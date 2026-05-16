@@ -1,0 +1,18 @@
+[package]
+name = "ddrs"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Distributed Differentiable Routing in Rust — BURN port of the Muskingum-Cunge solver from ~/projects/ddr"
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray", "autodiff"] }
+thiserror = "1"
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "ttf"] }
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
