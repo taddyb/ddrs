@@ -5,5 +5,6 @@
 
 pub mod config;
 pub mod geometry;
+pub mod nn;
 pub mod routing;
 pub mod sparse;
