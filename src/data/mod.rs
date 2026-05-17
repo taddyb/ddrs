@@ -23,8 +23,10 @@ pub mod dates;
 pub mod error;
 pub mod ids;
 pub mod store;
+pub mod statistics;
 
 pub use dates::{Frequency, RhoWindow, TimeAxis};
 pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
 pub use store::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
+pub use statistics::naninfmean;
