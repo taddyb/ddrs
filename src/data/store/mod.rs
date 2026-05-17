@@ -14,6 +14,6 @@ pub mod netcdf;
 pub mod zarr;
 
 pub use gage_csv::{GageMetadata, GageRow};
-pub use icechunk::StreamflowStore;
+pub use icechunk::{StreamflowStore, UsgsObservationsStore};
 pub use netcdf::AttributesStore;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};

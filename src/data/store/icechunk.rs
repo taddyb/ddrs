@@ -33,7 +33,7 @@ use ndarray::Array2;
 
 use crate::data::dates::RhoWindow;
 use crate::data::error::{DataError, Result};
-use crate::data::ids::{Comid, IdIndex};
+use crate::data::ids::{Comid, IdIndex, Staid};
 
 /// Shared session handle. Internal — never leaks past this module.
 #[allow(dead_code)] // Tasks 2-4 will use the fields.
@@ -251,7 +251,11 @@ fn parse_cf_epoch(
             path: path.to_path_buf(),
             message: format!("unexpected time units format: {units:?}"),
         })?;
-    NaiveDate::parse_from_str(date_str.trim(), "%Y-%m-%d").map_err(|e| DataError::Malformed {
+    // The date portion may be followed by a time-of-day component, e.g.
+    // "1980-01-01 00:00:00" (USGS store) vs "1980-01-01" (streamflow store).
+    // Take only the first token.
+    let date_part = date_str.trim().split_whitespace().next().unwrap_or("");
+    NaiveDate::parse_from_str(date_part, "%Y-%m-%d").map_err(|e| DataError::Malformed {
         path: path.to_path_buf(),
         message: format!("cannot parse epoch from units {units:?}: {e}"),
     })
@@ -368,6 +372,219 @@ impl StreamflowStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UsgsObservationsStore
+// ---------------------------------------------------------------------------
+
+/// `streamflow` observations reader over `usgs_daily_observations`-style
+/// icechunk repos.
+///
+/// Mirrors `~/projects/ddr/src/ddr/io/readers.py::IcechunkUSGSReader`
+/// (lines ~478-510). Differences from `StreamflowStore`:
+///   - Indexed by `Staid` (string), not `Comid` (int64).
+///   - Missing STAIDs cause a hard `DataError::MissingIds` error — matches
+///     DDR's `.sel(gage_id=...)` KeyError behavior. Streamflow misses are
+///     a fact of life (not every COMID has DHBv2 coverage); observation
+///     misses are a configuration bug.
+///   - No daily→hourly transform: loss is computed at daily resolution.
+///   - `streamflow` on disk is f64; we cast to f32 at read time.
+pub struct UsgsObservationsStore {
+    pub path: PathBuf,
+    pub index: IdIndex<Staid>,
+    pub time_start: NaiveDate,
+    pub n_time: usize,
+    #[allow(dead_code)]
+    storage: Arc<IcZarrStorage>,
+    streamflow: ZarrArray<dyn ReadableStorageTraits>,
+}
+
+impl UsgsObservationsStore {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let session = open_session(&path)?;
+        let storage: Arc<IcZarrStorage> = IcZarrStorage::shared(&session);
+        let readable: ReadableStorage = storage.clone();
+
+        // 1. `time` coord — CF-convention "days since YYYY-MM-DD[ HH:MM:SS]".
+        let time_arr = ZarrArray::open(readable.clone(), "/time")
+            .map_err(|e| ic_err(&path, e))?;
+        let time_epoch = parse_cf_epoch(time_arr.attributes(), &path)?;
+        let time_subset = time_arr.subset_all();
+        let time_i64: Vec<i64> = time_arr
+            .retrieve_array_subset(&time_subset)
+            .map_err(|e| ic_err(&path, e))?;
+        let n_time = time_i64.len();
+        if n_time == 0 {
+            return Err(DataError::Malformed {
+                path: path.clone(),
+                message: "time axis is empty".into(),
+            });
+        }
+        let time_start = time_epoch + chrono::Duration::days(time_i64[0]);
+
+        // 2. `gage_id` coord — zarr v3 `string` dtype with `vlen-utf8` codec.
+        let staids = read_gage_id_coord(&readable, &path)?;
+        let index = IdIndex::new(staids);
+
+        // 3. Open `/streamflow` (f64 on disk; cast to f32 at read time).
+        let streamflow = ZarrArray::open(readable.clone(), "/streamflow")
+            .map_err(|e| ic_err(&path, e))?;
+
+        Ok(Self {
+            path,
+            index,
+            time_start,
+            n_time,
+            storage,
+            streamflow,
+        })
+    }
+
+    /// Read `streamflow` observations for `window` and `staids`. Returns
+    /// `(rho_days, G)` f32 matrix. Missing STAIDs trigger
+    /// `DataError::MissingIds` — observation misses are configuration bugs.
+    pub fn read_window(
+        &self,
+        window: &RhoWindow,
+        staids: &[Staid],
+    ) -> Result<Array2<f32>> {
+        // 1. Time window validation (same pattern as StreamflowStore).
+        let store_start_day_i64 = (window.window_start - self.time_start).num_days();
+        if store_start_day_i64 < 0 {
+            return Err(DataError::Malformed {
+                path: self.path.clone(),
+                message: format!(
+                    "window starts {} before store start {}",
+                    window.window_start, self.time_start
+                ),
+            });
+        }
+        let store_start_day = store_start_day_i64 as usize;
+        let end_day = store_start_day + window.rho_days;
+        if end_day > self.n_time {
+            return Err(DataError::Malformed {
+                path: self.path.clone(),
+                message: format!(
+                    "window extends to store day {end_day} but n_time={}",
+                    self.n_time
+                ),
+            });
+        }
+
+        // 2. Resolve STAIDs. Hard-error on misses.
+        let (positions, missing_indices) = self.index.positions_of(staids);
+        if !missing_indices.is_empty() {
+            return Err(DataError::MissingIds {
+                path: self.path.clone(),
+                kind: "gage_id",
+                missing: missing_indices.len(),
+                total: staids.len(),
+            });
+        }
+        debug_assert_eq!(positions.len(), staids.len());
+
+        if positions.is_empty() {
+            return Ok(Array2::<f32>::zeros((window.rho_days, 0)));
+        }
+
+        // 3. Read contiguous gage-axis range covering [min_pos, max_pos].
+        let min_pos = *positions.iter().min().unwrap();
+        let max_pos = *positions.iter().max().unwrap();
+        let gage_range_end = max_pos + 1;
+        let gage_count = gage_range_end - min_pos;
+
+        // streamflow is stored as (gage_id, time) — axis 0 = gage, axis 1 = time.
+        let subset = zarrs::array::ArraySubset::new_with_ranges(&[
+            (min_pos as u64)..(gage_range_end as u64),
+            (store_start_day as u64)..(end_day as u64),
+        ]);
+        // On disk the array is f64; cast to f32 at the scatter site.
+        let raw_f64: Vec<f64> = self
+            .streamflow
+            .retrieve_array_subset(&subset)
+            .map_err(|e| ic_err(&self.path, e))?;
+        debug_assert_eq!(raw_f64.len(), gage_count * window.rho_days);
+
+        // 4. Scatter to output preserving input order. `positions[i]`
+        // corresponds to `staids[i]` because all inputs are present (no
+        // missing_indices path taken above).
+        let mut out = Array2::<f32>::zeros((window.rho_days, staids.len()));
+        for (out_col, _) in staids.iter().enumerate() {
+            let pos = positions[out_col];
+            let local_gage = pos - min_pos;
+            for d in 0..window.rho_days {
+                let raw_idx = local_gage * window.rho_days + d;
+                out[(d, out_col)] = raw_f64[raw_idx] as f32;
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Read the `/gage_id` string coord from an icechunk-backed zarr store.
+///
+/// The on-disk dtype is zarr v3 `"string"` with `vlen-utf8` codec; zarrs
+/// decodes it natively as `Vec<String>`. See zarr.json for the store:
+///   `"data_type": "string"`, `"codecs": [{"name": "vlen-utf8"}, ...]`.
+fn read_gage_id_coord(
+    storage: &ReadableStorage,
+    path: &Path,
+) -> Result<Vec<Staid>> {
+    let arr = ZarrArray::open(storage.clone(), "/gage_id")
+        .map_err(|e| ic_err(path, e))?;
+    let subset = arr.subset_all();
+
+    // Approach A: zarrs native string decode (vlen-utf8 → Vec<String>).
+    if let Ok(vs) = arr.retrieve_array_subset::<Vec<String>>(&subset) {
+        return Ok(vs
+            .into_iter()
+            .map(|s| Staid::new(s.trim_end_matches('\0').trim()))
+            .collect());
+    }
+
+    // Approach B: fixed-length UTF-32 ('<U8'): 8 u32 codepoints per gage.
+    if let Ok(codepoints) = arr.retrieve_array_subset::<Vec<u32>>(&subset) {
+        let chunk_size = 8usize;
+        if codepoints.len() % chunk_size == 0 {
+            let n = codepoints.len() / chunk_size;
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let slice = &codepoints[i * chunk_size..(i + 1) * chunk_size];
+                let s: String = slice
+                    .iter()
+                    .take_while(|&&c| c != 0)
+                    .filter_map(|&c| char::from_u32(c))
+                    .collect();
+                out.push(Staid::new(&s));
+            }
+            return Ok(out);
+        }
+    }
+
+    // Approach C: raw fixed-length ASCII/Latin-1 bytes (8 bytes per gage).
+    if let Ok(bytes) = arr.retrieve_array_subset::<Vec<u8>>(&subset) {
+        let chunk_size = 8usize;
+        if bytes.len() % chunk_size == 0 {
+            let n = bytes.len() / chunk_size;
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let slice = &bytes[i * chunk_size..(i + 1) * chunk_size];
+                let s = String::from_utf8_lossy(slice)
+                    .trim_end_matches('\0')
+                    .trim()
+                    .to_string();
+                out.push(Staid::new(&s));
+            }
+            return Ok(out);
+        }
+    }
+
+    Err(DataError::Malformed {
+        path: path.to_path_buf(),
+        message: "could not decode /gage_id (tried Vec<String>, Vec<u32> UTF-32, Vec<u8>)".into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +670,30 @@ mod tests {
         assert_eq!(
             s.time_start,
             chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn observations_store_open_sees_expected_axes() {
+        let p = Path::new("/mnt/ssd1/data/icechunk/usgs_daily_observations");
+        if !p.exists() {
+            eprintln!("skipping: {p:?} not present");
+            return;
+        }
+        let store = UsgsObservationsStore::open(p).expect("open obs");
+        assert!(store.n_time > 14000, "expected ~14610 days, got {}", store.n_time);
+        assert!(store.index.len() > 8000, "expected ~9067 gages, got {}", store.index.len());
+        assert_eq!(
+            store.time_start,
+            chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap()
+        );
+        // Spot-check that we got real STAIDs — known first one is "01011000".
+        let first = &store.index.ids()[0];
+        assert_eq!(
+            first.as_str(),
+            "01011000",
+            "first STAID should be 01011000 (per design-time probe), got {}",
+            first
         );
     }
 }
