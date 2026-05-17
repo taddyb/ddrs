@@ -9,6 +9,7 @@
 //! models. Composition over abstraction at this layer.
 
 pub mod gage_csv;
+pub mod icechunk;
 pub mod netcdf;
 pub mod zarr;
 
