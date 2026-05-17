@@ -67,3 +67,34 @@ fn attributes_store_opens_against_conus_subset() {
     let first = *store.index.ids().first().expect("at least one COMID present");
     assert_eq!(store.index.position(&first), Some(0));
 }
+
+use ddrs::data::AttrStats;
+
+const STATS_JSON: &str =
+    "/home/tbindas/projects/ddr/data/statistics/merit_attribute_statistics_merit_global_attributes_v2.nc.json";
+
+#[test]
+fn attr_stats_open_against_production_json() {
+    if !Path::new(STATS_JSON).exists() {
+        eprintln!("skipping: {STATS_JSON} not present");
+        return;
+    }
+    let s = AttrStats::open(STATS_JSON).expect("open stats json");
+    for name in [
+        "SoilGrids1km_clay",
+        "aridity",
+        "meanelevation",
+        "meanP",
+        "NDVI",
+        "meanslope",
+        "log10_uparea",
+        "SoilGrids1km_sand",
+        "ETPOT_Hargr",
+        "Porosity",
+    ] {
+        assert!(s.by_name.contains_key(name), "missing {name}");
+    }
+    let clay = &s.by_name["SoilGrids1km_clay"];
+    assert!((clay.mean - 23.494225_f64).abs() < 1e-6);
+    assert!((clay.std - 8.221468_f64).abs() < 1e-6);
+}
