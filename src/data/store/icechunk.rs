@@ -254,7 +254,7 @@ fn parse_cf_epoch(
     // The date portion may be followed by a time-of-day component, e.g.
     // "1980-01-01 00:00:00" (USGS store) vs "1980-01-01" (streamflow store).
     // Take only the first token.
-    let date_part = date_str.trim().split_whitespace().next().unwrap_or("");
+    let date_part = date_str.split_whitespace().next().unwrap_or("");
     NaiveDate::parse_from_str(date_part, "%Y-%m-%d").map_err(|e| DataError::Malformed {
         path: path.to_path_buf(),
         message: format!("cannot parse epoch from units {units:?}: {e}"),
@@ -366,6 +366,12 @@ impl StreamflowStore {
                 daily[(d, out_col)] = raw_f32[raw_idx];
             }
         }
+
+        debug_assert_eq!(
+            next_present,
+            positions.len(),
+            "scatter walked past `positions` — IdIndex::positions_of invariant broken"
+        );
 
         // 5. Daily → hourly transform: repeat each day 24×, trim to n_hourly.
         Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
@@ -508,6 +514,7 @@ impl UsgsObservationsStore {
         // 4. Scatter to output preserving input order. `positions[i]`
         // corresponds to `staids[i]` because all inputs are present (no
         // missing_indices path taken above).
+        debug_assert_eq!(positions.len(), staids.len());
         let mut out = Array2::<f32>::zeros((window.rho_days, staids.len()));
         for (out_col, _) in staids.iter().enumerate() {
             let pos = positions[out_col];

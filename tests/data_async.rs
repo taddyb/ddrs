@@ -119,7 +119,7 @@ fn observations_store_reads_known_window() {
 
     let obs = store.read_window(&window, &staids).expect("read obs");
 
-    assert_eq!(obs.shape(), &[90, staids.len()]);
+    assert_eq!(obs.shape(), &[window.rho_days, staids.len()]);
     // At least one finite value across the requested gauges × 90 days.
     let finite_count = obs.iter().filter(|v| v.is_finite()).count();
     assert!(
