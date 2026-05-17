@@ -29,4 +29,4 @@ pub use dates::{Frequency, RhoWindow, TimeAxis};
 pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
 pub use store::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
-pub use statistics::naninfmean;
+pub use statistics::{fill_nans, fill_nans_1d, naninfmean};
