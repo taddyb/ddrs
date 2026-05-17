@@ -30,6 +30,6 @@ pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
 pub use store::{
     AttributesStore, ConusAdjacencyStore, GageMetadata, GageRow, GageSubgraph,
-    GagesAdjacencyStore,
+    GagesAdjacencyStore, StreamflowStore,
 };
 pub use statistics::{fill_nans, fill_nans_1d, naninfmean, AttrStatRow, AttrStats};
