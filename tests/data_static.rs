@@ -9,6 +9,7 @@ use std::path::Path;
 
 use ddrs::data::GageMetadata;
 use ddrs::data::ids::Staid;
+use ddrs::data::{AttributesStore, ConusAdjacencyStore};
 
 const GAGES_CSV: &str =
     "/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv";
@@ -25,4 +26,44 @@ fn gages_3000_loads_with_expected_shape() {
     assert!((m.rows[0].drain_sqkm - 603.4942).abs() < 1e-6);
     assert_eq!(m.rows[0].da_valid, Some(true));
     assert!(m.by_staid.contains_key(&Staid::new("14190500")));
+}
+
+const ATTRS_NC: &str =
+    "/home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc";
+const CONUS_ADJ: &str =
+    "/home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr";
+
+#[test]
+fn attributes_store_opens_against_conus_subset() {
+    if !Path::new(ATTRS_NC).exists() || !Path::new(CONUS_ADJ).exists() {
+        eprintln!("skipping: production data files not present");
+        return;
+    }
+    let conus = ConusAdjacencyStore::open(CONUS_ADJ).expect("conus adj");
+    let comids: Vec<_> = conus.order.iter().take(500).copied().collect();
+    let attr_names = vec![
+        "SoilGrids1km_clay".to_string(),
+        "aridity".to_string(),
+        "meanelevation".to_string(),
+        "meanP".to_string(),
+        "NDVI".to_string(),
+        "meanslope".to_string(),
+        "log10_uparea".to_string(),
+        "SoilGrids1km_sand".to_string(),
+        "ETPOT_Hargr".to_string(),
+        "Porosity".to_string(),
+    ];
+
+    let store =
+        AttributesStore::open(ATTRS_NC, &attr_names, &comids).expect("open attrs");
+
+    assert_eq!(store.attr_names.len(), 10);
+    assert_eq!(store.attrs.shape()[0], 10);
+    assert!(store.attrs.shape()[1] > 0);
+    assert!(store.attrs.shape()[1] <= 500);
+    for &m in store.row_means.iter() {
+        assert!(m.is_finite(), "row_mean unexpectedly non-finite: {m}");
+    }
+    let first = *store.index.ids().first().expect("at least one COMID present");
+    assert_eq!(store.index.position(&first), Some(0));
 }
