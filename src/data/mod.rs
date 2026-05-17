@@ -28,5 +28,8 @@ pub mod statistics;
 pub use dates::{Frequency, RhoWindow, TimeAxis};
 pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
-pub use store::{ConusAdjacencyStore, GageMetadata, GageRow, GageSubgraph, GagesAdjacencyStore};
+pub use store::{
+    AttributesStore, ConusAdjacencyStore, GageMetadata, GageRow, GageSubgraph,
+    GagesAdjacencyStore,
+};
 pub use statistics::{fill_nans, fill_nans_1d, naninfmean, AttrStatRow, AttrStats};

@@ -9,7 +9,9 @@
 //! models. Composition over abstraction at this layer.
 
 pub mod gage_csv;
+pub mod netcdf;
 pub mod zarr;
 
 pub use gage_csv::{GageMetadata, GageRow};
+pub use netcdf::AttributesStore;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
