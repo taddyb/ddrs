@@ -9,6 +9,12 @@
 //! they regenerate the cache under DDR's `uv` venv and re-point
 //! `config.data_sources.statistics` here.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::Deserialize;
+
+use crate::data::error::{DataError, Result};
 use ndarray::{Array1, ArrayViewMut1, ArrayViewMut2};
 
 /// Replace `NaN` entries in a 1D array with `row_mean`. Mirrors `fill_nans`
@@ -59,6 +65,66 @@ pub fn naninfmean(arr: &[f32]) -> f32 {
         f32::NAN
     } else {
         (sum / n as f64) as f32
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AttrStatRow {
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub std: f64,
+    pub p10: f64,
+    pub p90: f64,
+}
+
+#[derive(Debug)]
+pub struct AttrStats {
+    pub path: PathBuf,
+    pub by_name: HashMap<String, AttrStatRow>,
+}
+
+impl AttrStats {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let bytes = std::fs::read(&path).map_err(|e| DataError::Io {
+            path: path.clone(),
+            source: e,
+        })?;
+        let by_name: HashMap<String, AttrStatRow> =
+            serde_json::from_slice(&bytes).map_err(|e| DataError::Malformed {
+                path: path.clone(),
+                message: format!("stats JSON parse failed: {e}"),
+            })?;
+        Ok(Self { path, by_name })
+    }
+
+    pub fn means_f32(&self, attr_names: &[String]) -> Array1<f32> {
+        Array1::from(
+            attr_names
+                .iter()
+                .map(|name| {
+                    self.by_name
+                        .get(name)
+                        .unwrap_or_else(|| panic!("AttrStats: unknown attribute {name}"))
+                        .mean as f32
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn stds_f32(&self, attr_names: &[String]) -> Array1<f32> {
+        Array1::from(
+            attr_names
+                .iter()
+                .map(|name| {
+                    self.by_name
+                        .get(name)
+                        .unwrap_or_else(|| panic!("AttrStats: unknown attribute {name}"))
+                        .std as f32
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -117,5 +183,32 @@ mod tests {
             fill_nans(a.view_mut(), &row_means);
         }));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn attr_stats_open_reads_known_values() {
+        let path = "/home/tbindas/projects/ddr/data/statistics/\
+                    merit_attribute_statistics_merit_global_attributes_v2.nc.json";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: {path} not present");
+            return;
+        }
+        let s = AttrStats::open(path).expect("load stats");
+        let clay = s
+            .by_name
+            .get("SoilGrids1km_clay")
+            .expect("SoilGrids1km_clay present");
+        assert!((clay.mean - 23.494225_f64).abs() < 1e-6);
+        assert!((clay.std - 8.221468_f64).abs() < 1e-6);
+
+        let names = vec![
+            "SoilGrids1km_clay".to_string(),
+            "meanslope".to_string(),
+        ];
+        let means = s.means_f32(&names);
+        let stds = s.stds_f32(&names);
+        assert_eq!(means.len(), 2);
+        assert_eq!(stds.len(), 2);
+        assert!((means[0] - 23.494225_f32).abs() < 1e-3);
     }
 }
