@@ -29,6 +29,9 @@ use zarrs::storage::{
     MaybeBytesIterator, ReadableStorage, ReadableStorageTraits, StorageError, StoreKey,
 };
 
+use ndarray::Array2;
+
+use crate::data::dates::RhoWindow;
 use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, IdIndex};
 
@@ -176,9 +179,10 @@ pub struct StreamflowStore {
     pub index: IdIndex<Comid>,
     pub time_start: NaiveDate,
     pub n_time: usize,
-    #[allow(dead_code)] // used by Task 3 (read_window)
+    // SP-3 may consolidate to a shared runtime; keep the Arc alive so the
+    // icechunk Store is not dropped while `qr` is in use.
+    #[allow(dead_code)]
     storage: Arc<IcZarrStorage>,
-    #[allow(dead_code)] // used by Task 3 (read_window)
     qr: ZarrArray<dyn ReadableStorageTraits>,
 }
 
@@ -253,10 +257,145 @@ fn parse_cf_epoch(
     })
 }
 
+/// Repeat a `(rho_days, N)` daily slab to `(n_hourly, N)` by replicating
+/// each row 24 times along the time axis, then trim to `n_hourly` rows.
+/// Mirrors `np.repeat(daily, 24, axis=1)[:, :n_hourly].T` in
+/// `~/projects/ddr/src/ddr/io/readers.py:447-454` (DDR transposes after; we
+/// yield time-major directly).
+fn daily_to_hourly_trim(daily: &Array2<f32>, n_hourly: usize) -> Array2<f32> {
+    let (rho_days, n_div) = daily.dim();
+    debug_assert!(
+        n_hourly <= rho_days * 24,
+        "n_hourly={n_hourly} exceeds rho_days*24={}",
+        rho_days * 24
+    );
+    let mut hourly = Array2::<f32>::zeros((n_hourly, n_div));
+    for h in 0..n_hourly {
+        let d = h / 24;
+        for j in 0..n_div {
+            hourly[(h, j)] = daily[(d, j)];
+        }
+    }
+    hourly
+}
+
+impl StreamflowStore {
+    /// Read `Qr` for `window` and `comids`. Returns `(n_hourly, N)` f32
+    /// matrix; missing COMIDs (not in the store) are filled with `0.001`
+    /// (discharge minimum, mirrors DDR's `torch.full(..., fill_value=0.001)`
+    /// in `readers.py:464-468`).
+    pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
+        // 1. Resolve time window to store-local day indices.
+        let store_start_day_i64 = (window.window_start - self.time_start).num_days();
+        if store_start_day_i64 < 0 {
+            return Err(DataError::Malformed {
+                path: self.path.clone(),
+                message: format!(
+                    "window starts {} before store start {}",
+                    window.window_start, self.time_start
+                ),
+            });
+        }
+        let store_start_day = store_start_day_i64 as usize;
+        let end_day = store_start_day + window.rho_days;
+        if end_day > self.n_time {
+            return Err(DataError::Malformed {
+                path: self.path.clone(),
+                message: format!(
+                    "window extends to store day {end_day} but n_time={}",
+                    self.n_time
+                ),
+            });
+        }
+
+        // 2. Resolve COMIDs → divide-axis positions.
+        // `positions_of` returns positions in the order of non-missing inputs,
+        // plus a list of indices (into `comids`) that were missing.
+        let (positions, missing_indices) = self.index.positions_of(comids);
+        let missing_set: std::collections::HashSet<usize> =
+            missing_indices.iter().copied().collect();
+        let n_out = comids.len();
+
+        // Pre-fill with the discharge minimum; missing COMIDs keep this value.
+        let mut daily = Array2::<f32>::from_elem((window.rho_days, n_out), 0.001);
+
+        if positions.is_empty() {
+            // All COMIDs missing — return filled result immediately.
+            return Ok(daily_to_hourly_trim(&daily, window.n_hourly()));
+        }
+
+        // 3. Contiguous divide-axis read covering [min_pos, max_pos].
+        // Transient memory: (max_pos - min_pos + 1) * rho_days * 8 bytes.
+        // For 50 COMIDs spanning ~100K positions × 90 days = ~72 MB — acceptable
+        // for SP-2. SP-3 may revisit with gather-style reads.
+        let min_pos = *positions.iter().min().unwrap();
+        let max_pos = *positions.iter().max().unwrap();
+        let div_range_end = max_pos + 1;
+        let div_count = div_range_end - min_pos;
+
+        // Qr is stored as (divide_id, time). Subset: axis 0 = divide, axis 1 = time.
+        let subset = zarrs::array::ArraySubset::new_with_ranges(&[
+            (min_pos as u64)..(div_range_end as u64),
+            (store_start_day as u64)..(end_day as u64),
+        ]);
+        let raw_f32: Vec<f32> = self
+            .qr
+            .retrieve_array_subset(&subset)
+            .map_err(|e| ic_err(&self.path, e))?;
+        // raw_f32 is row-major: shape (div_count, rho_days).
+        // Element at (i, t) is at index i * rho_days + t.
+        debug_assert_eq!(raw_f32.len(), div_count * window.rho_days);
+
+        // 4. Scatter into the output. Walk `comids` in order; for each
+        // non-missing entry consume the next element of `positions`.
+        let mut next_present = 0usize;
+        for (out_col, _) in comids.iter().enumerate() {
+            if missing_set.contains(&out_col) {
+                // Already pre-filled with 0.001.
+                continue;
+            }
+            let div_pos = positions[next_present];
+            next_present += 1;
+            let local_div = div_pos - min_pos;
+            for d in 0..window.rho_days {
+                let raw_idx = local_div * window.rho_days + d;
+                daily[(d, out_col)] = raw_f32[raw_idx];
+            }
+        }
+
+        // 5. Daily → hourly transform: repeat each day 24×, trim to n_hourly.
+        Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn daily_to_hourly_trim_repeats_and_truncates() {
+        use ndarray::Array2;
+        // 3 daily values × 2 divides → expand to 72 hours, truncate to 47
+        // (which is what (rho_days - 1) * 24 yields for rho_days=3, matching DDR's
+        // pd.date_range(... inclusive="left") semantics).
+        let daily: Array2<f32> = Array2::from_shape_vec(
+            (3, 2),
+            vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0],
+        )
+        .unwrap();
+        let hourly = daily_to_hourly_trim(&daily, 47);
+        assert_eq!(hourly.shape(), &[47, 2]);
+        for h in 0..24 {
+            assert_eq!(hourly[(h, 0)], 1.0);
+            assert_eq!(hourly[(h, 1)], 10.0);
+        }
+        // Hours 24..47 fall in day 1.
+        for h in 24..47 {
+            assert_eq!(hourly[(h, 0)], 2.0);
+            assert_eq!(hourly[(h, 1)], 20.0);
+        }
+    }
 
     #[test]
     fn open_streamflow_store_if_present() {
@@ -265,6 +404,36 @@ mod tests {
             return;
         }
         assert!(open_session(p).is_ok());
+    }
+
+    #[test]
+    fn streamflow_read_window_returns_expected_shape() {
+        let p = Path::new("/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic");
+        if !p.exists() {
+            eprintln!("skipping: {p:?} not present");
+            return;
+        }
+        let store = StreamflowStore::open(p).expect("open");
+
+        // First 10 COMIDs from the store's own divide_id index — guaranteed
+        // present, no fills needed.
+        let comids: Vec<Comid> = store.index.ids().iter().take(10).copied().collect();
+
+        // RhoWindow starting at 1981-10-01 (MERIT training start) + 90 days.
+        let axis = crate::data::dates::TimeAxis::new(
+            chrono::NaiveDate::from_ymd_opt(1981, 10, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(1981, 12, 31).unwrap(),
+        );
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let window = axis.sample_rho_window(&mut rng, 90);
+
+        let q = store.read_window(&window, &comids).expect("read_window");
+        assert_eq!(q.shape(), &[window.n_hourly(), 10]);
+        // No fill column expected (we used real COMIDs from the store).
+        for &v in q.iter() {
+            assert!(v.is_finite(), "got non-finite: {v}");
+        }
     }
 
     #[test]
