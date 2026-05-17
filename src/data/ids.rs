@@ -56,12 +56,13 @@ impl std::fmt::Display for Staid {
 /// Every store builds one of these at open time. `positions_of` returns both
 /// the resolved positions *and* the indices of the requested IDs that were
 /// missing — callers decide whether to warn, error, or fill with sentinels.
-pub struct IdIndex<Id: Eq + Hash + Clone> {
+#[derive(Debug)]
+pub struct IdIndex<Id: Eq + Hash + Clone + std::fmt::Debug> {
     lookup: HashMap<Id, usize>,
     ids_in_order: Vec<Id>,
 }
 
-impl<Id: Eq + Hash + Clone> IdIndex<Id> {
+impl<Id: Eq + Hash + Clone + std::fmt::Debug> IdIndex<Id> {
     pub fn new(ids: Vec<Id>) -> Self {
         let lookup = ids
             .iter()

@@ -34,7 +34,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 ```bash
 cargo build                                    # debug build
 cargo build --release                          # release build (LTO=thin)
-cargo test                                     # all tests (~36 total across 6 files + lib units)
+cargo test                                     # all tests (~54 total across 7 files + lib units)
 cargo test --test sparse_gradcheck             # one integration test file
 cargo test --test mmc mc_routes_linear_chain   # one specific test
 

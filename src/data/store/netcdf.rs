@@ -20,6 +20,7 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, IdIndex};
 use crate::data::statistics::naninfmean;
 
+#[derive(Debug)]
 pub struct AttributesStore {
     pub path: PathBuf,
     pub attr_names: Vec<String>,

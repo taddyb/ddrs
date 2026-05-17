@@ -7,9 +7,8 @@
 
 use std::path::Path;
 
-use ddrs::data::GageMetadata;
 use ddrs::data::ids::Staid;
-use ddrs::data::{AttributesStore, ConusAdjacencyStore};
+use ddrs::data::{AttrStats, AttributesStore, ConusAdjacencyStore, GageMetadata};
 
 const GAGES_CSV: &str =
     "/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv";
@@ -67,8 +66,6 @@ fn attributes_store_opens_against_conus_subset() {
     let first = *store.index.ids().first().expect("at least one COMID present");
     assert_eq!(store.index.position(&first), Some(0));
 }
-
-use ddrs::data::AttrStats;
 
 const STATS_JSON: &str =
     "/home/tbindas/projects/ddr/data/statistics/merit_attribute_statistics_merit_global_attributes_v2.nc.json";

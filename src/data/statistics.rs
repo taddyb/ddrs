@@ -1,8 +1,8 @@
 //! Pre-computed attribute statistics + NaN-handling helpers.
 //!
 //! Mirrors `~/projects/ddr/src/ddr/io/statistics.py::set_statistics` (read
-//! path only) and the `naninfmean` / `fill_nans` helpers in
-//! `~/projects/ddr/src/ddr/io/readers.py:315-368`.
+//! path only) and the `naninfmean` (readers.py:365) / `fill_nans`
+//! (readers.py:382) helpers in `~/projects/ddr/src/ddr/io/readers.py`.
 //!
 //! We do **not** recompute statistics. DDR caches them as JSON next to the
 //! attributes file; we load that JSON. If a user changes the attribute list
@@ -18,7 +18,7 @@ use crate::data::error::{DataError, Result};
 use ndarray::{Array1, ArrayViewMut1, ArrayViewMut2};
 
 /// Replace `NaN` entries in a 1D array with `row_mean`. Mirrors `fill_nans`
-/// in `readers.py:332-368` for the 1D case.
+/// in `readers.py:382` for the 1D case.
 pub fn fill_nans_1d(mut attr: ArrayViewMut1<f32>, row_mean: f32) {
     for v in attr.iter_mut() {
         if v.is_nan() {
@@ -28,7 +28,7 @@ pub fn fill_nans_1d(mut attr: ArrayViewMut1<f32>, row_mean: f32) {
 }
 
 /// Replace `NaN` entries in a `(F, N)` array with the per-row mean. `row_means`
-/// has length `F`. Mirrors `fill_nans` (readers.py:332-368) for the 2D case
+/// has length `F`. Mirrors `fill_nans` (readers.py:382) for the 2D case
 /// — specifically the branch that broadcasts a length-F vector across N
 /// columns.
 pub fn fill_nans(mut attr: ArrayViewMut2<f32>, row_means: &Array1<f32>) {
