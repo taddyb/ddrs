@@ -10,6 +10,27 @@ burn = { version = "0.21", default-features = false, features = ["std", "ndarray
 thiserror = "1"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "ttf"] }
 
+# Data layer — read DDR's live training sources in place, no export step.
+#   zarrs    : merit_conus_adjacency.zarr + merit_gages_conus_adjacency.zarr
+#   icechunk : streamflow + observations (transactional zarr over local FS)
+#   netcdf   : merit_global_attributes_v2.nc (HDF5-backed)
+#   tokio    : icechunk is async-first; one runtime owned by the dataset
+#   serde / serde_yaml : load config/merit_training.yaml
+#   csv      : gage list (camels_670.csv etc.)
+#   chrono   : Dates / time-window arithmetic
+#   ndarray  : staging buffers between zarrs/netcdf reads and BURN tensors
+#   rand     : seeded RandomSampler-equivalent + random rho-day window
+zarrs = "0.23"
+icechunk = "2"
+netcdf = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+csv = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+ndarray = "0.16"
+rand = "0.8"
+
 [dev-dependencies]
 approx = "0.5"
 
