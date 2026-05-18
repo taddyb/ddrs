@@ -137,17 +137,18 @@ def main():
     # DDR's denormalize() at ~/projects/ddr/src/ddr/routing/utils.py:180 and
     # Rust's physical_to_normalized in src/training/forward.rs:71.
     pr = cfg.params.parameter_ranges
-    log_params = cfg.params.log_space_parameters
+    log_params = set(cfg.params.log_space_parameters)
 
-    n_norm = (FROZEN_N - pr["n"][0]) / (pr["n"][1] - pr["n"][0])
-    q_norm = (FROZEN_Q_SPATIAL - pr["q_spatial"][0]) / (pr["q_spatial"][1] - pr["q_spatial"][0])
+    def physical_to_normalized(physical, lo, hi, log_space):
+        if log_space:
+            log_lo = float(np.log(lo + 1e-6))
+            log_hi = float(np.log(hi))
+            return (float(np.log(physical)) - log_lo) / (log_hi - log_lo)
+        return (physical - lo) / (hi - lo)
 
-    if "p_spatial" in log_params:
-        p_log_lo = float(np.log(pr["p_spatial"][0] + 1e-6))
-        p_log_hi = float(np.log(pr["p_spatial"][1]))
-        p_norm = (float(np.log(FROZEN_P_SPATIAL)) - p_log_lo) / (p_log_hi - p_log_lo)
-    else:
-        p_norm = (FROZEN_P_SPATIAL - pr["p_spatial"][0]) / (pr["p_spatial"][1] - pr["p_spatial"][0])
+    n_norm = physical_to_normalized(FROZEN_N,         pr["n"][0],         pr["n"][1],         "n" in log_params)
+    q_norm = physical_to_normalized(FROZEN_Q_SPATIAL, pr["q_spatial"][0], pr["q_spatial"][1], "q_spatial" in log_params)
+    p_norm = physical_to_normalized(FROZEN_P_SPATIAL, pr["p_spatial"][0], pr["p_spatial"][1], "p_spatial" in log_params)
 
     # Use string device ("cpu") — DDR's triangular_sparse_solve does an
     # equality check `if device == "cpu"` which fails with torch.device("cpu").
