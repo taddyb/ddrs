@@ -9,3 +9,4 @@ pub mod geometry;
 pub mod nn;
 pub mod routing;
 pub mod sparse;
+pub mod training;

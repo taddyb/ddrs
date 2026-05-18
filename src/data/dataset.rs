@@ -49,6 +49,90 @@ pub struct RoutingBatch {
 }
 
 // ---------------------------------------------------------------------------
+// RoutingTensors + to_tensors
+// ---------------------------------------------------------------------------
+
+use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
+
+/// BURN-tensor-lifted version of `RoutingBatch`. Produced via
+/// `RoutingBatch::to_tensors`. `observations` stays on CPU as it's only
+/// used for masking + comparison at loss time.
+pub struct RoutingTensors<B: Backend> {
+    pub adjacency: SparseAdjacency,
+    /// Normalized attributes, shape `(N, F)`.
+    pub spatial_attributes: Tensor<B, 2>,
+    /// q' streamflow, shape `(T_hours, N)`. Not yet Autodiff-wrapped.
+    pub q_prime: Tensor<B, 2>,
+    /// Observations stay on CPU.
+    pub observations: Array2<f32>,
+    /// Flat concat of `outflow_idx`, shape `(sum_g len(outflow_idx[g]),)`.
+    pub flat_indices: Tensor<B, 1, Int>,
+    /// Per-flat-index gauge group id, same shape as `flat_indices`.
+    pub group_ids: Tensor<B, 1, Int>,
+    pub num_gauges: usize,
+    pub gauge_staids: Vec<Staid>,
+    pub window: RhoWindow,
+}
+
+impl RoutingBatch {
+    /// Lift plain ndarray buffers onto a BURN device.
+    ///
+    /// Pre-computes `flat_indices` + `group_ids` from `outflow_idx` here,
+    /// mirrors DDR `mmc.py:347-358`.
+    pub fn to_tensors<B: Backend>(self, device: &B::Device) -> RoutingTensors<B> {
+        // 1. Pre-compute flat/group from outflow_idx.
+        let mut flat: Vec<i32> = Vec::new();
+        let mut group: Vec<i32> = Vec::new();
+        for (g_idx, segs) in self.outflow_idx.iter().enumerate() {
+            flat.extend(segs.iter().map(|&s| s as i32));
+            group.extend(std::iter::repeat_n(g_idx as i32, segs.len()));
+        }
+
+        // 2. Lift spatial_attributes (N, F) — already owned + contiguous after reversed_axes().into_owned().
+        let (rows, cols) = (
+            self.spatial_attributes_normalized.shape()[0],
+            self.spatial_attributes_normalized.shape()[1],
+        );
+        let attrs_vec: Vec<f32> = self
+            .spatial_attributes_normalized
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec_and_offset()
+            .0;
+        let spatial_attributes =
+            Tensor::<B, 2>::from_data(TensorData::new(attrs_vec, [rows, cols]), device);
+
+        // 3. Lift q_prime (T_hours, N).
+        let (t_hours, n) = (self.q_prime.shape()[0], self.q_prime.shape()[1]);
+        let q_vec: Vec<f32> = self
+            .q_prime
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec_and_offset()
+            .0;
+        let q_prime = Tensor::<B, 2>::from_data(TensorData::new(q_vec, [t_hours, n]), device);
+
+        // 4. Lift flat_indices + group_ids as Int tensors.
+        let flat_indices = Tensor::<B, 1, Int>::from_data(TensorData::from(flat.as_slice()), device);
+        let group_ids = Tensor::<B, 1, Int>::from_data(TensorData::from(group.as_slice()), device);
+
+        let num_gauges = self.gauge_staids.len();
+
+        RoutingTensors {
+            adjacency: self.adjacency,
+            spatial_attributes,
+            q_prime,
+            observations: self.observations,
+            flat_indices,
+            group_ids,
+            num_gauges,
+            gauge_staids: self.gauge_staids,
+            window: self.window,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MeritGagesDataset
 // ---------------------------------------------------------------------------
 
