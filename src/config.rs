@@ -102,6 +102,7 @@ pub struct Params {
     pub log_space_parameters: Vec<String>,
     pub defaults: HashMap<String, f32>,
     pub attribute_minimums: AttributeMinimums,
+    pub tau: u32,
 }
 
 impl Default for Params {
@@ -113,6 +114,7 @@ impl Default for Params {
             log_space_parameters: vec!["p_spatial".to_string()],
             defaults,
             attribute_minimums: AttributeMinimums::default(),
+            tau: 3,
         }
     }
 }
@@ -128,6 +130,7 @@ struct ParamsRaw {
     attribute_minimums: HashMap<String, f32>,
     defaults: HashMap<String, f32>,
     log_space_parameters: Vec<String>,
+    tau: Option<u32>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -166,6 +169,7 @@ impl From<ParamsRaw> for Params {
         if !r.log_space_parameters.is_empty() {
             p.log_space_parameters = r.log_space_parameters;
         }
+        p.tau = r.tau.unwrap_or(3);
         p
     }
 }
@@ -254,6 +258,8 @@ mod tests {
         let mlp = cfg.mlp.as_ref().unwrap();
         assert_eq!(mlp.hidden_size, 21);
         assert_eq!(mlp.input_var_names.len(), 10);
+        // tau defaults to 3 when not set in YAML.
+        assert_eq!(cfg.params.tau, 3);
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");
