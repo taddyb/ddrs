@@ -44,6 +44,111 @@ pub(crate) fn union_subgraphs(
     }
 }
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::data::error::{DataError, Result};
+use crate::data::ids::Comid;
+
+/// Compressed adjacency built from a unioned COO.
+#[derive(Debug)]
+pub(crate) struct CompressedAdj {
+    /// Compressed COMIDs in topological order, length `N_active`.
+    pub divide_comids: Vec<Comid>,
+    /// Compressed-position rows (i32 for `SparseAdjacency`).
+    pub rows: Vec<i32>,
+    /// Compressed-position cols (i32 for `SparseAdjacency`).
+    pub cols: Vec<i32>,
+    /// Per-gauge compressed position of the gauge outlet, length `G_present`.
+    pub gauge_compressed: Vec<usize>,
+    /// For each gauge, the compressed cols whose row index equals the
+    /// gauge's outlet. Mirrors DDR's `outflow_idx`.
+    pub outflow_idx: Vec<Vec<usize>>,
+}
+
+/// Compress a unioned COO into dense compressed-position space, preserving
+/// topological order via `BTreeSet` sort. The CONUS adjacency's `order`
+/// array is itself topological — so a sorted subset stays topological.
+///
+/// Hard-asserts the lower-triangular invariant (`rows >= cols`); fails
+/// with `DataError::Malformed` if violated.
+pub(crate) fn compress(
+    unioned: &UnionedCoo,
+    conus_order: &[Comid],
+) -> Result<CompressedAdj> {
+    use std::collections::BTreeSet;
+
+    // 1. Active set = union of edge endpoints + gauge outlets, sorted.
+    let mut active: BTreeSet<usize> = BTreeSet::new();
+    for &(r, c) in &unioned.edges {
+        active.insert(r);
+        active.insert(c);
+    }
+    for (_, g, _) in &unioned.gauges {
+        active.insert(*g);
+    }
+    if active.is_empty() {
+        return Err(DataError::Malformed {
+            path: PathBuf::from("<collate>"),
+            message: "compress: empty active set (no gauges + no edges)".into(),
+        });
+    }
+
+    // 2. Map CONUS-position → compressed-position.
+    let active_vec: Vec<usize> = active.into_iter().collect();
+    let mut mapping: HashMap<usize, usize> = HashMap::with_capacity(active_vec.len());
+    for (compressed_pos, &conus_pos) in active_vec.iter().enumerate() {
+        mapping.insert(conus_pos, compressed_pos);
+    }
+
+    let divide_comids: Vec<Comid> = active_vec.iter().map(|&p| conus_order[p]).collect();
+
+    // 3. Compress edges; assert lower-triangular.
+    let nnz = unioned.edges.len();
+    let mut rows: Vec<i32> = Vec::with_capacity(nnz);
+    let mut cols: Vec<i32> = Vec::with_capacity(nnz);
+    for &(r, c) in &unioned.edges {
+        let rc = mapping[&r] as i32;
+        let cc = mapping[&c] as i32;
+        if rc < cc {
+            return Err(DataError::Malformed {
+                path: PathBuf::from("<collate>"),
+                message: format!(
+                    "lower-triangular violated: compressed edge ({rc},{cc}) — \
+                     CONUS edge ({r},{c}) is upstream of itself"
+                ),
+            });
+        }
+        rows.push(rc);
+        cols.push(cc);
+    }
+
+    // 4. Gauge compressed positions.
+    let gauge_compressed: Vec<usize> =
+        unioned.gauges.iter().map(|(_, g, _)| mapping[g]).collect();
+
+    // 5. outflow_idx[g] = list of cols where rows[k] == gauge_compressed[g].
+    let mut outflow_idx: Vec<Vec<usize>> = Vec::with_capacity(gauge_compressed.len());
+    for &g_comp in &gauge_compressed {
+        let g_row = g_comp as i32;
+        let cols_for_g: Vec<usize> = rows
+            .iter()
+            .zip(cols.iter())
+            .filter(|(r, _)| **r == g_row)
+            .map(|(_, c)| *c as usize)
+            .collect();
+        outflow_idx.push(cols_for_g);
+    }
+
+    Ok(CompressedAdj {
+        divide_comids,
+        rows,
+        cols,
+        gauge_compressed,
+        outflow_idx,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +218,80 @@ mod tests {
         let u = union_subgraphs(&staids, &store);
         assert!(u.gauges.is_empty());
         assert!(u.edges.is_empty());
+    }
+
+    use crate::data::ids::Comid;
+
+    #[test]
+    fn compress_preserves_topological_order() {
+        // CONUS positions [0, 1, 2, 3, 4], COMIDs in topological order.
+        let conus_order = vec![Comid(100), Comid(200), Comid(300), Comid(400), Comid(500)];
+        // Edges in CONUS positions, lower-triangular (rows >= cols).
+        let unioned = UnionedCoo {
+            edges: vec![(2, 0), (3, 1), (4, 2), (4, 3)],
+            gauges: vec![
+                (Staid::new("0000000A"), 4, "comid500".to_string()),
+                (Staid::new("0000000B"), 3, "comid400".to_string()),
+            ],
+        };
+        let c = compress(&unioned, &conus_order).expect("compress");
+        // Active = {0, 1, 2, 3, 4} → all 5. Compressed positions match.
+        assert_eq!(c.divide_comids, conus_order);
+        assert_eq!(c.rows, vec![2, 3, 4, 4]);
+        assert_eq!(c.cols, vec![0, 1, 2, 3]);
+        assert_eq!(c.gauge_compressed, vec![4, 3]);
+        // outflow_idx: gauge A at row 4 receives from cols 2, 3.
+        // gauge B at row 3 receives from col 1.
+        assert_eq!(c.outflow_idx[0], vec![2, 3]);
+        assert_eq!(c.outflow_idx[1], vec![1]);
+    }
+
+    #[test]
+    fn compress_remaps_sparse_active_to_dense_compressed() {
+        // Sparse active set: CONUS positions {2, 5, 7, 9} → compressed {0,1,2,3}.
+        let conus_order: Vec<Comid> = (0..10).map(|i| Comid(i as i64 * 100)).collect();
+        let unioned = UnionedCoo {
+            edges: vec![(9, 7), (9, 5), (7, 2)],
+            gauges: vec![(Staid::new("0000000A"), 9, "comid900".to_string())],
+        };
+        let c = compress(&unioned, &conus_order).expect("compress");
+        assert_eq!(c.divide_comids, vec![Comid(200), Comid(500), Comid(700), Comid(900)]);
+        // Edges in compressed space: (3,2), (3,1), (2,0). Same order as input edges,
+        // but mapped through the compressed index space.
+        assert_eq!(c.rows.len(), 3);
+        for k in 0..c.rows.len() {
+            assert!(c.rows[k] >= c.cols[k], "lower-triangular violated at k={k}");
+        }
+        assert_eq!(c.gauge_compressed, vec![3]);
+    }
+
+    #[test]
+    fn compress_errors_on_non_topological_edges() {
+        let conus_order = vec![Comid(0), Comid(1), Comid(2)];
+        // Bogus edge: row 0, col 1 — violates lower-triangular (upstream
+        // referenced as downstream of itself).
+        let unioned = UnionedCoo {
+            edges: vec![(0, 1)],
+            gauges: vec![(Staid::new("0000000A"), 0, "x".to_string())],
+        };
+        let err = compress(&unioned, &conus_order).unwrap_err();
+        match err {
+            crate::data::error::DataError::Malformed { .. } => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compress_empty_unioned_errors() {
+        let conus_order = vec![Comid(0)];
+        let unioned = UnionedCoo {
+            edges: vec![],
+            gauges: vec![],
+        };
+        let err = compress(&unioned, &conus_order).unwrap_err();
+        match err {
+            crate::data::error::DataError::Malformed { .. } => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
     }
 }
