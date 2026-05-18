@@ -19,12 +19,14 @@
 //! sync. See `mlp_router`-style training loop in `harness/` for how the
 //! pieces compose.
 
+pub mod dataset;
 pub mod dates;
 pub mod error;
 pub mod ids;
 pub mod store;
 pub mod statistics;
 
+pub use dataset::RoutingBatch;
 pub use dates::{Frequency, RhoWindow, TimeAxis};
 pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
