@@ -28,7 +28,7 @@ pub mod sampler;
 pub mod store;
 pub mod statistics;
 
-pub use dataset::RoutingBatch;
+pub use dataset::{MeritGagesDataset, RoutingBatch};
 pub use dates::{Frequency, RhoWindow, TimeAxis};
 pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
