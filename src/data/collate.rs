@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use crate::data::ids::Staid;
-use crate::data::store::{GageSubgraph, GagesAdjacencyStore};
+use crate::data::store::{GageMetadata, GageSubgraph, GagesAdjacencyStore};
 
 /// Output of the per-batch subgraph union. Edges are deduplicated and
 /// returned in CONUS-position coordinates, sorted lex by `(row, col)`.
@@ -147,6 +147,66 @@ pub(crate) fn compress(
         gauge_compressed,
         outflow_idx,
     })
+}
+
+/// Per-segment flow scale factors of length `n_segments`. Default `1.0`;
+/// the compressed-position of each gauge's outlet gets the gauge's scale.
+///
+/// Mirrors `build_flow_scale_tensor` in `~/projects/ddr/src/ddr/io/readers.py:270-330`:
+/// fast path uses the `FLOW_SCALE` CSV column; fallback computes the factor
+/// from `(DRAIN_SQKM, COMID_DRAIN_SQKM, COMID_UNITAREA_SQKM)`.
+pub(crate) fn build_flow_scale(
+    batch_staids: &[Staid],
+    gauge_compressed: &[usize],
+    gages: &GageMetadata,
+    n_segments: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(batch_staids.len(), gauge_compressed.len());
+    let mut scale = vec![1.0_f32; n_segments];
+    for (s, &seg) in batch_staids.iter().zip(gauge_compressed.iter()) {
+        let Some(&i) = gages.by_staid.get(s) else { continue };
+        let row = &gages.rows[i];
+        if let Some(fs) = row.flow_scale {
+            if fs.is_finite() {
+                scale[seg] = fs;
+                continue;
+            }
+        }
+        if let (Some(comid_drain), Some(comid_unit)) =
+            (row.comid_drain_sqkm, row.comid_unitarea_sqkm)
+        {
+            scale[seg] = compute_flow_scale_factor(
+                row.drain_sqkm,
+                comid_drain,
+                comid_unit,
+            );
+        }
+        // else: stays 1.0.
+    }
+    scale
+}
+
+/// Per-gauge scaling factor in `[0, 1]`. Mirrors
+/// `compute_flow_scale_factor` in `readers.py:240-270`.
+fn compute_flow_scale_factor(
+    drain_sqkm: f64,
+    comid_drain_sqkm: f64,
+    comid_unitarea_sqkm: f64,
+) -> f32 {
+    if drain_sqkm.is_nan() || comid_drain_sqkm.is_nan() || comid_unitarea_sqkm.is_nan() {
+        return 1.0;
+    }
+    if comid_unitarea_sqkm <= 0.0 {
+        return 1.0;
+    }
+    let diff = drain_sqkm - comid_drain_sqkm;
+    if diff >= 0.0 {
+        return 1.0;
+    }
+    if diff.abs() >= comid_unitarea_sqkm {
+        return 1.0;
+    }
+    ((comid_unitarea_sqkm - diff.abs()) / comid_unitarea_sqkm) as f32
 }
 
 #[cfg(test)]
@@ -292,6 +352,85 @@ mod tests {
         match err {
             crate::data::error::DataError::Malformed { .. } => {}
             other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    use crate::data::store::{GageMetadata, GageRow};
+
+    fn synthetic_gage_meta(rows: Vec<GageRow>) -> GageMetadata {
+        let by_staid = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.staid.clone(), i))
+            .collect();
+        GageMetadata {
+            path: std::path::PathBuf::from("<inline>"),
+            rows,
+            by_staid,
+        }
+    }
+
+    fn make_row(staid: &str, flow_scale: Option<f32>) -> GageRow {
+        GageRow {
+            staid: Staid::new(staid),
+            staname: staid.into(),
+            drain_sqkm: 100.0,
+            lat_gage: 0.0,
+            lng_gage: 0.0,
+            comid: None,
+            comid_drain_sqkm: None,
+            comid_unitarea_sqkm: None,
+            abs_diff: None,
+            da_valid: Some(true),
+            flow_scale,
+        }
+    }
+
+    #[test]
+    fn flow_scale_fast_path_uses_csv_column() {
+        let meta = synthetic_gage_meta(vec![
+            make_row("00000001", Some(0.5)),
+            make_row("00000002", Some(0.8)),
+        ]);
+        let staids = vec![Staid::new("00000001"), Staid::new("00000002")];
+        let gauge_compressed = vec![3, 7];
+        let scale = build_flow_scale(&staids, &gauge_compressed, &meta, 10);
+        assert_eq!(scale.len(), 10);
+        assert!((scale[3] - 0.5).abs() < 1e-9);
+        assert!((scale[7] - 0.8).abs() < 1e-9);
+        for &i in &[0, 1, 2, 4, 5, 6, 8, 9] {
+            assert!((scale[i] - 1.0).abs() < 1e-9, "expected 1.0 at {i}, got {}", scale[i]);
+        }
+    }
+
+    #[test]
+    fn flow_scale_fallback_to_factor_when_csv_missing() {
+        let mut row = make_row("00000001", None);
+        row.drain_sqkm = 50.0;
+        row.comid_drain_sqkm = Some(100.0);
+        row.comid_unitarea_sqkm = Some(60.0);
+        let meta = synthetic_gage_meta(vec![row]);
+        let staids = vec![Staid::new("00000001")];
+        let scale = build_flow_scale(&staids, &vec![2], &meta, 5);
+        // diff = 50 - 100 = -50; abs(diff) = 50 < 60 = unitarea
+        // factor = (60 - 50) / 60 = 1/6
+        let expected = (60.0_f64 - 50.0_f64) / 60.0_f64;
+        assert!(
+            (scale[2] as f64 - expected).abs() < 1e-6,
+            "scale[2]={} expected={expected}",
+            scale[2]
+        );
+    }
+
+    #[test]
+    fn flow_scale_unknown_staid_keeps_default_one() {
+        let meta = synthetic_gage_meta(vec![make_row("00000001", Some(0.3))]);
+        // Caller asks for a STAID that isn't in the metadata — should leave
+        // the corresponding segment at 1.0.
+        let staids = vec![Staid::new("99999999")];
+        let scale = build_flow_scale(&staids, &vec![0], &meta, 3);
+        for i in 0..3 {
+            assert!((scale[i] - 1.0).abs() < 1e-9);
         }
     }
 }
