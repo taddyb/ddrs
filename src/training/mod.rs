@@ -10,5 +10,10 @@
 //!   V3 — full training loop runs end-to-end without divergence.
 
 pub mod forward;
+pub mod loss;
 
-pub use forward::scatter_add_by_group;
+pub use forward::{
+    scatter_add_by_group, forward_with_frozen_params, FrozenParams,
+    FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
+};
+pub use loss::{tau_trim_and_downsample, filter_nan_gauges, l1_loss_post_warmup, FilteredPair};
