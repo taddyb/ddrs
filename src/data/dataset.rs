@@ -9,10 +9,11 @@ use std::sync::Arc;
 use ndarray::{Array1, Array2};
 
 use crate::config::Config;
+use crate::data::collate::{build_flow_scale, compress, union_subgraphs};
 use crate::data::dates::{RhoWindow, TimeAxis};
 use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
-use crate::data::statistics::AttrStats;
+use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
     AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore, StreamflowStore,
     UsgsObservationsStore,
@@ -179,6 +180,121 @@ impl MeritGagesDataset {
     pub fn time_axis(&self) -> &TimeAxis {
         &self.time_axis
     }
+
+    /// Build one `RoutingBatch` from a STAID subset + a time window.
+    ///
+    /// Mirrors `Merit._collate_gages` in `geodatazoo/merit.py:245-330`.
+    pub fn collate(
+        &self,
+        batch_staids: &[Staid],
+        window: &RhoWindow,
+    ) -> Result<RoutingBatch> {
+        // ----- 1. Subgraph union + compression -----
+        let unioned = union_subgraphs(batch_staids, &self.gages_adj);
+        if unioned.gauges.is_empty() {
+            return Err(DataError::Malformed {
+                path: std::path::PathBuf::from("<collate>"),
+                message: format!(
+                    "no batch gauges present in gages_adjacency (asked for {})",
+                    batch_staids.len()
+                ),
+            });
+        }
+        // Pull out present STAIDs (caller-order, skipping missing) before
+        // moving `unioned` into compress().
+        let gauge_staids: Vec<Staid> =
+            unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
+
+        let compressed = compress(&unioned, &self.conus.order)?;
+        let n = compressed.divide_comids.len();
+
+        // ----- 2. SparseAdjacency: rows/cols + length/slope sliced -----
+        let mut length_m: Vec<f32> = Vec::with_capacity(n);
+        let mut slope: Vec<f32> = Vec::with_capacity(n);
+        for c in &compressed.divide_comids {
+            let pos = self.conus.index.position(c).ok_or_else(|| DataError::Malformed {
+                path: self.conus.path.clone(),
+                message: format!("compressed COMID {c:?} not found in CONUS order"),
+            })?;
+            length_m.push(self.conus.length_m[pos]);
+            slope.push(self.conus.slope[pos]);
+        }
+        let values: Vec<f32> = vec![1.0; compressed.rows.len()];
+        let adjacency = SparseAdjacency {
+            n,
+            rows: compressed.rows.clone(),
+            cols: compressed.cols.clone(),
+            values,
+            length_m,
+            slope,
+        };
+
+        // ----- 3. flow_scale + q_prime read & fuse -----
+        let flow_scale = build_flow_scale(
+            &gauge_staids,
+            &compressed.gauge_compressed,
+            &self.gages,
+            n,
+        );
+        let mut q_prime = self
+            .streamflow
+            .read_window(window, &compressed.divide_comids)?;
+        // q_prime: (T_hours, N). Multiply each column by flow_scale[col].
+        let t_hours = q_prime.shape()[0];
+        for col in 0..n {
+            let s = flow_scale[col];
+            if (s - 1.0).abs() < 1e-9 {
+                continue;
+            }
+            for t in 0..t_hours {
+                q_prime[(t, col)] *= s;
+            }
+        }
+
+        // ----- 4. Attributes: slice + fill_nans + normalize + transpose -----
+        let f = self.attr_names.len();
+        let mut attrs_present: Array2<f32> = Array2::zeros((f, n));
+        for (out_col, comid) in compressed.divide_comids.iter().enumerate() {
+            if let Some(src_col) = self.attrs.index.position(comid) {
+                for fi in 0..f {
+                    attrs_present[(fi, out_col)] = self.attrs.attrs[(fi, src_col)];
+                }
+            } else {
+                // Missing — fill with NaN so fill_nans handles it via row_means.
+                for fi in 0..f {
+                    attrs_present[(fi, out_col)] = f32::NAN;
+                }
+            }
+        }
+        fill_nans(attrs_present.view_mut(), &self.attrs.row_means);
+
+        // Normalize: (attrs - means) / stds, broadcast along axis 1.
+        for fi in 0..f {
+            let mean = self.means[fi];
+            let std = self.stds[fi];
+            for col in 0..n {
+                attrs_present[(fi, col)] = (attrs_present[(fi, col)] - mean) / std;
+            }
+        }
+        // Transpose to (N, F) for the MLP head's input contract.
+        let spatial_attributes_normalized: Array2<f32> = attrs_present.reversed_axes().into_owned();
+
+        // ----- 5. Observations (present-in-adjacency STAIDs; missing→error) -----
+        let observations = self.observations.read_window(window, &gauge_staids)?;
+
+        // ----- 6. Assemble -----
+        Ok(RoutingBatch {
+            adjacency,
+            spatial_attributes_normalized,
+            q_prime,
+            observations,
+            outflow_idx: compressed.outflow_idx,
+            gauge_staids,
+            divide_comids: compressed.divide_comids,
+            flow_scale,
+            window: *window,
+        })
+    }
 }
 
 /// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
@@ -251,5 +367,60 @@ mod tests {
         assert_eq!(ds.attr_names.len(), 10);
         assert_eq!(ds.means.len(), 10);
         assert_eq!(ds.stds.len(), 10);
+    }
+
+    #[test]
+    fn collate_one_batch_against_live_yaml() {
+        let cfg_path = "config/merit_training.yaml";
+        if !std::path::Path::new(cfg_path).exists() {
+            eprintln!("skipping: {cfg_path} not present");
+            return;
+        }
+        let cfg = match Config::from_yaml_file(cfg_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if let Some(ds) = cfg.data_sources.as_ref() {
+            for p in &[
+                &ds.attributes,
+                &ds.conus_adjacency,
+                &ds.gages_adjacency,
+                &ds.streamflow,
+                &ds.observations,
+                &ds.gages,
+            ] {
+                if !p.exists() {
+                    eprintln!("skipping: {} not present", p.display());
+                    return;
+                }
+            }
+        } else {
+            return;
+        }
+        let dataset = MeritGagesDataset::open(&cfg).expect("open dataset");
+
+        // Pick the first 4 gauges and a 90-day window.
+        let staids: Vec<_> = dataset.staids().iter().take(4).cloned().collect();
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let window = dataset.time_axis().sample_rho_window(&mut rng, 90);
+
+        let batch = dataset.collate(&staids, &window).expect("collate");
+
+        assert_eq!(batch.gauge_staids.len(), staids.len());
+        assert_eq!(batch.adjacency.n, batch.divide_comids.len());
+        assert_eq!(batch.spatial_attributes_normalized.shape()[0], batch.adjacency.n);
+        assert_eq!(batch.spatial_attributes_normalized.shape()[1], dataset.attr_names.len());
+        assert_eq!(batch.q_prime.shape(), &[window.n_hourly(), batch.adjacency.n]);
+        assert_eq!(batch.observations.shape(), &[window.rho_days, batch.gauge_staids.len()]);
+        // Lower-triangular invariant.
+        for k in 0..batch.adjacency.nnz() {
+            assert!(
+                batch.adjacency.rows[k] >= batch.adjacency.cols[k],
+                "lower-triangular violated at k={k}"
+            );
+        }
+        assert_eq!(batch.outflow_idx.len(), batch.gauge_staids.len());
+        assert_eq!(batch.flow_scale.len(), batch.adjacency.n);
     }
 }
