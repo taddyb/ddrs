@@ -19,6 +19,7 @@
 //! sync. See `mlp_router`-style training loop in `harness/` for how the
 //! pieces compose.
 
+pub mod collate;
 pub mod dataset;
 pub mod dates;
 pub mod error;
