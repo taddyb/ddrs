@@ -3,7 +3,10 @@
 //! Mirrors `~/projects/ddr/src/ddr/io/builders.py::construct_network_matrix`
 //! (lines ~55-110) and the COO-build portion of
 //! `~/projects/ddr/src/ddr/geodatazoo/merit.py::_collate_gages`
-//! (lines ~245-285).
+//! (starts at line 197; COO-build at ~202-237).
+//!
+//! `build_flow_scale` mirrors `~/projects/ddr/src/ddr/io/readers.py::build_flow_scale_tensor`
+//! (line 299) plus `compute_flow_scale_factor` (line 259).
 
 use std::collections::BTreeSet;
 
@@ -128,6 +131,11 @@ pub(crate) fn compress(
         unioned.gauges.iter().map(|(_, g, _)| mapping[g]).collect();
 
     // 5. outflow_idx[g] = list of cols where rows[k] == gauge_compressed[g].
+    // Fallback (matches DDR `_collate_gages` lines ~226-235): when a gauge
+    // has no incoming edges in this batch's union, use the gauge's own
+    // compressed index as the sole outflow. Headwater gauges are filtered
+    // upstream of compress(), so this fallback only fires for gauges at
+    // merge nodes whose upstream edges weren't in the batch.
     let mut outflow_idx: Vec<Vec<usize>> = Vec::with_capacity(gauge_compressed.len());
     for &g_comp in &gauge_compressed {
         let g_row = g_comp as i32;
@@ -137,7 +145,11 @@ pub(crate) fn compress(
             .filter(|(r, _)| **r == g_row)
             .map(|(_, c)| *c as usize)
             .collect();
-        outflow_idx.push(cols_for_g);
+        if cols_for_g.is_empty() {
+            outflow_idx.push(vec![g_comp]);
+        } else {
+            outflow_idx.push(cols_for_g);
+        }
     }
 
     Ok(CompressedAdj {
@@ -353,6 +365,21 @@ mod tests {
             crate::data::error::DataError::Malformed { .. } => {}
             other => panic!("expected Malformed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn outflow_idx_falls_back_to_self_when_no_incoming_edges() {
+        // Gauge at CONUS-position 2 with no upstream edges in this batch
+        // (active = {2} as a single-node graph). DDR's fallback yields the
+        // gauge's own compressed index as the sole outflow column.
+        let conus_order = vec![Comid(0), Comid(1), Comid(2)];
+        let unioned = UnionedCoo {
+            edges: vec![],
+            gauges: vec![(Staid::new("0000000A"), 2, "comid2".to_string())],
+        };
+        let c = compress(&unioned, &conus_order).expect("compress");
+        assert_eq!(c.gauge_compressed, vec![0]);
+        assert_eq!(c.outflow_idx[0], vec![0], "self-edge fallback");
     }
 
     use crate::data::store::{GageMetadata, GageRow};

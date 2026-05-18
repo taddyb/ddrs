@@ -56,7 +56,7 @@ pub struct MeritGagesDataset {
     pub(crate) conus: Arc<ConusAdjacencyStore>,
     pub(crate) gages_adj: Arc<GagesAdjacencyStore>,
     pub(crate) attrs: Arc<AttributesStore>,
-    #[allow(dead_code)] // used by Task 8 (collate)
+    #[allow(dead_code)] // retained for diagnostics; means/stds are pre-derived at open() time
     pub(crate) stats: Arc<AttrStats>,
     pub(crate) gages: Arc<GageMetadata>,
     pub(crate) streamflow: Arc<StreamflowStore>,
