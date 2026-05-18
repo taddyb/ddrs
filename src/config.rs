@@ -1,11 +1,58 @@
-//! Subset of the DDR `Config` schema needed by the routing core.
+//! Subset of the DDR `Config` schema needed by the routing core and dataset.
 //!
-//! Mirrors `~/projects/ddr/src/ddr/validation/configs.py` for the fields the
-//! Muskingum-Cunge solver actually reads: `parameter_ranges`, `log_space_parameters`,
-//! `defaults`, and `attribute_minimums`. Higher-level fields (data sources, KAN,
-//! experiment) are intentionally not modeled here — the solver does not need them.
+//! Mirrors `~/projects/ddr/src/ddr/validation/configs.py`. The routing core
+//! reads `params`; SP-3 dataset code reads `data_sources`, `experiment`, and
+//! `mlp`. Higher-level fields are kept optional so `Config::default()` still
+//! works for code that only needs the solver.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+
+use serde::Deserialize;
+
+use crate::data::error::{DataError, Result};
+
+// ---------------------------------------------------------------------------
+// New top-level sections (SP-3)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DataSources {
+    pub attributes: std::path::PathBuf,
+    pub conus_adjacency: std::path::PathBuf,
+    pub gages_adjacency: std::path::PathBuf,
+    pub streamflow: std::path::PathBuf,
+    pub observations: std::path::PathBuf,
+    pub gages: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Experiment {
+    pub batch_size: usize,
+    pub start_time: String,
+    pub end_time: String,
+    pub epochs: usize,
+    pub rho: Option<usize>,
+    #[serde(default)]
+    pub shuffle: bool,
+    pub warmup: usize,
+    #[serde(default)]
+    pub learning_rate: BTreeMap<usize, f32>,
+    #[serde(default)]
+    pub grad_clip_max_norm: Option<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MlpConfigSection {
+    pub hidden_size: usize,
+    pub num_hidden_layers: usize,
+    pub input_var_names: Vec<String>,
+    pub learnable_parameters: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Routing parameter types (pre-existing, kept as named-field structs)
+// ---------------------------------------------------------------------------
 
 /// Physical lower bounds applied during routing to keep the math stable.
 #[derive(Debug, Clone)]
@@ -70,8 +117,154 @@ impl Default for Params {
     }
 }
 
-/// Root config — currently just `params`, since that's all the solver consumes.
+// ---------------------------------------------------------------------------
+// YAML intermediate for Params (dict-shaped in YAML, named fields in Rust)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ParamsRaw {
+    parameter_ranges: HashMap<String, [f32; 2]>,
+    attribute_minimums: HashMap<String, f32>,
+    defaults: HashMap<String, f32>,
+    log_space_parameters: Vec<String>,
+}
+
+impl From<ParamsRaw> for Params {
+    fn from(r: ParamsRaw) -> Self {
+        let mut p = Params::default();
+        // parameter_ranges — named field mapping.
+        if let Some(v) = r.parameter_ranges.get("n") {
+            p.parameter_ranges.n = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("q_spatial") {
+            p.parameter_ranges.q_spatial = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("p_spatial") {
+            p.parameter_ranges.p_spatial = *v;
+        }
+        // attribute_minimums — named field mapping.
+        if let Some(&v) = r.attribute_minimums.get("discharge") {
+            p.attribute_minimums.discharge = v;
+        }
+        if let Some(&v) = r.attribute_minimums.get("slope") {
+            p.attribute_minimums.slope = v;
+        }
+        if let Some(&v) = r.attribute_minimums.get("velocity") {
+            p.attribute_minimums.velocity = v;
+        }
+        if let Some(&v) = r.attribute_minimums.get("depth") {
+            p.attribute_minimums.depth = v;
+        }
+        if let Some(&v) = r.attribute_minimums.get("bottom_width") {
+            p.attribute_minimums.bottom_width = v;
+        }
+        // defaults and log_space_parameters override if non-empty.
+        if !r.defaults.is_empty() {
+            p.defaults = r.defaults;
+        }
+        if !r.log_space_parameters.is_empty() {
+            p.log_space_parameters = r.log_space_parameters;
+        }
+        p
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Root Config
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub params: Params,
+    pub data_sources: Option<DataSources>,
+    pub experiment: Option<Experiment>,
+    pub mlp: Option<MlpConfigSection>,
+    pub mode: String,
+    pub geodataset: String,
+    pub seed: u64,
+    pub np_seed: u64,
+}
+
+/// YAML-shaped intermediate; the public `Config` has nicer types.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ConfigRaw {
+    mode: Option<String>,
+    geodataset: Option<String>,
+    seed: Option<u64>,
+    np_seed: Option<u64>,
+    params: ParamsRaw,
+    data_sources: Option<DataSources>,
+    experiment: Option<Experiment>,
+    mlp: Option<MlpConfigSection>,
+}
+
+impl From<ConfigRaw> for Config {
+    fn from(r: ConfigRaw) -> Self {
+        Self {
+            params: r.params.into(),
+            data_sources: r.data_sources,
+            experiment: r.experiment,
+            mlp: r.mlp,
+            mode: r.mode.unwrap_or_else(|| "training".to_string()),
+            geodataset: r.geodataset.unwrap_or_else(|| "merit".to_string()),
+            seed: r.seed.unwrap_or(42),
+            np_seed: r.np_seed.unwrap_or(42),
+        }
+    }
+}
+
+impl Config {
+    pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let bytes = std::fs::read(path).map_err(|e| DataError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let raw: ConfigRaw = serde_yaml::from_slice(&bytes).map_err(|e| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        Ok(raw.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_merit_training_yaml() {
+        let path = "config/merit_training.yaml";
+        let cfg = Config::from_yaml_file(path).expect("load yaml");
+        assert_eq!(cfg.experiment.as_ref().unwrap().batch_size, 64);
+        assert_eq!(cfg.experiment.as_ref().unwrap().rho, Some(90));
+        assert_eq!(cfg.experiment.as_ref().unwrap().warmup, 5);
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert!(ds.conus_adjacency.file_name().unwrap().to_str().unwrap() == "merit_conus_adjacency.zarr");
+        assert!(ds.streamflow.extension().map(|e| e == "ic").unwrap_or(false));
+        // params still readable.
+        let pr = &cfg.params.parameter_ranges;
+        assert!((pr.n[0] - 0.015).abs() < 1e-9);
+        assert!((pr.p_spatial[1] - 200.0).abs() < 1e-9);
+        // log_space_parameters from YAML overrides default.
+        assert_eq!(cfg.params.log_space_parameters, vec!["n".to_string()]);
+        // mlp section.
+        let mlp = cfg.mlp.as_ref().unwrap();
+        assert_eq!(mlp.hidden_size, 21);
+        assert_eq!(mlp.input_var_names.len(), 10);
+        // top-level scalars.
+        assert_eq!(cfg.seed, 42);
+        assert_eq!(cfg.mode, "training");
+    }
+
+    #[test]
+    fn default_config_still_constructs() {
+        // Sanity: existing call sites that use Config::default() still work.
+        let cfg = Config::default();
+        assert!(cfg.params.parameter_ranges.n[0] > 0.0);
+        assert!(cfg.data_sources.is_none());
+        assert!(cfg.experiment.is_none());
+    }
 }
