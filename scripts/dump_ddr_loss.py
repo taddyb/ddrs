@@ -109,7 +109,7 @@ def pick_batch(dataset, variant: str, seed: int, batch_size: int, rho: int):
     start_day_idx = int(rng.integers(0, sample_size - rho))
     chunk = np.arange(start_day_idx, start_day_idx + rho)
     dataset.dates.set_date_range(chunk)
-    return staids
+    return staids, start_day_idx
 
 
 def main():
@@ -124,9 +124,9 @@ def main():
     dataset = Merit(cfg=cfg)
 
     if args.variant == "v1":
-        staids = pick_batch(dataset, "v1", seed=42, batch_size=8, rho=90)
+        staids, start_day_idx = pick_batch(dataset, "v1", seed=42, batch_size=8, rho=90)
     else:
-        staids = pick_batch(dataset, "v2", seed=42, batch_size=len(dataset.gage_ids), rho=90)
+        staids, start_day_idx = pick_batch(dataset, "v2", seed=42, batch_size=len(dataset.gage_ids), rho=90)
 
     routing_dataclass = dataset._collate_gages(np.array(staids))
     n_active = routing_dataclass.spatial_attributes.shape[1]
@@ -206,6 +206,8 @@ def main():
         "seed": 42,
         "batch_size": len(staids),
         "rho": 90,
+        "start_day_idx": start_day_idx,
+        "staids": list(map(str, staids)),
         "start_time": str(routing_dataclass.dates.batch_daily_time_range[0]),
         "frozen_n": FROZEN_N,
         "frozen_q_spatial": FROZEN_Q_SPATIAL,
