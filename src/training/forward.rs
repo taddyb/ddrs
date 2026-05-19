@@ -145,6 +145,52 @@ pub fn forward_with_frozen_params<I: Backend>(
     )
 }
 
+// ---------------------------------------------------------------------------
+// MLP-integrated production forward
+// ---------------------------------------------------------------------------
+
+use crate::nn::mlp::Mlp;
+
+/// One training-step forward pass. Computes MLP outputs from normalized
+/// attributes, denormalizes through the engine's `setup_inputs`, runs MC,
+/// and scatter-adds to per-gauge predictions. Returns `(num_gauges, T_hours)`
+/// with autograd alive on the engine path.
+///
+/// Mirrors `~/projects/ddr/scripts/train.py:67-73` (MLP forward + dmc forward).
+pub fn forward<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<Autodiff<I>>,
+    mlp: &Mlp<Autodiff<I>>,
+    device: &I::Device,
+) -> Tensor<Autodiff<I>, 2> {
+    let params_map = mlp.forward(tensors.spatial_attributes.clone());
+
+    let n_param = params_map.get("n").expect("MLP missing n").clone();
+    let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
+    let p_param = params_map.get("p_spatial").cloned();
+
+    let n_active = tensors.adjacency.n;
+    let x_storage: Tensor<Autodiff<I>, 1> = Tensor::full([n_active], 0.3_f32, device);
+
+    let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    engine.setup_inputs(
+        RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
+        tensors.q_prime.clone(),
+        SpatialParameters { n: n_param, q_spatial: q_param, p_spatial: p_param },
+        false, // carry_state
+    );
+
+    let runoff = engine.forward(); // (N, T_hours)
+
+    // Scatter-add (N, T_hours) → (G, T_hours) with autograd alive.
+    scatter_add_by_group(
+        runoff,
+        tensors.flat_indices.clone(),
+        tensors.group_ids.clone(),
+        tensors.num_gauges,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
