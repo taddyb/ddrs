@@ -376,6 +376,92 @@ impl StreamflowStore {
         // 5. Daily → hourly transform: repeat each day 24×, trim to n_hourly.
         Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
     }
+
+    /// Same as `read_window` but for `TestWindow` — returns `n_days * 24`
+    /// hours (no trailing-day trim) so chunks tile cleanly. Used by SP-5
+    /// `evaluate()`. Mirrors `read_window` with `window.n_days` replacing
+    /// `window.rho_days` and `n_hourly = n_days * 24` (no trim).
+    pub fn read_test_window(
+        &self,
+        window: &crate::data::TestWindow,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        // 1. Resolve time window to store-local day indices.
+        let store_start_day_i64 = (window.window_start - self.time_start).num_days();
+        if store_start_day_i64 < 0 {
+            return Err(DataError::Malformed {
+                path: self.path.clone(),
+                message: format!(
+                    "test window starts {} before store start {}",
+                    window.window_start, self.time_start
+                ),
+            });
+        }
+        let store_start_day = store_start_day_i64 as usize;
+        let end_day = store_start_day + window.n_days;
+        if end_day > self.n_time {
+            return Err(DataError::Malformed {
+                path: self.path.clone(),
+                message: format!(
+                    "test window extends to store day {end_day} but n_time={}",
+                    self.n_time
+                ),
+            });
+        }
+
+        // 2. Resolve COMIDs → divide-axis positions.
+        let (positions, missing_indices) = self.index.positions_of(comids);
+        let missing_set: std::collections::HashSet<usize> =
+            missing_indices.iter().copied().collect();
+        let n_out = comids.len();
+
+        // Pre-fill with the discharge minimum; missing COMIDs keep this value.
+        let mut daily = Array2::<f32>::from_elem((window.n_days, n_out), 0.001);
+
+        if positions.is_empty() {
+            return Ok(daily_to_hourly_trim(&daily, window.n_hourly()));
+        }
+
+        // 3. Contiguous divide-axis read.
+        let min_pos = *positions.iter().min().unwrap();
+        let max_pos = *positions.iter().max().unwrap();
+        let div_range_end = max_pos + 1;
+        let div_count = div_range_end - min_pos;
+
+        let subset = zarrs::array::ArraySubset::new_with_ranges(&[
+            (min_pos as u64)..(div_range_end as u64),
+            (store_start_day as u64)..(end_day as u64),
+        ]);
+        let raw_f32: Vec<f32> = self
+            .qr
+            .retrieve_array_subset(&subset)
+            .map_err(|e| ic_err(&self.path, e))?;
+        debug_assert_eq!(raw_f32.len(), div_count * window.n_days);
+
+        // 4. Scatter into the output.
+        let mut next_present = 0usize;
+        for (out_col, _) in comids.iter().enumerate() {
+            if missing_set.contains(&out_col) {
+                continue;
+            }
+            let div_pos = positions[next_present];
+            next_present += 1;
+            let local_div = div_pos - min_pos;
+            for d in 0..window.n_days {
+                let raw_idx = local_div * window.n_days + d;
+                daily[(d, out_col)] = raw_f32[raw_idx];
+            }
+        }
+
+        debug_assert_eq!(
+            next_present,
+            positions.len(),
+            "scatter walked past `positions` — IdIndex::positions_of invariant broken"
+        );
+
+        // 5. Daily → hourly: repeat each day 24×. n_hourly = n_days * 24 (no trim).
+        Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+    }
 }
 
 // ---------------------------------------------------------------------------
