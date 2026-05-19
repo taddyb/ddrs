@@ -18,7 +18,7 @@ pub mod optimizer;
 
 pub use checkpoint::{load_mlp, save_mlp};
 pub use forward::{
-    scatter_add_by_group, forward_with_frozen_params, FrozenParams,
+    scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams,
     FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
 pub use loss::{tau_trim_and_downsample, filter_nan_gauges, l1_loss_post_warmup, FilteredPair};

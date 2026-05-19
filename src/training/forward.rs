@@ -193,6 +193,58 @@ pub fn forward<I: Backend>(
     )
 }
 
+/// MLP inference forward — no autograd anywhere. Used by `bin/eval` and
+/// the Mlp arm of `EvalParams`.
+///
+/// Mirrors `forward` (production training path) but operates on the inner
+/// backend `I` throughout. Caller passes an `Mlp<I>` loaded via
+/// `checkpoint::load_mlp`.
+pub fn forward_eval<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    mlp: &Mlp<I>,
+    device: &I::Device,
+    carry_state: bool,
+) -> Tensor<I, 2> {
+    let params_map = mlp.forward(tensors.spatial_attributes.clone());
+
+    let n_param = params_map.get("n").expect("MLP missing n").clone();
+    let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
+    let p_param = params_map.get("p_spatial").cloned();
+
+    let n_active = tensors.adjacency.n;
+    let x_storage: Tensor<I, 1> = Tensor::full([n_active], 0.3_f32, device);
+
+    // Wrap to Autodiff at the engine boundary (engine requires Autodiff
+    // even for forward-only). Drop the graph immediately after with .inner().
+    let q_prime_ad: Tensor<Autodiff<I>, 2> =
+        Tensor::from_inner(tensors.q_prime.clone());
+    let n_ad = Tensor::<Autodiff<I>, 1>::from_inner(n_param);
+    let q_ad = Tensor::<Autodiff<I>, 1>::from_inner(q_param);
+    let p_ad = match p_param {
+        Some(t) => Some(Tensor::<Autodiff<I>, 1>::from_inner(t)),
+        None => None,
+    };
+    let x_ad = Tensor::<Autodiff<I>, 1>::from_inner(x_storage);
+
+    let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    engine.setup_inputs(
+        RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage: x_ad },
+        q_prime_ad,
+        SpatialParameters { n: n_ad, q_spatial: q_ad, p_spatial: p_ad },
+        carry_state,
+    );
+    let runoff_ad = engine.forward();
+    let runoff = runoff_ad.inner();
+
+    scatter_add_by_group(
+        runoff,
+        tensors.flat_indices.clone(),
+        tensors.group_ids.clone(),
+        tensors.num_gauges,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
