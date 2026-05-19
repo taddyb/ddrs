@@ -11,7 +11,8 @@ mod common;
 use approx::assert_relative_eq;
 use burn::tensor::Tensor;
 
-use ddrs::routing::{compute_hotstart_discharge, MuskingumCunge};
+use ddrs::routing::{compute_hotstart_discharge, MuskingumCunge, RoutingInputs, SpatialParameters};
+use ddrs::sparse::SparseAdjacency;
 
 use common::{
     mock_config, mock_routing_inputs, mock_spatial_parameters, mock_streamflow, InnerBackend,
@@ -313,4 +314,89 @@ fn ad_streamflow<B: burn::tensor::backend::Backend>(
         }
     }
     Tensor::<B, 1>::from_floats(data.as_slice(), device).reshape([t, n])
+}
+
+/// `carry_state=true` in a second `setup_inputs` call preserves discharge state
+/// across time-window boundaries.
+///
+/// SP-5's `evaluate()` depends on the engine carrying discharge_t across
+/// chunked time-window calls. This test verifies that when the engine is asked
+/// to continue routing with new lateral inflows (q2) but the same network, the
+/// prior discharge state is retained — not cold-started from q2's first row.
+#[test]
+fn carry_state_preserves_discharge_across_setup_inputs_calls() {
+    let device = TestDevice::default();
+    let cfg = mock_config();
+    let mut mc = MuskingumCunge::<InnerBackend>::new(cfg, device.clone());
+
+    // Tiny linear-chain network (3 reaches) — minimal, cheap repro.
+    let n = 3usize;
+    let adjacency = SparseAdjacency::from_dense(
+        n,
+        &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        vec![1000.0; n],
+        vec![0.001; n],
+    );
+    let x_storage = Tensor::<TestBackend, 1>::ones([n], &device) * 0.2;
+
+    // Two distinct q_prime windows. Window 1 uses all 5.0 m³/s; window 2 uses
+    // all 8.0 m³/s. If the engine incorrectly resets discharge_t on the second
+    // setup_inputs call, it would cold-start from the new inflow, breaking the
+    // continuity required for SP-5's chunked evaluation.
+    let q_window_1 = Tensor::<TestBackend, 2>::ones([24, n], &device) * 5.0_f32;
+    let q_window_2 = Tensor::<TestBackend, 2>::ones([24, n], &device) * 8.0_f32;
+
+    let n_param = Tensor::<TestBackend, 1>::ones([n], &device) * 0.5;
+    let q_param = Tensor::<TestBackend, 1>::ones([n], &device) * 0.5;
+
+    // === First window: cold-start and advance ===
+    let inputs1 = RoutingInputs {
+        adjacency: adjacency.clone(),
+        x_storage: x_storage.clone(),
+    };
+    let params1 = SpatialParameters {
+        n: n_param.clone(),
+        q_spatial: q_param.clone(),
+        p_spatial: None,
+    };
+    mc.setup_inputs(inputs1, q_window_1, params1, false);
+    let _ = mc.forward();
+    let state_after_first_forward: Vec<f32> = mc
+        .discharge_state()
+        .expect("discharge_state populated after forward")
+        .into_data()
+        .to_vec()
+        .unwrap();
+
+    // === Second window: carry_state=true must PRESERVE the discharge state ===
+    let inputs2 = RoutingInputs {
+        adjacency,
+        x_storage,
+    };
+    let params2 = SpatialParameters {
+        n: n_param,
+        q_spatial: q_param,
+        p_spatial: None,
+    };
+    mc.setup_inputs(inputs2, q_window_2, params2, true);
+    let state_after_carry_setup: Vec<f32> = mc
+        .discharge_state()
+        .expect("discharge_state should survive carry_state=true setup")
+        .into_data()
+        .to_vec()
+        .unwrap();
+
+    // Assertion: the discharge state must not have been reset by the second
+    // setup_inputs call. This ensures SP-5's chunked evaluate() can piece
+    // together multi-window simulations without losing internal state.
+    for (before, after) in state_after_first_forward
+        .iter()
+        .zip(state_after_carry_setup.iter())
+    {
+        assert_relative_eq!(
+            before, after,
+            epsilon = 1e-6,
+            max_relative = 1e-6
+        );
+    }
 }
