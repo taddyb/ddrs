@@ -323,3 +323,85 @@ fn v2_loss_matches_ddr_for_frozen_constant_params_all_gauges() {
         fixture.loss
     );
 }
+
+// ---------------------------------------------------------------------------
+// V3 test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v3_train_one_epoch_runs_end_to_end() {
+    use burn::backend::{Autodiff, NdArray};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use ddrs::nn::mlp::MlpConfig;
+    use ddrs::training::{TrainState, train, build_adam};
+
+    type I = NdArray<f32>;
+    type AB = Autodiff<I>;
+
+    let cfg_path = "config/merit_training.yaml";
+    if !std::path::Path::new(cfg_path).exists() {
+        eprintln!("skipping: {cfg_path} not present");
+        return;
+    }
+    let mut cfg = match Config::from_yaml_file(cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("skipping: config load failed: {e}");
+            return;
+        }
+    };
+    if !all_paths_exist(&cfg) {
+        eprintln!("skipping: one or more data paths absent");
+        return;
+    }
+
+    // Force CI-friendly knobs.
+    {
+        let exp = cfg.experiment.as_mut().expect("experiment");
+        exp.epochs = 1;
+        exp.batch_size = 4;
+    }
+
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let dataset = MeritGagesDataset::open(&cfg).expect("open dataset");
+
+    let mlp_section = cfg.mlp.as_ref().expect("mlp config");
+    let mlp_cfg = MlpConfig::new(
+        mlp_section.input_var_names.clone(),
+        mlp_section.learnable_parameters.clone(),
+    )
+    .with_hidden_size(mlp_section.hidden_size)
+    .with_num_hidden_layers(mlp_section.num_hidden_layers);
+    let mlp = mlp_cfg.init::<AB>(&device);
+
+    let mut state = TrainState::<I> {
+        mlp,
+        epoch: 1,
+        mini_batch: 0,
+        rng: StdRng::seed_from_u64(42),
+    };
+    let mut optimizer = build_adam::<ddrs::nn::mlp::Mlp<AB>, AB>();
+
+    let ckpt_dir = std::path::PathBuf::from("/tmp/ddrs_v3_ckpts");
+    let _ = std::fs::remove_dir_all(&ckpt_dir);
+    std::fs::create_dir_all(&ckpt_dir).expect("ckpt dir");
+
+    // Run only 3 mini-batches so the test finishes in seconds rather than hours.
+    const MAX_MB_FOR_V3: usize = 3;
+    train::<I>(&cfg, &dataset, &mut state, &mut optimizer, &device, &ckpt_dir, Some(MAX_MB_FOR_V3))
+        .expect("V3 train run");
+
+    // Bar 1: training advanced state past start.
+    assert!(
+        state.epoch >= 2 || state.mini_batch > 0,
+        "training loop didn't advance state (epoch={}, mb={})",
+        state.epoch,
+        state.mini_batch
+    );
+    // Bar 2: at least one checkpoint exists.
+    let entries: Vec<_> = std::fs::read_dir(&ckpt_dir)
+        .expect("ckpt dir missing")
+        .collect();
+    assert!(!entries.is_empty(), "no checkpoints written");
+}

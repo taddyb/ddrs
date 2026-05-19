@@ -52,6 +52,7 @@ pub fn train<I: Backend>(
     optimizer: &mut impl Optimizer<Mlp<Autodiff<I>>, Autodiff<I>>,
     device: &I::Device,
     checkpoint_dir: &Path,
+    max_mini_batches: Option<usize>,
 ) -> Result<()> {
     let exp = cfg.experiment.as_ref().expect("experiment");
     let rho = exp.rho.expect("training requires rho");
@@ -64,6 +65,7 @@ pub fn train<I: Backend>(
         let lr = resolve_lr(&exp.learning_rate, epoch);
         eprintln!("epoch {epoch} lr={lr}");
 
+        let mut mb_done = 0usize;
         while let Some(idx) = sampler.next_batch() {
             let staids: Vec<_> = idx.iter().map(|&i| dataset.staids()[i].clone()).collect();
             let window = dataset.time_axis().sample_rho_window(&mut state.rng, rho);
@@ -132,6 +134,12 @@ pub fn train<I: Backend>(
 
             eprintln!("  mb={} loss={:.6}", state.mini_batch, loss_f32);
             state.mini_batch += 1;
+            mb_done += 1;
+            if let Some(limit) = max_mini_batches {
+                if mb_done >= limit {
+                    break;
+                }
+            }
         }
         state.mini_batch = 0;
         state.epoch = epoch + 1;
