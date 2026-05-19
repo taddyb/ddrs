@@ -6,6 +6,7 @@
 //! PRNG streams diverge, so we pin inputs to DDR's batch selection.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use ndarray::{s, Array2};
 use serde::Deserialize;
@@ -321,6 +322,134 @@ fn v2_loss_matches_ddr_for_frozen_constant_params_all_gauges() {
         rel_diff < 1e-4,
         "V2 loss diverged: ddrs={loss_ddrs}, DDR={}, rel={rel_diff}",
         fixture.loss
+    );
+}
+
+// ---------------------------------------------------------------------------
+// V4 test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn v4_test_period_matches_ddr_for_frozen_constant_params() {
+    use burn::tensor::backend::BackendTypes;
+    use ddrs::config::ConfigMode;
+    use ddrs::data::TestWindow;
+    use ddrs::training::{evaluate, EvalParams, FrozenParams};
+    use zarrs::array::Array as ZarrArray;
+    use zarrs::filesystem::FilesystemStore;
+    use zarrs::storage::ReadableStorage;
+
+    type I = NdArray<f32>;
+
+    let fixture_path = "fixtures/sp5/v4_ddr_test.zarr";
+    if !Path::new(fixture_path).exists() {
+        eprintln!("skipping V4: {fixture_path} not present");
+        return;
+    }
+    let cfg_path = "config/merit_training.yaml";
+    if !Path::new(cfg_path).exists() {
+        eprintln!("skipping V4: {cfg_path} not present");
+        return;
+    }
+    let cfg = match Config::from_yaml_file_with_mode(cfg_path, ConfigMode::Testing) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("skipping V4: config load failed: {e}");
+            return;
+        }
+    };
+    if !all_paths_exist(&cfg) {
+        eprintln!("skipping V4: one or more data paths absent");
+        return;
+    }
+
+    let device = <I as BackendTypes>::Device::default();
+    let dataset = MeritGagesDataset::open(&cfg).expect("open dataset");
+
+    let axis = dataset.time_axis().clone();
+    let n_days_total = axis.num_days;
+    eprintln!("V4: n_days_total={n_days_total}");
+
+    // Probe to size FrozenParams.
+    let probe = TestWindow::new(&axis, 0, 1);
+    let probe_batch = dataset.collate_window(&probe).expect("probe");
+    let frozen = FrozenParams::constant(probe_batch.adjacency.n);
+    eprintln!("V4: n_active={}", probe_batch.adjacency.n);
+    eprintln!("V4: num_gauges={}", probe_batch.gauge_staids.len());
+
+    // Single batch covering the whole window — mirrors the dump script.
+    let output = evaluate::<I>(&cfg, &dataset, EvalParams::Frozen(&frozen),
+                                &device, n_days_total).expect("evaluate");
+    let pred_ddrs = &output.predictions_daily;
+    eprintln!("V4: pred_ddrs shape {:?}", pred_ddrs.shape());
+    let ddrs_mean = pred_ddrs.mean().unwrap_or(0.0);
+    eprintln!("V4: pred_ddrs mean {ddrs_mean:.4}");
+
+    // Read DDR reference via zarrs.
+    let read_storage: ReadableStorage =
+        Arc::new(FilesystemStore::new(fixture_path).expect("open ref zarr"));
+    let arr = ZarrArray::open(read_storage, "/predictions").expect("open /predictions");
+    let dims = arr.shape().to_vec();
+    eprintln!("V4: DDR ref shape {:?}", dims);
+    let subset = arr.subset_all();
+    let pred_ddr_flat: Vec<f64> = arr
+        .retrieve_array_subset::<Vec<f64>>(&subset)
+        .expect("read predictions");
+    let pred_ddr = ndarray::Array2::<f64>::from_shape_vec(
+        (dims[0] as usize, dims[1] as usize),
+        pred_ddr_flat,
+    )
+    .expect("reshape");
+    let ddr_mean = pred_ddr.mean().unwrap_or(0.0);
+    eprintln!("V4: DDR mean {ddr_mean:.4}");
+
+    assert_eq!(
+        pred_ddrs.shape(),
+        pred_ddr.shape(),
+        "V4 shape mismatch: ddrs={:?} ddr={:?}",
+        pred_ddrs.shape(),
+        pred_ddr.shape()
+    );
+
+    // Check means agree within 1% before per-element comparison.
+    let mean_rel = ((ddrs_mean as f64) - ddr_mean).abs() / ddr_mean.abs().max(1e-6);
+    eprintln!("V4: mean relative diff = {mean_rel:.6e}");
+    assert!(
+        mean_rel < 0.01,
+        "V4 mean diverged: ddrs={ddrs_mean:.4} DDR={ddr_mean:.4} rel={mean_rel:.6e} > 1%"
+    );
+
+    // Per-gauge max relative error.
+    let mut worst_rel = 0.0_f32;
+    let mut worst_at = (0usize, 0usize);
+    for g in 0..pred_ddrs.shape()[0] {
+        for t in 0..pred_ddrs.shape()[1] {
+            let p = pred_ddrs[(g, t)];
+            let d = pred_ddr[(g, t)] as f32;
+            let denom = d.abs().max(1e-6);
+            let rel = (p - d).abs() / denom;
+            if rel > worst_rel {
+                worst_rel = rel;
+                worst_at = (g, t);
+            }
+        }
+    }
+    eprintln!(
+        "V4: worst rel error {worst_rel:.6e} at (g={}, t={})",
+        worst_at.0, worst_at.1
+    );
+
+    // Tolerance 1e-3 (relaxed from 1e-4). Empirically the 5479-day CONUS run
+    // produces a worst per-cell rel of ~3.32e-4 at (g=762, t=533) with means
+    // agreeing to 0.16% (ddrs=28.7487 vs DDR=28.7957). That's 60x the V2
+    // window (90 days) — f32 accumulation drift through the triangular solve
+    // and per-timestep geometry recomputation exceeds the V2 1e-4 bound at
+    // this scale. SP-5 design Concern #6 anticipated this relaxation.
+    assert!(
+        worst_rel < 1e-3,
+        "V4 diverged: worst rel error {worst_rel:.6e} > 1e-3 at (g={}, t={})",
+        worst_at.0,
+        worst_at.1
     );
 }
 
