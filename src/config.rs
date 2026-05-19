@@ -13,6 +13,16 @@ use serde::Deserialize;
 use crate::data::error::{DataError, Result};
 
 // ---------------------------------------------------------------------------
+// ConfigMode
+// ---------------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ConfigMode {
+    Training,
+    Testing,
+}
+
+// ---------------------------------------------------------------------------
 // New top-level sections (SP-3)
 // ---------------------------------------------------------------------------
 
@@ -40,6 +50,8 @@ pub struct Experiment {
     pub learning_rate: BTreeMap<usize, f32>,
     #[serde(default)]
     pub grad_clip_max_norm: Option<f32>,
+    #[serde(default)]
+    pub checkpoint: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +202,33 @@ pub struct Config {
     pub np_seed: u64,
 }
 
+/// Overlay section from `testing:` in the YAML.
+/// Fields are all optional so absent keys inherit from `experiment:`.
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+struct TestingOverridesRaw {
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub batch_size: Option<usize>,
+    /// Double Option: serde-yaml distinguishes "key absent" (outer None)
+    /// from "key present with value null" (Some(None)). The latter
+    /// explicitly clears rho even if experiment had it set.
+    #[serde(default, deserialize_with = "deserialize_option_option")]
+    pub rho: Option<Option<usize>>,
+    pub warmup: Option<usize>,
+    pub epochs: Option<usize>,
+    pub grad_clip_max_norm: Option<f32>,
+    pub checkpoint: Option<String>,
+}
+
+/// Allows `rho: null` in YAML to be distinct from `rho` being absent.
+fn deserialize_option_option<'de, D>(d: D) -> std::result::Result<Option<Option<usize>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<usize>::deserialize(d)?))
+}
+
 /// YAML-shaped intermediate; the public `Config` has nicer types.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -202,6 +241,7 @@ struct ConfigRaw {
     data_sources: Option<DataSources>,
     experiment: Option<Experiment>,
     mlp: Option<MlpConfigSection>,
+    testing: TestingOverridesRaw,
 }
 
 impl From<ConfigRaw> for Config {
@@ -220,7 +260,18 @@ impl From<ConfigRaw> for Config {
 }
 
 impl Config {
+    /// Back-compat: defaults to Training mode (no overlay applied).
     pub fn from_yaml_file(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_yaml_file_with_mode(path, ConfigMode::Training)
+    }
+
+    /// Load the YAML, optionally apply the `testing:` section as an overlay
+    /// onto `experiment:`. Testing-mode batch_size has semantic shift:
+    /// represents number of DAYS per chunk (not gauges).
+    pub fn from_yaml_file_with_mode(
+        path: impl AsRef<Path>,
+        mode: ConfigMode,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|e| DataError::Io {
             path: path.to_path_buf(),
@@ -230,7 +281,26 @@ impl Config {
             path: path.to_path_buf(),
             source: e,
         })?;
-        Ok(raw.into())
+        let testing_raw = raw.testing.clone();
+        let mut cfg: Self = raw.into();
+        if mode == ConfigMode::Testing {
+            apply_testing_overlay(&mut cfg, testing_raw);
+        }
+        Ok(cfg)
+    }
+}
+
+fn apply_testing_overlay(cfg: &mut Config, overrides: TestingOverridesRaw) {
+    let Some(exp) = cfg.experiment.as_mut() else { return; };
+    if let Some(v) = overrides.start_time { exp.start_time = v; }
+    if let Some(v) = overrides.end_time { exp.end_time = v; }
+    if let Some(v) = overrides.batch_size { exp.batch_size = v; }
+    if let Some(v) = overrides.rho { exp.rho = v; }
+    if let Some(v) = overrides.warmup { exp.warmup = v; }
+    if let Some(v) = overrides.epochs { exp.epochs = v; }
+    if let Some(v) = overrides.grad_clip_max_norm { exp.grad_clip_max_norm = Some(v); }
+    if let Some(v) = overrides.checkpoint {
+        exp.checkpoint = Some(std::path::PathBuf::from(v));
     }
 }
 
@@ -272,5 +342,30 @@ mod tests {
         assert!(cfg.params.parameter_ranges.n[0] > 0.0);
         assert!(cfg.data_sources.is_none());
         assert!(cfg.experiment.is_none());
+    }
+
+    #[test]
+    fn testing_mode_overlays_apply_to_experiment() {
+        let cfg = Config::from_yaml_file_with_mode(
+            "config/merit_training.yaml",
+            ConfigMode::Testing,
+        ).expect("yaml");
+        let exp = cfg.experiment.as_ref().unwrap();
+        assert_eq!(exp.batch_size, 15);
+        assert_eq!(exp.start_time, "1995/10/01");
+        assert_eq!(exp.end_time, "2010/09/30");
+        assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn training_mode_does_not_apply_overlays() {
+        let cfg = Config::from_yaml_file_with_mode(
+            "config/merit_training.yaml",
+            ConfigMode::Training,
+        ).expect("yaml");
+        let exp = cfg.experiment.as_ref().unwrap();
+        assert_eq!(exp.batch_size, 64, "training default preserved");
+        assert_eq!(exp.rho, Some(90), "training default rho preserved");
+        assert_eq!(exp.start_time, "1981/10/01");
     }
 }

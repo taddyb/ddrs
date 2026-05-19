@@ -70,3 +70,15 @@ params:
     p_spatial: 21.0
   log_space_parameters:
     - n
+
+# Test-mode overlay. When the binary is run with --mode testing, these keys
+# replace the corresponding ones in `experiment:`. Absent keys inherit.
+#
+# IMPORTANT: batch_size SEMANTIC SHIFTS between modes:
+#   - experiment.batch_size (training) = number of GAUGES per mini-batch
+#   - testing.batch_size              = number of DAYS per chunk
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15      # DAYS, not gauges
+  rho: null           # disabled in test mode
