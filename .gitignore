@@ -38,3 +38,6 @@ spike_backward/
 *.swp
 *.swo
 .DS_Store
+
+# Python bytecode cache from scripts/*.py run under DDR's uv venv
+__pycache__/
