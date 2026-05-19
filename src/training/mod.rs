@@ -10,6 +10,7 @@
 //!   V3 — full training loop runs end-to-end without divergence.
 
 pub mod checkpoint;
+pub mod driver;
 pub mod forward;
 pub mod loss;
 pub mod metrics;
@@ -21,5 +22,6 @@ pub use forward::{
     FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
 pub use loss::{tau_trim_and_downsample, filter_nan_gauges, l1_loss_post_warmup, FilteredPair};
+pub use driver::{train, TrainState};
 pub use metrics::Metrics;
 pub use optimizer::{resolve_lr, build_adam, clip_grad_norm};
