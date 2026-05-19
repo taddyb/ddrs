@@ -80,7 +80,7 @@ pub fn train<I: Backend>(
 
             // to_tensors::<Autodiff<I>> lifts plain ndarray buffers to the device.
             let tensors = batch.to_tensors::<Autodiff<I>>(device);
-            let pred_hourly = forward::<I>(cfg, &tensors, &state.mlp, device);
+            let pred_hourly = forward::<I>(cfg, &tensors, &state.mlp, device, false);
             let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
             let dims = daily.dims();
             let (g, t_days) = (dims[0], dims[1]);

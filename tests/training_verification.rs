@@ -142,7 +142,7 @@ fn v1_loss_matches_ddr_for_frozen_constant_params_small_batch() {
 
     // 9. Forward pass → (num_gauges, T_hours).
     let pred_hourly =
-        forward_with_frozen_params::<NdArray<f32>>(&cfg, &tensors, &frozen, &device);
+        forward_with_frozen_params::<NdArray<f32>>(&cfg, &tensors, &frozen, &device, false);
 
     // 10. Tau-trim + daily downsample → (num_gauges, T_days).
     let pred_daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
@@ -277,7 +277,7 @@ fn v2_loss_matches_ddr_for_frozen_constant_params_all_gauges() {
 
     // 9. Forward pass → (num_gauges, T_hours).
     let pred_hourly =
-        forward_with_frozen_params::<NdArray<f32>>(&cfg, &tensors, &frozen, &device);
+        forward_with_frozen_params::<NdArray<f32>>(&cfg, &tensors, &frozen, &device, false);
 
     // 10. Tau-trim + daily downsample → (num_gauges, T_days).
     let pred_daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);

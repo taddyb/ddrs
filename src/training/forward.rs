@@ -97,6 +97,7 @@ pub fn forward_with_frozen_params<I: Backend>(
     tensors: &RoutingTensors<I>,
     frozen: &FrozenParams,
     device: &I::Device,
+    carry_state: bool,
 ) -> Tensor<I, 2> {
     let n_active = tensors.adjacency.n;
     let ranges = &cfg.params.parameter_ranges;
@@ -129,7 +130,7 @@ pub fn forward_with_frozen_params<I: Backend>(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
         q_prime_autodiff,
         SpatialParameters { n: n_t, q_spatial: q_t, p_spatial: Some(p_t) },
-        false, // carry_state
+        carry_state,
     );
 
     // engine.forward() → (N, T_hours) on Autodiff<I>.
@@ -162,6 +163,7 @@ pub fn forward<I: Backend>(
     tensors: &RoutingTensors<Autodiff<I>>,
     mlp: &Mlp<Autodiff<I>>,
     device: &I::Device,
+    carry_state: bool,
 ) -> Tensor<Autodiff<I>, 2> {
     let params_map = mlp.forward(tensors.spatial_attributes.clone());
 
@@ -177,7 +179,7 @@ pub fn forward<I: Backend>(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
         tensors.q_prime.clone(),
         SpatialParameters { n: n_param, q_spatial: q_param, p_spatial: p_param },
-        false, // carry_state
+        carry_state,
     );
 
     let runoff = engine.forward(); // (N, T_hours)
