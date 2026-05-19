@@ -27,6 +27,7 @@ pub mod ids;
 pub mod sampler;
 pub mod store;
 pub mod statistics;
+pub mod test_window;
 
 pub use dataset::{MeritGagesDataset, RoutingBatch};
 pub use dates::{Frequency, RhoWindow, TimeAxis};
@@ -38,3 +39,4 @@ pub use store::{
     GagesAdjacencyStore, StreamflowStore, UsgsObservationsStore,
 };
 pub use statistics::{fill_nans, fill_nans_1d, naninfmean, AttrStatRow, AttrStats};
+pub use test_window::TestWindow;
