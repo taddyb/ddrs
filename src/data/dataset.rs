@@ -293,6 +293,14 @@ impl MeritGagesDataset {
         &self.time_axis
     }
 
+    /// Returns the cached full-period observations `(n_days_full, n_all_gauges)`.
+    ///
+    /// Triggers static-network build if not already cached. Reads observations
+    /// once during cache build; does NOT touch the streamflow store.
+    pub fn full_observations(&self) -> Result<&Array2<f32>> {
+        Ok(&self.get_or_build_static_network()?.full_observations)
+    }
+
     /// Build one `RoutingBatch` from a STAID subset + a time window.
     ///
     /// Mirrors `Merit._collate_gages` in `geodatazoo/merit.py:245-330`.

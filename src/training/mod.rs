@@ -11,6 +11,7 @@
 
 pub mod checkpoint;
 pub mod driver;
+pub mod eval;
 pub mod forward;
 pub mod loss;
 pub mod metrics;
@@ -23,5 +24,6 @@ pub use forward::{
 };
 pub use loss::{tau_trim_and_downsample, filter_nan_gauges, l1_loss_post_warmup, FilteredPair};
 pub use driver::{train, TrainState};
+pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
 pub use optimizer::{resolve_lr, build_adam, clip_grad_norm};
