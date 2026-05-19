@@ -16,6 +16,7 @@ pub mod forward;
 pub mod loss;
 pub mod metrics;
 pub mod optimizer;
+pub mod zarr_io;
 
 pub use checkpoint::{load_mlp, save_mlp};
 pub use forward::{
@@ -27,3 +28,4 @@ pub use driver::{train, TrainState};
 pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
 pub use optimizer::{resolve_lr, build_adam, clip_grad_norm};
+pub use zarr_io::{write_predictions_zarr, ZarrAttrs};
