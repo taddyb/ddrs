@@ -7,6 +7,7 @@ description = "Distributed Differentiable Routing in Rust — BURN port of the M
 
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray", "autodiff"] }
+burn-cuda = { version = "0.21", default-features = false }
 thiserror = "1"
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "ttf"] }
 

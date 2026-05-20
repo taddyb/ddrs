@@ -21,8 +21,8 @@
 
 use std::path::PathBuf;
 
-use burn::backend::NdArray;
 use burn::tensor::backend::BackendTypes;
+use burn_cuda::Cuda;
 use clap::Parser;
 
 use ddrs::config::{Config, ConfigMode};
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
     let dataset = MeritGagesDataset::open(&cfg)?;
 
-    type I = NdArray<f32>;
+    type I = Cuda<f32, i32>;
     let device = <I as BackendTypes>::Device::default();
 
     let output = if cli.frozen {

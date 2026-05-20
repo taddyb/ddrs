@@ -28,8 +28,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use burn::backend::{Autodiff, NdArray};
+use burn::backend::Autodiff;
 use burn::tensor::backend::BackendTypes;
+use burn_cuda::Cuda;
 use clap::Parser;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -76,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    type I = NdArray<f32>;
+    type I = Cuda<f32, i32>;
     type AB = Autodiff<I>;
     let device = <I as BackendTypes>::Device::default();
 
