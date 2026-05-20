@@ -221,10 +221,7 @@ pub fn forward_eval<I: Backend>(
         Tensor::from_inner(tensors.q_prime.clone());
     let n_ad = Tensor::<Autodiff<I>, 1>::from_inner(n_param);
     let q_ad = Tensor::<Autodiff<I>, 1>::from_inner(q_param);
-    let p_ad = match p_param {
-        Some(t) => Some(Tensor::<Autodiff<I>, 1>::from_inner(t)),
-        None => None,
-    };
+    let p_ad = p_param.map(Tensor::<Autodiff<I>, 1>::from_inner);
     let x_ad = Tensor::<Autodiff<I>, 1>::from_inner(x_storage);
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());

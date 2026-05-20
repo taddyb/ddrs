@@ -104,7 +104,8 @@ pub fn evaluate<I: Backend>(
     // streamflow read). Slice [1..-1] along axis 0 and transpose to
     // (G, n_days_full - 2) to match DDR's compute_daily_runoff convention.
     let obs_full = dataset.full_observations()?; // borrow of (n_days_full, G)
-    let obs_trimmed: Array2<f32> = obs_full.slice(s![1..-1, ..]).to_owned();
+    let n_days_full = obs_full.nrows();
+    let obs_trimmed: Array2<f32> = obs_full.slice(s![1..n_days_full - 1, ..]).to_owned();
     // Transpose (T, G) -> (G, T) and ensure contiguous storage.
     let observations_daily: Array2<f32> = obs_trimmed
         .reversed_axes()

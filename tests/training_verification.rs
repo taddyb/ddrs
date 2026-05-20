@@ -454,6 +454,30 @@ fn v4_test_period_matches_ddr_for_frozen_constant_params() {
 }
 
 // ---------------------------------------------------------------------------
+// V4b — dropped.
+//
+// V4b was intended to assert that ddrs multi-batch evaluate() reproduces
+// ddrs single-batch evaluate() to f32 floor. Under DDR-matching semantics
+// that premise is FALSE: DDR's _test loop clears _discharge_t between
+// batches (see train_and_test.py cleanup block: "routing_model.routing_engine
+// ._discharge_t = None" runs at end of every iteration), so DDR also
+// cold-starts each chunk despite passing carry_state=i>0. ddrs is faithful
+// to that behavior — each chunk's call to forward_with_frozen_params /
+// forward_eval constructs a fresh MuskingumCunge, so discharge_t resets
+// per chunk and the carry_state=true argument is effectively a no-op.
+//
+// Empirical confirmation (single-batch vs 15-day chunks over 1996 water year):
+// worst rel error ~62x at t=150 (a chunk boundary), means agree to 0.18%.
+// The discontinuity is the cold-start at every chunk boundary, NOT a bug —
+// it's the expected behavior under DDR-matching semantics.
+//
+// V4 (single-batch, full 15-year window) remains the load-bearing
+// correctness test against DDR. Production use of bin/eval should
+// configure batch_size_days large enough that a single chunk covers the
+// run, OR accept the per-chunk cold-start discontinuities.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // V3 test
 // ---------------------------------------------------------------------------
 
