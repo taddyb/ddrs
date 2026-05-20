@@ -69,6 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     type I = Cuda<f32, i32>;
     let device = <I as BackendTypes>::Device::default();
 
+    // Seed the backend RNG so MLP template init is deterministic across runs.
+    // (Per BURN 0.21 docs at burn-backend-0.21.0/src/backend/base.rs:141 —
+    // ensures single-threaded determinism; CUDA atomic-add in scatter_add
+    // is still non-deterministic, but at least the load_record template
+    // doesn't drift between runs.)
+    <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
+
     let output = if cli.frozen {
         // Probe with a 1-day window to size FrozenParams (cheap — forces the
         // static-network cache to build but only reads 1 day of streamflow).

@@ -102,6 +102,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_hidden_size(mlp_section.hidden_size)
     .with_num_hidden_layers(mlp_section.num_hidden_layers);
+
+    // Seed the backend RNG BEFORE MLP init so Kaiming/Xavier weight init is
+    // deterministic across runs. Per BURN 0.21 docs at
+    // burn-backend-0.21.0/src/backend/base.rs:141 — ensures single-threaded
+    // determinism. CUDA atomic-add in scatter_add stays non-deterministic
+    // (real engine work for later), but at least the optimization starts
+    // from the same MLP weights every run.
+    <I as burn::tensor::backend::Backend>::seed(&device, train_cfg.seed);
+
     let mlp: Mlp<AB> = mlp_cfg.init::<AB>(&device);
 
     let mut state = TrainState::<I> {
