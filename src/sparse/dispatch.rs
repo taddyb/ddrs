@@ -84,3 +84,46 @@ where
         (out_prim, SavedX::Cpu(Arc::new(x_vec)))
     }
 }
+
+/// Backward-solve dispatch: CPU path uses `back_sub_upper_transposed`,
+/// GPU path uses `cusparse_backward_solve`. Returns the gradient on `b`.
+///
+/// On the CPU path, `a_values_prim` and `grad_out_prim` are pulled to host,
+/// the back-substitution is run, and the result is uploaded back via
+/// `B::float_from_data`.
+///
+/// On the GPU path, the solve runs entirely on device via cuSPARSE's
+/// TRANSPOSE op using the pre-analyzed `desc_backward` descriptor from the
+/// pattern cache. The result is returned as a new `B::FloatTensorPrimitive`
+/// (host-roundtrip fallback — same temporary strategy as `cusparse_forward`).
+pub(crate) fn backward_solve_primitive<B: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    a_values_prim: &B::FloatTensorPrimitive,
+    grad_out_prim: &B::FloatTensorPrimitive,
+    device: &B::Device,
+    use_cuda: bool,
+) -> B::FloatTensorPrimitive
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if effective_use_cuda::<B>(use_cuda) {
+        crate::sparse::cusparse::cusparse_backward_solve::<B>(
+            pattern,
+            a_values_prim,
+            grad_out_prim,
+            device,
+        )
+    } else {
+        // CPU path: existing back-substitution + round-trip.
+        let a_data: Vec<f32> =
+            crate::sparse::primitive_to_vec::<B>(a_values_prim.clone());
+        let grad_out_data: Vec<f32> =
+            crate::sparse::primitive_to_vec::<B>(grad_out_prim.clone());
+        let gradb_data =
+            crate::sparse::back_sub_upper_transposed(pattern, &a_data, &grad_out_data);
+        B::float_from_data(
+            burn::tensor::TensorData::from(gradb_data.as_slice()),
+            device,
+        )
+    }
+}

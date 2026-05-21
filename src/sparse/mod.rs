@@ -328,7 +328,7 @@ fn forward_sub_lower(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f
 ///
 /// `pattern.trans_*` describe `A^T`'s CSR layout; we look up the underlying
 /// `A_values` via `trans_to_orig`.
-fn back_sub_upper_transposed(
+pub(crate) fn back_sub_upper_transposed(
     pattern: &CsrPattern,
     a_values: &[f32],
     b: &[f32],
@@ -377,7 +377,7 @@ pub(crate) fn cpu_forward_primitive<B: Backend>(
 
 /// Wrap a raw `FloatTensorPrimitive` in a `Tensor` wrapper just long enough to
 /// call `.to_data()` synchronously, then yield a `Vec<f32>`.
-fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
+pub(crate) fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
     let t: Tensor<B, 1> = Tensor::from_primitive(TensorPrimitive::Float(prim));
     t.to_data().to_vec::<f32>().expect("expected f32 tensor")
 }
@@ -414,7 +414,10 @@ struct CsrSolveState<B: Backend> {
 #[derive(Debug)]
 struct CsrSolveOp;
 
-impl<B: Backend> Backward<B, 2> for CsrSolveOp {
+impl<B: Backend + 'static> Backward<B, 2> for CsrSolveOp
+where
+    B::FloatTensorPrimitive: 'static,
+{
     type State = CsrSolveState<B>;
 
     fn backward(
@@ -428,25 +431,28 @@ impl<B: Backend> Backward<B, 2> for CsrSolveOp {
         let grad_out = grads.consume::<B>(&ops.node);
         let device = B::float_device(&grad_out);
 
-        // Pull x to host. CPU path stores SavedX::Cpu; the future GPU path
-        // (Task 11) replaces this with a GPU dispatch.
-        let x_host: Vec<f32> = match x {
-            SavedX::Cpu(arc) => (*arc).clone(),
-            SavedX::Cuda(prim) => primitive_to_vec::<B>(prim),
-        };
-        let a_data: Vec<f32> = primitive_to_vec::<B>(a_values);
-        let grad_out_data: Vec<f32> = primitive_to_vec::<B>(grad_out);
-
-        // CPU backward solve. Cuda dispatch lands in Task 10.
-        let _ = use_cuda; // unused on CPU path; suppress warning.
-        let gradb_data = back_sub_upper_transposed(&pattern, &a_data, &grad_out_data);
+        // Dispatch the backward triangular solve (CPU back-sub or GPU SpSV TRANSPOSE).
+        // Returns grad_b = (A^T)^{-1} · grad_out as a primitive.
+        let gradb_prim = crate::sparse::dispatch::backward_solve_primitive::<B>(
+            &pattern,
+            &a_values,
+            &grad_out,
+            &device,
+            use_cuda,
+        );
 
         if let Some(p_b) = parent_b {
-            let gradb = B::float_from_data(TensorData::from(gradb_data.as_slice()), &device);
-            grads.register::<B>(p_b.id, gradb);
+            grads.register::<B>(p_b.id, gradb_prim.clone());
         }
 
         if let Some(p_a) = parent_a {
+            // For grada the per-nnz scatter still runs on host (Task 11 swaps
+            // in a GPU kernel). Pull gradb and x to CPU.
+            let gradb_data: Vec<f32> = primitive_to_vec::<B>(gradb_prim);
+            let x_host: Vec<f32> = match x {
+                SavedX::Cpu(arc) => (*arc).clone(),
+                SavedX::Cuda(prim) => primitive_to_vec::<B>(prim),
+            };
             let nnz = pattern.nnz();
             let mut grada = vec![0.0f32; nnz];
             for k in 0..nnz {

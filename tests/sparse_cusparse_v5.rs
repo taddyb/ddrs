@@ -87,3 +87,60 @@ fn forward_cuda_smoke() {
 
     eprintln!("forward_cuda_smoke: x = {v:?}");
 }
+
+#[test]
+fn backward_cuda_smoke() {
+    type CudaB = burn_cuda::Cuda<f32, i32>;
+    type B = Autodiff<CudaB>;
+    type Dev = <CudaB as BackendTypes>::Device;
+
+    // Guard: skip if no CUDA device is available.
+    let cuda_available = std::panic::catch_unwind(|| {
+        let _d: Dev = Default::default();
+    })
+    .is_ok();
+    if !cuda_available {
+        eprintln!("backward_cuda_smoke: skipping — no CUDA device available");
+        return;
+    }
+
+    let device: Dev = Default::default();
+    let pattern = small_lower_pattern();
+    let nnz = pattern.col.len();
+
+    // Build autograd tensors.
+    let a: Tensor<B, 1> =
+        Tensor::from_floats(vec![1.0_f32; nnz].as_slice(), &device).require_grad();
+    let b: Tensor<B, 1> =
+        Tensor::from_floats(vec![1.0_f32; pattern.n].as_slice(), &device).require_grad();
+
+    // Forward + backward through the CUDA path.
+    let x = triangular_csr_solve(&pattern, a.clone(), b.clone(), /* use_cuda = */ true);
+    let loss = x.sum();
+    let grads = loss.backward();
+
+    let grad_b: Vec<f32> = b
+        .grad(&grads)
+        .expect("grad_b missing")
+        .into_data()
+        .to_vec()
+        .unwrap();
+    let grad_a: Vec<f32> = a
+        .grad(&grads)
+        .expect("grad_a missing")
+        .into_data()
+        .to_vec()
+        .unwrap();
+
+    assert!(
+        grad_b.iter().all(|v| v.is_finite()),
+        "non-finite grad_b from cuSPARSE backward: {grad_b:?}"
+    );
+    assert!(
+        grad_a.iter().all(|v| v.is_finite()),
+        "non-finite grad_a from CPU scatter: {grad_a:?}"
+    );
+
+    eprintln!("backward_cuda_smoke: grad_b = {grad_b:?}");
+    eprintln!("backward_cuda_smoke: grad_a = {grad_a:?}");
+}
