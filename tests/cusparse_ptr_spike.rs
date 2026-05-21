@@ -33,6 +33,27 @@ fn round_trip_via_pointer() {
     assert_eq!(len, 4, "extracted len does not match tensor length");
 }
 
+#[test]
+fn cubecl_stream_is_non_null() {
+    type B = burn_cuda::Cuda<f32, i32>;
+    type Dev = <B as burn::tensor::backend::BackendTypes>::Device;
+
+    let cuda_available = std::panic::catch_unwind(|| {
+        let _d: Dev = Default::default();
+    })
+    .is_ok();
+    if !cuda_available {
+        eprintln!("skipping: no CUDA device");
+        return;
+    }
+
+    let device: Dev = Default::default();
+    // Construct a dummy tensor to force cubecl client init.
+    let _t = burn::tensor::Tensor::<B, 1>::from_floats([0.0_f32], &device);
+    let stream = ddrs::sparse::cusparse::__spike_get_stream::<B>(&device);
+    assert!(!stream.is_null(), "cubecl returned a null stream");
+}
+
 /// Verify that the TypeId gate correctly returns None for a non-CUDA backend.
 #[test]
 fn non_cuda_backend_returns_none() {

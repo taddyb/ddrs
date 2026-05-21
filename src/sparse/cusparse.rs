@@ -26,6 +26,7 @@
 use burn::tensor::backend::Backend;
 use burn_cubecl::tensor::CubeTensor;
 use cubecl::cuda::CudaRuntime;
+use cudarc::driver::sys::CUstream;
 
 /// Type-erased view into a CUDA tensor as a raw device pointer.
 ///
@@ -126,4 +127,122 @@ where
     primitive_as_cuda_view::<B>(prim)
         .expect("expected Cuda<f32,i32> backend (non-fusion) with an extractable device pointer")
         .len
+}
+
+// ---------------------------------------------------------------------------
+// Stream access — SP-6 Task 7
+// ---------------------------------------------------------------------------
+
+/// Newtype wrapper so the raw `CUstream` pointer can be stored in a
+/// `OnceLock` (which requires `Send` + `Sync`).
+///
+/// SAFETY: CUDA stream handles are process-wide opaque integers.  Sending
+/// the value across threads is safe as long as no thread destroys the stream
+/// and all CUDA operations using it are properly serialized (cuSPARSE handles
+/// internal locking; the caller owns the sync contract with BURN).
+struct SendStream(CUstream);
+
+// SAFETY: See doc on `SendStream`.
+unsafe impl Send for SendStream {}
+unsafe impl Sync for SendStream {}
+
+/// Per-process dedicated cuSPARSE stream.  Created once, on first call.
+static FALLBACK_STREAM: std::sync::OnceLock<SendStream> = std::sync::OnceLock::new();
+
+/// Returns a CUDA stream handle suitable for passing to `cusparseSetStream`.
+///
+/// **Path B — dedicated stream (requires explicit sync on interop).**
+///
+/// ## Why Path A is blocked
+///
+/// cubecl-cuda 0.10 keeps all stream state private to the crate:
+/// `CudaServer.streams: MultiStream<CudaStreamBackend>` (private field),
+/// `Stream.sys: CUstream` (pub field, but the `stream` module is
+/// `pub(crate)`), and `GpuStorage.stream` (private).  No public method on
+/// `ComputeClient<CudaRuntime>` or the `ComputeServer` trait exposes the raw
+/// `CUstream`.  Path A (sharing cubecl's own stream) would require forking
+/// cubecl-cuda.
+///
+/// ## Path B implementation
+///
+/// `cuStreamCreate` requires the current thread to have an active CUDA
+/// context.  That context is bound only on cubecl's server thread.  To
+/// avoid `CUDA_ERROR_INVALID_CONTEXT` we dispatch the one-time creation via
+/// `ComputeClient::exclusive`, which runs the closure on the server thread
+/// where the CUDA context is already current.
+///
+/// ## Perf implication
+///
+/// Because this stream is independent of cubecl's scheduler, every
+/// cuSPARSE call that hands off data to BURN (or vice-versa) requires one
+/// explicit `cudaStreamSynchronize` on the boundary.  Expected cost: one
+/// host-side sync per triangular solve.  Acceptable for Task 9; revisit if
+/// profiling shows it to be a bottleneck.
+///
+/// The returned handle is valid for the lifetime of the process.  The
+/// caller MUST NOT destroy it.
+///
+/// # Panics
+///
+/// Panics if `B` is not the CUDA backend (`B::Device` is not `CudaDevice`),
+/// or if `cuStreamCreate` fails.
+pub(crate) fn cubecl_cuda_stream<B: Backend>(device: &B::Device) -> CUstream
+where
+    B::Device: 'static,
+{
+    use std::any::TypeId;
+
+    // Fast path — already created.
+    if let Some(s) = FALLBACK_STREAM.get() {
+        return s.0;
+    }
+
+    // Downcast B::Device to the concrete CudaDevice type.
+    type CudaDev = cubecl::cuda::CudaDevice;
+    assert_eq!(
+        TypeId::of::<B::Device>(),
+        TypeId::of::<CudaDev>(),
+        "cubecl_cuda_stream requires the Cuda backend"
+    );
+    // SAFETY: TypeId equality guarantees same type; reinterpret reference.
+    let cuda_device: &CudaDev =
+        unsafe { &*(device as *const B::Device as *const CudaDev) };
+
+    // Load a ComputeClient for this device (does NOT create a new server —
+    // just borrows the existing DeviceHandle for the already-init'd device).
+    // `cubecl::client` re-exports cubecl_runtime::client (via cubecl-core).
+    let client = cubecl::client::ComputeClient::<CudaRuntime>::load(cuda_device);
+
+    // Run stream creation on the server thread, where the CUDA context is
+    // current.  `exclusive` blocks until the closure returns.
+    // The closure returns `SendStream` (which is `Send`) to satisfy the
+    // `Re: Send + 'static` bound on `exclusive`.
+    let send_stream = client
+        .exclusive(|| {
+            // SAFETY: cuStreamCreate is called from the server thread where the
+            // CUDA context is bound.  The handle is stored for the process
+            // lifetime and never freed.
+            let raw = cudarc::driver::result::stream::create(
+                cudarc::driver::result::stream::StreamKind::NonBlocking,
+            )
+            .expect("cuStreamCreate failed on server thread");
+            // SAFETY: wrapping the raw pointer in SendStream so it can cross
+            // the channel boundary back to the calling thread.
+            SendStream(raw)
+        })
+        .expect("exclusive task dispatched successfully");
+
+    // Store (race-free: OnceLock ensures only one winner).
+    FALLBACK_STREAM.get_or_init(|| send_stream).0
+}
+
+/// Test-only entry point for the stream spike.
+/// Returns the stream handle so `tests/cusparse_ptr_spike.rs` can assert it
+/// is non-null without depending on the private `SendStream` type.
+#[doc(hidden)]
+pub fn __spike_get_stream<B: Backend>(device: &B::Device) -> CUstream
+where
+    B::Device: 'static,
+{
+    cubecl_cuda_stream::<B>(device)
 }
