@@ -303,3 +303,35 @@ fn v5_cpu_and_cuda_forward_backward_bit_match() {
     assert_rel_or_abs("grad_b", &grad_b_c, &grad_b_g, REL_TOL, ABS_TOL);
     assert_rel_or_abs("grad_a", &grad_a_c, &grad_a_g, REL_TOL, ABS_TOL);
 }
+
+/// End-to-end smoke: run a 3-mini-batch CUDA training and assert finite
+/// losses. Marked #[ignore] because it depends on the live data sources
+/// and the train binary build artifact.
+///
+/// Run manually:
+///     cargo test --release --test sparse_cusparse_v5 -- --ignored end_to_end_smoke_cuda_train
+#[test]
+#[ignore]
+fn end_to_end_smoke_cuda_train() {
+    use std::process::Command;
+    let output = Command::new("cargo")
+        .args(&["run", "--release", "--bin", "train", "--",
+                "--config", "/tmp/merit_training_cuda.yaml",
+                "--checkpoint-dir", "/tmp/sp6_e2e_smoke",
+                "--max-mini-batches", "3"])
+        .output()
+        .expect("spawn cargo run --bin train");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let _stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "train binary exited non-zero: {stdout}");
+    // Parse "loss=..." lines; require ≥1 and all finite.
+    let losses: Vec<f32> = stdout
+        .lines()
+        .filter_map(|l| l.split("loss=").nth(1))
+        .filter_map(|tail| tail.split_whitespace().next())
+        .filter_map(|tok| tok.parse::<f32>().ok())
+        .collect();
+    assert!(!losses.is_empty(), "no loss= lines in train output");
+    assert!(losses.iter().all(|v| v.is_finite()),
+            "non-finite loss in CUDA training: {losses:?}");
+}

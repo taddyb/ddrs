@@ -118,13 +118,12 @@ where
             crate::sparse::SavedX::Cpu(arc) => (*arc).clone(),
             crate::sparse::SavedX::Cuda(p) => crate::sparse::primitive_to_vec::<B>(p),
         };
-        let nnz = pattern.nnz();
-        let mut grada = vec![0.0_f32; nnz];
-        for k in 0..nnz {
-            let r = pattern.row_for_nnz[k] as usize;
-            let c = pattern.col[k] as usize;
-            grada[k] = -gradb_host[r] * x_host[c];
-        }
+        let grada: Vec<f32> = pattern
+            .row_for_nnz
+            .iter()
+            .zip(pattern.col.iter())
+            .map(|(&r, &c)| -gradb_host[r as usize] * x_host[c as usize])
+            .collect();
         B::float_from_data(
             burn::tensor::TensorData::from(grada.as_slice()),
             device,
