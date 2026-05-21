@@ -204,6 +204,19 @@ where
         .result()
         .expect("cusparseCsrSetPointers failed in backward solve");
 
+        // --- 6b. Notify cuSPARSE that matrix values changed since analysis. ---
+        // Same rationale as in cusparse_forward: the SpSV descriptor caches
+        // values from analysis time (dummy 1.0s); updateMatrix refreshes them.
+        // SAFETY: desc_backward was analyzed; sp_mat has valid values pointer.
+        cudarc::cusparse::sys::cusparseSpSV_updateMatrix(
+            cache.handle,
+            cache.desc_backward,
+            a_view.ptr as *mut std::ffi::c_void,
+            cudarc::cusparse::sys::cusparseSpSVUpdate_t::CUSPARSE_SPSV_UPDATE_GENERAL,
+        )
+        .result()
+        .expect("cusparseSpSV_updateMatrix (backward) failed");
+
         // --- 7. Build transient dense vector descriptors for b (rhs) and y (out). ---
         // SAFETY: b_view.ptr and y_ptr are live device pointers of the
         // correct element count (pattern.n).
@@ -281,6 +294,57 @@ where
         burn::tensor::TensorData::from(y_host.as_slice()),
         device,
     )
+}
+
+// ---------------------------------------------------------------------------
+// SP-6 Task 11: cusparse_grada — GPU per-nnz scatter via pure BURN tensor ops
+// ---------------------------------------------------------------------------
+
+/// GPU per-nnz grada scatter using pure BURN tensor ops:
+///
+///     grada[k] = -gradb[row_for_nnz[k]] * x[col[k]]
+///
+/// No custom CUDA kernel — `Tensor::select` (gather) compiles on any backend
+/// (NdArray for CPU tests, Cuda for the GPU path). This path runs entirely on
+/// device when invoked with a `Cuda<f32, i32>` backend.
+///
+/// Inputs are `FloatTensorPrimitive` to match the dispatch interface; they are
+/// wrapped into `Tensor<B, 1>` for the select/multiply/negate ops and then
+/// unwrapped back.
+pub(crate) fn cusparse_grada<B: Backend>(
+    pattern: &crate::sparse::CsrPattern,
+    gradb_prim: B::FloatTensorPrimitive,
+    x_prim: B::FloatTensorPrimitive,
+    device: &B::Device,
+) -> B::FloatTensorPrimitive {
+    use burn::tensor::{Int, Tensor, TensorData, TensorPrimitive};
+
+    // 1. Lift index arrays as BURN Int tensors on the device.
+    let row_t: Tensor<B, 1, Int> = Tensor::from_data(
+        TensorData::from(pattern.row_for_nnz.as_slice()),
+        device,
+    );
+    let col_t: Tensor<B, 1, Int> = Tensor::from_data(
+        TensorData::from(pattern.col.as_slice()),
+        device,
+    );
+
+    // 2. Wrap the input primitives as Tensors.
+    let gradb_t: Tensor<B, 1> =
+        Tensor::from_primitive(TensorPrimitive::Float(gradb_prim));
+    let x_t: Tensor<B, 1> =
+        Tensor::from_primitive(TensorPrimitive::Float(x_prim));
+
+    // 3. Gather + multiply + negate: grada[k] = -gradb[row[k]] * x[col[k]]
+    let gradb_gathered: Tensor<B, 1> = gradb_t.select(0, row_t);
+    let x_gathered: Tensor<B, 1> = x_t.select(0, col_t);
+    let grada: Tensor<B, 1> = -(gradb_gathered * x_gathered);
+
+    // 4. Unwrap back to FloatTensorPrimitive.
+    match grada.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        _ => unreachable!("grada is f32"),
+    }
 }
 
 /// Test-only entry point that returns the device-slice element count extracted
@@ -967,6 +1031,21 @@ where
         )
         .result()
         .expect("cusparseCsrSetPointers failed");
+
+        // --- 6b. Notify cuSPARSE that matrix values changed since analysis. ---
+        // cusparseSpSV_analysis caches the values internally. If values differ
+        // from those used at analysis time (we used dummy 1.0s), cuSPARSE must
+        // be notified so it can update its internal state before the solve.
+        // CUSPARSE_SPSV_UPDATE_GENERAL handles both off-diagonal and diagonal.
+        // SAFETY: desc_forward was created and analyzed; sp_mat has valid values.
+        cudarc::cusparse::sys::cusparseSpSV_updateMatrix(
+            cache.handle,
+            cache.desc_forward,
+            a_view.ptr as *mut std::ffi::c_void,
+            cudarc::cusparse::sys::cusparseSpSVUpdate_t::CUSPARSE_SPSV_UPDATE_GENERAL,
+        )
+        .result()
+        .expect("cusparseSpSV_updateMatrix (forward) failed");
 
         // --- 7. Build transient dense vector descriptors for b and x. ---
         // SAFETY: b_view.ptr and x_ptr are live device pointers.

@@ -446,21 +446,16 @@ where
         }
 
         if let Some(p_a) = parent_a {
-            // For grada the per-nnz scatter still runs on host (Task 11 swaps
-            // in a GPU kernel). Pull gradb and x to CPU.
-            let gradb_data: Vec<f32> = primitive_to_vec::<B>(gradb_prim);
-            let x_host: Vec<f32> = match x {
-                SavedX::Cpu(arc) => (*arc).clone(),
-                SavedX::Cuda(prim) => primitive_to_vec::<B>(prim),
-            };
-            let nnz = pattern.nnz();
-            let mut grada = vec![0.0f32; nnz];
-            for k in 0..nnz {
-                let r = pattern.row_for_nnz[k] as usize;
-                let c = pattern.col[k] as usize;
-                grada[k] = -gradb_data[r] * x_host[c];
-            }
-            let grada_prim = B::float_from_data(TensorData::from(grada.as_slice()), &device);
+            // SP-6 Task 11: dispatch the per-nnz scatter on CPU or GPU.
+            // GPU path: pure BURN tensor ops (select+mul+neg), stays on device.
+            // CPU path: host loop in grada_primitive dispatcher.
+            let grada_prim = crate::sparse::dispatch::grada_primitive::<B>(
+                &pattern,
+                gradb_prim,
+                x,
+                &device,
+                use_cuda,
+            );
             grads.register::<B>(p_a.id, grada_prim);
         }
     }

@@ -85,6 +85,53 @@ where
     }
 }
 
+/// Per-nnz grada gradient dispatch.
+///
+/// GPU path calls `cusparse_grada` which keeps everything on device via
+/// pure BURN tensor ops (`Tensor::select` + multiply + negate). CPU path
+/// uses the existing host-loop in `CsrSolveOp::backward` refactored here.
+///
+/// `gradb_prim` is consumed (not cloned) by the GPU path; the caller must
+/// clone it first if it's also needed for registering `parent_b`.
+pub(crate) fn grada_primitive<B: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    gradb_prim: B::FloatTensorPrimitive,
+    x: crate::sparse::SavedX<B>,
+    device: &B::Device,
+    use_cuda: bool,
+) -> B::FloatTensorPrimitive
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    if effective_use_cuda::<B>(use_cuda) {
+        let x_prim = match x {
+            crate::sparse::SavedX::Cuda(p) => p,
+            crate::sparse::SavedX::Cpu(_) => {
+                panic!("GPU grada called with CPU-saved x — mismatched dispatch")
+            }
+        };
+        crate::sparse::cusparse::cusparse_grada::<B>(pattern, gradb_prim, x_prim, device)
+    } else {
+        // CPU path: materialize gradb + x to host, compute, push back.
+        let gradb_host: Vec<f32> = crate::sparse::primitive_to_vec::<B>(gradb_prim);
+        let x_host: Vec<f32> = match x {
+            crate::sparse::SavedX::Cpu(arc) => (*arc).clone(),
+            crate::sparse::SavedX::Cuda(p) => crate::sparse::primitive_to_vec::<B>(p),
+        };
+        let nnz = pattern.nnz();
+        let mut grada = vec![0.0_f32; nnz];
+        for k in 0..nnz {
+            let r = pattern.row_for_nnz[k] as usize;
+            let c = pattern.col[k] as usize;
+            grada[k] = -gradb_host[r] * x_host[c];
+        }
+        B::float_from_data(
+            burn::tensor::TensorData::from(grada.as_slice()),
+            device,
+        )
+    }
+}
+
 /// Backward-solve dispatch: CPU path uses `back_sub_upper_transposed`,
 /// GPU path uses `cusparse_backward_solve`. Returns the gradient on `b`.
 ///
