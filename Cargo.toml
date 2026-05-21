@@ -49,3 +49,36 @@ approx = "0.5"
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Vendored forks of cubecl-cuda + burn-cubecl with `pub` accessors needed
+# by SP-7's cuSPARSE GPU solve. See vendor/README.md for rationale +
+# upstream PR plan (SP-8).
+#
+# All burn-* crates must come from the same source to avoid duplicate
+# trait-object conflicts (burn_std::device::Device must be unified).
+# The cubecl monorepo cascades similarly; patch the full set.
+[patch.crates-io]
+cubecl         = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-cuda    = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-common  = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-core    = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-cpp     = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-ir      = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-macros  = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-opt     = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-runtime = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-std     = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+cubecl-zspace  = { git = "https://github.com/taddyb/cubecl", branch = "ddrs-sp7-stream-accessor" }
+burn-cubecl    = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-autodiff  = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-backend   = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-core      = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-cuda      = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-derive    = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-ir        = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-ndarray   = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-nn        = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-optim     = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-std       = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-tensor    = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
+burn-fusion    = { git = "https://github.com/taddyb/burn",   branch = "ddrs-sp7-primitive-ctor"  }
