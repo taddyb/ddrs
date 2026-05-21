@@ -12,6 +12,7 @@
 //! recipe this module uses.
 
 pub mod cusparse;
+pub(crate) mod dispatch;
 
 use std::sync::Arc;
 
@@ -360,7 +361,7 @@ fn back_sub_upper_transposed(
 // autodiff op and as a standalone API for forward-only callers.
 // =================================================================================
 
-fn forward_primitive<B: Backend>(
+pub(crate) fn cpu_forward_primitive<B: Backend>(
     pattern: &CsrPattern,
     a_values_prim: &B::FloatTensorPrimitive,
     b_prim: &B::FloatTensorPrimitive,
@@ -468,12 +469,15 @@ impl<B: Backend> Backward<B, 2> for CsrSolveOp {
 /// Note: `pattern` is **structural metadata only** — it does not participate in
 /// autograd. Callers cache one [`CsrPattern`] per network and reuse it across
 /// timesteps and epochs.
-pub fn triangular_csr_solve<I: Backend>(
+pub fn triangular_csr_solve<I: Backend + 'static>(
     pattern: &Arc<CsrPattern>,
     a_values: Tensor<Autodiff<I>, 1>,
     b: Tensor<Autodiff<I>, 1>,
     use_cuda: bool,
-) -> Tensor<Autodiff<I>, 1> {
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+{
     let a_at = match a_values.into_primitive() {
         TensorPrimitive::Float(p) => p,
         TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
@@ -485,8 +489,13 @@ pub fn triangular_csr_solve<I: Backend>(
 
     let device = I::float_device(&a_at.primitive);
 
-    let (out_prim, x_data) =
-        forward_primitive::<I>(pattern, &a_at.primitive, &b_at.primitive, &device);
+    let (out_prim, saved_x) = crate::sparse::dispatch::forward_primitive::<I>(
+        pattern,
+        &a_at.primitive,
+        &b_at.primitive,
+        &device,
+        use_cuda,
+    );
 
     let result = match CsrSolveOp
         .prepare::<NoCheckpointing>([a_at.node.clone(), b_at.node.clone()])
@@ -496,7 +505,7 @@ pub fn triangular_csr_solve<I: Backend>(
         OpsKind::Tracked(prep) => {
             let state = CsrSolveState::<I> {
                 a_values: a_at.primitive.clone(),
-                x: SavedX::Cpu(Arc::new(x_data)),
+                x: saved_x,
                 pattern: pattern.clone(),
                 use_cuda,
             };
