@@ -8,6 +8,9 @@ description = "Distributed Differentiable Routing in Rust — BURN port of the M
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray", "autodiff"] }
 burn-cuda = { version = "0.21", default-features = false }
+# Direct access to CubeTensor and CudaRuntime types for the cuSPARSE pointer bridge (SP-6).
+burn-cubecl = { version = "0.21", default-features = false }
+cubecl = { version = "0.10", default-features = false, features = ["cuda"] }
 # Direct cuSPARSE bindings for the GPU triangular solve (SP-6).
 # cudarc is already a transitive dep of cubecl-cuda; declaring it
 # explicitly lets us enable the `cusparse` feature.

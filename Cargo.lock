@@ -2553,10 +2553,12 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "burn",
+ "burn-cubecl",
  "burn-cuda",
  "chrono",
  "clap",
  "csv",
+ "cubecl",
  "cudarc",
  "icechunk",
  "ndarray 0.16.1",

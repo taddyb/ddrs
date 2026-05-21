@@ -11,6 +11,8 @@
 //! See `.claude/skills/burn_custom_backward.md` for the BURN-0.21 custom-backward
 //! recipe this module uses.
 
+pub mod cusparse;
+
 use std::sync::Arc;
 
 use burn::backend::Autodiff;
