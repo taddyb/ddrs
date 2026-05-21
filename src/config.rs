@@ -107,6 +107,17 @@ impl Default for ParameterRanges {
     }
 }
 
+/// Selects the backend implementation of the CSR triangular solve in
+/// `MuskingumCunge`. `Cuda` opts into the cuSPARSE path when the runtime
+/// backend is `burn::backend::Cuda`; on other backends the solver silently
+/// falls back to `Cpu` (logged once at WARN).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SparseSolver {
+    #[default]
+    Cpu,
+    Cuda,
+}
+
 /// Routing parameter configuration.
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -115,6 +126,7 @@ pub struct Params {
     pub defaults: HashMap<String, f32>,
     pub attribute_minimums: AttributeMinimums,
     pub tau: u32,
+    pub sparse_solver: SparseSolver,
 }
 
 impl Default for Params {
@@ -127,6 +139,7 @@ impl Default for Params {
             defaults,
             attribute_minimums: AttributeMinimums::default(),
             tau: 3,
+            sparse_solver: SparseSolver::default(),
         }
     }
 }
@@ -143,6 +156,7 @@ struct ParamsRaw {
     defaults: HashMap<String, f32>,
     log_space_parameters: Vec<String>,
     tau: Option<u32>,
+    sparse_solver: Option<String>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -182,6 +196,11 @@ impl From<ParamsRaw> for Params {
             p.log_space_parameters = r.log_space_parameters;
         }
         p.tau = r.tau.unwrap_or(3);
+        p.sparse_solver = match r.sparse_solver.as_deref() {
+            Some("cuda") | Some("CUDA") => SparseSolver::Cuda,
+            Some("cpu") | Some("CPU") | None => SparseSolver::Cpu,
+            Some(other) => panic!("unknown sparse_solver: {other:?} (expected \"cpu\" or \"cuda\")"),
+        };
         p
     }
 }
@@ -330,6 +349,8 @@ mod tests {
         assert_eq!(mlp.input_var_names.len(), 10);
         // tau defaults to 3 when not set in YAML.
         assert_eq!(cfg.params.tau, 3);
+        // sparse_solver defaults to Cpu when not set in YAML.
+        assert_eq!(cfg.params.sparse_solver, SparseSolver::Cpu);
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");

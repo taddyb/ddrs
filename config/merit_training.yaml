@@ -70,6 +70,7 @@ params:
     p_spatial: 21.0
   log_space_parameters:
     - n
+  # sparse_solver: cuda    # opt-in for GPU cuSPARSE solve (requires CUDA backend)
 
 # Test-mode overlay. When the binary is run with --mode testing, these keys
 # replace the corresponding ones in `experiment:`. Absent keys inherit.
