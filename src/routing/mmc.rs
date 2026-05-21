@@ -23,7 +23,7 @@ use std::sync::Arc;
 use burn::backend::Autodiff;
 use burn::tensor::{backend::Backend, Tensor};
 
-use crate::config::Config;
+use crate::config::{Config, SparseSolver};
 use crate::geometry::compute_trapezoidal_geometry;
 use crate::routing::utils::denormalize;
 use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAdjacency};
@@ -77,10 +77,12 @@ pub struct MuskingumCunge<I: Backend> {
 
     dt: f32,
     device: I::Device,
+    sparse_solver: SparseSolver,
 }
 
 impl<I: Backend> MuskingumCunge<I> {
     pub fn new(cfg: Config, device: I::Device) -> Self {
+        let sparse_solver = cfg.params.sparse_solver;
         let p_default = *cfg
             .params
             .defaults
@@ -102,6 +104,7 @@ impl<I: Backend> MuskingumCunge<I> {
             discharge_t: None,
             dt: DT_SECONDS,
             device,
+            sparse_solver,
         }
     }
 
@@ -176,8 +179,13 @@ impl<I: Backend> MuskingumCunge<I> {
             let pattern = self.pattern.as_ref().unwrap();
             let assembler = self.assembler.as_ref().unwrap();
             let a_values = assembler.assemble(ones);
-            let q0 = triangular_csr_solve::<I>(pattern, a_values, q_prime_0, false)
-                .clamp_min(self.cfg.params.attribute_minimums.discharge);
+            let q0 = triangular_csr_solve::<I>(
+                pattern,
+                a_values,
+                q_prime_0,
+                self.sparse_solver == SparseSolver::Cuda,
+            )
+            .clamp_min(self.cfg.params.attribute_minimums.discharge);
             self.discharge_t = Some(q0);
         }
     }
@@ -245,7 +253,12 @@ impl<I: Backend> MuskingumCunge<I> {
 
         // 5. CSR solve of A · Q_{t+1} = b, A = I − c1·N.
         let a_values = self.assembler.as_ref().unwrap().assemble(c1);
-        let solution = triangular_csr_solve::<I>(pattern, a_values, b, false);
+        let solution = triangular_csr_solve::<I>(
+            pattern,
+            a_values,
+            b,
+            self.sparse_solver == SparseSolver::Cuda,
+        );
         solution.clamp_min(self.cfg.params.attribute_minimums.discharge)
     }
 
