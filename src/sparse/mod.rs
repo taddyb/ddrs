@@ -15,6 +15,8 @@ pub mod cusparse;
 
 use std::sync::Arc;
 
+use crate::sparse::cusparse::UnsafeSendCache;
+
 use burn::backend::Autodiff;
 use burn::backend::autodiff::checkpoint::base::Checkpointer;
 use burn::backend::autodiff::checkpoint::strategy::NoCheckpointing;
@@ -98,7 +100,7 @@ impl SparseAdjacency {
 /// Within each row, off-diagonal entries are emitted first (in ascending column
 /// order), followed by the diagonal — this matches both DDR's `PatternMapper`
 /// output ordering and the natural forward-substitution traversal.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CsrPattern {
     pub n: usize,
     /// CSR row pointers, length `n + 1`.
@@ -125,6 +127,28 @@ pub struct CsrPattern {
     /// the `k`-th entry of `A^T` corresponds to. Lets the backward read
     /// `A_values[trans_to_orig[k]]` without rebuilding any structure.
     pub trans_to_orig: Vec<i32>,
+
+    /// Lazy GPU companion built on first cuSPARSE solve call. `None` on
+    /// CPU-only runs. Not part of structural equality — the `Debug` impl
+    /// skips this field.
+    pub(crate) cuda_cache: UnsafeSendCache,
+}
+
+impl std::fmt::Debug for CsrPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CsrPattern")
+            .field("n", &self.n)
+            .field("nnz", &self.col.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for UnsafeSendCache {
+    fn clone(&self) -> Self {
+        // The GPU cache is not cloned — each CsrPattern clone starts with an
+        // empty cache and re-initializes on first GPU solve if needed.
+        Self::new()
+    }
 }
 
 impl CsrPattern {
@@ -187,6 +211,7 @@ impl CsrPattern {
             trans_crow,
             trans_col,
             trans_to_orig,
+            cuda_cache: UnsafeSendCache::new(),
         }
     }
 
@@ -232,6 +257,7 @@ impl CsrPattern {
             trans_crow,
             trans_col,
             trans_to_orig,
+            cuda_cache: UnsafeSendCache::new(),
         }
     }
 }

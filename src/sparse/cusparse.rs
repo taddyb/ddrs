@@ -246,3 +246,113 @@ where
 {
     cubecl_cuda_stream::<B>(device)
 }
+
+// ---------------------------------------------------------------------------
+// CudaPatternCache — SP-6 Task 8
+// ---------------------------------------------------------------------------
+
+use std::marker::PhantomData;
+
+use cudarc::driver::CudaSlice;
+
+/// Per-pattern cuSPARSE state. Built lazily on first GPU solve call.
+///
+/// !Send because cuSPARSE descriptors and CUDA contexts are tied to the
+/// thread that created them. Single-threaded training is the only supported
+/// mode for SP-6.
+///
+/// The struct holds:
+/// - `d_crow`, `d_col`, `d_row_for_nnz`: device copies of the pattern's
+///   structural arrays (uploaded once, reused per solve).
+/// - `sp_mat`: cuSPARSE sparse matrix descriptor referencing the device arrays.
+/// - `desc_forward` / `desc_backward`: pre-analyzed SpSV descriptors for the
+///   no-transpose (lower-tri solve) and transpose (upper-tri backward) ops.
+/// - `workspace_forward` / `workspace_backward`: device byte buffers sized
+///   via `cusparseSpSV_bufferSize`.
+///
+/// Built lazily via `ensure_cuda_cache`; populated by `build_cuda_pattern_cache`
+/// in Task 9. The Task 8 skeleton calls `unimplemented!()` so the type plumbing
+/// compiles without exercising any cuSPARSE calls.
+#[allow(dead_code)] // fields populated in Task 9
+pub(crate) struct CudaPatternCache {
+    pub(crate) handle: cudarc::cusparse::sys::cusparseHandle_t,
+    pub(crate) d_crow: CudaSlice<i32>,
+    pub(crate) d_col: CudaSlice<i32>,
+    pub(crate) d_row_for_nnz: CudaSlice<i32>,
+    pub(crate) sp_mat: cudarc::cusparse::sys::cusparseSpMatDescr_t,
+    pub(crate) desc_forward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
+    pub(crate) desc_backward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
+    pub(crate) workspace_forward: CudaSlice<u8>,
+    pub(crate) workspace_backward: CudaSlice<u8>,
+    /// `!Send` marker — cuSPARSE descriptors are thread-bound.
+    _not_send: PhantomData<*mut ()>,
+}
+
+impl Drop for CudaPatternCache {
+    fn drop(&mut self) {
+        // SAFETY: descriptors must be destroyed before the device slices they
+        // reference go out of scope. cudarc's CudaSlice<T> Drop runs AFTER
+        // this Drop body executes, so the order is correct. The handle,
+        // sp_mat, and SpSV descriptors are all created in Task 9; until
+        // then this drop is never triggered (the OnceCell stays empty).
+        // Task 9 fills in the real cusparseDestroy* calls.
+    }
+}
+
+/// A wrapper around `Option<CudaPatternCache>` stored in an `UnsafeCell` so
+/// that `CsrPattern` (which is `Arc`-shared and stored in the autograd tape's
+/// `Send` state) can hold it.
+///
+/// SAFETY: SP-6 single-threaded training guarantee — only the training thread
+/// ever calls `ensure_cuda_cache` or reads/writes the inner value. The
+/// `UnsafeCell` is never accessed from two threads concurrently. If this
+/// invariant is violated the program will have a data race, which is UB; the
+/// single-threaded contract must be maintained by all callers.
+pub(crate) struct UnsafeSendCache(std::cell::UnsafeCell<Option<CudaPatternCache>>);
+
+// SAFETY: see doc on `UnsafeSendCache` above.
+unsafe impl Send for UnsafeSendCache {}
+unsafe impl Sync for UnsafeSendCache {}
+
+impl UnsafeSendCache {
+    pub(crate) fn new() -> Self {
+        Self(std::cell::UnsafeCell::new(None))
+    }
+
+    /// Initialize the cache if not yet set, then return a reference to it.
+    ///
+    /// SAFETY: caller must guarantee exclusive access (single-threaded context).
+    pub(crate) unsafe fn get_or_init(
+        &self,
+        init: impl FnOnce() -> CudaPatternCache,
+    ) -> &CudaPatternCache {
+        let ptr = self.0.get();
+        if (*ptr).is_none() {
+            *ptr = Some(init());
+        }
+        (*ptr).as_ref().unwrap()
+    }
+}
+
+/// Build or retrieve the GPU cache for this pattern. Allocates device
+/// memory for crow/col/row_for_nnz on first call; subsequent calls return
+/// the cached handle.
+///
+/// SAFETY: caller must guarantee the current thread has an active CUDA
+/// context and that no other thread concurrently accesses the pattern's
+/// `cuda_cache`. The returned reference is valid for the lifetime of `pattern`.
+#[allow(dead_code)] // exercised once Task 9 wires it into the dispatch shim
+pub(crate) unsafe fn ensure_cuda_cache(
+    pattern: &crate::sparse::CsrPattern,
+) -> &CudaPatternCache {
+    pattern
+        .cuda_cache
+        .get_or_init(|| build_cuda_pattern_cache(pattern))
+}
+
+/// Allocate device memory + create cuSPARSE descriptors for this pattern.
+/// Filled in by Task 9.
+#[allow(dead_code)]
+fn build_cuda_pattern_cache(_pattern: &crate::sparse::CsrPattern) -> CudaPatternCache {
+    unimplemented!("filled in SP-6 Task 9 alongside the cuSPARSE forward solve")
+}
