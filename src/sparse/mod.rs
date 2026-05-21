@@ -357,6 +357,16 @@ fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
 // Autodiff op: forward + analytical backward.
 // =================================================================================
 
+/// Forward-solve output saved for the backward pass. The CPU path stores a
+/// host-side `Vec<f32>` (cheap to share via `Arc`); the future GPU path
+/// stores a `B::FloatTensorPrimitive` so `x` stays on device.
+#[derive(Clone, Debug)]
+pub(crate) enum SavedX<B: Backend> {
+    Cpu(Arc<Vec<f32>>),
+    #[allow(dead_code)]
+    Cuda(B::FloatTensorPrimitive),
+}
+
 /// Saved state for the backward pass.
 ///
 /// `x` is stored as a host `Vec<f32>` because the backward immediately needs it
@@ -367,8 +377,9 @@ fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
 #[derive(Clone, Debug)]
 struct CsrSolveState<B: Backend> {
     a_values: B::FloatTensorPrimitive,
-    x: Arc<Vec<f32>>,
+    x: SavedX<B>,
     pattern: Arc<CsrPattern>,
+    use_cuda: bool,
 }
 
 #[derive(Debug)]
@@ -383,36 +394,38 @@ impl<B: Backend> Backward<B, 2> for CsrSolveOp {
         grads: &mut Gradients,
         _checkpointer: &mut Checkpointer,
     ) {
-        let CsrSolveState { a_values, x, pattern } = ops.state;
+        let CsrSolveState { a_values, x, pattern, use_cuda } = ops.state;
         let [parent_a, parent_b] = ops.parents;
-
         let grad_out = grads.consume::<B>(&ops.node);
-
         let device = B::float_device(&grad_out);
 
+        // Pull x to host. CPU path stores SavedX::Cpu; the future GPU path
+        // (Task 11) replaces this with a GPU dispatch.
+        let x_host: Vec<f32> = match x {
+            SavedX::Cpu(arc) => (*arc).clone(),
+            SavedX::Cuda(prim) => primitive_to_vec::<B>(prim),
+        };
         let a_data: Vec<f32> = primitive_to_vec::<B>(a_values);
         let grad_out_data: Vec<f32> = primitive_to_vec::<B>(grad_out);
 
-        // ∂L/∂b = solve(A^T, ∂L/∂x).
+        // CPU backward solve. Cuda dispatch lands in Task 10.
+        let _ = use_cuda; // unused on CPU path; suppress warning.
         let gradb_data = back_sub_upper_transposed(&pattern, &a_data, &grad_out_data);
 
         if let Some(p_b) = parent_b {
-            let gradb =
-                B::float_from_data(TensorData::from(gradb_data.as_slice()), &device);
+            let gradb = B::float_from_data(TensorData::from(gradb_data.as_slice()), &device);
             grads.register::<B>(p_b.id, gradb);
         }
 
         if let Some(p_a) = parent_a {
-            // ∂L/∂A_values[k] = − gradb[row(k)] · x[col(k)].
             let nnz = pattern.nnz();
             let mut grada = vec![0.0f32; nnz];
             for k in 0..nnz {
                 let r = pattern.row_for_nnz[k] as usize;
                 let c = pattern.col[k] as usize;
-                grada[k] = -gradb_data[r] * x[c];
+                grada[k] = -gradb_data[r] * x_host[c];
             }
-            let grada_prim =
-                B::float_from_data(TensorData::from(grada.as_slice()), &device);
+            let grada_prim = B::float_from_data(TensorData::from(grada.as_slice()), &device);
             grads.register::<B>(p_a.id, grada_prim);
         }
     }
@@ -431,6 +444,7 @@ pub fn triangular_csr_solve<I: Backend>(
     pattern: &Arc<CsrPattern>,
     a_values: Tensor<Autodiff<I>, 1>,
     b: Tensor<Autodiff<I>, 1>,
+    use_cuda: bool,
 ) -> Tensor<Autodiff<I>, 1> {
     let a_at = match a_values.into_primitive() {
         TensorPrimitive::Float(p) => p,
@@ -454,8 +468,9 @@ pub fn triangular_csr_solve<I: Backend>(
         OpsKind::Tracked(prep) => {
             let state = CsrSolveState::<I> {
                 a_values: a_at.primitive.clone(),
-                x: Arc::new(x_data),
+                x: SavedX::Cpu(Arc::new(x_data)),
                 pattern: pattern.clone(),
+                use_cuda,
             };
             prep.finish(state, out_prim)
         }

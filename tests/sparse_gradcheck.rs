@@ -64,7 +64,7 @@ fn gradcheck_against_ddr_triangular_sparse_solver() {
     let b: Tensor<B, 1> =
         Tensor::<B, 1>::from_floats(b_data.as_slice(), &device).require_grad();
 
-    let x = triangular_csr_solve::<Inner>(&pattern, a_values.clone(), b.clone());
+    let x = triangular_csr_solve::<Inner>(&pattern, a_values.clone(), b.clone(), false);
 
     // Forward: max abs error vs DDR's x.
     let x_ddrs: Vec<f32> = x.clone().into_data().to_vec().unwrap();

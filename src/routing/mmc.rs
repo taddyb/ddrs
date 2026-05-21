@@ -176,7 +176,7 @@ impl<I: Backend> MuskingumCunge<I> {
             let pattern = self.pattern.as_ref().unwrap();
             let assembler = self.assembler.as_ref().unwrap();
             let a_values = assembler.assemble(ones);
-            let q0 = triangular_csr_solve::<I>(pattern, a_values, q_prime_0)
+            let q0 = triangular_csr_solve::<I>(pattern, a_values, q_prime_0, false)
                 .clamp_min(self.cfg.params.attribute_minimums.discharge);
             self.discharge_t = Some(q0);
         }
@@ -245,7 +245,7 @@ impl<I: Backend> MuskingumCunge<I> {
 
         // 5. CSR solve of A · Q_{t+1} = b, A = I − c1·N.
         let a_values = self.assembler.as_ref().unwrap().assemble(c1);
-        let solution = triangular_csr_solve::<I>(pattern, a_values, b);
+        let solution = triangular_csr_solve::<I>(pattern, a_values, b, false);
         solution.clamp_min(self.cfg.params.attribute_minimums.discharge)
     }
 
