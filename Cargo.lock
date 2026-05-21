@@ -2557,6 +2557,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "cudarc",
  "icechunk",
  "ndarray 0.16.1",
  "netcdf",
