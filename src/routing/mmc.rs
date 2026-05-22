@@ -218,48 +218,27 @@ impl<I: Backend> MuskingumCunge<I> {
     }
 
     /// Advance one timestep. Returns next-step discharge `Q_{t+1}` (shape `[n]`).
-    pub fn route_timestep(&self, q_prime_clamp: Tensor<Autodiff<I>, 1>) -> Tensor<Autodiff<I>, 1> {
+    pub fn route_timestep(&self, q_prime_clamp: Tensor<Autodiff<I>, 1>) -> Tensor<Autodiff<I>, 1>
+    where
+        I::FloatTensorPrimitive: 'static,
+        I::Device: 'static,
+    {
         let n = self.n.as_ref().unwrap().clone();
-        let slope = self.slope.as_ref().unwrap().clone();
         let q_spatial = self.q_spatial.as_ref().unwrap().clone();
+        let p_spatial = self.p_spatial_broadcast(self.n_segments.expect("setup_inputs not called"));
         let length = self.length.as_ref().unwrap().clone();
+        let slope = self.slope.as_ref().unwrap().clone();
         let x_storage = self.x_storage.as_ref().unwrap().clone();
         let q_t = self.discharge_t.as_ref().unwrap().clone();
         let pattern = self.pattern.as_ref().unwrap();
-        let n_segments = self.n_segments.expect("setup_inputs not called");
+        let assembler = self.assembler.as_ref().unwrap();
 
-        // 1. geometry → velocity, 2. celerity
-        let geom = compute_trapezoidal_geometry(
-            n.clone(),
-            self.p_spatial_broadcast(n_segments),
-            q_spatial,
-            q_t.clone(),
-            slope,
-            self.cfg.params.attribute_minimums.depth,
-            self.cfg.params.attribute_minimums.bottom_width,
-        );
-        let v_clamped = geom
-            .velocity
-            .clamp(self.cfg.params.attribute_minimums.velocity, 15.0);
-        let celerity = v_clamped * (5.0 / 3.0);
-
-        // 3. Muskingum coefficients
-        let (c1, c2, c3, c4) = self.calculate_muskingum_coefficients(length, celerity, x_storage);
-
-        // 4. rhs: b = c2·(N·Q_t) + c3·Q_t + c4·q' — SpMV via cached CSR pattern,
-        //    no dense [n, n] matmul.
-        let i_t = self.assembler.as_ref().unwrap().spmv(q_t.clone());
-        let b = c2 * i_t + c3 * q_t + c4 * q_prime_clamp;
-
-        // 5. CSR solve of A · Q_{t+1} = b, A = I − c1·N.
-        let a_values = self.assembler.as_ref().unwrap().assemble(c1);
-        let solution = triangular_csr_solve::<I>(
-            pattern,
-            a_values,
-            b,
-            self.sparse_solver == SparseSolver::Cuda,
-        );
-        solution.clamp_min(self.cfg.params.attribute_minimums.discharge)
+        crate::routing::mmc_op::timestep_forward::<I>(
+            &self.cfg, pattern, assembler,
+            n, q_spatial, p_spatial,
+            q_t, q_prime_clamp,
+            length, slope, x_storage,
+        )
     }
 
     /// Forward over the full window. Output shape `[n, T]` (segment × time).
