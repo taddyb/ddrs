@@ -11,6 +11,7 @@ burn-cuda = { version = "0.21", default-features = false }
 # Direct access to CubeTensor and CudaRuntime types for the cuSPARSE pointer bridge (SP-6).
 burn-cubecl = { version = "0.21", default-features = false }
 cubecl = { version = "0.10", default-features = false, features = ["cuda"] }
+cubecl-common = { version = "0.10" }
 # Direct cuSPARSE bindings for the GPU triangular solve (SP-6).
 # cudarc is already a transitive dep of cubecl-cuda; declaring it
 # explicitly lets us enable the `cusparse` feature.

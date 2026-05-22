@@ -54,15 +54,14 @@ fn cubecl_stream_is_non_null() {
     assert!(!stream.is_null(), "cubecl returned a null stream");
 }
 
-/// SP-7 Task 4 spike: verify that cubecl_stream_active returns a non-null pointer
-/// distinct from FALLBACK_STREAM (which is created by cuStreamCreate).
+/// SP-7 Task 4b spike: verify that cubecl_stream_active returns a real non-null
+/// CUstream pointer distinct from FALLBACK_STREAM and from the sentinel
+/// (usize::MAX-1) that the previous Task 4 commit returned.
 ///
-/// NOTE: the current implementation of `cubecl_stream_active` uses a sentinel
-/// value (usize::MAX-1) because `ComputeClient::exclusive_with_server` is not
-/// yet exposed by the cubecl fork. The sentinel is guaranteed non-null and
-/// non-zero, which is distinct from FALLBACK_STREAM (a real CUstream handle).
-/// The canonical fix (Tasks 5+6) requires adding `exclusive_with_server` to
-/// the fork so `server.stream(StreamId::current())` is callable.
+/// `cubecl_stream_active` now calls `ComputeClient::exclusive_with_server`
+/// (added in the SP-7 cubecl-runtime fork) which passes `&mut CudaServer` to
+/// the closure, allowing `server.stream(StreamId::current())` to be called
+/// directly on the server-bound thread.
 #[test]
 fn cubecl_active_stream_is_non_null_and_not_fallback() {
     type B = burn_cuda::Cuda<f32, i32>;
@@ -79,11 +78,17 @@ fn cubecl_active_stream_is_non_null_and_not_fallback() {
     let _t = burn::tensor::Tensor::<B, 1>::from_floats([0.0_f32], &device);
     let active = ddrs::sparse::cusparse::__spike_active_stream::<B>(&device);
     let fallback = ddrs::sparse::cusparse::__spike_get_stream::<B>(&device);
+    eprintln!("cubecl active stream pointer: {:#x}", active as usize);
     assert!(!active.is_null(), "cubecl active stream is null");
     assert_ne!(
         active as usize,
         fallback as usize,
         "expected active stream and FALLBACK_STREAM to be different handles",
+    );
+    assert!(
+        (active as usize) < usize::MAX - 16,
+        "active stream looks like a sentinel: {:#x}",
+        active as usize,
     );
 }
 

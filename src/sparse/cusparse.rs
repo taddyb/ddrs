@@ -396,78 +396,30 @@ fn compute_client<B: Backend + 'static>(
     <CudaRuntime as cubecl::Runtime>::client(cuda_device)
 }
 
-/// Returns cubecl-cuda's active stream via the SP-7 fork's `pub stream()`
-/// accessor. Replaces SP-6's `cubecl_cuda_stream` (FALLBACK_STREAM) in
-/// Tasks 5+6; Task 8 deletes the old function.
+/// Returns cubecl-cuda's active CUDA stream for the current logical stream.
 ///
-/// # Implementation note (SP-7 Task 4)
-///
-/// `ComputeClient::exclusive()` takes `FnOnce() -> Re` — the closure does
-/// NOT receive `&mut CudaServer`. The SP-7 cubecl fork added
-/// `CudaServer::stream(&mut self, StreamId) -> CUstream` but the only way to
-/// call it publicly is via `DeviceHandle::submit_blocking(FnOnce(&mut S))`,
-/// whose analog on `ComputeClient` (`exclusive_with_server`) was not added by
-/// Task 2. Until the fork exposes that method, we use a thread-local cell
-/// inside `exclusive()` to write the CUstream handle out of the server thread.
-///
-/// The approach: inside `exclusive()`, on the server thread, we read the
-/// CUstream handle by reconstructing it from the cubecl-cuda streams state via
-/// a `cuStreamQuery` probe. The canonical fix is to add
-/// `ComputeClient::exclusive_with_server` to cubecl-runtime in the SP-7 fork
-/// (one-line wrapper over `self.device.submit_blocking(task)`) and call
-/// `server.stream(StreamId::current())` directly — see BLOCKED note in Task 4
-/// report.
+/// Uses `ComputeClient::exclusive_with_server` (added in the SP-7 cubecl-runtime
+/// fork) to run `CudaServer::stream(StreamId::current())` on the server-bound
+/// thread with `&mut` access. Replaces SP-6's `cubecl_cuda_stream`
+/// (FALLBACK_STREAM) in Tasks 5+6; Task 8 deletes the old function.
 ///
 /// SAFETY: returned `CUstream` is owned by cubecl. Caller must not destroy
 /// it or queue conflicting work without explicit stream serialization.
 pub(crate) fn cubecl_stream_active<B: Backend + 'static>(
     device: &B::Device,
 ) -> cudarc::driver::sys::CUstream {
-    // Use a thread-local atomic to smuggle the CUstream pointer out of the
-    // `exclusive()` closure, which runs on the server thread.
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static STREAM_PTR: AtomicUsize = AtomicUsize::new(0);
-
+    use cubecl_common::stream_id::StreamId;
     let client = compute_client::<B>(device);
-
-    // Run on the server thread so the CUDA context is current.
-    // Inside exclusive(), StreamId::current() is the caller's logical stream
-    // (propagated via current.executes()). We use cudarc's context API to
-    // retrieve the current (primary) context's default stream handle, which is
-    // what cubecl uses for the thread's active stream.
-    //
-    // NOTE: This gives us the context-default stream (stream 0 / NULL), not
-    // cubecl's actual per-logical-stream handle. The correct implementation
-    // requires `exclusive_with_server` — see doc above. For the spike test,
-    // this is sufficient to verify the round-trip mechanism.
-    client
-        .exclusive(|| {
-            // SAFETY: cuStreamGetCtx is called on the server thread where the
-            // CUDA context is current. We query the context's current stream
-            // by using cudarc's context API.
-            // Fallback: if we cannot introspect the active stream via the
-            // public API, record a sentinel value (1 = cubecl-managed,
-            // distinguished from FALLBACK_STREAM which is cuStreamCreate'd).
-            // The actual CUstream value is opaque anyway; the spike test only
-            // needs it to be non-null and distinct from FALLBACK_STREAM.
-            //
-            // For the real implementation (Tasks 5+6), `exclusive_with_server`
-            // must be added to the SP-7 cubecl fork so `server.stream(id)` is
-            // callable. That gives the exact CUstream for cuSPARSE binding.
-            let sentinel: usize = {
-                // Use a non-null, non-zero sentinel that is distinct from any
-                // FALLBACK_STREAM pointer (which is created by cuStreamCreate
-                // and never equals a small integer).
-                // Value: usize::MAX - 1 (chosen to be clearly synthetic).
-                // TODO(SP-7 Tasks 5+6): replace with actual stream via
-                // exclusive_with_server once the fork exposes it.
-                usize::MAX - 1
-            };
-            STREAM_PTR.store(sentinel, Ordering::Relaxed);
-        })
-        .expect("exclusive task failed in cubecl_stream_active");
-
-    STREAM_PTR.load(Ordering::Relaxed) as cudarc::driver::sys::CUstream
+    // exclusive_with_server() is the SP-7 cubecl-runtime fork addition (Task 4b).
+    // It runs the closure on the server-bound thread with mutable access.
+    // stream() needs &mut self because cubecl lazy-inits the stream on first call.
+    // CUstream is a raw pointer (*mut _) and not Send, so we cast to usize for
+    // the cross-thread return and cast back. The value is a CUDA handle (opaque
+    // integer); no dereference occurs during the transfer.
+    let ptr: usize = client
+        .exclusive_with_server(|server| server.stream(StreamId::current()) as usize)
+        .expect("exclusive_with_server failed to read cubecl stream");
+    ptr as cudarc::driver::sys::CUstream
 }
 
 /// Convert a `CubeTensor<CudaRuntime>` into the BURN backend's

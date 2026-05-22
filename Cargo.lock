@@ -2489,6 +2489,7 @@ dependencies = [
  "clap",
  "csv",
  "cubecl",
+ "cubecl-common",
  "cudarc",
  "icechunk",
  "ndarray 0.16.1",
