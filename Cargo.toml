@@ -46,6 +46,7 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 approx = "0.5"
+which = "6"
 
 [profile.release]
 opt-level = 3
