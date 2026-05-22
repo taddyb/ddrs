@@ -26,7 +26,6 @@
 use burn::tensor::backend::Backend;
 use burn_cubecl::tensor::CubeTensor;
 use cubecl::cuda::CudaRuntime;
-use cudarc::driver::sys::CUstream;
 
 /// Type-erased view into a CUDA tensor as a raw device pointer.
 ///
@@ -552,14 +551,18 @@ pub(crate) struct CudaPatternCache {
     pub(crate) d_crow: burn_cubecl::cubecl::server::Handle,
     /// cubecl Handle for col (i32 array, len = nnz).
     pub(crate) d_col: burn_cubecl::cubecl::server::Handle,
-    /// cubecl Handle for row_for_nnz (i32 array, len = nnz).
+    /// Held to keep the row-index buffer alive (cusparseSpMat references it
+    /// via raw pointer). Never read directly — cubecl frees on Drop.
+    #[allow(dead_code)]
     pub(crate) d_row_for_nnz: burn_cubecl::cubecl::server::Handle,
     pub(crate) sp_mat: cudarc::cusparse::sys::cusparseSpMatDescr_t,
     pub(crate) desc_forward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
     pub(crate) desc_backward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
-    /// cubecl Handle for forward workspace (u8 array).
+    /// Held for cuSPARSE workspace lifetime; cubecl frees on Drop.
+    #[allow(dead_code)]
     pub(crate) workspace_forward: burn_cubecl::cubecl::server::Handle,
-    /// cubecl Handle for backward workspace (u8 array).
+    /// Held for cuSPARSE workspace lifetime; cubecl frees on Drop.
+    #[allow(dead_code)]
     pub(crate) workspace_backward: burn_cubecl::cubecl::server::Handle,
     /// `!Send` marker — cuSPARSE descriptors are thread-bound.
     _not_send: PhantomData<*mut ()>,
