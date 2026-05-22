@@ -161,14 +161,11 @@ where
         cusparseSetStream,
     };
 
-    // 1. Ensure FALLBACK_STREAM is initialised before build_cuda_pattern_cache.
-    //    build_cuda_pattern_cache still uses FALLBACK_STREAM for the one-time
-    //    crow/col upload. cubecl_cuda_stream is idempotent after the first call.
-    cubecl_cuda_stream::<B>(device);
-
-    // 2. Lazy-build the pattern cache (one-time per CsrPattern).
-    // SAFETY: SP-6/SP-7 single-threaded training contract — no concurrent
-    // access to cuda_cache from multiple threads.
+    // 1. Lazy-build the pattern cache (one-time per CsrPattern).
+    //    Task 7: build_cuda_pattern_cache now uses cubecl Handles internally;
+    //    no FALLBACK_STREAM initialisation is needed before this call.
+    // SAFETY: SP-7 single-threaded training contract — no concurrent access to
+    // cuda_cache from multiple threads.
     let cache = unsafe { ensure_cuda_cache(pattern) };
 
     // 3. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
@@ -225,11 +222,15 @@ where
     unsafe {
         // 7a. Re-point sparse matrix descriptor at the current a_values.
         // SAFETY: a_view.ptr is the live device pointer of a_values_prim.
-        // cache.d_crow and cache.d_col are raw CUdeviceptr u64 values from SP-6.
+        // cache.d_crow and cache.d_col are cubecl Handles (Task 7); extract raw
+        // device pointers via handle_device_ptr. The Handles stay alive through
+        // `cache` (borrowed for the whole call).
+        let crow_ptr = handle_device_ptr(&client, &cache.d_crow);
+        let col_ptr  = handle_device_ptr(&client, &cache.d_col);
         cudarc::cusparse::sys::cusparseCsrSetPointers(
             cache.sp_mat,
-            cache.d_crow as *mut std::ffi::c_void,
-            cache.d_col as *mut std::ffi::c_void,
+            crow_ptr as *mut std::ffi::c_void,
+            col_ptr as *mut std::ffi::c_void,
             a_view.ptr as *mut std::ffi::c_void,
         )
         .result()
@@ -648,49 +649,37 @@ use std::marker::PhantomData;
 ///
 /// !Send because cuSPARSE descriptors and CUDA contexts are tied to the
 /// thread that created them. Single-threaded training is the only supported
-/// mode for SP-6.
+/// mode for SP-6/SP-7.
 ///
-/// Device allocations are stored as raw `CUdeviceptr` (u64) values rather
-/// than cudarc `CudaSlice<T>` to avoid the `CudaContext`/`CudaStream` RAII
-/// wrappers. This is necessary because:
-///
-/// 1. `CudaContext::new(0)` calls `cuCtxSetCurrent` on the calling thread,
-///    which conflicts with cubecl's server thread holding the primary context.
-/// 2. CUDA 12.2+ supports context-free stream-ordered allocation (`cuMemAllocAsync`),
-///    and our target (CUDA 13.2) supports this. We use `FALLBACK_STREAM` for all
-///    stream-ordered async allocation, bypassing the RAII wrappers.
-///
-/// Drop frees all device memory with `cuMemFreeAsync` on `FALLBACK_STREAM`.
+/// Device allocations are cubecl `Handle`s. cubecl owns their lifetimes and
+/// frees them when the Handles drop. Drop only needs to destroy cuSPARSE
+/// descriptors; no `cuMemFreeAsync` is needed here.
 pub(crate) struct CudaPatternCache {
     pub(crate) handle: cudarc::cusparse::sys::cusparseHandle_t,
-    /// Device pointer for crow (i32 array, len = n+1). Freed in Drop.
-    pub(crate) d_crow: u64,
-    /// Device pointer for col (i32 array, len = nnz). Freed in Drop.
-    pub(crate) d_col: u64,
-    /// Device pointer for row_for_nnz (i32 array, len = nnz). Freed in Drop.
-    pub(crate) d_row_for_nnz: u64,
+    /// cubecl Handle for crow (i32 array, len = n+1).
+    pub(crate) d_crow: burn_cubecl::cubecl::server::Handle,
+    /// cubecl Handle for col (i32 array, len = nnz).
+    pub(crate) d_col: burn_cubecl::cubecl::server::Handle,
+    /// cubecl Handle for row_for_nnz (i32 array, len = nnz).
+    pub(crate) d_row_for_nnz: burn_cubecl::cubecl::server::Handle,
     pub(crate) sp_mat: cudarc::cusparse::sys::cusparseSpMatDescr_t,
     pub(crate) desc_forward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
     pub(crate) desc_backward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
-    /// Device pointer for forward workspace (u8 array). Freed in Drop.
-    pub(crate) workspace_forward: u64,
-    /// Device pointer for backward workspace (u8 array). Freed in Drop.
-    pub(crate) workspace_backward: u64,
+    /// cubecl Handle for forward workspace (u8 array).
+    pub(crate) workspace_forward: burn_cubecl::cubecl::server::Handle,
+    /// cubecl Handle for backward workspace (u8 array).
+    pub(crate) workspace_backward: burn_cubecl::cubecl::server::Handle,
     /// `!Send` marker — cuSPARSE descriptors are thread-bound.
     _not_send: PhantomData<*mut ()>,
 }
 
 impl Drop for CudaPatternCache {
     fn drop(&mut self) {
-        // SAFETY: All device pointers were allocated with cuMemAllocAsync on
-        // FALLBACK_STREAM.  We free them on the same stream so that any pending
-        // async work referencing them completes before the memory is reclaimed.
-        // cuSPARSE descriptors are destroyed first (in dependency order), then
-        // sp_mat and handle. Raw device memory is freed last.
-        //
-        // FALLBACK_STREAM may be None if the process is exiting without ever
-        // using the GPU path — in that case we skip the CUDA cleanup and let
-        // the OS reclaim GPU memory.
+        // SAFETY: cuSPARSE descriptors are destroyed before the Handle fields
+        // drop (struct field declaration order: handle → d_crow → d_col →
+        // d_row_for_nnz → sp_mat → desc_forward → desc_backward →
+        // workspace_forward → workspace_backward). cubecl-owned Handles release
+        // device buffers via their own Drop impl — no cuMemFreeAsync needed.
         unsafe {
             // Destroy SpSV descriptors.
             cudarc::cusparse::sys::cusparseSpSV_destroyDescr(self.desc_forward)
@@ -707,21 +696,10 @@ impl Drop for CudaPatternCache {
             cudarc::cusparse::sys::cusparseDestroy(self.handle)
                 .result()
                 .expect("cusparseDestroy failed");
-
-            // Free device memory. Use FALLBACK_STREAM for async free if available.
-            if let Some(stream) = FALLBACK_STREAM.get() {
-                let s = stream.0;
-                cudarc::driver::result::free_async(self.d_crow, s)
-                    .expect("cuMemFreeAsync d_crow failed");
-                cudarc::driver::result::free_async(self.d_col, s)
-                    .expect("cuMemFreeAsync d_col failed");
-                cudarc::driver::result::free_async(self.d_row_for_nnz, s)
-                    .expect("cuMemFreeAsync d_row_for_nnz failed");
-                cudarc::driver::result::free_async(self.workspace_forward, s)
-                    .expect("cuMemFreeAsync workspace_forward failed");
-                cudarc::driver::result::free_async(self.workspace_backward, s)
-                    .expect("cuMemFreeAsync workspace_backward failed");
-            }
+            // The five Handle fields (d_crow, d_col, d_row_for_nnz,
+            // workspace_forward, workspace_backward) drop automatically after
+            // this block and free their device allocations via cubecl's Handle
+            // Drop impl. No explicit cuMemFreeAsync is needed.
         }
     }
 }
@@ -780,57 +758,26 @@ pub(crate) unsafe fn ensure_cuda_cache(
 // SP-6 Task 9: build_cuda_pattern_cache implementation
 // ---------------------------------------------------------------------------
 
-/// Allocate stream-ordered async device memory of `len` elements of type `T`.
-///
-/// Uses `cuMemAllocAsync` on `FALLBACK_STREAM`. Requires CUDA 12.2+ (CUDA 13.2
-/// is installed). Returns the raw `CUdeviceptr` (u64).
-///
-/// SAFETY: caller must ensure FALLBACK_STREAM is initialised and valid.
-unsafe fn async_alloc<T>(len: usize, stream: CUstream) -> u64 {
-    let bytes = len * std::mem::size_of::<T>();
-    cudarc::driver::result::malloc_async(stream, bytes)
-        .expect("cuMemAllocAsync failed in build_cuda_pattern_cache")
-}
-
-/// Upload a `&[T]` to device memory at `d_ptr` using `cuMemcpyHtoDAsync`.
-///
-/// SAFETY: d_ptr must be a valid device allocation of at least `src.len()` elements,
-/// and the allocation must be associated with `stream`.
-unsafe fn upload_slice<T>(d_ptr: u64, src: &[T], stream: CUstream) {
-    let bytes = std::mem::size_of_val(src);
-    cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
-        d_ptr,
-        src.as_ptr() as *const _,
-        bytes,
-        stream,
-    )
-    .result()
-    .expect("cuMemcpyHtoDAsync failed");
-}
-
-/// Zero-fill `len` bytes at `d_ptr` using `cuMemsetD8Async`.
-///
-/// SAFETY: d_ptr must be a valid device allocation of at least `len` bytes.
-unsafe fn zero_device(d_ptr: u64, len_bytes: usize, stream: CUstream) {
-    cudarc::driver::result::memset_d8_async(d_ptr, 0, len_bytes, stream)
-        .expect("cuMemsetD8Async failed");
-}
-
 /// Allocate device memory + create cuSPARSE descriptors for this pattern.
 ///
-/// This runs once per `CsrPattern` lifetime and performs:
-/// 1. Create cuSPARSE handle
-/// 2. Upload crow/col/row_for_nnz to device via FALLBACK_STREAM
-/// 3. Create sparse matrix descriptor (values=NULL, set per-solve)
-/// 4. Set fill mode (lower) + diag type (non-unit)
-/// 5. Create SpSV descriptors (forward + backward)
-/// 6. Probe and allocate workspace buffers
-/// 7. Run cusparseSpSV_analysis for both directions
+/// SP-7 Task 7 version — all device buffers are cubecl `Handle`s allocated
+/// via `client.create_from_slice`. No `cuMemAllocAsync`, no `cuMemFreeAsync`,
+/// no `FALLBACK_STREAM` references.
 ///
-/// All device allocations use `cuMemAllocAsync` on `FALLBACK_STREAM` (CUDA 12.2+
-/// context-free async allocation). This avoids binding a CUDA context on the
-/// calling thread, which would conflict with cubecl's server thread.
+/// This runs once per `CsrPattern` lifetime and performs:
+/// 1. Materialise a cubecl client for `Cuda<f32, i32>` (default device).
+/// 2. Upload crow / col / row_for_nnz via `client.create_from_slice`.
+/// 3. `client.flush()` to submit writes onto the shared stream.
+/// 4. Create cuSPARSE handle; bind it to cubecl's active stream.
+/// 5. Create sparse matrix descriptor (values=NULL, set per-solve).
+/// 6. Set fill mode (lower) + diag type (non-unit).
+/// 7. Create SpSV descriptors (forward + backward).
+/// 8. Probe workspace sizes (with dummy b/x Handles).
+/// 9. Allocate workspaces + dummy values via `create_from_slice`.
+/// 10. Run `cusparseSpSV_analysis` for both directions.
+/// 11. Return `CudaPatternCache`; dummy Handles drop and free device memory.
 fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternCache {
+    use burn_cubecl::cubecl::server::Handle;
     use cudarc::cusparse::sys::{
         cudaDataType_t::CUDA_R_32F,
         cusparseCreateCsr,
@@ -850,55 +797,84 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         cusparseDestroyDnVec,
     };
 
-    // All operations use FALLBACK_STREAM (created by cubecl_cuda_stream on
-    // the server thread before this function is called).
-    // SAFETY: FALLBACK_STREAM is guaranteed to be initialised because
-    // build_cuda_pattern_cache is only called from ensure_cuda_cache, which
-    // is only called from cusparse_forward, which calls cubecl_cuda_stream
-    // (initialising FALLBACK_STREAM) before calling ensure_cuda_cache.
-    let stream = FALLBACK_STREAM
-        .get()
-        .expect("FALLBACK_STREAM not initialised — ensure cubecl_cuda_stream was called first")
-        .0;
+    // --- Step 1: Materialise the cubecl client. ---
+    // We are guaranteed to be on Cuda<f32, i32> here (the dispatcher gates the
+    // call). Default device is device index 0.
+    // Note: burn::backend::Cuda is gated behind the "cuda" feature on the burn
+    // umbrella crate (not enabled); use burn_cuda::Cuda directly instead.
+    type B = burn_cuda::Cuda<f32, i32>;
+    let device: cubecl::cuda::CudaDevice = Default::default();
+    let client = compute_client::<B>(&device);
 
-    // --- Step 1: Create cuSPARSE handle. ---
+    // --- Step 2: Upload structural arrays via cubecl. ---
+    // `create_from_slice` allocates device memory and copies bytes to it.
+    // SAFETY: i32 slices reinterpreted as u8 bytes; alignment/size are valid.
+
+    let crow_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            pattern.crow.as_ptr() as *const u8,
+            pattern.crow.len() * std::mem::size_of::<i32>(),
+        )
+    };
+    let d_crow: Handle = client.create_from_slice(crow_bytes);
+
+    let col_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            pattern.col.as_ptr() as *const u8,
+            pattern.col.len() * std::mem::size_of::<i32>(),
+        )
+    };
+    let d_col: Handle = client.create_from_slice(col_bytes);
+
+    let row_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            pattern.row_for_nnz.as_ptr() as *const u8,
+            pattern.row_for_nnz.len() * std::mem::size_of::<i32>(),
+        )
+    };
+    let d_row_for_nnz: Handle = client.create_from_slice(row_bytes);
+
+    // --- Step 3: Flush so writes hit the stream cuSPARSE will be using. ---
+    client.flush().expect("cubecl flush after crow/col/row upload");
+
+    // --- Step 4: Create cuSPARSE handle + bind to cubecl's active stream. ---
     // SAFETY: cusparseCreate doesn't require a current CUDA context in CUDA 12+.
     let handle = cudarc::cusparse::result::create()
         .expect("cusparseCreate failed — CUDA setup broken");
 
+    let stream = cubecl_stream_active::<B>(&device);
     unsafe {
-        // --- Step 2: Upload structural arrays to device via FALLBACK_STREAM. ---
-        // SAFETY: FALLBACK_STREAM is a valid non-blocking stream created on the
-        // server thread. cuMemAllocAsync and cuMemcpyHtoDAsync in CUDA 12.2+ do
-        // not require a current context on the calling thread.
-
-        let d_crow = async_alloc::<i32>(pattern.crow.len(), stream);
-        upload_slice(d_crow, &pattern.crow, stream);
-
-        let d_col = async_alloc::<i32>(pattern.col.len(), stream);
-        upload_slice(d_col, &pattern.col, stream);
-
-        let d_row_for_nnz = async_alloc::<i32>(pattern.row_for_nnz.len(), stream);
-        upload_slice(d_row_for_nnz, &pattern.row_for_nnz, stream);
-
-        // Synchronise so the uploads are complete before we pass pointers to cuSPARSE.
-        cudarc::driver::sys::cuStreamSynchronize(stream)
+        // SAFETY: `cudarc::driver::sys::CUstream_st` and
+        // `cudarc::cusparse::sys::CUstream_st` are the same opaque CUDA ABI
+        // type. cudarc generates separate FFI bindings; casting the pointer
+        // integer is safe because no dereference occurs here.
+        let stream_for_cusparse = stream as *mut cudarc::cusparse::sys::CUstream_st;
+        cudarc::cusparse::sys::cusparseSetStream(handle, stream_for_cusparse)
             .result()
-            .expect("stream sync after htod upload");
+            .expect("cusparseSetStream (build_cuda_pattern_cache) failed");
+    }
 
-        let n = pattern.n as i64;
-        let nnz = pattern.col.len() as i64;
+    let n = pattern.n as i64;
+    let nnz = pattern.col.len() as i64;
 
-        // --- Step 3: Create sparse matrix descriptor (values = NULL). ---
-        // Values will be set per-call via cusparseCsrSetPointers in cusparse_forward.
-        let mut sp_mat: cudarc::cusparse::sys::cusparseSpMatDescr_t = std::ptr::null_mut();
+    // Extract raw device pointers from the three structural Handles.
+    // SAFETY: Handles are alive for the rest of this function; pointers are valid.
+    let crow_ptr = unsafe { handle_device_ptr(&client, &d_crow) };
+    let col_ptr  = unsafe { handle_device_ptr(&client, &d_col) };
+
+    // --- Step 5: Create sparse matrix descriptor (values = NULL). ---
+    // Values will be set per-call via cusparseCsrSetPointers in cusparse_forward.
+    let mut sp_mat: cudarc::cusparse::sys::cusparseSpMatDescr_t = std::ptr::null_mut();
+    unsafe {
+        // SAFETY: crow_ptr / col_ptr are valid device pointers for i32 arrays
+        // of length n+1 and nnz respectively.
         cusparseCreateCsr(
             &mut sp_mat,
             n,
             n,
             nnz,
-            d_crow as *mut std::ffi::c_void,
-            d_col as *mut std::ffi::c_void,
+            crow_ptr as *mut std::ffi::c_void,
+            col_ptr as *mut std::ffi::c_void,
             std::ptr::null_mut(), // values — set per-call
             CUSPARSE_INDEX_32I,
             CUSPARSE_INDEX_32I,
@@ -908,7 +884,7 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         .result()
         .expect("cusparseCreateCsr failed");
 
-        // --- Step 4: Set fill mode (lower triangular) and diag type (non-unit). ---
+        // --- Step 6: Set fill mode (lower triangular) and diag type (non-unit). ---
         // SAFETY: sp_mat is a valid descriptor. Attribute values are passed as
         // pointers to local variables per the cuSPARSE API contract.
         let fill_mode = CUSPARSE_FILL_MODE_LOWER;
@@ -930,41 +906,72 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         )
         .result()
         .expect("cusparseSpMatSetAttribute DIAG_TYPE failed");
+    }
 
-        // --- Step 5: Create SpSV descriptors for forward (L \ b) and backward (L^T \ b). ---
-        let mut desc_forward: cudarc::cusparse::sys::cusparseSpSVDescr_t = std::ptr::null_mut();
-        let mut desc_backward: cudarc::cusparse::sys::cusparseSpSVDescr_t = std::ptr::null_mut();
+    // --- Step 7: Create SpSV descriptors for forward and backward. ---
+    let mut desc_forward: cudarc::cusparse::sys::cusparseSpSVDescr_t = std::ptr::null_mut();
+    let mut desc_backward: cudarc::cusparse::sys::cusparseSpSVDescr_t = std::ptr::null_mut();
+    unsafe {
+        // SAFETY: cusparseSpSV_createDescr initialises an opaque descriptor;
+        // no CUDA context is required.
         cusparseSpSV_createDescr(&mut desc_forward)
             .result()
             .expect("cusparseSpSV_createDescr (forward) failed");
         cusparseSpSV_createDescr(&mut desc_backward)
             .result()
             .expect("cusparseSpSV_createDescr (backward) failed");
+    }
 
-        // --- Step 6: Probe buffer sizes + run analysis. ---
-        // cuSPARSE needs dense vector descriptors for buffer sizing and analysis.
-        // Allocate small dummy device buffers (zero-filled) for b and x.
-        let dummy_b = async_alloc::<f32>(pattern.n, stream);
-        let dummy_x = async_alloc::<f32>(pattern.n, stream);
-        zero_device(dummy_b, pattern.n * 4, stream);
-        zero_device(dummy_x, pattern.n * 4, stream);
-        cudarc::driver::sys::cuStreamSynchronize(stream)
-            .result()
-            .expect("sync after dummy alloc");
+    // --- Step 8: Probe workspace sizes with dummy b/x Handles. ---
+    // cusparseSpSV_bufferSize requires valid (non-NULL) dense vector pointers.
+    // Allocate zero-filled dummy buffers via cubecl.
+    let dummy_b: Handle = client.create_from_slice(&vec![0u8; pattern.n * std::mem::size_of::<f32>()]);
+    let dummy_x: Handle = client.create_from_slice(&vec![0u8; pattern.n * std::mem::size_of::<f32>()]);
+
+    // Upload dummy values (1.0f32) for the analysis step; cusparseSpSV_analysis
+    // requires a non-NULL values pointer — NULL values is only allowed at
+    // descriptor creation time.
+    let nnz_usize = pattern.col.len();
+    let ones: Vec<f32> = vec![1.0f32; nnz_usize];
+    let dummy_vals_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(ones.as_ptr() as *const u8, nnz_usize * std::mem::size_of::<f32>())
+    };
+    let dummy_vals: Handle = client.create_from_slice(dummy_vals_bytes);
+
+    // Flush so the dummy uploads land on the stream before cuSPARSE reads them.
+    client.flush().expect("cubecl flush after dummy uploads");
+
+    let dummy_b_ptr   = unsafe { handle_device_ptr(&client, &dummy_b) };
+    let dummy_x_ptr   = unsafe { handle_device_ptr(&client, &dummy_x) };
+    let dummy_a_ptr   = unsafe { handle_device_ptr(&client, &dummy_vals) };
+
+    let alpha: f32 = 1.0;
+    let mut fwd_buf_sz: usize = 0;
+    let mut bwd_buf_sz: usize = 0;
+
+    unsafe {
+        // Set values pointer to dummy for buffer-size query.
+        // SAFETY: dummy_a_ptr is a valid f32 device array of length nnz.
+        cudarc::cusparse::sys::cusparseCsrSetPointers(
+            sp_mat,
+            crow_ptr as *mut std::ffi::c_void,
+            col_ptr as *mut std::ffi::c_void,
+            dummy_a_ptr as *mut std::ffi::c_void,
+        )
+        .result()
+        .expect("cusparseCsrSetPointers (analysis dummy) failed");
 
         let mut b_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
         let mut x_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
-        cusparseCreateDnVec(&mut b_dn, n, dummy_b as *mut std::ffi::c_void, CUDA_R_32F)
+        // SAFETY: dummy_b_ptr / dummy_x_ptr are valid f32 device arrays of length n.
+        cusparseCreateDnVec(&mut b_dn, n, dummy_b_ptr as *mut std::ffi::c_void, CUDA_R_32F)
             .result()
-            .expect("cusparseCreateDnVec b failed");
-        cusparseCreateDnVec(&mut x_dn, n, dummy_x as *mut std::ffi::c_void, CUDA_R_32F)
+            .expect("cusparseCreateDnVec b (bufferSize) failed");
+        cusparseCreateDnVec(&mut x_dn, n, dummy_x_ptr as *mut std::ffi::c_void, CUDA_R_32F)
             .result()
-            .expect("cusparseCreateDnVec x failed");
-
-        let alpha: f32 = 1.0;
+            .expect("cusparseCreateDnVec x (bufferSize) failed");
 
         // --- Forward: NON_TRANSPOSE (lower-tri solve L \ b). ---
-        let mut fwd_buf_sz: usize = 0;
         cusparseSpSV_bufferSize(
             handle,
             CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -981,7 +988,6 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         .expect("cusparseSpSV_bufferSize (forward) failed");
 
         // --- Backward: TRANSPOSE (upper-tri solve L^T \ b for adjoint). ---
-        let mut bwd_buf_sz: usize = 0;
         cusparseSpSV_bufferSize(
             handle,
             CUSPARSE_OPERATION_TRANSPOSE,
@@ -997,38 +1003,38 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         .result()
         .expect("cusparseSpSV_bufferSize (backward) failed");
 
-        // Allocate workspaces. Minimum 4 bytes to avoid zero-size alloc issues.
-        let workspace_forward = async_alloc::<u8>(fwd_buf_sz.max(4), stream);
-        let workspace_backward = async_alloc::<u8>(bwd_buf_sz.max(4), stream);
-
-        // Allocate dummy values for the analysis step. cusparseSpSV_analysis
-        // requires a valid (non-NULL) values pointer — NULL values is only
-        // allowed at descriptor creation time. We use 1.0 values (valid lower-tri).
-        let nnz_usize = pattern.col.len();
-        let dummy_vals = async_alloc::<f32>(nnz_usize, stream);
-        // Fill with 1.0 (all-ones matrix is valid for structural analysis).
-        {
-            let ones: Vec<f32> = vec![1.0f32; nnz_usize];
-            upload_slice(dummy_vals, &ones, stream);
-        }
-        cudarc::driver::sys::cuStreamSynchronize(stream)
+        cusparseDestroyDnVec(b_dn)
             .result()
-            .expect("sync after workspace alloc");
+            .expect("cusparseDestroyDnVec b (bufferSize) failed");
+        cusparseDestroyDnVec(x_dn)
+            .result()
+            .expect("cusparseDestroyDnVec x (bufferSize) failed");
+    }
 
-        // Set the values pointer on sp_mat to the dummy values for analysis.
-        // SAFETY: dummy_vals is a valid f32 device array of length nnz.
-        cudarc::cusparse::sys::cusparseCsrSetPointers(
-            sp_mat,
-            d_crow as *mut std::ffi::c_void,
-            d_col as *mut std::ffi::c_void,
-            dummy_vals as *mut std::ffi::c_void,
-        )
-        .result()
-        .expect("cusparseCsrSetPointers (analysis dummy) failed");
+    // --- Step 9: Allocate workspaces. Minimum 1 byte to avoid zero-size alloc. ---
+    let workspace_forward:  Handle = client.create_from_slice(&vec![0u8; fwd_buf_sz.max(1)]);
+    let workspace_backward: Handle = client.create_from_slice(&vec![0u8; bwd_buf_sz.max(1)]);
+    let ws_fwd_ptr = unsafe { handle_device_ptr(&client, &workspace_forward) };
+    let ws_bwd_ptr = unsafe { handle_device_ptr(&client, &workspace_backward) };
 
-        // --- Analysis (pattern-once step, reused every timestep). ---
-        // SAFETY: sp_mat now has valid values (dummy_vals). Analysis reads structure
-        // and optionally values depending on the algorithm.
+    // Flush workspace allocations onto the stream before analysis.
+    client.flush().expect("cubecl flush before cusparseSpSV_analysis");
+
+    // --- Step 10: Run cusparseSpSV_analysis for forward + backward. ---
+    unsafe {
+        // Re-create dense vector descriptors for analysis (the bufferSize ones were destroyed).
+        let mut b_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let mut x_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        // SAFETY: dummy_b_ptr / dummy_x_ptr are still valid (Handles alive).
+        cusparseCreateDnVec(&mut b_dn, n, dummy_b_ptr as *mut std::ffi::c_void, CUDA_R_32F)
+            .result()
+            .expect("cusparseCreateDnVec b (analysis) failed");
+        cusparseCreateDnVec(&mut x_dn, n, dummy_x_ptr as *mut std::ffi::c_void, CUDA_R_32F)
+            .result()
+            .expect("cusparseCreateDnVec x (analysis) failed");
+
+        // SAFETY: sp_mat has valid values (dummy_a_ptr set above). Analysis reads
+        // structure and optionally values depending on the algorithm.
         cusparseSpSV_analysis(
             handle,
             CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -1039,7 +1045,7 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
             CUDA_R_32F,
             CUSPARSE_SPSV_ALG_DEFAULT,
             desc_forward,
-            workspace_forward as *mut std::ffi::c_void,
+            ws_fwd_ptr as *mut std::ffi::c_void,
         )
         .result()
         .expect("cusparseSpSV_analysis (forward) failed");
@@ -1054,42 +1060,31 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
             CUDA_R_32F,
             CUSPARSE_SPSV_ALG_DEFAULT,
             desc_backward,
-            workspace_backward as *mut std::ffi::c_void,
+            ws_bwd_ptr as *mut std::ffi::c_void,
         )
         .result()
         .expect("cusparseSpSV_analysis (backward) failed");
 
-        // Sync after analysis — analysis is async.
-        cudarc::driver::sys::cuStreamSynchronize(stream)
-            .result()
-            .expect("sync after cusparseSpSV_analysis");
-
-        // Destroy transient dense vector descriptors and free dummy buffers.
         cusparseDestroyDnVec(b_dn)
             .result()
-            .expect("cusparseDestroyDnVec b failed");
+            .expect("cusparseDestroyDnVec b (analysis) failed");
         cusparseDestroyDnVec(x_dn)
             .result()
-            .expect("cusparseDestroyDnVec x failed");
-        cudarc::driver::result::free_async(dummy_b, stream)
-            .expect("cuMemFreeAsync dummy_b failed");
-        cudarc::driver::result::free_async(dummy_x, stream)
-            .expect("cuMemFreeAsync dummy_x failed");
-        cudarc::driver::result::free_async(dummy_vals, stream)
-            .expect("cuMemFreeAsync dummy_vals failed");
+            .expect("cusparseDestroyDnVec x (analysis) failed");
+        // dummy_vals, dummy_b, dummy_x drop here — cubecl frees the device buffers.
+    }
 
-        CudaPatternCache {
-            handle,
-            d_crow,
-            d_col,
-            d_row_for_nnz,
-            sp_mat,
-            desc_forward,
-            desc_backward,
-            workspace_forward,
-            workspace_backward,
-            _not_send: PhantomData,
-        }
+    CudaPatternCache {
+        handle,
+        d_crow,
+        d_col,
+        d_row_for_nnz,
+        sp_mat,
+        desc_forward,
+        desc_backward,
+        workspace_forward,
+        workspace_backward,
+        _not_send: PhantomData,
     }
 }
 
@@ -1166,16 +1161,11 @@ where
         cusparseSetStream,
     };
 
-    // 1. Ensure FALLBACK_STREAM is initialised before build_cuda_pattern_cache.
-    //    build_cuda_pattern_cache still uses FALLBACK_STREAM for the one-time
-    //    crow/col upload (Task 7 will migrate this to cubecl Handles; until
-    //    then we must guarantee the stream exists before the first cache build).
-    //    cubecl_cuda_stream is idempotent after the first call.
-    cubecl_cuda_stream::<B>(device);
-
-    // 2. Lazy-build the pattern cache (one-time per CsrPattern).
-    // SAFETY: SP-6/SP-7 single-threaded training contract — no concurrent
-    // access to cuda_cache from multiple threads.
+    // 1. Lazy-build the pattern cache (one-time per CsrPattern).
+    //    Task 7: build_cuda_pattern_cache now uses cubecl Handles internally;
+    //    no FALLBACK_STREAM initialisation is needed before this call.
+    // SAFETY: SP-7 single-threaded training contract — no concurrent access to
+    // cuda_cache from multiple threads.
     let cache = unsafe { ensure_cuda_cache(pattern) };
 
     // 2. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
@@ -1231,12 +1221,15 @@ where
     unsafe {
         // 6a. Re-point sparse matrix descriptor at the current a_values.
         // SAFETY: a_view.ptr is the live device pointer of a_values_prim.
-        // cache.d_crow and cache.d_col are raw CUdeviceptr u64 values from SP-6;
-        // they remain raw until Task 7 migrates them to cubecl Handles.
+        // cache.d_crow and cache.d_col are cubecl Handles (Task 7); extract raw
+        // device pointers via handle_device_ptr. The Handles stay alive for the
+        // duration of this function through `cache` (borrowed for the whole call).
+        let crow_ptr = handle_device_ptr(&client, &cache.d_crow);
+        let col_ptr  = handle_device_ptr(&client, &cache.d_col);
         cudarc::cusparse::sys::cusparseCsrSetPointers(
             cache.sp_mat,
-            cache.d_crow as *mut std::ffi::c_void,
-            cache.d_col as *mut std::ffi::c_void,
+            crow_ptr as *mut std::ffi::c_void,
+            col_ptr as *mut std::ffi::c_void,
             a_view.ptr as *mut std::ffi::c_void,
         )
         .result()
