@@ -478,6 +478,7 @@ pub fn triangular_csr_solve<I: Backend + 'static>(
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
 {
     let a_at = match a_values.into_primitive() {
         TensorPrimitive::Float(p) => p,

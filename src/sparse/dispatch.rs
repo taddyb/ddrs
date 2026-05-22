@@ -63,6 +63,7 @@ pub(crate) fn forward_primitive<B: Backend + 'static>(
 ) -> (B::FloatTensorPrimitive, SavedX<B>)
 where
     B::FloatTensorPrimitive: 'static,
+    B::Device: 'static,
 {
     if effective_use_cuda::<B>(use_cuda) {
         // CUDA path: GPU solve via cuSPARSE.

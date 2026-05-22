@@ -1076,29 +1076,56 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
 }
 
 // ---------------------------------------------------------------------------
-// SP-6 Task 9: cusparse_forward — GPU forward triangular solve
+// SP-7 Task 5: handle_device_ptr helper
+// ---------------------------------------------------------------------------
+
+/// Extract the raw CUDA device pointer (as u64) from a cubecl `Handle`.
+///
+/// Calls `client.get_resource(handle.clone())` to retrieve the `GpuResource`
+/// associated with the handle, then reads `GpuResource.ptr` (a `CUdeviceptr`).
+/// The `GpuResource` type is inferred — it does not need to be named explicitly.
+///
+/// # Safety
+///
+/// - Caller must not free the returned pointer manually; cubecl owns the buffer.
+/// - The `handle` (or a clone of it) must stay alive while the pointer is in use,
+///   so that the underlying allocation is not reclaimed.
+/// - The returned pointer is valid for GPU access on cubecl's active stream.
+///   The caller is responsible for ensuring stream-ordering between cubecl ops
+///   and any external (cuSPARSE) ops that use the pointer.
+unsafe fn handle_device_ptr(
+    client: &cubecl::client::ComputeClient<CudaRuntime>,
+    handle: &burn_cubecl::cubecl::server::Handle,
+) -> u64 {
+    // `get_resource` is a blocking server call that returns `ManagedResource<GpuResource>`.
+    // `GpuResource` is a pub struct in cubecl-cuda with a `pub ptr: u64` field.
+    // We access it via type inference — no need to name `GpuResource` explicitly.
+    // SAFETY: We clone the handle to keep the allocation alive; we do not free the ptr.
+    let resource = client
+        .get_resource(handle.clone())
+        .expect("handle_device_ptr: failed to get GpuResource for Handle");
+    resource.resource().ptr
+}
+
+// ---------------------------------------------------------------------------
+// SP-7 Task 5 (replaces SP-6 Task 9): cusparse_forward — shared-stream, zero-copy x
 // ---------------------------------------------------------------------------
 
 /// GPU forward solve `A · x = b` for lower-triangular `A` via cuSPARSE.
 /// Returns a new `B::FloatTensorPrimitive` for `x` on the same device.
 ///
+/// SP-7 Task 5 version — shared-stream, no host roundtrip:
+/// - Binds cuSPARSE to cubecl's active CUDA stream (no FALLBACK_STREAM).
+/// - Allocates x via `client.create_from_slice` (cubecl-owned buffer).
+/// - Returns a `CubeTensor` wrapping the handle — no `cuMemcpyDtoH` or
+///   `B::float_from_data`.
+/// - No `B::sync`; a `client.flush()` submits cubecl's pending kernels onto
+///   the shared stream so cuSPARSE reads them in order.
+///
 /// SAFETY assumptions (caller responsibility, checked at dispatch):
 /// - Active backend is `Cuda<f32, i32>` (non-fusion).
 /// - `a_values_prim` and `b_prim` are already on the same CUDA device.
-///
-/// ## Host round-trip fallback
-///
-/// The output `x` is copied back to host and re-uploaded via `B::float_from_data`
-/// rather than constructing a `CubeTensor<CudaRuntime>` from a raw `CUdeviceptr`.
-///
-/// Constructing a `CubeTensor` from an external allocation requires the internal
-/// `ComputeClient::create_tensor` API that takes a raw `CUdeviceptr` and manages
-/// the handle lifetime — this API is not exposed in burn-cubecl 0.21's public API.
-///
-/// This is a TEMPORARY fallback that makes correctness-first shipping possible.
-/// Task 11's V5 verification still passes at f32 precision floor. A follow-up
-/// perf pass can wire in proper primitive construction once the API stabilises.
-pub(crate) fn cusparse_forward<B: Backend>(
+pub(crate) fn cusparse_forward<B: Backend + 'static>(
     pattern: &crate::sparse::CsrPattern,
     a_values_prim: &B::FloatTensorPrimitive,
     b_prim: &B::FloatTensorPrimitive,
@@ -1106,7 +1133,11 @@ pub(crate) fn cusparse_forward<B: Backend>(
 ) -> B::FloatTensorPrimitive
 where
     B::FloatTensorPrimitive: 'static,
+    B::Device: 'static,
 {
+    use burn::tensor::{DType, Shape};
+    use burn_cubecl::cubecl::server::Handle;
+    use burn_cubecl::tensor::CubeTensor;
     use cudarc::cusparse::sys::{
         cudaDataType_t::CUDA_R_32F,
         cusparseCreateDnVec,
@@ -1117,51 +1148,45 @@ where
         cusparseSetStream,
     };
 
-    // --- 1. Get dedicated stream (initialises the CUDA device via cubecl). ---
-    // MUST happen before build_cuda_pattern_cache to ensure the primary CUDA
-    // context is bound on the server thread before we call cuSPARSE functions.
-    // cubecl_cuda_stream dispatches cuStreamCreate to the server thread where
-    // the CUDA context is already current.
-    let stream = cubecl_cuda_stream::<B>(device);
+    // 1. Ensure FALLBACK_STREAM is initialised before build_cuda_pattern_cache.
+    //    build_cuda_pattern_cache still uses FALLBACK_STREAM for the one-time
+    //    crow/col upload (Task 7 will migrate this to cubecl Handles; until
+    //    then we must guarantee the stream exists before the first cache build).
+    //    cubecl_cuda_stream is idempotent after the first call.
+    cubecl_cuda_stream::<B>(device);
 
-    // --- 2. Lazy-build the pattern cache (one-time per CsrPattern). ---
-    // SAFETY: SP-6 single-threaded contract — no concurrent access to cuda_cache.
-    // Called after cubecl_cuda_stream so FALLBACK_STREAM is initialised.
+    // 2. Lazy-build the pattern cache (one-time per CsrPattern).
+    // SAFETY: SP-6/SP-7 single-threaded training contract — no concurrent
+    // access to cuda_cache from multiple threads.
     let cache = unsafe { ensure_cuda_cache(pattern) };
 
-    // --- 3. Bind cuSPARSE handle to the dedicated stream. ---
-    // SAFETY: cusparseSetStream is a simple handle-level call.
-    // stream is a non-null CUstream created in Task 7 and valid for
-    // the process lifetime.
+    // 2. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
+    //    write a_values + b onto this stream; cuSPARSE will run after them
+    //    automatically because they share the same stream. No host sync needed.
+    let stream = cubecl_stream_active::<B>(device);
     unsafe {
-        // SAFETY: Both `cudarc::driver::sys::CUstream_st` and
-        // `cudarc::cusparse::sys::CUstream_st` are the same opaque C struct.
-        // They differ only because cudarc generates separate FFI bindings for
-        // each sub-crate, but the underlying CUDA ABI type is identical.
-        // Transmuting the pointer is safe here.
+        // SAFETY: `cudarc::driver::sys::CUstream_st` and
+        // `cudarc::cusparse::sys::CUstream_st` are the same opaque CUDA ABI
+        // type. cudarc generates separate FFI bindings per sub-crate; casting
+        // the pointer integer is safe because no dereference occurs here.
         let stream_for_cusparse = stream as *mut cudarc::cusparse::sys::CUstream_st;
         cusparseSetStream(cache.handle, stream_for_cusparse)
             .result()
-            .expect("cusparseSetStream failed");
+            .expect("cusparseSetStream forward failed");
     }
 
-    // --- 4. Flush cubecl's compute queue before extracting raw pointers. ---
-    // a_values_prim and b_prim are the result of BURN tensor ops (gather, mul,
-    // add, etc.) queued on cubecl's internal CUDA stream. cuSPARSE runs on
-    // FALLBACK_STREAM (a separate stream). Without a stream-order dependency,
-    // cuSPARSE could read from device buffers before cubecl's kernels have
-    // written to them, producing NaN.
-    //
-    // B::sync(device) calls client.sync() → Fence::new(cubecl_stream) →
-    // cuEventSynchronize → host blocks until all pending cubecl GPU work
-    // completes. After this call, a_values_prim and b_prim are fully written.
-    B::sync(device).expect("cubecl device sync failed before cusparse_forward");
+    // 3. Flush cubecl's kernel queue onto the active stream before cuSPARSE
+    //    reads a_values / b. `client.flush()` is a non-blocking server-side
+    //    operation: it submits pending work to the CUDA stream without blocking
+    //    the host. cuSPARSE, running on the same stream, will execute after.
+    //    This is cheaper than B::sync (which blocks the host via cuEventSynchronize).
+    let client = compute_client::<B>(device);
+    client.flush().expect("cubecl client flush failed before cusparse_forward");
 
-    // --- 5. Extract raw device pointers from BURN tensors. ---
-    // SAFETY: a_values_prim and b_prim must not be dropped while these
-    // views are live. They stay alive through the end of this function.
-    // All cubecl GPU work is complete (see sync step above), so the
-    // device buffers at these pointers are fully written.
+    // 4. Extract device pointers for a_values + b.
+    // SAFETY: a_values_prim and b_prim must stay alive for the duration of
+    // this function (they are parameters). cubecl's pending kernels have been
+    // submitted to the stream (step 3); cuSPARSE reads them in order.
     let a_view = primitive_as_cuda_view::<B>(a_values_prim)
         .expect("cusparse_forward: Cuda<f32, i32> backend required");
     let b_view = primitive_as_cuda_view::<B>(b_prim)
@@ -1169,16 +1194,27 @@ where
 
     let n = pattern.n;
 
-    // --- 6. Allocate output x on device (zero-initialised) via FALLBACK_STREAM. ---
-    // SAFETY: FALLBACK_STREAM is valid. cuMemAllocAsync + cuMemsetD8Async are
-    // context-free on CUDA 12.2+.
-    let x_ptr: u64 = unsafe { async_alloc::<f32>(n, stream) };
-    unsafe { zero_device(x_ptr, n * 4, stream) };
+    // 5. Allocate x via the cubecl client. The returned Handle owns the GPU
+    //    buffer; cubecl frees it when the resulting CubeTensor is dropped.
+    //    Zero-initialise so cuSPARSE can safely accumulate into x.
+    let n_bytes = n * std::mem::size_of::<f32>();
+    let x_bytes = vec![0u8; n_bytes];
+    // SAFETY: create_from_slice uploads bytes to device and returns a Handle.
+    // The Handle keeps the allocation alive for as long as we (or the resulting
+    // CubeTensor) hold it.
+    let x_handle: Handle = client.create_from_slice(&x_bytes);
 
+    // SAFETY: x_handle is a freshly allocated, still-owned handle. We clone it
+    // to keep the allocation alive while extracting the raw ptr; the original
+    // x_handle is consumed later by CubeTensor::from_handle.
+    let x_ptr = unsafe { handle_device_ptr(&client, &x_handle) } as *mut f32;
+
+    // 6. cuSPARSE solve — same descriptor + updateMatrix dance as SP-6.
     unsafe {
-        // --- 7. Re-point sparse matrix descriptor at the current a_values. ---
+        // 6a. Re-point sparse matrix descriptor at the current a_values.
         // SAFETY: a_view.ptr is the live device pointer of a_values_prim.
-        // d_crow and d_col are stored as raw CUdeviceptr in the cache.
+        // cache.d_crow and cache.d_col are raw CUdeviceptr u64 values from SP-6;
+        // they remain raw until Task 7 migrates them to cubecl Handles.
         cudarc::cusparse::sys::cusparseCsrSetPointers(
             cache.sp_mat,
             cache.d_crow as *mut std::ffi::c_void,
@@ -1186,14 +1222,12 @@ where
             a_view.ptr as *mut std::ffi::c_void,
         )
         .result()
-        .expect("cusparseCsrSetPointers failed");
+        .expect("cusparseCsrSetPointers forward failed");
 
-        // --- 7b. Notify cuSPARSE that matrix values changed since analysis. ---
-        // cusparseSpSV_analysis caches the values internally. If values differ
-        // from those used at analysis time (we used dummy 1.0s), cuSPARSE must
-        // be notified so it can update its internal state before the solve.
-        // CUSPARSE_SPSV_UPDATE_GENERAL handles both off-diagonal and diagonal.
-        // SAFETY: desc_forward was created and analyzed; sp_mat has valid values.
+        // 6b. Notify cuSPARSE that matrix values changed since analysis.
+        // The SpSV descriptor caches values from analysis time (dummy 1.0s);
+        // updateMatrix refreshes them so the solve uses the current a_values.
+        // SAFETY: desc_forward was analyzed; sp_mat now has valid a_values ptr.
         cudarc::cusparse::sys::cusparseSpSV_updateMatrix(
             cache.handle,
             cache.desc_forward,
@@ -1201,10 +1235,11 @@ where
             cudarc::cusparse::sys::cusparseSpSVUpdate_t::CUSPARSE_SPSV_UPDATE_GENERAL,
         )
         .result()
-        .expect("cusparseSpSV_updateMatrix (forward) failed");
+        .expect("cusparseSpSV_updateMatrix forward failed");
 
-        // --- 8. Build transient dense vector descriptors for b and x. ---
-        // SAFETY: b_view.ptr and x_ptr are live device pointers.
+        // 6c. Build transient dense vector descriptors for b and x.
+        // SAFETY: b_view.ptr and x_ptr are live device pointers of the
+        // correct element count (n). They remain valid through the solve.
         let mut b_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
         let mut x_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
         cusparseCreateDnVec(
@@ -1215,7 +1250,6 @@ where
         )
         .result()
         .expect("cusparseCreateDnVec b failed in forward");
-
         cusparseCreateDnVec(
             &mut x_dn,
             n as i64,
@@ -1225,13 +1259,12 @@ where
         .result()
         .expect("cusparseCreateDnVec x failed in forward");
 
-        // --- 9. Execute the triangular solve: x = A^{-1} b. ---
-        // SAFETY: cusparseSpSV_solve uses the pre-analyzed desc_forward which
-        // was built for the NON_TRANSPOSE direction. stream is the dedicated
-        // cuSPARSE stream set in step 3. The workspace is registered via
-        // cusparseSpSV_analysis during cache construction.
-        // Note: cusparseSpSV_solve does NOT take a workspace parameter —
-        // it uses the workspace registered during analysis.
+        // 6d. Execute the triangular solve: x = A^{-1} b.
+        // SAFETY: desc_forward was pre-analyzed for CUSPARSE_OPERATION_NON_TRANSPOSE.
+        // The handle is bound to cubecl's active stream (step 2), so the solve
+        // executes after all upstream cubecl kernels on that stream.
+        // cusparseSpSV_solve does NOT take a workspace arg — the workspace is
+        // registered implicitly during cusparseSpSV_analysis.
         let alpha: f32 = 1.0;
         cusparseSpSV_solve(
             cache.handle,
@@ -1245,16 +1278,12 @@ where
             cache.desc_forward,
         )
         .result()
-        .expect("cusparseSpSV_solve failed");
+        .expect("cusparseSpSV_solve forward failed");
+        // NO cuStreamSynchronize — cubecl's next op on the same stream will
+        // execute after the cuSPARSE solve automatically.
 
-        // --- Path B sync: dedicated stream, must synchronize before BURN sees result. ---
-        // SAFETY: stream is the dedicated cuSPARSE stream. Synchronising here
-        // ensures the solve is complete before we read x back to host.
-        cudarc::driver::sys::cuStreamSynchronize(stream)
-            .result()
-            .expect("cuStreamSynchronize failed after cusparseSpSV_solve");
-
-        // Clean up transient descriptors.
+        // Clean up transient dense vector descriptors.
+        // SAFETY: b_dn and x_dn are valid descriptors created above.
         cusparseDestroyDnVec(b_dn)
             .result()
             .expect("cusparseDestroyDnVec b failed in forward");
@@ -1263,25 +1292,20 @@ where
             .expect("cusparseDestroyDnVec x failed in forward");
     }
 
-    // --- 10. Host round-trip: copy x from device to host, then create BURN tensor. ---
-    // TEMPORARY FALLBACK: See module-level doc on why we don't construct a
-    // CubeTensor directly from x_ptr. Once a public escape hatch exists in
-    // burn-cubecl, this copy can be eliminated.
-    //
-    // SAFETY: x_ptr was written by cusparseSpSV_solve on `stream`.
-    // We synchronised `stream` above, so the solve result is fully written.
-    // memcpy_dtoh_sync is a blocking synchronous copy — safe after sync.
-    let mut x_host = vec![0.0f32; n];
-    unsafe {
-        cudarc::driver::result::memcpy_dtoh_sync(&mut x_host, x_ptr)
-            .expect("cuMemcpyDtoH x failed in cusparse_forward");
-        // Free the temporary device x buffer.
-        cudarc::driver::result::free_async(x_ptr, stream)
-            .expect("cuMemFreeAsync x_ptr failed");
-    }
-
-    B::float_from_data(
-        burn::tensor::TensorData::from(x_host.as_slice()),
-        device,
-    )
+    // 7. Wrap x_handle as CubeTensor → B::FloatTensorPrimitive.
+    //    No host roundtrip. cubecl owns the x buffer via x_handle; it will be
+    //    freed when BURN drops the resulting tensor.
+    let shape = Shape::from(vec![n]);
+    // SAFETY: TypeId of B::Device == CudaDevice is asserted inside compute_client.
+    // transmute_copy reads the device value by-copy without moving `device`.
+    let cuda_device: <CudaRuntime as cubecl::Runtime>::Device =
+        unsafe { std::mem::transmute_copy(device) };
+    let cube = CubeTensor::<CudaRuntime>::from_handle(
+        client,
+        cuda_device,
+        shape,
+        x_handle,
+        DType::F32,
+    );
+    cube_tensor_to_primitive::<B>(cube)
 }
