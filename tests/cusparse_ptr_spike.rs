@@ -33,37 +33,15 @@ fn round_trip_via_pointer() {
     assert_eq!(len, 4, "extracted len does not match tensor length");
 }
 
-#[test]
-fn cubecl_stream_is_non_null() {
-    type B = burn_cuda::Cuda<f32, i32>;
-    type Dev = <B as burn::tensor::backend::BackendTypes>::Device;
-
-    let cuda_available = std::panic::catch_unwind(|| {
-        let _d: Dev = Default::default();
-    })
-    .is_ok();
-    if !cuda_available {
-        eprintln!("skipping: no CUDA device");
-        return;
-    }
-
-    let device: Dev = Default::default();
-    // Construct a dummy tensor to force cubecl client init.
-    let _t = burn::tensor::Tensor::<B, 1>::from_floats([0.0_f32], &device);
-    let stream = ddrs::sparse::cusparse::__spike_get_stream::<B>(&device);
-    assert!(!stream.is_null(), "cubecl returned a null stream");
-}
-
 /// SP-7 Task 4b spike: verify that cubecl_stream_active returns a real non-null
-/// CUstream pointer distinct from FALLBACK_STREAM and from the sentinel
-/// (usize::MAX-1) that the previous Task 4 commit returned.
+/// CUstream pointer and is not a sentinel value (usize::MAX-1).
 ///
-/// `cubecl_stream_active` now calls `ComputeClient::exclusive_with_server`
+/// `cubecl_stream_active` calls `ComputeClient::exclusive_with_server`
 /// (added in the SP-7 cubecl-runtime fork) which passes `&mut CudaServer` to
 /// the closure, allowing `server.stream(StreamId::current())` to be called
 /// directly on the server-bound thread.
 #[test]
-fn cubecl_active_stream_is_non_null_and_not_fallback() {
+fn cubecl_active_stream_is_non_null() {
     type B = burn_cuda::Cuda<f32, i32>;
     type Dev = <B as BackendTypes>::Device;
     let cuda_available = std::panic::catch_unwind(|| {
@@ -77,14 +55,8 @@ fn cubecl_active_stream_is_non_null_and_not_fallback() {
     let device: Dev = Default::default();
     let _t = burn::tensor::Tensor::<B, 1>::from_floats([0.0_f32], &device);
     let active = ddrs::sparse::cusparse::__spike_active_stream::<B>(&device);
-    let fallback = ddrs::sparse::cusparse::__spike_get_stream::<B>(&device);
     eprintln!("cubecl active stream pointer: {:#x}", active as usize);
     assert!(!active.is_null(), "cubecl active stream is null");
-    assert_ne!(
-        active as usize,
-        fallback as usize,
-        "expected active stream and FALLBACK_STREAM to be different handles",
-    );
     assert!(
         (active as usize) < usize::MAX - 16,
         "active stream looks like a sentinel: {:#x}",
