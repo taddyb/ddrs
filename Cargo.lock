@@ -956,7 +956,6 @@ dependencies = [
 [[package]]
 name = "burn-autodiff"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "burn-std",
@@ -972,7 +971,6 @@ dependencies = [
 [[package]]
 name = "burn-backend"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-std",
  "bytemuck",
@@ -1004,7 +1002,6 @@ dependencies = [
 [[package]]
 name = "burn-core"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "ahash",
  "bincode",
@@ -1043,7 +1040,6 @@ dependencies = [
 [[package]]
 name = "burn-cubecl"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "burn-cubecl-fusion",
@@ -1062,7 +1058,6 @@ dependencies = [
 [[package]]
 name = "burn-cubecl-fusion"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "burn-fusion",
@@ -1079,7 +1074,6 @@ dependencies = [
 [[package]]
 name = "burn-cuda"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "burn-cubecl",
@@ -1089,7 +1083,6 @@ dependencies = [
 [[package]]
 name = "burn-derive"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "derive-new",
  "proc-macro2",
@@ -1134,7 +1127,6 @@ dependencies = [
 [[package]]
 name = "burn-fusion"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "burn-ir",
@@ -1151,7 +1143,6 @@ dependencies = [
 [[package]]
 name = "burn-ir"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "hashbrown 0.16.1",
@@ -1161,7 +1152,6 @@ dependencies = [
 [[package]]
 name = "burn-ndarray"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "atomic_float",
  "burn-autodiff",
@@ -1183,7 +1173,6 @@ dependencies = [
 [[package]]
 name = "burn-nn"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-core",
  "num-traits",
@@ -1192,7 +1181,6 @@ dependencies = [
 [[package]]
 name = "burn-optim"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-core",
  "derive-new",
@@ -1230,7 +1218,6 @@ dependencies = [
 [[package]]
 name = "burn-std"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -1279,7 +1266,6 @@ dependencies = [
 [[package]]
 name = "burn-tensor"
 version = "0.21.0"
-source = "git+https://github.com/taddyb/burn?branch=ddrs-sp7-primitive-ctor#a033dc80727ab7b4edf9e7918e9bce0a1e5931ac"
 dependencies = [
  "burn-backend",
  "burn-std",
@@ -1946,7 +1932,6 @@ dependencies = [
 [[package]]
 name = "cubecl"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "cubecl-core",
  "cubecl-cpu",
@@ -1962,7 +1947,6 @@ dependencies = [
 [[package]]
 name = "cubecl-common"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "backtrace",
  "bytemuck",
@@ -2003,7 +1987,6 @@ dependencies = [
 [[package]]
 name = "cubecl-core"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
@@ -2030,7 +2013,6 @@ dependencies = [
 [[package]]
 name = "cubecl-cpp"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2046,7 +2028,6 @@ dependencies = [
 [[package]]
 name = "cubecl-cpu"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2067,7 +2048,6 @@ dependencies = [
 [[package]]
 name = "cubecl-cuda"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2085,7 +2065,6 @@ dependencies = [
 [[package]]
 name = "cubecl-hip"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2114,7 +2093,6 @@ dependencies = [
 [[package]]
 name = "cubecl-ir"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "cubecl-common",
  "cubecl-macros-internal",
@@ -2135,7 +2113,6 @@ dependencies = [
 [[package]]
 name = "cubecl-macros"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "cubecl-common",
  "darling 0.23.0",
@@ -2151,7 +2128,6 @@ dependencies = [
 [[package]]
 name = "cubecl-macros-internal"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -2162,7 +2138,6 @@ dependencies = [
 [[package]]
 name = "cubecl-opt"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "cubecl-common",
  "cubecl-core",
@@ -2179,7 +2154,6 @@ dependencies = [
 [[package]]
 name = "cubecl-runtime"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "ahash",
  "async-channel",
@@ -2209,7 +2183,6 @@ dependencies = [
 [[package]]
 name = "cubecl-std"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "cubecl-common",
  "cubecl-core",
@@ -2225,7 +2198,6 @@ dependencies = [
 [[package]]
 name = "cubecl-wgpu"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "async-channel",
  "bytemuck",
@@ -2249,7 +2221,6 @@ dependencies = [
 [[package]]
 name = "cubecl-zspace"
 version = "0.10.0"
-source = "git+https://github.com/taddyb/cubecl?branch=ddrs-sp7-stream-accessor#7dd53ba825cfac62e2d79826fe7a71f10eba7f46"
 dependencies = [
  "derive-new",
  "serde",
@@ -3851,7 +3822,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5504,7 +5475,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5542,7 +5513,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]

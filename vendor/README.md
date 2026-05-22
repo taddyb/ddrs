@@ -10,10 +10,20 @@ accessors that are `pub(crate)` on crates.io today:
 
 ## Forks
 
-- cubecl: `taddyb/cubecl` branch `ddrs-sp7-stream-accessor`
-  - Forked from upstream commit `7cf203735e095e640a2c03b2400d0faa03196bb4` (= tag `v0.10.0`).
-- burn: `taddyb/burn` branch `ddrs-sp7-primitive-ctor`
-  - Forked from upstream commit `546cacb55fe00168854d19bdf0a5d79bd8060e03` (= tag `v0.21.0`).
+The fork branches live on github.com/taddyb but ddrs patches against
+**local clones** for the local development workflow:
+
+- cubecl: `~/projects/cubecl` (origin = `taddyb/cubecl`, on branch
+  `ddrs-sp7-stream-accessor`, based on upstream commit
+  `7cf203735e095e640a2c03b2400d0faa03196bb4` = tag `v0.10.0`).
+- burn: `~/projects/burn` (origin = `taddyb/burn`, on branch
+  `ddrs-sp7-primitive-ctor`, based on upstream commit
+  `546cacb55fe00168854d19bdf0a5d79bd8060e03` = tag `v0.21.0`).
+
+Keep the local clones on their SP-7 patch branches. If you need to push
+new commits, do so on the local branch and push to origin; ddrs's
+`Cargo.toml` `[patch.crates-io]` points at the local paths so changes
+take effect on next `cargo build` without a `cargo update`.
 
 ## Diffs
 
