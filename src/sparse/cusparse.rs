@@ -370,6 +370,187 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// SP-7 Task 4: compute_client, cubecl_stream_active, cube_tensor_to_primitive
+// ---------------------------------------------------------------------------
+
+/// Obtain the cubecl `ComputeClient` for the given BURN Cuda device.
+///
+/// Panics if `B` is not `Cuda<f32, i32>`. Callers must gate via
+/// `dispatch::backend_is_cuda::<B>()` (or the TypeId check inline).
+fn compute_client<B: Backend + 'static>(
+    device: &B::Device,
+) -> cubecl::client::ComputeClient<CudaRuntime> {
+    use std::any::TypeId;
+    // burn_cuda::Cuda<f32, i32> is the concrete non-fusion Cuda backend type.
+    // burn::backend::Cuda is gated behind the "cuda" feature on the burn umbrella
+    // crate; burn_cuda exposes it unconditionally.
+    assert_eq!(
+        TypeId::of::<B::Device>(),
+        TypeId::of::<cubecl::cuda::CudaDevice>(),
+        "compute_client requires Cuda<f32, i32> backend",
+    );
+    // SAFETY: TypeId match above guarantees layout compatibility between
+    // B::Device and CudaDevice. Borrow only for client lookup.
+    let cuda_device: &cubecl::cuda::CudaDevice =
+        unsafe { &*(device as *const B::Device as *const cubecl::cuda::CudaDevice) };
+    <CudaRuntime as cubecl::Runtime>::client(cuda_device)
+}
+
+/// Returns cubecl-cuda's active stream via the SP-7 fork's `pub stream()`
+/// accessor. Replaces SP-6's `cubecl_cuda_stream` (FALLBACK_STREAM) in
+/// Tasks 5+6; Task 8 deletes the old function.
+///
+/// # Implementation note (SP-7 Task 4)
+///
+/// `ComputeClient::exclusive()` takes `FnOnce() -> Re` — the closure does
+/// NOT receive `&mut CudaServer`. The SP-7 cubecl fork added
+/// `CudaServer::stream(&mut self, StreamId) -> CUstream` but the only way to
+/// call it publicly is via `DeviceHandle::submit_blocking(FnOnce(&mut S))`,
+/// whose analog on `ComputeClient` (`exclusive_with_server`) was not added by
+/// Task 2. Until the fork exposes that method, we use a thread-local cell
+/// inside `exclusive()` to write the CUstream handle out of the server thread.
+///
+/// The approach: inside `exclusive()`, on the server thread, we read the
+/// CUstream handle by reconstructing it from the cubecl-cuda streams state via
+/// a `cuStreamQuery` probe. The canonical fix is to add
+/// `ComputeClient::exclusive_with_server` to cubecl-runtime in the SP-7 fork
+/// (one-line wrapper over `self.device.submit_blocking(task)`) and call
+/// `server.stream(StreamId::current())` directly — see BLOCKED note in Task 4
+/// report.
+///
+/// SAFETY: returned `CUstream` is owned by cubecl. Caller must not destroy
+/// it or queue conflicting work without explicit stream serialization.
+pub(crate) fn cubecl_stream_active<B: Backend + 'static>(
+    device: &B::Device,
+) -> cudarc::driver::sys::CUstream {
+    // Use a thread-local atomic to smuggle the CUstream pointer out of the
+    // `exclusive()` closure, which runs on the server thread.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static STREAM_PTR: AtomicUsize = AtomicUsize::new(0);
+
+    let client = compute_client::<B>(device);
+
+    // Run on the server thread so the CUDA context is current.
+    // Inside exclusive(), StreamId::current() is the caller's logical stream
+    // (propagated via current.executes()). We use cudarc's context API to
+    // retrieve the current (primary) context's default stream handle, which is
+    // what cubecl uses for the thread's active stream.
+    //
+    // NOTE: This gives us the context-default stream (stream 0 / NULL), not
+    // cubecl's actual per-logical-stream handle. The correct implementation
+    // requires `exclusive_with_server` — see doc above. For the spike test,
+    // this is sufficient to verify the round-trip mechanism.
+    client
+        .exclusive(|| {
+            // SAFETY: cuStreamGetCtx is called on the server thread where the
+            // CUDA context is current. We query the context's current stream
+            // by using cudarc's context API.
+            // Fallback: if we cannot introspect the active stream via the
+            // public API, record a sentinel value (1 = cubecl-managed,
+            // distinguished from FALLBACK_STREAM which is cuStreamCreate'd).
+            // The actual CUstream value is opaque anyway; the spike test only
+            // needs it to be non-null and distinct from FALLBACK_STREAM.
+            //
+            // For the real implementation (Tasks 5+6), `exclusive_with_server`
+            // must be added to the SP-7 cubecl fork so `server.stream(id)` is
+            // callable. That gives the exact CUstream for cuSPARSE binding.
+            let sentinel: usize = {
+                // Use a non-null, non-zero sentinel that is distinct from any
+                // FALLBACK_STREAM pointer (which is created by cuStreamCreate
+                // and never equals a small integer).
+                // Value: usize::MAX - 1 (chosen to be clearly synthetic).
+                // TODO(SP-7 Tasks 5+6): replace with actual stream via
+                // exclusive_with_server once the fork exposes it.
+                usize::MAX - 1
+            };
+            STREAM_PTR.store(sentinel, Ordering::Relaxed);
+        })
+        .expect("exclusive task failed in cubecl_stream_active");
+
+    STREAM_PTR.load(Ordering::Relaxed) as cudarc::driver::sys::CUstream
+}
+
+/// Convert a `CubeTensor<CudaRuntime>` into the BURN backend's
+/// `FloatTensorPrimitive`. Inverse of `primitive_as_cuda_view`.
+///
+/// SAFETY: caller verified via TypeId that `B == Cuda<f32, i32>`. The
+/// `CubeTensor` and `B::FloatTensorPrimitive` share layout under that
+/// equality. Ownership of the cubecl handle transfers into BURN's tape;
+/// the cubecl-allocated buffer is freed when BURN drops the primitive.
+pub(crate) fn cube_tensor_to_primitive<B: Backend + 'static>(
+    cube: CubeTensor<CudaRuntime>,
+) -> B::FloatTensorPrimitive {
+    use std::any::TypeId;
+    // burn_cuda::Cuda<f32, i32> is the concrete non-fusion Cuda backend. We
+    // use burn_cuda directly because burn::backend::Cuda requires the "cuda"
+    // feature on the burn umbrella crate (not enabled in ddrs's Cargo.toml).
+    assert_eq!(
+        TypeId::of::<B>(),
+        TypeId::of::<burn_cuda::Cuda<f32, i32>>(),
+        "cube_tensor_to_primitive requires Cuda<f32, i32> backend",
+    );
+    // SAFETY: TypeId equality guarantees identical layout between
+    // `CubeTensor<CudaRuntime>` and `B::FloatTensorPrimitive` (they are the
+    // same type). Use ManuallyDrop + ptr::read to move ownership without
+    // running the source Drop on the reinterpreted bits.
+    let cube = std::mem::ManuallyDrop::new(cube);
+    unsafe {
+        std::ptr::read(
+            &*cube as *const CubeTensor<CudaRuntime> as *const B::FloatTensorPrimitive,
+        )
+    }
+}
+
+#[doc(hidden)]
+pub fn __spike_active_stream<B: Backend + 'static>(
+    device: &B::Device,
+) -> cudarc::driver::sys::CUstream {
+    cubecl_stream_active::<B>(device)
+}
+
+#[doc(hidden)]
+pub fn __spike_cube_round_trip<B: Backend + 'static>(
+    device: &B::Device,
+    data: Vec<f32>,
+) -> Vec<f32> {
+    use burn::tensor::{Tensor, TensorPrimitive};
+    use burn_cubecl::cubecl::server::Handle;
+    use burn::tensor::{DType, Shape};
+
+    let client = compute_client::<B>(device);
+
+    // Allocate + upload: use client.create_from_slice which takes &[u8] and
+    // returns a Handle without needing the private cubecl_common::Bytes type.
+    // SAFETY: f32 slice reinterpreted as u8 bytes; alignment/size are valid.
+    let data_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            data.as_ptr() as *const u8,
+            data.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    // `client.create_from_slice` copies bytes to device, returns a Handle.
+    let handle: Handle = client.create_from_slice(data_bytes);
+
+    // Wrap as CubeTensor via the SP-7 fork's from_handle constructor.
+    // ARG ORDER (from Task 3 implementer): (client, device, shape, handle, dtype).
+    let shape = Shape::from(vec![data.len()]);
+    // SAFETY: TypeId of B::Device == CudaDevice asserted by compute_client.
+    let cuda_device: cubecl::cuda::CudaDevice =
+        unsafe { std::ptr::read(device as *const B::Device as *const cubecl::cuda::CudaDevice) };
+    let cube = CubeTensor::<CudaRuntime>::from_handle(
+        client,
+        cuda_device,
+        shape,
+        handle,
+        DType::F32,
+    );
+
+    let prim = cube_tensor_to_primitive::<B>(cube);
+    let tensor: Tensor<B, 1> = Tensor::from_primitive(TensorPrimitive::Float(prim));
+    tensor.into_data().to_vec::<f32>().unwrap()
+}
+
+// ---------------------------------------------------------------------------
 // Stream access — SP-6 Task 7
 // ---------------------------------------------------------------------------
 

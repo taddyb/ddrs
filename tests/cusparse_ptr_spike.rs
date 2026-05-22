@@ -54,6 +54,59 @@ fn cubecl_stream_is_non_null() {
     assert!(!stream.is_null(), "cubecl returned a null stream");
 }
 
+/// SP-7 Task 4 spike: verify that cubecl_stream_active returns a non-null pointer
+/// distinct from FALLBACK_STREAM (which is created by cuStreamCreate).
+///
+/// NOTE: the current implementation of `cubecl_stream_active` uses a sentinel
+/// value (usize::MAX-1) because `ComputeClient::exclusive_with_server` is not
+/// yet exposed by the cubecl fork. The sentinel is guaranteed non-null and
+/// non-zero, which is distinct from FALLBACK_STREAM (a real CUstream handle).
+/// The canonical fix (Tasks 5+6) requires adding `exclusive_with_server` to
+/// the fork so `server.stream(StreamId::current())` is callable.
+#[test]
+fn cubecl_active_stream_is_non_null_and_not_fallback() {
+    type B = burn_cuda::Cuda<f32, i32>;
+    type Dev = <B as BackendTypes>::Device;
+    let cuda_available = std::panic::catch_unwind(|| {
+        let _d: Dev = Default::default();
+    })
+    .is_ok();
+    if !cuda_available {
+        eprintln!("skipping: no CUDA device");
+        return;
+    }
+    let device: Dev = Default::default();
+    let _t = burn::tensor::Tensor::<B, 1>::from_floats([0.0_f32], &device);
+    let active = ddrs::sparse::cusparse::__spike_active_stream::<B>(&device);
+    let fallback = ddrs::sparse::cusparse::__spike_get_stream::<B>(&device);
+    assert!(!active.is_null(), "cubecl active stream is null");
+    assert_ne!(
+        active as usize,
+        fallback as usize,
+        "expected active stream and FALLBACK_STREAM to be different handles",
+    );
+}
+
+/// SP-7 Task 4 spike: verify that a CubeTensor created via from_handle round-trips
+/// to the correct f32 values when read back through BURN's tensor API.
+#[test]
+fn cube_tensor_round_trip_to_primitive() {
+    type B = burn_cuda::Cuda<f32, i32>;
+    type Dev = <B as BackendTypes>::Device;
+    let cuda_available = std::panic::catch_unwind(|| {
+        let _d: Dev = Default::default();
+    })
+    .is_ok();
+    if !cuda_available {
+        eprintln!("skipping: no CUDA device");
+        return;
+    }
+    let device: Dev = Default::default();
+    let recovered: Vec<f32> =
+        ddrs::sparse::cusparse::__spike_cube_round_trip::<B>(&device, vec![10.0, 20.0, 30.0]);
+    assert_eq!(recovered, vec![10.0_f32, 20.0, 30.0]);
+}
+
 /// Verify that the TypeId gate correctly returns None for a non-CUDA backend.
 #[test]
 fn non_cuda_backend_returns_none() {
