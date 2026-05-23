@@ -644,18 +644,21 @@ pub fn assemble_primitive<I: Backend>(
     }
 }
 
-/// Primitive-level SpMV `i_t = N · q` on inner backend `I`.
-///
-/// `q_prim` is shape `[n]`; result is shape `[n]`.
-pub fn spmv_primitive<I: Backend>(
+// ---------------------------------------------------------------------------
+// SP-9 Task 8: CPU fallbacks (verbatim copies of the previous helper bodies)
+// ---------------------------------------------------------------------------
+
+/// SP-9 CPU fallback: forward SpMV via Tensor::scatter (the previous
+/// implementation, now reused only when use_cuda=false or backend is not Cuda).
+pub(crate) fn cpu_spmv_forward<I: Backend>(
     pattern: &CsrPattern,
-    q_prim: I::FloatTensorPrimitive,
+    q_prim: &I::FloatTensorPrimitive,
     device: &I::Device,
 ) -> I::FloatTensorPrimitive {
     let row_idx = tensor_from_pattern_i32::<I>(&pattern.row_for_nnz, device);
     let col_idx = tensor_from_pattern_i32::<I>(&pattern.col, device);
     let adj = tensor_from_pattern_f32::<I>(&pattern.adj_values, device);
-    let q: Tensor<I, 1> = Tensor::from_primitive(TensorPrimitive::Float(q_prim));
+    let q: Tensor<I, 1> = Tensor::from_primitive(TensorPrimitive::Float(q_prim.clone()));
 
     let q_at_cols = q.gather(0, col_idx);
     let weighted = q_at_cols * adj;
@@ -667,20 +670,16 @@ pub fn spmv_primitive<I: Backend>(
     }
 }
 
-/// Backward of `assemble_primitive`: given `gA_values` of shape `[nnz]`,
-/// returns `gc` of shape `[n]` where
-/// `gc[i] = -sum_{k: row[k]==i} (gA[k] * adj[k])`.
-///
-/// Inner-backend scatter — no autograd participation.
-pub fn assemble_backward_primitive<I: Backend>(
+/// SP-9 CPU fallback: backward of assemble_primitive via Tensor::scatter.
+pub(crate) fn cpu_assemble_backward<I: Backend>(
     pattern: &CsrPattern,
-    g_a_values_prim: I::FloatTensorPrimitive,
+    g_a_values_prim: &I::FloatTensorPrimitive,
     device: &I::Device,
 ) -> I::FloatTensorPrimitive {
     let row_idx = tensor_from_pattern_i32::<I>(&pattern.row_for_nnz, device);
     let adj = tensor_from_pattern_f32::<I>(&pattern.adj_values, device);
     let g_a: Tensor<I, 1> =
-        Tensor::from_primitive(TensorPrimitive::Float(g_a_values_prim));
+        Tensor::from_primitive(TensorPrimitive::Float(g_a_values_prim.clone()));
 
     let weighted = g_a * adj;
     let zeros: Tensor<I, 1> = Tensor::zeros([pattern.n], device);
@@ -692,19 +691,17 @@ pub fn assemble_backward_primitive<I: Backend>(
     }
 }
 
-/// Backward of `spmv_primitive`: given `gi_t` of shape `[n]`, returns
-/// `gq_t = N^T · gi_t` of shape `[n]`. Computes
-/// `gq[col[k]] += adj[k] * gi[row[k]]`.
-pub fn spmv_backward_primitive<I: Backend>(
+/// SP-9 CPU fallback: backward SpMV `gq = N^T · gi` via Tensor::scatter.
+pub(crate) fn cpu_spmv_backward<I: Backend>(
     pattern: &CsrPattern,
-    g_i_t_prim: I::FloatTensorPrimitive,
+    g_i_t_prim: &I::FloatTensorPrimitive,
     device: &I::Device,
 ) -> I::FloatTensorPrimitive {
     let row_idx = tensor_from_pattern_i32::<I>(&pattern.row_for_nnz, device);
     let col_idx = tensor_from_pattern_i32::<I>(&pattern.col, device);
     let adj = tensor_from_pattern_f32::<I>(&pattern.adj_values, device);
     let g_i: Tensor<I, 1> =
-        Tensor::from_primitive(TensorPrimitive::Float(g_i_t_prim));
+        Tensor::from_primitive(TensorPrimitive::Float(g_i_t_prim.clone()));
 
     let g_i_at_rows = g_i.gather(0, row_idx);
     let weighted = g_i_at_rows * adj;
@@ -714,4 +711,58 @@ pub fn spmv_backward_primitive<I: Backend>(
         TensorPrimitive::Float(p) => p,
         _ => unreachable!(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// SP-9 Task 8: thin dispatcher wrappers (replace previous direct impls)
+// ---------------------------------------------------------------------------
+
+/// Primitive-level SpMV `i_t = N · q` on inner backend `I`.
+///
+/// `q_prim` is shape `[n]`; result is shape `[n]`.
+pub fn spmv_primitive<I: Backend + 'static>(
+    pattern: &std::sync::Arc<CsrPattern>,
+    q_prim: I::FloatTensorPrimitive,
+    device: &I::Device,
+    use_cuda: bool,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    crate::sparse::dispatch::spmv_forward_dispatch::<I>(pattern, &q_prim, device, use_cuda)
+}
+
+/// Backward of `assemble_primitive`: given `gA_values` of shape `[nnz]`,
+/// returns `gc` of shape `[n]` where
+/// `gc[i] = -sum_{k: row[k]==i} (gA[k] * adj[k])`.
+///
+/// Inner-backend scatter — no autograd participation.
+pub fn assemble_backward_primitive<I: Backend + 'static>(
+    pattern: &std::sync::Arc<CsrPattern>,
+    g_a_values_prim: I::FloatTensorPrimitive,
+    device: &I::Device,
+    use_cuda: bool,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    crate::sparse::dispatch::assemble_backward_dispatch::<I>(pattern, &g_a_values_prim, device, use_cuda)
+}
+
+/// Backward of `spmv_primitive`: given `gi_t` of shape `[n]`, returns
+/// `gq_t = N^T · gi_t` of shape `[n]`. Computes
+/// `gq[col[k]] += adj[k] * gi[row[k]]`.
+pub fn spmv_backward_primitive<I: Backend + 'static>(
+    pattern: &std::sync::Arc<CsrPattern>,
+    g_i_t_prim: I::FloatTensorPrimitive,
+    device: &I::Device,
+    use_cuda: bool,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    crate::sparse::dispatch::spmv_backward_dispatch::<I>(pattern, &g_i_t_prim, device, use_cuda)
 }

@@ -132,6 +132,63 @@ where
     }
 }
 
+/// Site 1 dispatch: forward `y = N · q`.
+pub(crate) fn spmv_forward_dispatch<I: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    q_prim: &I::FloatTensorPrimitive,
+    device: &I::Device,
+    use_cuda: bool,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    if effective_use_cuda::<I>(use_cuda) {
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+        crate::sparse::cusparse::cusparse_spmv_forward::<I>(cache, q_prim, device)
+    } else {
+        crate::sparse::cpu_spmv_forward::<I>(pattern, q_prim, device)
+    }
+}
+
+/// Site 2 dispatch: backward `gq = N^T · gi`.
+pub(crate) fn spmv_backward_dispatch<I: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    gi_prim: &I::FloatTensorPrimitive,
+    device: &I::Device,
+    use_cuda: bool,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    if effective_use_cuda::<I>(use_cuda) {
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+        crate::sparse::cusparse::cusparse_spmv_backward::<I>(cache, gi_prim, device)
+    } else {
+        crate::sparse::cpu_spmv_backward::<I>(pattern, gi_prim, device)
+    }
+}
+
+/// Site 3 dispatch: `gc = -Σ_k(gA[k]·adj[k])` per row.
+pub(crate) fn assemble_backward_dispatch<I: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    g_a_prim: &I::FloatTensorPrimitive,
+    device: &I::Device,
+    use_cuda: bool,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    if effective_use_cuda::<I>(use_cuda) {
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+        crate::sparse::cusparse::cusparse_assemble_backward::<I>(cache, g_a_prim, device)
+    } else {
+        crate::sparse::cpu_assemble_backward::<I>(pattern, g_a_prim, device)
+    }
+}
+
 /// Backward-solve dispatch: CPU path uses `back_sub_upper_transposed`,
 /// GPU path uses `cusparse_backward_solve`. Returns the gradient on `b`.
 ///

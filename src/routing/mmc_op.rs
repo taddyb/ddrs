@@ -185,7 +185,7 @@ where
         // B26. gc1 = assemble_backward(gA_values)
         // ===========================================================
         let gc1_prim =
-            sparse::assemble_backward_primitive::<I>(&state.pattern, g_a_values_prim, &device);
+            sparse::assemble_backward_primitive::<I>(&state.pattern, g_a_values_prim, &device, state.use_cuda);
         let gc1 = wrap(gc1_prim);
 
         // ===========================================================
@@ -211,7 +211,7 @@ where
         // ===========================================================
         let gi_t_prim = unwrap(gi_t);
         let gq_t_from_s24_prim =
-            sparse::spmv_backward_primitive::<I>(&state.pattern, gi_t_prim, &device);
+            sparse::spmv_backward_primitive::<I>(&state.pattern, gi_t_prim, &device, state.use_cuda);
         let gq_t_from_s24 = wrap(gq_t_from_s24_prim);
 
         // ===========================================================
@@ -621,7 +621,7 @@ where
     let c4 = denom.clone().recip() * (2.0 * dt);
 
     // S24: i_t = N · q_t (inner-backend SpMV)
-    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_p.clone(), &device);
+    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_p.clone(), &device, use_cuda);
     let i_t = wrap(i_t_prim.clone());
 
     // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
