@@ -555,6 +555,9 @@ pub(crate) struct CudaPatternCache {
     /// via raw pointer). Never read directly — cubecl frees on Drop.
     #[allow(dead_code)]
     pub(crate) d_row_for_nnz: burn_cubecl::cubecl::server::Handle,
+    /// Persistent device buffer of CsrPattern.adj_values (length nnz, f32).
+    /// SP-9: shared by sp_mat_spmv and sp_mat_rowsum SpMV descriptors.
+    pub(crate) d_adj_values: burn_cubecl::cubecl::server::Handle,
     pub(crate) sp_mat: cudarc::cusparse::sys::cusparseSpMatDescr_t,
     pub(crate) desc_forward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
     pub(crate) desc_backward: cudarc::cusparse::sys::cusparseSpSVDescr_t,
@@ -572,7 +575,7 @@ impl Drop for CudaPatternCache {
     fn drop(&mut self) {
         // SAFETY: cuSPARSE descriptors are destroyed before the Handle fields
         // drop (struct field declaration order: handle → d_crow → d_col →
-        // d_row_for_nnz → sp_mat → desc_forward → desc_backward →
+        // d_row_for_nnz → d_adj_values → sp_mat → desc_forward → desc_backward →
         // workspace_forward → workspace_backward). cubecl-owned Handles release
         // device buffers via their own Drop impl — no cuMemFreeAsync needed.
         unsafe {
@@ -727,6 +730,16 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         )
     };
     let d_row_for_nnz: Handle = client.create_from_slice(row_bytes);
+
+    // SP-9: Upload adj_values as a persistent device buffer. SpMV descriptors
+    // (Tasks 3-7) will point at this buffer for the cache's lifetime.
+    let adj_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            pattern.adj_values.as_ptr() as *const u8,
+            pattern.adj_values.len() * std::mem::size_of::<f32>(),
+        )
+    };
+    let d_adj_values: Handle = client.create_from_slice(adj_bytes);
 
     // --- Step 3: Flush so writes hit the stream cuSPARSE will be using. ---
     client.flush().expect("cubecl flush after crow/col/row upload");
@@ -973,6 +986,7 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         d_crow,
         d_col,
         d_row_for_nnz,
+        d_adj_values,
         sp_mat,
         desc_forward,
         desc_backward,
