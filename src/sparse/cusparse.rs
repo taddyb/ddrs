@@ -373,6 +373,162 @@ pub(crate) fn cusparse_grada<B: Backend>(
     }
 }
 
+// =================================================================================
+// SP-9 Task 4: cusparse_spmv_forward — site 1, forward y = N · q via
+// cusparseSpMV(NON_TRANSPOSE) on sp_mat_spmv. Stream-shared with cubecl,
+// zero-copy.
+// =================================================================================
+
+/// Compute `y = N · q` via cuSPARSE SpMV (NON_TRANSPOSE). Returns the result
+/// as a primitive tensor of shape `[n]`. No D↔H syncs — input and output
+/// stay on device.
+///
+/// `cache` must come from `build_cuda_pattern_cache` for the matching
+/// `CsrPattern`. `q_prim` is a `Tensor<Cuda<f32, i32>>::FloatTensorPrimitive`
+/// of length `n`.
+pub(crate) fn cusparse_spmv_forward<B: Backend + 'static>(
+    cache: &CudaPatternCache,
+    q_prim: &B::FloatTensorPrimitive,
+    device: &B::Device,
+) -> B::FloatTensorPrimitive
+where
+    B::FloatTensorPrimitive: 'static,
+    B::Device: 'static,
+{
+    use burn::tensor::{DType, Shape};
+    use burn_cubecl::tensor::CubeTensor;
+    use cudarc::cusparse::sys::{
+        cudaDataType_t::CUDA_R_32F,
+        cusparseCreateDnVec,
+        cusparseDestroyDnVec,
+        cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        cusparseSpMVAlg_t::CUSPARSE_SPMV_ALG_DEFAULT,
+        cusparseSpMV,
+        cusparseSetStream,
+    };
+
+    // 1. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
+    //    write q onto this stream; cuSPARSE will run after them automatically
+    //    because they share the same stream. No host sync needed.
+    let stream = cubecl_stream_active::<B>(device);
+    unsafe {
+        // SAFETY: `cudarc::driver::sys::CUstream_st` and
+        // `cudarc::cusparse::sys::CUstream_st` are the same opaque CUDA ABI
+        // type. cudarc generates separate FFI bindings; casting the pointer
+        // integer is safe because no dereference occurs here.
+        let stream_for_cusparse = stream as *mut cudarc::cusparse::sys::CUstream_st;
+        cusparseSetStream(cache.handle, stream_for_cusparse)
+            .result()
+            .expect("cusparseSetStream forward SpMV failed");
+    }
+
+    // 2. Flush cubecl's kernel queue onto the active stream before cuSPARSE
+    //    reads q. `client.flush()` is a non-blocking server-side operation: it
+    //    submits pending work to the CUDA stream without blocking the host.
+    //    cuSPARSE, running on the same stream, will execute after.
+    let client = compute_client::<B>(device);
+    client.flush().expect("cubecl client flush failed before cusparse_spmv_forward");
+
+    // 3. Extract device pointer for q.
+    // SAFETY: q_prim must stay alive for the duration of this function. cubecl's
+    // pending kernels have been submitted to the stream (step 2); cuSPARSE reads
+    // q in order.
+    let q_view = primitive_as_cuda_view::<B>(q_prim)
+        .expect("cusparse_spmv_forward: Cuda<f32, i32> backend required");
+
+    let n = cache.n;
+
+    // 4. Allocate y via the cubecl client. The returned Handle owns the GPU
+    //    buffer; cubecl frees it when the resulting CubeTensor is dropped.
+    //    Zero-initialise so cuSPARSE can safely accumulate into y.
+    let n_bytes = n * std::mem::size_of::<f32>();
+    let y_bytes = vec![0u8; n_bytes];
+    // SAFETY: create_from_slice uploads bytes to device and returns a Handle.
+    // The Handle keeps the allocation alive for as long as we (or the resulting
+    // CubeTensor) hold it.
+    let y_handle: burn_cubecl::cubecl::server::Handle = client.create_from_slice(&y_bytes);
+
+    // SAFETY: y_handle is a freshly allocated, still-owned handle. The original
+    // y_handle is consumed later by CubeTensor::from_handle.
+    let y_ptr = unsafe { handle_device_ptr(&client, &y_handle) } as *mut f32;
+    let workspace_ptr = unsafe { handle_device_ptr(&client, &cache.workspace_spmv_n) };
+
+    // 5. Execute SpMV: y = 1.0 · N · q + 0.0 · y.
+    unsafe {
+        // 5a. Build transient dense vector descriptors for q and y.
+        // SAFETY: q_view.ptr and y_ptr are live device pointers of the correct
+        // element count (n). They remain valid through the SpMV.
+        let mut q_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let mut y_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        cusparseCreateDnVec(
+            &mut q_dn,
+            n as i64,
+            q_view.ptr as *mut std::ffi::c_void,
+            CUDA_R_32F,
+        )
+        .result()
+        .expect("cusparseCreateDnVec q failed in forward SpMV");
+        cusparseCreateDnVec(
+            &mut y_dn,
+            n as i64,
+            y_ptr as *mut std::ffi::c_void,
+            CUDA_R_32F,
+        )
+        .result()
+        .expect("cusparseCreateDnVec y failed in forward SpMV");
+
+        // 5b. Execute: y = alpha * sp_mat_spmv * q + beta * y.
+        // SAFETY: cache.sp_mat_spmv was built at cache-creation time with the
+        // correct (n × n) shape and adj_values pointer. The handle is bound to
+        // cubecl's active stream (step 1), so the SpMV executes after all
+        // upstream cubecl kernels on that stream.
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        cusparseSpMV(
+            cache.handle,
+            CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &alpha as *const f32 as *const std::ffi::c_void,
+            cache.sp_mat_spmv,
+            q_dn,
+            &beta as *const f32 as *const std::ffi::c_void,
+            y_dn,
+            CUDA_R_32F,
+            CUSPARSE_SPMV_ALG_DEFAULT,
+            workspace_ptr as *mut std::ffi::c_void,
+        )
+        .result()
+        .expect("cusparseSpMV forward failed");
+        // NO cuStreamSynchronize — cubecl's next op on the same stream will
+        // execute after the cuSPARSE SpMV automatically.
+
+        // Clean up transient dense vector descriptors.
+        // SAFETY: q_dn and y_dn are valid descriptors created above.
+        cusparseDestroyDnVec(q_dn)
+            .result()
+            .expect("cusparseDestroyDnVec q failed in forward SpMV");
+        cusparseDestroyDnVec(y_dn)
+            .result()
+            .expect("cusparseDestroyDnVec y failed in forward SpMV");
+    }
+
+    // 6. Wrap y_handle as CubeTensor → B::FloatTensorPrimitive.
+    //    No host roundtrip. cubecl owns the y buffer via y_handle; it will be
+    //    freed when BURN drops the resulting tensor.
+    let shape = Shape::from(vec![n]);
+    // SAFETY: TypeId of B::Device == CudaDevice is asserted inside compute_client.
+    // transmute_copy reads the device value by-copy without moving `device`.
+    let cuda_device: <CudaRuntime as cubecl::Runtime>::Device =
+        unsafe { std::mem::transmute_copy(device) };
+    let cube = CubeTensor::<CudaRuntime>::from_handle(
+        client,
+        cuda_device,
+        shape,
+        y_handle,
+        DType::F32,
+    );
+    cube_tensor_to_primitive::<B>(cube)
+}
+
 /// Test-only entry point that returns the device-slice element count extracted
 /// from the primitive. Used by `tests/cusparse_ptr_spike.rs` to verify the
 /// round-trip without exposing the raw pointer publicly.
@@ -582,6 +738,10 @@ pub(crate) struct CudaPatternCache {
     pub(crate) workspace_spmv_nt: burn_cubecl::cubecl::server::Handle,
     /// Workspace for `cusparseSpMV(NON_TRANSPOSE, sp_mat_rowsum, ...)`.
     pub(crate) workspace_rowsum: burn_cubecl::cubecl::server::Handle,
+    /// Number of reaches (rows = cols of the square network matrix).
+    pub(crate) n: usize,
+    /// Number of non-zeros in the network adjacency.
+    pub(crate) nnz: usize,
     /// `!Send` marker — cuSPARSE descriptors are thread-bound.
     _not_send: PhantomData<*mut ()>,
 }
@@ -1159,6 +1319,8 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         workspace_spmv_n,
         workspace_spmv_nt,
         workspace_rowsum,
+        n: pattern.n,
+        nnz: pattern.col.len(),
         _not_send: PhantomData,
     }
 }
