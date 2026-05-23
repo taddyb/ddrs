@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# SP-8 V7b: gate scatter_kernel_t_f32_i_i32 below 30% of GPU compute time.
-#
-# Exits 0 if the gate passes, 1 otherwise. Writes the nsys report and stats
-# to $NSYS_DIR (default $HOME/nsys_out).
+# SP-8 V7b (also used by SP-9): gate scatter_kernel_t_f32_i_i32 below 30% of
+# GPU compute time. Forces sparse_solver: cuda so the CUDA SpMV path runs.
 set -euo pipefail
 
 NSYS_DIR="${NSYS_DIR:-$HOME/nsys_out}"
@@ -11,10 +9,22 @@ REPORT="$NSYS_DIR/sp8_v7b"
 CKPT="/tmp/sp8_v7b_ckpt"
 THRESHOLD="${SP8_SCATTER_THRESHOLD:-30.0}"
 
+# Write a temp YAML with sparse_solver: cuda injected under params:.
+TMP_CFG="/tmp/v7b_cuda.yaml"
+awk '
+    /^params:/ {
+        print;
+        print "  sparse_solver: cuda";
+        next
+    }
+    /sparse_solver:/ { next }   # strip any pre-existing sparse_solver line (commented or not)
+    { print }
+' config/merit_training.yaml > "$TMP_CFG"
+
 rm -rf "$CKPT"
 nsys profile --trace=cuda --sample=none --cpuctxsw=none \
     --output="$REPORT" --force-overwrite=true \
-    target/release/train --config config/merit_training.yaml \
+    target/release/train --config "$TMP_CFG" \
                           --checkpoint-dir "$CKPT" \
                           --max-mini-batches 3
 
