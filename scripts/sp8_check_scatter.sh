@@ -29,7 +29,9 @@ nsys profile --trace=cuda --sample=none --cpuctxsw=none \
                           --max-mini-batches 3
 
 STATS="$NSYS_DIR/sp8_v7b_stats.txt"
-nsys stats "$REPORT.nsys-rep" --report cuda_gpu_kern_sum > "$STATS"
+# --force-export=true so a stale sqlite doesn't make `nsys stats` silently
+# bail out with an empty stdout (the default behavior on cache mismatch).
+nsys stats --force-export=true "$REPORT.nsys-rep" --report cuda_gpu_kern_sum > "$STATS"
 
 # nsys output column layout for cuda_gpu_kern_sum:
 #   "Time (%)", "Total Time (ns)", "Instances", "Avg", "Med", "Min", "Max", "StdDev", "Name"
