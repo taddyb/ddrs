@@ -684,6 +684,163 @@ where
     cube_tensor_to_primitive::<B>(cube)
 }
 
+// =================================================================================
+// SP-9 Task 6: cusparse_assemble_backward — site 3, per-row sum
+// gc = -sp_mat_rowsum · gA via cusparseSpMV(NON_TRANSPOSE) on sp_mat_rowsum
+// with α=-1 (embedded negation, no separate kernel launch).
+// =================================================================================
+
+/// Compute `gc[i] = -Σ_k adj[k] · gA[k]` for `k in row i` via cuSPARSE SpMV
+/// with α=-1. Returns the result as a primitive tensor of shape `[n]`.
+/// No D↔H syncs.
+///
+/// `gA_prim` has length `nnz` (one entry per off-diagonal CSR position).
+/// Output `gc` has length `n` (one entry per reach).
+pub(crate) fn cusparse_assemble_backward<B: Backend + 'static>(
+    cache: &CudaPatternCache,
+    g_a_prim: &B::FloatTensorPrimitive,
+    device: &B::Device,
+) -> B::FloatTensorPrimitive
+where
+    B::FloatTensorPrimitive: 'static,
+    B::Device: 'static,
+{
+    use burn::tensor::{DType, Shape};
+    use burn_cubecl::tensor::CubeTensor;
+    use cudarc::cusparse::sys::{
+        cudaDataType_t::CUDA_R_32F,
+        cusparseCreateDnVec,
+        cusparseDestroyDnVec,
+        cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        cusparseSpMVAlg_t::CUSPARSE_SPMV_ALG_DEFAULT,
+        cusparseSpMV,
+        cusparseSetStream,
+    };
+
+    // 1. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
+    //    write gA onto this stream; cuSPARSE will run after them automatically
+    //    because they share the same stream. No host sync needed.
+    let stream = cubecl_stream_active::<B>(device);
+    unsafe {
+        // SAFETY: `cudarc::driver::sys::CUstream_st` and
+        // `cudarc::cusparse::sys::CUstream_st` are the same opaque CUDA ABI
+        // type. cudarc generates separate FFI bindings; casting the pointer
+        // integer is safe because no dereference occurs here.
+        let stream_for_cusparse = stream as *mut cudarc::cusparse::sys::CUstream_st;
+        cusparseSetStream(cache.handle, stream_for_cusparse)
+            .result()
+            .expect("cusparseSetStream (assemble backward) failed");
+    }
+
+    // 2. Flush cubecl's kernel queue onto the active stream before cuSPARSE
+    //    reads gA. `client.flush()` is a non-blocking server-side operation: it
+    //    submits pending work to the CUDA stream without blocking the host.
+    //    cuSPARSE, running on the same stream, will execute after.
+    let client = compute_client::<B>(device);
+    client.flush().expect("cubecl client flush failed before cusparse_assemble_backward");
+
+    // 3. Extract device pointer for gA.
+    // SAFETY: g_a_prim must stay alive for the duration of this function. cubecl's
+    // pending kernels have been submitted to the stream (step 2); cuSPARSE reads
+    // gA in order.
+    let ga_view = primitive_as_cuda_view::<B>(g_a_prim)
+        .expect("cusparse_assemble_backward: Cuda<f32, i32> backend required");
+
+    let n = cache.n;
+    let nnz = cache.nnz;
+
+    // 4. Allocate gc via the cubecl client. The returned Handle owns the GPU
+    //    buffer; cubecl frees it when the resulting CubeTensor is dropped.
+    //    Zero-initialise so cuSPARSE can safely accumulate into gc.
+    let n_bytes = n * std::mem::size_of::<f32>();
+    let gc_bytes = vec![0u8; n_bytes];
+    // SAFETY: create_from_slice uploads bytes to device and returns a Handle.
+    // The Handle keeps the allocation alive for as long as we (or the resulting
+    // CubeTensor) hold it.
+    let gc_handle: burn_cubecl::cubecl::server::Handle = client.create_from_slice(&gc_bytes);
+
+    // SAFETY: gc_handle is a freshly allocated, still-owned handle. The original
+    // gc_handle is consumed later by CubeTensor::from_handle.
+    let gc_ptr = unsafe { handle_device_ptr(&client, &gc_handle) } as *mut f32;
+    let workspace_ptr = unsafe { handle_device_ptr(&client, &cache.workspace_rowsum) };
+
+    // 5. Execute SpMV: gc = -1.0 · sp_mat_rowsum · gA + 0.0 · gc.
+    unsafe {
+        // 5a. Build transient dense vector descriptors for gA and gc.
+        // SAFETY: ga_view.ptr is a live device pointer with nnz elements.
+        // gc_ptr is a live device pointer with n elements.
+        // Both remain valid through the SpMV.
+        let mut ga_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let mut gc_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        cusparseCreateDnVec(
+            &mut ga_dn,
+            nnz as i64,
+            ga_view.ptr as *mut std::ffi::c_void,
+            CUDA_R_32F,
+        )
+        .result()
+        .expect("cusparseCreateDnVec gA failed in (assemble backward)");
+        cusparseCreateDnVec(
+            &mut gc_dn,
+            n as i64,
+            gc_ptr as *mut std::ffi::c_void,
+            CUDA_R_32F,
+        )
+        .result()
+        .expect("cusparseCreateDnVec gc failed in (assemble backward)");
+
+        // 5b. Execute: gc = alpha * sp_mat_rowsum * gA + beta * gc.
+        // SAFETY: cache.sp_mat_rowsum was built at cache-creation time with the
+        // correct (n × nnz) shape and adj_values pointer. The handle is bound to
+        // cubecl's active stream (step 1), so the SpMV executes after all
+        // upstream cubecl kernels on that stream.
+        let alpha: f32 = -1.0;
+        let beta: f32 = 0.0;
+        cusparseSpMV(
+            cache.handle,
+            CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &alpha as *const f32 as *const std::ffi::c_void,
+            cache.sp_mat_rowsum,
+            ga_dn,
+            &beta as *const f32 as *const std::ffi::c_void,
+            gc_dn,
+            CUDA_R_32F,
+            CUSPARSE_SPMV_ALG_DEFAULT,
+            workspace_ptr as *mut std::ffi::c_void,
+        )
+        .result()
+        .expect("cusparseSpMV (assemble backward) failed");
+        // NO cuStreamSynchronize — cubecl's next op on the same stream will
+        // execute after the cuSPARSE SpMV automatically.
+
+        // Clean up transient dense vector descriptors.
+        // SAFETY: ga_dn and gc_dn are valid descriptors created above.
+        cusparseDestroyDnVec(ga_dn)
+            .result()
+            .expect("cusparseDestroyDnVec gA failed in (assemble backward)");
+        cusparseDestroyDnVec(gc_dn)
+            .result()
+            .expect("cusparseDestroyDnVec gc failed in (assemble backward)");
+    }
+
+    // 6. Wrap gc_handle as CubeTensor → B::FloatTensorPrimitive.
+    //    No host roundtrip. cubecl owns the gc buffer via gc_handle; it will be
+    //    freed when BURN drops the resulting tensor.
+    let shape = Shape::from(vec![n]);
+    // SAFETY: TypeId of B::Device == CudaDevice is asserted inside compute_client.
+    // transmute_copy reads the device value by-copy without moving `device`.
+    let cuda_device: <CudaRuntime as cubecl::Runtime>::Device =
+        unsafe { std::mem::transmute_copy(device) };
+    let cube = CubeTensor::<CudaRuntime>::from_handle(
+        client,
+        cuda_device,
+        shape,
+        gc_handle,
+        DType::F32,
+    );
+    cube_tensor_to_primitive::<B>(cube)
+}
+
 /// Test-only entry point that returns the device-slice element count extracted
 /// from the primitive. Used by `tests/cusparse_ptr_spike.rs` to verify the
 /// round-trip without exposing the raw pointer publicly.
