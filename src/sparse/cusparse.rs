@@ -567,6 +567,21 @@ pub(crate) struct CudaPatternCache {
     /// Held for cuSPARSE workspace lifetime; cubecl frees on Drop.
     #[allow(dead_code)]
     pub(crate) workspace_backward: burn_cubecl::cubecl::server::Handle,
+    // ── SP-9 SpMV ─────────────────────────────────────────────────
+    /// `(n × n)` cuSPARSE matrix descriptor for SpMV (values = adj). Used for
+    /// site 1 (forward `y = N · q`) and site 2 (backward `gq = N^T · gi`).
+    pub(crate) sp_mat_spmv: cudarc::cusparse::sys::cusparseSpMatDescr_t,
+    /// `(n × nnz)` cuSPARSE matrix descriptor for site 3 row-sum
+    /// (`gc = α · sp_mat_rowsum · gA`, with α=-1).
+    pub(crate) sp_mat_rowsum: cudarc::cusparse::sys::cusparseSpMatDescr_t,
+    /// `[0, 1, 2, ..., nnz-1]` i32 indices — col-index array for `sp_mat_rowsum`.
+    pub(crate) d_col_identity: burn_cubecl::cubecl::server::Handle,
+    /// Workspace for `cusparseSpMV(NON_TRANSPOSE, sp_mat_spmv, ...)`.
+    pub(crate) workspace_spmv_n: burn_cubecl::cubecl::server::Handle,
+    /// Workspace for `cusparseSpMV(TRANSPOSE, sp_mat_spmv, ...)`.
+    pub(crate) workspace_spmv_nt: burn_cubecl::cubecl::server::Handle,
+    /// Workspace for `cusparseSpMV(NON_TRANSPOSE, sp_mat_rowsum, ...)`.
+    pub(crate) workspace_rowsum: burn_cubecl::cubecl::server::Handle,
     /// `!Send` marker — cuSPARSE descriptors are thread-bound.
     _not_send: PhantomData<*mut ()>,
 }
@@ -576,9 +591,22 @@ impl Drop for CudaPatternCache {
         // SAFETY: cuSPARSE descriptors are destroyed before the Handle fields
         // drop (struct field declaration order: handle → d_crow → d_col →
         // d_row_for_nnz → d_adj_values → sp_mat → desc_forward → desc_backward →
-        // workspace_forward → workspace_backward). cubecl-owned Handles release
-        // device buffers via their own Drop impl — no cuMemFreeAsync needed.
+        // workspace_forward → workspace_backward → sp_mat_spmv → sp_mat_rowsum →
+        // d_col_identity → workspace_spmv_n → workspace_spmv_nt → workspace_rowsum).
+        // cubecl-owned Handles release device buffers via their own Drop impl —
+        // no cuMemFreeAsync needed.
         unsafe {
+            // Destroy new SpMV descriptors (Task 2 — may be null placeholders).
+            if !self.sp_mat_spmv.is_null() {
+                cudarc::cusparse::sys::cusparseDestroySpMat(self.sp_mat_spmv)
+                    .result()
+                    .expect("cusparseDestroySpMat sp_mat_spmv failed");
+            }
+            if !self.sp_mat_rowsum.is_null() {
+                cudarc::cusparse::sys::cusparseDestroySpMat(self.sp_mat_rowsum)
+                    .result()
+                    .expect("cusparseDestroySpMat sp_mat_rowsum failed");
+            }
             // Destroy SpSV descriptors.
             cudarc::cusparse::sys::cusparseSpSV_destroyDescr(self.desc_forward)
                 .result()
@@ -594,10 +622,11 @@ impl Drop for CudaPatternCache {
             cudarc::cusparse::sys::cusparseDestroy(self.handle)
                 .result()
                 .expect("cusparseDestroy failed");
-            // The five Handle fields (d_crow, d_col, d_row_for_nnz,
-            // workspace_forward, workspace_backward) drop automatically after
-            // this block and free their device allocations via cubecl's Handle
-            // Drop impl. No explicit cuMemFreeAsync is needed.
+            // The nine Handle fields (d_crow, d_col, d_row_for_nnz, d_adj_values,
+            // workspace_forward, workspace_backward, d_col_identity,
+            // workspace_spmv_n, workspace_spmv_nt, workspace_rowsum) drop
+            // automatically after this block and free their device allocations
+            // via cubecl's Handle Drop impl. No explicit cuMemFreeAsync is needed.
         }
     }
 }
@@ -992,6 +1021,12 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         desc_backward,
         workspace_forward,
         workspace_backward,
+        sp_mat_spmv: std::ptr::null_mut(),
+        sp_mat_rowsum: std::ptr::null_mut(),
+        d_col_identity: client.create_from_slice(&[]),  // Task 3 — dummy zero-byte handle
+        workspace_spmv_n: client.create_from_slice(&[]),  // Task 3
+        workspace_spmv_nt: client.create_from_slice(&[]),  // Task 3
+        workspace_rowsum: client.create_from_slice(&[]),  // Task 3
         _not_send: PhantomData,
     }
 }
