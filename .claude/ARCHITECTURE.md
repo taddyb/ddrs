@@ -106,6 +106,47 @@ needs. One autograd node per timestep instead of ~33.
 with either `cusparseSpMV` or a no-atomic warp-reduction kernel. That's
 the remaining unlock on the V7 gates.
 
+## SP-9 cuSPARSE SpMV (2026-05-22, partial)
+
+Three `Tensor::scatter(0, ..., IndexingUpdateOp::Add)` call sites in
+`src/sparse/mod.rs` (`spmv_primitive`, `spmv_backward_primitive`,
+`assemble_backward_primitive`) were the source of the 77.5%-of-GPU
+`scatter_kernel` hotspot identified in SP-8. SP-9 replaced them with
+`cusparseSpMV` calls via two new `cusparseSpMatDescr_t` descriptors on
+`CudaPatternCache`:
+
+- `sp_mat_spmv` (n × n, values = adj) — sites 1 + 2 (forward y=N·q,
+  backward gq=N^T·gi via TRANSPOSE op).
+- `sp_mat_rowsum` (n × nnz, values = adj) — site 3
+  (`gc = -sp_mat_rowsum · gA` with α=-1, negation embedded in SpMV).
+
+CPU (NdArray) path keeps `Tensor::scatter` unchanged. Dispatch in
+`src/sparse/dispatch.rs` routes between paths per `cfg.params.sparse_solver`.
+
+**Outcome:**
+- V8 (SpMV CPU/CUDA bit-match): GREEN — `max_rel = 0` exact match for all
+  3 sites on the linear-chain test pattern.
+- V7b (scatter_kernel < 30% of GPU time): **GREEN — 0.0%** (down from
+  77.5%). The `scatter_kernel_t_f32_i_i32` is GONE from the kernel
+  profile. New top kernels are `cusparse::spsm_v2_kernel` (31%, SP-6's
+  triangular solve, unchanged) and the various `kernel_binop_*` /
+  `kernel_scalar_binop_*` families.
+- V7a (cuda/cpu ratio ≤ 0.7): **PARTIAL — ratio = 0.919**. CUDA is now
+  21 sec / 8% faster than CPU on the smoke train (4.34 → 3.99 min), but
+  the 30% target was missed. The cuSPARSE SpMV win was capped at the
+  fraction of wall time scatter_kernel had been consuming
+  (~29.7 sec on a ~5 min run = ~10%, matching the observed 8% drop).
+
+**The remaining wall-time floor** is launch overhead: 8M+
+`cuLaunchKernel` calls at ~2.3 μs each (per SP-8's nsys profile), spread
+across millions of small (~1 μs) `kernel_binop_*` ops. CPU and CUDA pay
+this roughly equally, hence the small relative ratio improvement
+despite the big absolute win on scatter.
+
+**SP-10 candidate**: CUDA Graphs or cubecl kernel fusion to attack the
+launch-overhead surface. Either would help GPU disproportionately
+(small per-op kernels are exactly where launch overhead dominates).
+
 ## Deferred from the Python original
 
 These exist in DDR but are not load-bearing for the MC solver itself and were
