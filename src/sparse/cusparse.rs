@@ -708,6 +708,7 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         cudaDataType_t::CUDA_R_32F,
         cusparseCreateCsr,
         cusparseCreateDnVec,
+        cusparseDestroyDnVec,
         cusparseDiagType_t::CUSPARSE_DIAG_TYPE_NON_UNIT,
         cusparseFillMode_t::CUSPARSE_FILL_MODE_LOWER,
         cusparseIndexBase_t::CUSPARSE_INDEX_BASE_ZERO,
@@ -715,12 +716,13 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
         cusparseOperation_t::CUSPARSE_OPERATION_TRANSPOSE,
         cusparseSpMatAttribute_t::{CUSPARSE_SPMAT_DIAG_TYPE, CUSPARSE_SPMAT_FILL_MODE},
+        cusparseSpMVAlg_t::CUSPARSE_SPMV_ALG_DEFAULT,
+        cusparseSpMV_bufferSize,
         cusparseSpSVAlg_t::CUSPARSE_SPSV_ALG_DEFAULT,
         cusparseSpSV_analysis,
         cusparseSpSV_bufferSize,
         cusparseSpSV_createDescr,
         cusparseSpMatSetAttribute,
-        cusparseDestroyDnVec,
     };
 
     // --- Step 1: Materialise the cubecl client. ---
@@ -1010,6 +1012,136 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         // dummy_vals, dummy_b, dummy_x drop here — cubecl frees the device buffers.
     }
 
+    // --- Step 11: SP-9 Task 3 — create SpMV descriptors + workspaces. ---
+
+    // Upload identity column indices [0, 1, ..., nnz-1] for sp_mat_rowsum.
+    // sp_mat_rowsum is an (n × nnz) CSR matrix where each stored entry j
+    // lives in column j — so col_ind[j] = j for all j in [0, nnz).
+    let nnz_usize = pattern.col.len();
+    let col_identity_vec: Vec<i32> = (0..nnz_usize as i32).collect();
+    let col_identity_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            col_identity_vec.as_ptr() as *const u8,
+            col_identity_vec.len() * std::mem::size_of::<i32>(),
+        )
+    };
+    let d_col_identity: Handle = client.create_from_slice(col_identity_bytes);
+
+    // Flush so d_col_identity lands on the stream before cuSPARSE reads it.
+    client.flush().expect("cubecl flush after d_col_identity upload");
+
+    let adj_ptr_spmv = unsafe { handle_device_ptr(&client, &d_adj_values) };
+    let col_id_ptr   = unsafe { handle_device_ptr(&client, &d_col_identity) };
+
+    // Create sp_mat_spmv: same (n × n) shape as sp_mat (used by SpSV) but a
+    // separate descriptor so SpMV and SpSV calls don't share state.
+    // Values point at d_adj_values (persistent cache field).
+    let mut sp_mat_spmv: cudarc::cusparse::sys::cusparseSpMatDescr_t = std::ptr::null_mut();
+    unsafe {
+        cusparseCreateCsr(
+            &mut sp_mat_spmv,
+            n,                                        // rows
+            n,                                        // cols
+            nnz,                                      // nnz
+            crow_ptr as *mut std::ffi::c_void,
+            col_ptr as *mut std::ffi::c_void,
+            adj_ptr_spmv as *mut std::ffi::c_void,   // values = adj_values
+            CUSPARSE_INDEX_32I,
+            CUSPARSE_INDEX_32I,
+            CUSPARSE_INDEX_BASE_ZERO,
+            CUDA_R_32F,
+        )
+        .result()
+        .expect("cusparseCreateCsr sp_mat_spmv failed");
+    }
+
+    // Create sp_mat_rowsum: (n × nnz) CSR where row pointers are the SAME
+    // crow as sp_mat_spmv and col_ind is d_col_identity. Each edge e in
+    // [0, nnz) is stored in column e, so row-sum via SpMV sums adj_values
+    // per upstream reach — used in the dq/dN gradient assembly (SP-9 Task 6).
+    let mut sp_mat_rowsum: cudarc::cusparse::sys::cusparseSpMatDescr_t = std::ptr::null_mut();
+    unsafe {
+        cusparseCreateCsr(
+            &mut sp_mat_rowsum,
+            n,                                        // rows
+            nnz,                                      // cols = nnz
+            nnz,                                      // total nnz of this matrix
+            crow_ptr as *mut std::ffi::c_void,        // same crow as sp_mat_spmv
+            col_id_ptr as *mut std::ffi::c_void,      // identity col indices
+            adj_ptr_spmv as *mut std::ffi::c_void,    // same adj_values
+            CUSPARSE_INDEX_32I,
+            CUSPARSE_INDEX_32I,
+            CUSPARSE_INDEX_BASE_ZERO,
+            CUDA_R_32F,
+        )
+        .result()
+        .expect("cusparseCreateCsr sp_mat_rowsum failed");
+    }
+
+    // Query workspace sizes for the three SpMV configurations.
+    // cusparseCreateDnVec requires valid device pointers — allocate real
+    // device buffers sized to the largest of (n, nnz) elements as f32.
+    // These are temporary and drop at the end of this block.
+    let max_len = (nnz_usize).max(pattern.n);
+    let dummy_vec_h: Handle = client.create_from_slice(
+        &vec![0u8; max_len * std::mem::size_of::<f32>()]);
+    client.flush().expect("cubecl flush after dummy_vec_h");
+    let dummy_vec_ptr = unsafe { handle_device_ptr(&client, &dummy_vec_h) }
+        as *mut std::ffi::c_void;
+
+    // The closure captures `handle`, `dummy_vec_ptr`, and the cuSPARSE
+    // type aliases via the use block above.
+    let query_workspace_bytes = |
+        sp_mat_q: cudarc::cusparse::sys::cusparseSpMatDescr_t,
+        op: cudarc::cusparse::sys::cusparseOperation_t,
+        input_len: i64,
+        output_len: i64,
+    | -> usize {
+        let mut dnvec_in:  cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let mut dnvec_out: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let alpha: f32 = 1.0;
+        let beta:  f32 = 0.0;
+        let mut buf_bytes: usize = 0;
+        unsafe {
+            // Both descriptors point into the same dummy buffer — cusparseSpMV_bufferSize
+            // only inspects shapes, not memory contents.
+            cusparseCreateDnVec(&mut dnvec_in,  input_len,  dummy_vec_ptr, CUDA_R_32F)
+                .result().expect("cusparseCreateDnVec in (SpMV workspace query)");
+            cusparseCreateDnVec(&mut dnvec_out, output_len, dummy_vec_ptr, CUDA_R_32F)
+                .result().expect("cusparseCreateDnVec out (SpMV workspace query)");
+            cusparseSpMV_bufferSize(
+                handle,
+                op,
+                &alpha as *const f32 as *const std::ffi::c_void,
+                sp_mat_q,
+                dnvec_in,
+                &beta as *const f32 as *const std::ffi::c_void,
+                dnvec_out,
+                CUDA_R_32F,
+                CUSPARSE_SPMV_ALG_DEFAULT,
+                &mut buf_bytes,
+            )
+            .result().expect("cusparseSpMV_bufferSize");
+            cusparseDestroyDnVec(dnvec_in)
+                .result().expect("cusparseDestroyDnVec in (SpMV workspace query)");
+            cusparseDestroyDnVec(dnvec_out)
+                .result().expect("cusparseDestroyDnVec out (SpMV workspace query)");
+        }
+        buf_bytes.max(1)  // cuSPARSE may return 0 — always allocate at least 1 byte
+    };
+
+    let bytes_spmv_n  = query_workspace_bytes(
+        sp_mat_spmv, CUSPARSE_OPERATION_NON_TRANSPOSE, n, n);
+    let bytes_spmv_nt = query_workspace_bytes(
+        sp_mat_spmv, CUSPARSE_OPERATION_TRANSPOSE,     n, n);
+    let bytes_rowsum  = query_workspace_bytes(
+        sp_mat_rowsum, CUSPARSE_OPERATION_NON_TRANSPOSE, nnz, n);
+    // dummy_vec_h drops here, freeing the temporary device buffer.
+
+    let workspace_spmv_n:  Handle = client.create_from_slice(&vec![0u8; bytes_spmv_n]);
+    let workspace_spmv_nt: Handle = client.create_from_slice(&vec![0u8; bytes_spmv_nt]);
+    let workspace_rowsum:  Handle = client.create_from_slice(&vec![0u8; bytes_rowsum]);
+
     CudaPatternCache {
         handle,
         d_crow,
@@ -1021,12 +1153,12 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         desc_backward,
         workspace_forward,
         workspace_backward,
-        sp_mat_spmv: std::ptr::null_mut(),
-        sp_mat_rowsum: std::ptr::null_mut(),
-        d_col_identity: client.create_from_slice(&[]),  // Task 3 — dummy zero-byte handle
-        workspace_spmv_n: client.create_from_slice(&[]),  // Task 3
-        workspace_spmv_nt: client.create_from_slice(&[]),  // Task 3
-        workspace_rowsum: client.create_from_slice(&[]),  // Task 3
+        sp_mat_spmv,
+        sp_mat_rowsum,
+        d_col_identity,
+        workspace_spmv_n,
+        workspace_spmv_nt,
+        workspace_rowsum,
         _not_send: PhantomData,
     }
 }
