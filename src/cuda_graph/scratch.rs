@@ -1,8 +1,10 @@
 //! SP-10: persistent per-MC-instance scratch buffers.
 //!
 //! Allocated once during `setup_inputs`, dropped when `CudaPatternCache`
-//! drops. All buffers are `[n × f32]`. Total: ~33n × 4 bytes (~540 KB for
-//! n=5K gauge subgraph; ~45 MB for full CONUS n=346,321).
+//! drops. All buffers are `[n × f32]`. 32 Handles total: 3 forward I/O,
+//! 23 saved-state intermediates (mirroring `TimestepState`), 1 backward
+//! input, 5 backward outputs. Total: ~32n × 4 bytes (~525 KB for n=5K
+//! gauge subgraph; ~44 MB for full CONUS n=346,321).
 
 use burn::tensor::backend::Backend;
 use burn_cubecl::cubecl::server::Handle;
