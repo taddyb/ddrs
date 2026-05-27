@@ -4,6 +4,7 @@ Run from the ddrs-py directory with a venv that has ddrs_py installed:
     uv run pytest tests/smoke.py -v
 """
 
+import numpy as np
 import pytest
 import ddrs_py
 
@@ -27,3 +28,25 @@ def test_parameter_bounds_from_merit_training_yaml():
     p_bounds, p_log = bounds["p_spatial"]
     assert p_bounds == (pytest.approx(1.0), pytest.approx(200.0))
     assert p_log is False
+
+
+def test_denormalize_linear_matches_formula():
+    # bounds (1.0, 200.0), log_space=False  →  v · (200 - 1) + 1
+    values = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+    result = ddrs_py.denormalize(values, (1.0, 200.0), False)
+    expected = np.array([1.0, 100.5, 200.0], dtype=np.float32)
+    np.testing.assert_allclose(result, expected, rtol=1e-6)
+
+
+def test_denormalize_log_matches_formula():
+    # bounds (0.015, 0.25), log_space=True  →  exp(v · (ln(0.25) - ln(0.015+1e-6)) + ln(0.015+1e-6))
+    values = np.array([0.0, 1.0], dtype=np.float32)
+    result = ddrs_py.denormalize(values, (0.015, 0.25), True)
+    lo_eff = np.log(0.015 + 1e-6)
+    expected = np.array([np.exp(lo_eff), 0.25], dtype=np.float32)
+    np.testing.assert_allclose(result, expected, rtol=1e-5)
+
+
+def test_denormalize_rejects_non_1d():
+    with pytest.raises(ValueError, match="1-D"):
+        ddrs_py.denormalize(np.zeros((2, 2), dtype=np.float32), (0.0, 1.0), False)
