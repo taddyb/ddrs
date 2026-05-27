@@ -10,7 +10,7 @@ use pyo3::types::PyDict;
 use crate::error::BridgeError;
 
 /// Load `Config` from a YAML path with consistent error wrapping.
-pub fn load_config(path: &str) -> Result<Config, BridgeError> {
+pub(crate) fn load_config(path: &str) -> Result<Config, BridgeError> {
     Config::from_yaml_file(Path::new(path)).map_err(|source| BridgeError::Config {
         path: path.into(),
         source,
@@ -18,7 +18,7 @@ pub fn load_config(path: &str) -> Result<Config, BridgeError> {
 }
 
 /// Pull `cfg.mlp` or return a typed error if absent.
-pub fn require_mlp_section<'a>(
+pub(crate) fn require_mlp_section<'a>(
     cfg: &'a Config,
     path: &str,
 ) -> Result<&'a MlpConfigSection, BridgeError> {
@@ -29,7 +29,7 @@ pub fn require_mlp_section<'a>(
 
 /// Convert a ddrs YAML `MlpConfigSection` into the ddrs `MlpConfig` used to
 /// build an `Mlp<B>` template.
-pub fn mlp_config_from_section(section: &MlpConfigSection) -> MlpConfig {
+pub(crate) fn mlp_config_from_section(section: &MlpConfigSection) -> MlpConfig {
     MlpConfig::new(section.input_var_names.clone(), section.learnable_parameters.clone())
         .with_hidden_size(section.hidden_size)
         .with_num_hidden_layers(section.num_hidden_layers)

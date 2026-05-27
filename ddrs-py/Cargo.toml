@@ -14,8 +14,6 @@ pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 numpy = "0.22"
 ddrs = { path = ".." }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
-burn-ndarray = { version = "0.21", default-features = false, features = ["std"] }
-serde_yaml = "0.9"
 thiserror = "1"
 
 # Match ddrs's vendored fork patches so cargo resolves a single set of burn-* crates.
