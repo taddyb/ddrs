@@ -59,3 +59,28 @@ def test_denormalize_rejects_log_space_with_nonpositive_hi():
             (0.015, 0.0),
             True,
         )
+
+
+import os
+
+CHECKPOINT_DIR = f"{REPO_ROOT}/output/saved_models"
+
+
+def _first_available_checkpoint() -> str | None:
+    """Return base path (no .mpk extension) of any checkpoint in the saved_models dir."""
+    if not os.path.isdir(CHECKPOINT_DIR):
+        return None
+    mpks = sorted(f for f in os.listdir(CHECKPOINT_DIR) if f.endswith(".mpk"))
+    if not mpks:
+        return None
+    return f"{CHECKPOINT_DIR}/{mpks[0][:-len('.mpk')]}"
+
+
+def test_load_mlp_returns_pymlp_with_param_names():
+    ckpt = _first_available_checkpoint()
+    if ckpt is None:
+        pytest.skip(f"no checkpoints in {CHECKPOINT_DIR}; train one first")
+
+    model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
+    assert model.learnable_parameters == ["n", "q_spatial", "p_spatial"]
+    assert model.input_var_names_len == 10  # matches merit_training.yaml
