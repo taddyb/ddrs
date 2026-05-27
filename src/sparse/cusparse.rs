@@ -1918,3 +1918,291 @@ where
     );
     cube_tensor_to_primitive::<B>(cube)
 }
+
+// ---------------------------------------------------------------------------
+// SP-10 Task 5: forward-graph capture helpers
+// ---------------------------------------------------------------------------
+
+/// Wrap an inner-backend `FloatTensorPrimitive` as a rank-1 `Tensor<B, 1>`.
+/// No-op type juggling — convenience for the SP-10 capture path.
+pub(crate) fn wrap_prim<B: Backend>(p: B::FloatTensorPrimitive) -> burn::tensor::Tensor<B, 1> {
+    burn::tensor::Tensor::from_primitive(burn::tensor::TensorPrimitive::Float(p))
+}
+
+/// Extract the raw `CUdeviceptr` (as `u64`) from a cubecl `Handle` using the
+/// supplied client. Public-crate counterpart of the existing private
+/// `handle_device_ptr` (kept for `cusparse_*` callers that already have a
+/// client).
+///
+/// # Safety
+/// - Caller must not free the returned pointer manually; cubecl owns the buffer.
+/// - The `handle` (or a clone) must stay alive while the pointer is in use.
+/// - The pointer is valid on cubecl's active stream; stream-ordering against
+///   any external (cuSPARSE / raw CUDA) ops is the caller's responsibility.
+pub(crate) unsafe fn handle_devptr(
+    client: &cubecl::client::ComputeClient<CudaRuntime>,
+    handle: &burn_cubecl::cubecl::server::Handle,
+) -> u64 {
+    // SAFETY: cloning the handle keeps the allocation alive past the
+    // `get_resource` call; we only read the `ptr` field.
+    let resource = client
+        .get_resource(handle.clone())
+        .expect("handle_devptr: failed to get GpuResource for Handle");
+    resource.resource().ptr
+}
+
+/// Extract the raw `CUdeviceptr` (as `u64`) from an inner-backend
+/// `FloatTensorPrimitive` (which must be a `CubeTensor<CudaRuntime>` — the
+/// caller is responsible for ensuring `B == burn_cuda::Cuda<f32, i32>`).
+///
+/// # Safety
+/// - Same constraints as [`primitive_as_cuda_view`].
+/// - Returns `0` if the primitive is not a CUDA tensor — caller should check
+///   the backend type before calling.
+pub(crate) fn primitive_devptr<B: Backend>(
+    prim: &B::FloatTensorPrimitive,
+) -> u64
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    primitive_as_cuda_view::<B>(prim)
+        .map(|v| v.ptr as u64)
+        .unwrap_or(0)
+}
+
+/// `&mut` variant of [`ensure_cuda_cache`]. Used by SP-10 to install
+/// captured graphs onto the cache from `setup_inputs`.
+///
+/// # Safety
+/// Same as [`ensure_cuda_cache`]: caller must guarantee single-threaded
+/// access to the pattern's cuda cache. In practice this is invoked from
+/// `MuskingumCunge::setup_inputs` on the training thread, before any
+/// per-timestep call.
+pub(crate) unsafe fn ensure_cuda_cache_mut(
+    pattern: &crate::sparse::CsrPattern,
+) -> &mut CudaPatternCache {
+    // Initialize through the existing `get_or_init` if needed (so the
+    // build_cuda_pattern_cache work isn't duplicated).
+    // SAFETY: caller guarantees single-threaded access.
+    let _ = unsafe { ensure_cuda_cache(pattern) };
+    // Now grab `&mut` through the UnsafeCell. The OnceLock-style guard on
+    // initialization is already satisfied by the line above; here we just
+    // hand out a `&mut` to the inner `CudaPatternCache`.
+    let ptr = pattern.cuda_cache.0.get();
+    // SAFETY: single-threaded access guarantee from the caller means no
+    // concurrent reads/writes of the inner Option. We initialized above so
+    // unwrap() is safe.
+    unsafe { (*ptr).as_mut().expect("cuda cache must be initialized") }
+}
+
+/// SP-10: capture the forward chain into `cache.graph_fwd`. Mutates the
+/// cache to install the graph (or to record a fallback reason if capture
+/// failed). Called from `MuskingumCunge::setup_inputs`.
+///
+/// Strategy: double-run. The chain is invoked once OUTSIDE capture to
+/// observe the cubecl-allocator-assigned device pointers for each of the 24
+/// outputs (Q_next + 23 saved intermediates). Then the chain is invoked
+/// AGAIN inside `cuStreamBeginCapture` / `cuStreamEndCapture`, and we
+/// schedule a `cuMemcpyDtoDAsync` for each output from its (assumed-stable)
+/// src pointer into the persistent scratch destination. The resulting graph
+/// is installed on `cache.graph_fwd`.
+///
+/// On failure (any error from capture, instantiate, or the closure itself),
+/// the cache's `capture_status` is set to `FallbackReason(...)` and
+/// `graph_fwd` is left `None` so subsequent `route_timestep` calls take the
+/// SP-9 direct-launch path. Logs via `tracing::info!` / `tracing::warn!`
+/// either way so silent fallbacks are greppable in training logs.
+///
+/// Only called when `cfg.params.use_cuda_graphs == true` and
+/// `sparse_solver == Cuda`. Bypassed entirely otherwise.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_capture_forward<I: Backend + 'static>(
+    cache: &mut CudaPatternCache,
+    cfg: &crate::config::Config,
+    pattern: &std::sync::Arc<crate::sparse::CsrPattern>,
+    n: I::FloatTensorPrimitive,
+    q_spatial: I::FloatTensorPrimitive,
+    p_spatial: I::FloatTensorPrimitive,
+    length: I::FloatTensorPrimitive,
+    slope: I::FloatTensorPrimitive,
+    x_storage: I::FloatTensorPrimitive,
+    device: &I::Device,
+) where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::cuda_graph::{capture_forward_with_outputs, CaptureError, PersistentScratch};
+    use crate::routing::mmc_op::{forward_chain_inner, NUM_SAVED_STATE};
+
+    // 1. Allocate scratch on first capture. n_segments = pattern.n,
+    //    nnz = a_values length.
+    if cache.scratch.is_none() {
+        cache.scratch = Some(PersistentScratch::allocate::<I>(
+            pattern.n,
+            pattern.col.len(),
+            device,
+        ));
+    }
+
+    // 2. Build the scratch-backed inputs once, OUTSIDE capture. We seed the
+    //    in_q / in_qp scratch buffers with the caller-supplied q_t / q_p
+    //    primitives by D2D-copying their device pointers; this happens at
+    //    cubecl-allocator level via creating wrapping tensors that hold the
+    //    scratch handles. For the capture trial run we just reuse the
+    //    caller-supplied primitives (Task 5's only goal here is to learn
+    //    output pointers — the actual seeding is Task 6's job at replay).
+    let client = compute_client::<I>(device);
+
+    // Make sure all prior cubecl work has been submitted to the stream.
+    // capture begins on a clean stream below.
+    client.flush().expect("client flush before forward capture");
+
+    // Cubecl's primary CUstream is a raw pointer (!Send). We pass its
+    // address as `usize` into the server closure and reconstruct it there.
+    let stream_addr: usize = cubecl_stream_active::<I>(device) as usize;
+
+    // -------- First pass: discover output handle device-pointers ---------
+    //
+    // Wrap the caller's inputs as inner-backend Tensors and run the chain
+    // OUTSIDE the capture region. The src pointers observed here are the
+    // ones we'll memcpy from inside capture (assumption: cubecl's allocator
+    // is deterministic for the same allocation sequence).
+    let probe_inputs = || -> (
+        I::FloatTensorPrimitive,
+        [I::FloatTensorPrimitive; NUM_SAVED_STATE],
+    ) {
+        forward_chain_inner::<I>(
+            cfg,
+            pattern,
+            wrap_prim::<I>(n.clone()),
+            wrap_prim::<I>(q_spatial.clone()),
+            wrap_prim::<I>(p_spatial.clone()),
+            wrap_prim::<I>(n.clone()), /* placeholder for q_t — value doesn't matter */
+            wrap_prim::<I>(n.clone()), /* placeholder for q_prime_t */
+            wrap_prim::<I>(length.clone()),
+            wrap_prim::<I>(slope.clone()),
+            wrap_prim::<I>(x_storage.clone()),
+        )
+    };
+
+    // ---- attempt the whole sequence inside exclusive_with_server ----
+    //
+    // The capture + instantiate + launch invariants documented on
+    // `CudaGraph` require that the current thread has cubecl's primary
+    // CUDA context bound. cubecl only binds it on the server thread.
+    // `exclusive_with_server` runs our closure there.
+    let scratch_ref = cache.scratch.as_ref().unwrap();
+    let bytes_n = (pattern.n * std::mem::size_of::<f32>()) as u64;
+    let bytes_nnz = (pattern.col.len() * std::mem::size_of::<f32>()) as u64;
+
+    // Precompute the destination devptrs from scratch handles (these are
+    // stable for the cache lifetime, so we resolve them once here).
+    let dst_out_q = unsafe { handle_devptr(&client, &scratch_ref.out_q) };
+    let dst_states: [u64; NUM_SAVED_STATE] = unsafe {
+        [
+            handle_devptr(&client, &scratch_ref.state_depth),
+            handle_devptr(&client, &scratch_ref.state_top_width),
+            handle_devptr(&client, &scratch_ref.state_side_slope),
+            handle_devptr(&client, &scratch_ref.state_bottom_width),
+            handle_devptr(&client, &scratch_ref.state_hydraulic_radius),
+            handle_devptr(&client, &scratch_ref.state_velocity_unclamped),
+            handle_devptr(&client, &scratch_ref.state_velocity_clamped),
+            handle_devptr(&client, &scratch_ref.state_celerity),
+            handle_devptr(&client, &scratch_ref.state_k_muskingum),
+            handle_devptr(&client, &scratch_ref.state_denom),
+            handle_devptr(&client, &scratch_ref.state_c1),
+            handle_devptr(&client, &scratch_ref.state_c2),
+            handle_devptr(&client, &scratch_ref.state_c3),
+            handle_devptr(&client, &scratch_ref.state_c4),
+            handle_devptr(&client, &scratch_ref.state_a_values),
+            handle_devptr(&client, &scratch_ref.state_b_rhs),
+            handle_devptr(&client, &scratch_ref.state_i_t),
+            handle_devptr(&client, &scratch_ref.state_x_sol),
+            handle_devptr(&client, &scratch_ref.state_ratio),
+            handle_devptr(&client, &scratch_ref.state_denominator),
+            handle_devptr(&client, &scratch_ref.state_q_eps),
+            handle_devptr(&client, &scratch_ref.state_side_slope_raw),
+            handle_devptr(&client, &scratch_ref.state_bw_raw),
+        ]
+    };
+    // Saved-state sizes — only `state_a_values` (index 14) is nnz; the rest
+    // are n. Mirror `forward_saved_idx::A_VALUES`.
+    let mut state_bytes = [bytes_n; NUM_SAVED_STATE];
+    state_bytes[crate::routing::mmc_op::forward_saved_idx::A_VALUES] = bytes_nnz;
+
+    // First pass to learn src pointers. We run this *outside* capture but
+    // inside exclusive_with_server so context bindings line up uniformly.
+    // (Both passes happen inside the same closure to keep all CUDA
+    // operations on the same thread.)
+    let capture_result: Result<
+        crate::cuda_graph::CudaGraph,
+        String,
+    > = client
+        .exclusive_with_server(|_server| -> Result<crate::cuda_graph::CudaGraph, String> {
+            // ---- First pass: discover src ptrs ----
+            let (probe_q_next, probe_states) = probe_inputs();
+            let src_q_next = primitive_devptr::<I>(&probe_q_next);
+            let mut src_states = [0u64; NUM_SAVED_STATE];
+            for (i, s) in probe_states.iter().enumerate() {
+                src_states[i] = primitive_devptr::<I>(s);
+            }
+            // Drop probe outputs so cubecl frees their buffers (releasing
+            // the addresses we just observed back to the allocator; the
+            // capture-pass re-run should then reuse the same addresses).
+            drop(probe_q_next);
+            drop(probe_states);
+
+            // Build the output_copies tuple list.
+            let mut output_copies: Vec<(u64, u64, u64)> =
+                Vec::with_capacity(1 + NUM_SAVED_STATE);
+            output_copies.push((src_q_next, dst_out_q, bytes_n));
+            for i in 0..NUM_SAVED_STATE {
+                output_copies.push((src_states[i], dst_states[i], state_bytes[i]));
+            }
+
+            // ---- Second pass inside capture region ----
+            //
+            // The closure re-runs the chain; cubecl should reuse the same
+            // src device-pointer addresses (deterministic-allocator
+            // assumption). Then capture_forward_with_outputs appends the
+            // memcpy nodes so the outputs land in the scratch destinations.
+            let closure = || -> Result<(), String> {
+                let (_q_next_prim2, _state_prims2) = probe_inputs();
+                // Drop happens at end of scope after end_capture executes
+                // its closure; the cubecl frees are stream-ordered so the
+                // copies above (which reference the same handles) finish
+                // first within the captured graph.
+                Ok(())
+            };
+
+            // SAFETY: stream is cubecl's primary stream; we are inside
+            // exclusive_with_server so context is bound; closure issues no
+            // host-sync calls; output_copies dst pointers live in scratch
+            // (owned by cache, outlives returned CudaGraph).
+            let stream = stream_addr as cudarc::driver::sys::CUstream;
+            let graph = unsafe {
+                capture_forward_with_outputs(stream, closure, &output_copies)
+            }
+            .map_err(|e: CaptureError| format!("{e}"))?;
+            Ok(graph)
+        })
+        .map_err(|e| format!("exclusive_with_server failed: {e}"))
+        .and_then(|inner| inner);
+
+    match capture_result {
+        Ok(graph) => {
+            cache.graph_fwd = Some(graph);
+            cache.capture_status = CaptureStatus::Captured;
+            cache.capture_sig = Some((pattern.n, cfg.params.sparse_solver));
+            eprintln!(
+                "SP-10 forward graph captured (n={}, nnz={})",
+                pattern.n,
+                pattern.col.len()
+            );
+        }
+        Err(e) => {
+            cache.capture_status = CaptureStatus::FallbackReason(format!("forward: {e}"));
+            eprintln!("SP-10 forward graph capture FAILED, falling back: {e}");
+        }
+    }
+}

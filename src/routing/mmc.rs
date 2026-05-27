@@ -23,8 +23,9 @@ use std::sync::Arc;
 use burn::backend::Autodiff;
 use burn::tensor::{backend::Backend, Tensor};
 
+use burn::tensor::TensorPrimitive;
+
 use crate::config::{Config, SparseSolver};
-use crate::geometry::compute_trapezoidal_geometry;
 use crate::routing::utils::denormalize;
 use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAdjacency};
 
@@ -116,7 +117,10 @@ impl<I: Backend> MuskingumCunge<I> {
         streamflow: Tensor<Autodiff<I>, 2>,
         params: SpatialParameters<I>,
         carry_state: bool,
-    ) {
+    ) where
+        I::FloatTensorPrimitive: 'static,
+        I::Device: 'static,
+    {
         let n = inputs.adjacency.n;
 
         // Upload per-reach channel attributes from the bundled SparseAdjacency.
@@ -188,6 +192,47 @@ impl<I: Backend> MuskingumCunge<I> {
             .clamp_min(self.cfg.params.attribute_minimums.discharge);
             self.discharge_t = Some(q0);
         }
+
+        // SP-10: eagerly capture the per-timestep CUDA graph once, here at
+        // setup time, so the per-step path can just replay it. Bypassed if
+        // graphs aren't requested, or on the CPU sparse path.
+        if self.cfg.params.use_cuda_graphs && self.sparse_solver == SparseSolver::Cuda {
+            self.try_capture_forward_graph();
+        }
+    }
+
+    /// SP-10: extract inner-backend primitives from the autograd-tracked
+    /// inputs and call into `cusparse::try_capture_forward`. Lives behind a
+    /// `use_cuda_graphs` gate; default V1 config skips it entirely.
+    fn try_capture_forward_graph(&self)
+    where
+        I::FloatTensorPrimitive: 'static,
+        I::Device: 'static,
+    {
+        let into_inner = |t: Tensor<Autodiff<I>, 1>| -> I::FloatTensorPrimitive {
+            match t.into_primitive() {
+                TensorPrimitive::Float(p) => p.primitive,
+                _ => unreachable!(),
+            }
+        };
+        let pattern = self.pattern.as_ref().unwrap();
+        // SAFETY: setup_inputs is the training thread's entry point; no
+        // other thread has access to this pattern's cuda cache. The
+        // returned &mut is valid for the duration of try_capture_forward.
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache_mut(pattern) };
+        let n_seg = self.n_segments.expect("n_segments set");
+        crate::sparse::cusparse::try_capture_forward::<I>(
+            cache,
+            &self.cfg,
+            pattern,
+            into_inner(self.n.as_ref().unwrap().clone()),
+            into_inner(self.q_spatial.as_ref().unwrap().clone()),
+            into_inner(self.p_spatial_broadcast(n_seg)),
+            into_inner(self.length.as_ref().unwrap().clone()),
+            into_inner(self.slope.as_ref().unwrap().clone()),
+            into_inner(self.x_storage.as_ref().unwrap().clone()),
+            &self.device,
+        );
     }
 
     /// Muskingum-Cunge coefficients `(c1, c2, c3, c4)`. Direct port of

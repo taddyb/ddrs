@@ -54,13 +54,20 @@ pub struct PersistentScratch {
 }
 
 impl PersistentScratch {
+    /// `n_segments` is the network row count; `nnz` is the non-zero count of
+    /// the adjacency. Most scratch buffers are `[n_segments]` f32, but
+    /// `state_a_values` (output of `assemble_primitive`) is `[nnz]` f32, so
+    /// it needs its own size.
     pub fn allocate<B: Backend + 'static>(
         n_segments: usize,
+        nnz: usize,
         device: &B::Device,
     ) -> Self {
         let client = crate::sparse::cusparse::compute_client::<B>(device);
-        let bytes = (n_segments * std::mem::size_of::<f32>()) as u64;
-        let mk = || client.empty(bytes as usize);
+        let n_bytes = (n_segments * std::mem::size_of::<f32>()) as usize;
+        let nnz_bytes = (nnz * std::mem::size_of::<f32>()) as usize;
+        let mk = || client.empty(n_bytes);
+        let mk_nnz = || client.empty(nnz_bytes);
 
         Self {
             n_segments,
@@ -70,7 +77,7 @@ impl PersistentScratch {
             state_velocity_unclamped: mk(), state_velocity_clamped: mk(),
             state_celerity: mk(), state_k_muskingum: mk(), state_denom: mk(),
             state_c1: mk(), state_c2: mk(), state_c3: mk(), state_c4: mk(),
-            state_a_values: mk(), state_b_rhs: mk(), state_i_t: mk(),
+            state_a_values: mk_nnz(), state_b_rhs: mk(), state_i_t: mk(),
             state_x_sol: mk(), state_ratio: mk(), state_denominator: mk(),
             state_q_eps: mk(), state_side_slope_raw: mk(), state_bw_raw: mk(),
             in_grad_q_next: mk(),

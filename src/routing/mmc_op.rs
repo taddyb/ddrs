@@ -488,6 +488,201 @@ where
     }
 }
 
+/// Number of saved-state primitives `forward_chain_inner` returns, in
+/// addition to `q_next`. Matches the count of `state_*` fields on
+/// `crate::cuda_graph::PersistentScratch` (and the indices in
+/// [`ForwardSavedIdx`]).
+pub(crate) const NUM_SAVED_STATE: usize = 23;
+
+/// Position of each saved-state primitive in the array returned by
+/// [`forward_chain_inner`]. Mirrors the declaration order of the `state_*`
+/// fields on `PersistentScratch` so the SP-10 capture path can index by
+/// position without re-typing the field name list.
+#[allow(dead_code)]
+pub(crate) mod forward_saved_idx {
+    pub const DEPTH: usize = 0;
+    pub const TOP_WIDTH: usize = 1;
+    pub const SIDE_SLOPE: usize = 2;
+    pub const BOTTOM_WIDTH: usize = 3;
+    pub const HYDRAULIC_RADIUS: usize = 4;
+    pub const VELOCITY_UNCLAMPED: usize = 5;
+    pub const VELOCITY_CLAMPED: usize = 6;
+    pub const CELERITY: usize = 7;
+    pub const K_MUSKINGUM: usize = 8;
+    pub const DENOM: usize = 9;
+    pub const C1: usize = 10;
+    pub const C2: usize = 11;
+    pub const C3: usize = 12;
+    pub const C4: usize = 13;
+    pub const A_VALUES: usize = 14;
+    pub const B_RHS: usize = 15;
+    pub const I_T: usize = 16;
+    pub const X_SOL: usize = 17;
+    pub const RATIO: usize = 18;
+    pub const DENOMINATOR: usize = 19;
+    pub const Q_EPS: usize = 20;
+    pub const SIDE_SLOPE_RAW: usize = 21;
+    pub const BW_RAW: usize = 22;
+}
+
+/// Inner-backend S1..S28 chain. Operates on `I::FloatTensorPrimitive`s — no
+/// autograd tape pushes. Returns `(q_next, [saved_state; NUM_SAVED_STATE])`.
+///
+/// Shared between [`timestep_forward`] (regular per-step path) and SP-10's
+/// `try_capture_forward` (CUDA-graph capture path) so that exactly the same
+/// kernel sequence runs in both cases — keeping V1 ABSOLUTE MATCH while also
+/// giving capture a deterministic chain to record.
+///
+/// The saved-state array is indexed by [`forward_saved_idx`], whose order
+/// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn forward_chain_inner<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+) -> (
+    I::FloatTensorPrimitive,
+    [I::FloatTensorPrimitive; NUM_SAVED_STATE],
+)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+        match t.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        }
+    };
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+
+    let qt_prim_for_spmv = unwrap(qt_in.clone());
+    let device = I::float_device(&qt_prim_for_spmv);
+
+    // S1
+    let q_eps = qsp_in.clone() + 1e-6_f32;
+    // S2
+    let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
+    // S3
+    let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
+    // S4
+    let ratio = numerator.clone() / denominator.clone();
+    // S5
+    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+    // S6
+    let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
+    // S7
+    let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
+    // S8 (pre-clamp side slope)
+    let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
+    // S9
+    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
+    // S10 (pre-clamp bw)
+    let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
+    // S11
+    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
+    // S12
+    let _area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
+    // S13
+    let wp = bottom_width.clone()
+        + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
+    // S14
+    let hyd_radius = _area.clone() / wp.clone();
+    // S15
+    let velocity_un = n_in.clone().recip() * hyd_radius.clone().powf_scalar(2.0 / 3.0)
+        * slope_in.clone().sqrt();
+    // S16
+    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
+    // S17
+    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
+
+    // S18..S23: Muskingum coefficients
+    let k_muskingum = length_in.clone() / celerity.clone();
+    let one_minus_x = -xst_in.clone() + 1.0;
+    let two_k = k_muskingum.clone() * 2.0;
+    let two_kx = two_k.clone() * xst_in.clone();
+    let two_k_1mx = two_k.clone() * one_minus_x.clone();
+    let denom = two_k_1mx.clone() + dt;
+    let c1 = (-two_kx.clone() + dt) / denom.clone();
+    let c2 = (two_kx.clone() + dt) / denom.clone();
+    let c3 = (two_k_1mx.clone() - dt) / denom.clone();
+    let c4 = denom.clone().recip() * (2.0 * dt);
+
+    // S24: i_t = N · q_t (inner-backend SpMV)
+    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda);
+    let i_t = wrap(i_t_prim.clone());
+
+    // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
+    let b_rhs =
+        c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
+
+    // S26: A_values = assemble_primitive(c1)
+    let c1_prim = unwrap(c1.clone());
+    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device);
+
+    // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — at primitive level via dispatch.
+    let b_rhs_prim = unwrap(b_rhs.clone());
+    let (x_sol_prim, _saved_x) = dispatch::forward_primitive::<I>(
+        pattern,
+        &a_values_prim,
+        &b_rhs_prim,
+        &device,
+        use_cuda,
+    );
+    let x_sol = wrap(x_sol_prim.clone());
+
+    // S28: q_next = max(x_sol, discharge_lb)
+    let q_next = x_sol.clone().clamp_min(discharge_lb);
+    let q_next_prim = unwrap(q_next);
+
+    // Saved-state array — order MUST match `forward_saved_idx`.
+    let saved: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = [
+        unwrap(depth),         // 0  DEPTH
+        unwrap(top_width),     // 1  TOP_WIDTH
+        unwrap(side_slope),    // 2  SIDE_SLOPE
+        unwrap(bottom_width),  // 3  BOTTOM_WIDTH
+        unwrap(hyd_radius),    // 4  HYDRAULIC_RADIUS
+        unwrap(velocity_un),   // 5  VELOCITY_UNCLAMPED
+        unwrap(velocity_cl),   // 6  VELOCITY_CLAMPED
+        unwrap(celerity),      // 7  CELERITY
+        unwrap(k_muskingum),   // 8  K_MUSKINGUM
+        unwrap(denom),         // 9  DENOM
+        c1_prim,               // 10 C1
+        unwrap(c2),            // 11 C2
+        unwrap(c3),            // 12 C3
+        unwrap(c4),            // 13 C4
+        a_values_prim,         // 14 A_VALUES
+        b_rhs_prim,            // 15 B_RHS
+        i_t_prim,              // 16 I_T
+        x_sol_prim,            // 17 X_SOL
+        unwrap(ratio),         // 18 RATIO
+        unwrap(denominator),   // 19 DENOMINATOR
+        unwrap(q_eps),         // 20 Q_EPS
+        unwrap(side_slope_raw),// 21 SIDE_SLOPE_RAW
+        unwrap(bw_raw),        // 22 BW_RAW
+    ];
+
+    (q_next_prim, saved)
+}
+
 /// Forward + register-on-tape entry point. Called from
 /// `MuskingumCunge::route_timestep` (Task 4). Returns Q_{t+1} as an
 /// autograd-tracked rank-1 tensor.
@@ -549,103 +744,37 @@ where
     let slope_p = slope_aut.primitive.clone();
     let xst_p = xst_aut.primitive.clone();
 
-    let device = I::float_device(&n_p);
-
-    // --- S1..S17: trapezoidal geometry + clamp + celerity. Compute on inner backend. ---
+    // --- S1..S28: trapezoidal geometry + clamp + celerity + solve. Compute on inner backend. ---
     let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
         Tensor::from_primitive(TensorPrimitive::Float(p))
     };
-    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-        match t.into_primitive() {
-            TensorPrimitive::Float(p) => p,
-            _ => unreachable!(),
-        }
-    };
 
-    let n_in = wrap(n_p.clone());
-    let qsp_in = wrap(qsp_p.clone());
-    let psp_in = wrap(psp_p.clone());
-    let qt_in = wrap(qt_p.clone());
-    let qpt_in = wrap(qpt_p.clone());
-    let length_in = wrap(length_p.clone());
-    let slope_in = wrap(slope_p.clone());
-    let xst_in = wrap(xst_p.clone());
-
-    // S1
-    let q_eps = qsp_in.clone() + 1e-6_f32;
-    // S2
-    let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
-    // S3
-    let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
-    // S4
-    let ratio = numerator.clone() / denominator.clone();
-    // S5
-    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
-    // S6
-    let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
-    // S7
-    let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
-    // S8 (pre-clamp side slope)
-    let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
-    // S9
-    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
-    // S10 (pre-clamp bw)
-    let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
-    // S11
-    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
-    // S12
-    let area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
-    // S13
-    let wp = bottom_width.clone()
-        + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
-    // S14
-    let hyd_radius = area.clone() / wp.clone();
-    // S15
-    let velocity_un = n_in.clone().recip() * hyd_radius.clone().powf_scalar(2.0 / 3.0)
-        * slope_in.clone().sqrt();
-    // S16
-    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
-    // S17
-    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
-
-    // S18..S23: Muskingum coefficients
-    let k_muskingum = length_in.clone() / celerity.clone();
-    let one_minus_x = -xst_in.clone() + 1.0;
-    let two_k = k_muskingum.clone() * 2.0;
-    let two_kx = two_k.clone() * xst_in.clone();
-    let two_k_1mx = two_k.clone() * one_minus_x.clone();
-    let denom = two_k_1mx.clone() + dt;
-    let c1 = (-two_kx.clone() + dt) / denom.clone();
-    let c2 = (two_kx.clone() + dt) / denom.clone();
-    let c3 = (two_k_1mx.clone() - dt) / denom.clone();
-    let c4 = denom.clone().recip() * (2.0 * dt);
-
-    // S24: i_t = N · q_t (inner-backend SpMV)
-    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_p.clone(), &device, use_cuda);
-    let i_t = wrap(i_t_prim.clone());
-
-    // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
-    let b_rhs =
-        c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
-
-    // S26: A_values = assemble_primitive(c1)
-    let c1_prim = unwrap(c1.clone());
-    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device);
-
-    // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — at primitive level via dispatch.
-    let b_rhs_prim = unwrap(b_rhs.clone());
-    let (x_sol_prim, _saved_x) = dispatch::forward_primitive::<I>(
+    let (q_next_prim, saved) = forward_chain_inner::<I>(
+        cfg,
         pattern,
-        &a_values_prim,
-        &b_rhs_prim,
-        &device,
-        use_cuda,
+        wrap(n_p.clone()),
+        wrap(qsp_p.clone()),
+        wrap(psp_p.clone()),
+        wrap(qt_p.clone()),
+        wrap(qpt_p.clone()),
+        wrap(length_p.clone()),
+        wrap(slope_p.clone()),
+        wrap(xst_p.clone()),
     );
-    let x_sol = wrap(x_sol_prim.clone());
 
-    // S28: q_next = max(x_sol, discharge_lb)
-    let q_next = x_sol.clone().clamp_min(discharge_lb);
-    let q_next_prim = unwrap(q_next);
+    // Unpack saved-state array into named TimestepState fields. Indices MUST
+    // match `forward_saved_idx`.
+    use forward_saved_idx as fsi;
+    let [
+        depth_p, top_width_p, side_slope_p, bottom_width_p,
+        hyd_radius_p, velocity_un_p, velocity_cl_p, celerity_p,
+        k_muskingum_p, denom_p, c1_prim, c2_p, c3_p, c4_p,
+        a_values_prim, b_rhs_prim, i_t_prim, x_sol_prim,
+        ratio_p, denominator_p, q_eps_p, side_slope_raw_p, bw_raw_p,
+    ] = saved;
+    // Compile-time sanity: confirm the index constants are aligned with the
+    // destructure above (touch each so a future re-order is caught).
+    let _ = (fsi::DEPTH, fsi::BW_RAW);
 
     // Build TimestepState saving every intermediate the backward needs.
     let state = TimestepState::<I> {
@@ -658,29 +787,29 @@ where
         length: length_p,
         slope: slope_p,
         x_storage: xst_p,
-        depth: unwrap(depth),
-        top_width: unwrap(top_width),
-        side_slope: unwrap(side_slope),
-        bottom_width: unwrap(bottom_width),
-        hydraulic_radius: unwrap(hyd_radius),
-        velocity_unclamped: unwrap(velocity_un),
-        velocity_clamped: unwrap(velocity_cl),
-        celerity: unwrap(celerity),
-        k_muskingum: unwrap(k_muskingum),
-        denom: unwrap(denom),
+        depth: depth_p,
+        top_width: top_width_p,
+        side_slope: side_slope_p,
+        bottom_width: bottom_width_p,
+        hydraulic_radius: hyd_radius_p,
+        velocity_unclamped: velocity_un_p,
+        velocity_clamped: velocity_cl_p,
+        celerity: celerity_p,
+        k_muskingum: k_muskingum_p,
+        denom: denom_p,
         c1: c1_prim,
-        c2: unwrap(c2),
-        c3: unwrap(c3),
-        c4: unwrap(c4),
+        c2: c2_p,
+        c3: c3_p,
+        c4: c4_p,
         a_values: a_values_prim,
         b_rhs: b_rhs_prim,
         i_t: i_t_prim,
         x_sol: x_sol_prim,
-        ratio: unwrap(ratio),
-        denominator: unwrap(denominator),
-        q_eps: unwrap(q_eps),
-        side_slope_raw: unwrap(side_slope_raw),
-        bw_raw: unwrap(bw_raw),
+        ratio: ratio_p,
+        denominator: denominator_p,
+        q_eps: q_eps_p,
+        side_slope_raw: side_slope_raw_p,
+        bw_raw: bw_raw_p,
         bottom_width_lb,
         depth_lb,
         velocity_lb,

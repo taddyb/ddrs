@@ -193,6 +193,58 @@ where
     Ok(CudaGraph { exec, template })
 }
 
+/// Capture a forward-pass closure that produces a set of output device
+/// pointers, then append D2D copies from each source pointer to a stable
+/// destination pointer (typically pointing into `PersistentScratch`).
+///
+/// The D2D copies become memcpy nodes inside the captured graph, so subsequent
+/// replays write the closure's outputs into the destination buffers without
+/// the caller having to re-bind handles. This is the core trick that lets
+/// SP-10 replay a graph repeatedly while exposing stable input/output
+/// addresses to the BURN tape on the host.
+///
+/// `output_copies` is a slice of `(src_devptr, dst_devptr, num_bytes)`. The
+/// caller is responsible for having run the closure once OUTSIDE capture
+/// first to discover the `src_devptr`s; we assume cubecl's allocator is
+/// deterministic for a given allocation sequence and that the second
+/// in-capture run reuses the same handle addresses. If that assumption
+/// breaks, the captured graph will copy from stale pointers — Task 9's V9
+/// bit-match test is what would catch it.
+///
+/// # Safety
+/// - `stream` must be a valid `CUstream`, typically cubecl's primary stream.
+/// - Current thread must have the originating CUDA primary context bound
+///   (see [`capture_on_stream`] module-level docs).
+/// - Each `(src, dst)` pair must reference allocations of at least
+///   `num_bytes`, both allocated on `stream`'s memory pool.
+/// - `dst_devptr`s must outlive the returned `CudaGraph` (i.e., point into
+///   `PersistentScratch` or similar). Source pointers' lifetime is moot —
+///   we only need them valid during the capture region.
+/// - `closure` must not invoke any host-sync APIs. See [`capture_on_stream`].
+pub unsafe fn capture_forward_with_outputs<F>(
+    stream: CUstream,
+    closure: F,
+    output_copies: &[(u64, u64, u64)],
+) -> Result<CudaGraph, CaptureError>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    // SAFETY: forwarded to capture_on_stream — see its doc for invariants.
+    unsafe {
+        capture_on_stream(stream, || {
+            closure()?;
+            for &(src, dst, bytes) in output_copies {
+                // SAFETY: src and dst are valid GPU pointers per the caller's
+                // contract; bytes <= sizes of both allocations. The D2D copy
+                // is stream-ordered against the closure's preceding kernels.
+                cudarc::driver::result::memcpy_dtod_async(dst, src, bytes as usize, stream)
+                    .map_err(|e| format!("cuMemcpyDtoDAsync during capture failed: {e}"))?;
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Probe a stream's current capture status. Mostly diagnostic — useful in
 /// tests to assert the stream entered/exited capture cleanly.
 ///
