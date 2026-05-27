@@ -27,6 +27,11 @@ pub fn denormalize<'py>(
         .as_slice()
         .ok_or_else(|| PyValueError::new_err("denormalize expects a contiguous array"))?;
     let out: Vec<f32> = if log_space {
+        if hi <= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "denormalize log_space=True requires hi > 0, got hi={hi}"
+            )));
+        }
         let log_min = (lo + 1e-6_f32).ln();
         let log_max = hi.ln();
         let scale = log_max - log_min;

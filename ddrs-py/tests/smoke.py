@@ -50,3 +50,12 @@ def test_denormalize_log_matches_formula():
 def test_denormalize_rejects_non_1d():
     with pytest.raises(ValueError, match="1-D"):
         ddrs_py.denormalize(np.zeros((2, 2), dtype=np.float32), (0.0, 1.0), False)
+
+
+def test_denormalize_rejects_log_space_with_nonpositive_hi():
+    with pytest.raises(ValueError, match="hi > 0"):
+        ddrs_py.denormalize(
+            np.array([0.5], dtype=np.float32),
+            (0.015, 0.0),
+            True,
+        )
