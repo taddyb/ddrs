@@ -85,3 +85,30 @@ def test_load_mlp_returns_pymlp_with_param_names():
     model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
     assert model.learnable_parameters == ["n", "q_spatial", "p_spatial"]
     assert model.input_var_names_len == 10  # matches merit_training.yaml
+
+
+def test_forward_returns_param_dict_in_unit_interval():
+    ckpt = _first_available_checkpoint()
+    if ckpt is None:
+        pytest.skip("no checkpoint")
+    model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
+
+    rng = np.random.default_rng(seed=0)
+    attrs = rng.standard_normal((7, model.input_var_names_len)).astype(np.float32)
+    out = model.forward(attrs)
+
+    assert set(out.keys()) == {"n", "q_spatial", "p_spatial"}
+    for key, arr in out.items():
+        assert arr.dtype == np.float32, f"{key} dtype is {arr.dtype}"
+        assert arr.shape == (7,), f"{key} shape is {arr.shape}"
+        assert np.all((arr >= 0.0) & (arr <= 1.0)), f"{key} values out of [0,1]: min={arr.min()} max={arr.max()}"
+
+
+def test_forward_rejects_wrong_feature_count():
+    ckpt = _first_available_checkpoint()
+    if ckpt is None:
+        pytest.skip("no checkpoint")
+    model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
+    bad = np.zeros((4, 99), dtype=np.float32)
+    with pytest.raises(ValueError, match="mismatches"):
+        model.forward(bad)
