@@ -358,8 +358,8 @@ mod tests {
         assert_eq!(mlp.input_var_names.len(), 10);
         // tau defaults to 3 when not set in YAML.
         assert_eq!(cfg.params.tau, 3);
-        // sparse_solver defaults to Cpu when not set in YAML.
-        assert_eq!(cfg.params.sparse_solver, SparseSolver::Cpu);
+        // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
+        assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
         // SP-10: use_cuda_graphs defaults to false when not set in YAML.
         assert!(!cfg.params.use_cuda_graphs);
         // top-level scalars.
