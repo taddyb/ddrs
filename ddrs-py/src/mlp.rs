@@ -32,14 +32,14 @@ impl PyMlp {
         self.inner.learnable_parameters().to_vec()
     }
 
-    /// Number of input attribute columns this MLP expects. The bridge
-    /// doesn't expose the names (use `parameter_bounds`/config for that)
-    /// because the only thing the forward call needs is the length.
+    /// Number of input attribute columns this MLP expects.
+    ///
+    /// To find out which attributes these are, read the
+    /// `mlp.input_var_names` list in your YAML config — the names are
+    /// not stored in the checkpoint after `MlpConfig::init`.
     #[getter]
     fn input_var_names_len(&self) -> usize {
-        // Inferred from the first Linear layer's weight rows. We don't
-        // store the original names on the BURN module.
-        // Weight is shaped [d_input, d_output] per burn-nn/src/modules/linear.rs:48.
+        // Inferred from the first Linear layer's weight rows.
         self.inner.input.weight.val().dims()[0]
     }
 }

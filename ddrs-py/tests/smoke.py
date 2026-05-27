@@ -4,8 +4,11 @@ Run from the ddrs-py directory with a venv that has ddrs_py installed:
     uv run pytest tests/smoke.py -v
 """
 
+import os
+
 import numpy as np
 import pytest
+
 import ddrs_py
 
 
@@ -60,8 +63,6 @@ def test_denormalize_rejects_log_space_with_nonpositive_hi():
             True,
         )
 
-
-import os
 
 CHECKPOINT_DIR = f"{REPO_ROOT}/output/saved_models"
 
