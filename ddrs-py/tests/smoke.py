@@ -112,3 +112,45 @@ def test_forward_rejects_wrong_feature_count():
     bad = np.zeros((4, 99), dtype=np.float32)
     with pytest.raises(ValueError, match="mismatches"):
         model.forward(bad)
+
+
+DDR_DATA = "/home/tbindas/projects/ddr/data"
+ATTRS_NC = f"{DDR_DATA}/merit_global_attributes_v2.nc"
+CONUS_ZARR = f"{DDR_DATA}/merit_conus_adjacency.zarr"
+
+
+def test_run_inference_over_conus_returns_per_comid_params():
+    ckpt = _first_available_checkpoint()
+    if ckpt is None:
+        pytest.skip("no checkpoint")
+    if not os.path.exists(ATTRS_NC) or not os.path.exists(CONUS_ZARR):
+        pytest.skip(f"MERIT data not present at {DDR_DATA}")
+
+    result = ddrs_py.run_inference_over_conus(
+        attrs_nc=ATTRS_NC,
+        conus_adjacency_zarr=CONUS_ZARR,
+        checkpoint=ckpt,
+        config_path=CONFIG_PATH,
+    )
+
+    assert set(result.keys()) == {"comid", "n", "q_spatial", "p_spatial"}
+    n_reaches = result["comid"].shape[0]
+    assert n_reaches > 100_000, f"expected ~346k MERIT reaches, got {n_reaches}"
+
+    # COMID column is int64.
+    assert result["comid"].dtype == np.int64
+
+    # Parameter columns are float32, same length as comid, physical-units range.
+    for key in ("n", "q_spatial", "p_spatial"):
+        arr = result[key]
+        assert arr.dtype == np.float32
+        assert arr.shape == (n_reaches,)
+        assert np.all(np.isfinite(arr)), f"{key} has non-finite values"
+
+    # Physical bounds sanity per merit_training.yaml's parameter_ranges:
+    #   n in [0.015, 0.25] (log space → exp() output strictly positive)
+    #   q_spatial in [0.0, 1.0]
+    #   p_spatial in [1.0, 200.0]
+    assert result["n"].min() > 0.0 and result["n"].max() <= 0.25 + 1e-3
+    assert result["q_spatial"].min() >= 0.0 and result["q_spatial"].max() <= 1.0 + 1e-5
+    assert result["p_spatial"].min() >= 1.0 - 1e-3 and result["p_spatial"].max() <= 200.0 + 1e-3

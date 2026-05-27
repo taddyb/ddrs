@@ -13,7 +13,7 @@ use pyo3::types::PyDict;
 use crate::config::{load_config, mlp_config_from_section, require_mlp_section};
 use crate::error::BridgeError;
 
-type Backend = NdArray<f32>;
+pub(crate) type Backend = NdArray<f32>;
 
 /// Opaque container for a loaded MLP.
 ///
@@ -87,7 +87,7 @@ impl PyMlp {
             let tensor = raw
                 .get(key)
                 .expect("MLP returned no entry for declared learnable_parameter");
-            let vec: Vec<f32> = tensor.clone().into_data().to_vec().map_err(|e| {
+            let vec: Vec<f32> = tensor.to_data().to_vec().map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "BURN tensor → Vec<f32> failed for `{key}`: {e:?}"
                 ))
@@ -95,6 +95,20 @@ impl PyMlp {
             out.set_item(key, PyArray1::from_vec_bound(py, vec))?;
         }
         Ok(out)
+    }
+}
+
+// Internal helpers used by sibling modules; NOT exposed to Python.
+impl PyMlp {
+    pub(crate) fn run(
+        &self,
+        input: Tensor<Backend, 2>,
+    ) -> std::collections::HashMap<String, Tensor<Backend, 1>> {
+        self.inner.forward(input)
+    }
+
+    pub(crate) fn param_order(&self) -> &[String] {
+        self.inner.learnable_parameters()
     }
 }
 
