@@ -862,7 +862,7 @@ where
 ///
 /// Panics if `B` is not `Cuda<f32, i32>`. Callers must gate via
 /// `dispatch::backend_is_cuda::<B>()` (or the TypeId check inline).
-fn compute_client<B: Backend + 'static>(
+pub(crate) fn compute_client<B: Backend + 'static>(
     device: &B::Device,
 ) -> cubecl::client::ComputeClient<CudaRuntime> {
     use std::any::TypeId;

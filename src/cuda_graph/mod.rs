@@ -11,3 +11,4 @@ pub mod capture;
 pub mod scratch;
 
 pub use capture::{CaptureError, CudaGraph, capture_on_stream, capture_status};
+pub use scratch::PersistentScratch;
