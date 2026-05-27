@@ -151,6 +151,7 @@ def test_run_inference_over_conus_returns_per_comid_params():
     #   n in [0.015, 0.25] (log space → exp() output strictly positive)
     #   q_spatial in [0.0, 1.0]
     #   p_spatial in [1.0, 200.0]
-    assert result["n"].min() > 0.0 and result["n"].max() <= 0.25 + 1e-3
+    # Log-space n is bounded below by lo + 1e-6 ≈ 0.015, not just > 0.
+    assert result["n"].min() >= 0.015 - 1e-3 and result["n"].max() <= 0.25 + 1e-3
     assert result["q_spatial"].min() >= 0.0 and result["q_spatial"].max() <= 1.0 + 1e-5
     assert result["p_spatial"].min() >= 1.0 - 1e-3 and result["p_spatial"].max() <= 200.0 + 1e-3

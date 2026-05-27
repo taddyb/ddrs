@@ -14,7 +14,7 @@ use pyo3::types::PyDict;
 
 use crate::config::{load_config, require_mlp_section};
 use crate::error::BridgeError;
-use crate::mlp::{Backend, PyMlp};
+use crate::mlp::Backend;
 
 /// Load checkpoint → walk every COMID in the CONUS adjacency → return a
 /// per-COMID dict of physical-unit parameters.
@@ -50,15 +50,31 @@ pub fn run_inference_over_conus<'py>(
     //    ids() returns the slice in insertion order, which matches attrs columns.
     let n_reaches = attrs_store.index.len();
     let f = attr_names.len();
-    debug_assert_eq!(attrs_store.attrs.dim(), (f, n_reaches));
+    // Hard assert: a layout mismatch would silently scramble the input tensor
+    // in release builds, producing finite but wrong parameter maps.
+    assert_eq!(attrs_store.attrs.dim(), (f, n_reaches),
+        "AttributesStore returned shape {:?}, expected (F={}, N={})",
+        attrs_store.attrs.dim(), f, n_reaches);
     let resolved_comids: Vec<i64> = attrs_store.index.ids().iter().map(|c| c.0).collect();
 
-    // 4. Reload the MLP.
+    // 4. Reload the MLP. (We do this here rather than accepting a PyMlp
+    //    parameter so the caller has a single-call API.) Note: this
+    //    re-parses the YAML internally; acceptable for a one-shot
+    //    CONUS-wide inference call.
     let model = crate::mlp::load_mlp(checkpoint, config_path)?;
 
     // 5. Build the BURN input tensor. AttributesStore stores attrs as
     //    (F, N); MLP wants (N, F). Transpose into a Vec<f32> in row-major.
     //    Impute NaN/Inf with per-attribute row_means (mirrors DDR's fill_nans).
+    //
+    // DDR's `fill_nans` in `~/projects/ddr/src/ddr/io/readers.py` uses
+    // `torch.isnan`, which catches NaN only. We use `is_finite()` to catch
+    // both NaN and ±Inf — strictly more defensive. In MERIT data observed
+    // so far (9,291 non-finite values across 346k reaches × 10 attributes)
+    // all non-finite values were NaN, so this is a no-op divergence. If
+    // Inf values ever appear in future attribute files, DDR would pass
+    // them through to the MLP (producing Inf outputs) while ddrs-py would
+    // impute them.
     let mut input_buf = vec![0.0_f32; n_reaches * f];
     for row in 0..n_reaches {
         for col in 0..f {
@@ -121,6 +137,10 @@ pub fn run_inference_over_conus<'py>(
 fn denormalize_vec(values: &[f32], bounds: [f32; 2], log_space: bool) -> Vec<f32> {
     let [lo, hi] = bounds;
     if log_space {
+        debug_assert!(
+            hi > 0.0,
+            "denormalize_vec log_space=true requires hi > 0, got hi={hi}"
+        );
         let log_min = (lo + 1e-6_f32).ln();
         let log_max = hi.ln();
         let scale = log_max - log_min;
