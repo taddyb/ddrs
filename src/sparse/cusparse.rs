@@ -1957,17 +1957,17 @@ pub(crate) unsafe fn handle_devptr(
 ///
 /// # Safety
 /// - Same constraints as [`primitive_as_cuda_view`].
-/// - Returns `0` if the primitive is not a CUDA tensor — caller should check
-///   the backend type before calling.
+/// - Returns `None` if the primitive is not a CUDA tensor — callers must
+///   either `.expect(...)` or otherwise handle the `None` case explicitly.
+///   Previously this returned `0` silently, which could let a captured graph
+///   memcpy from the null page if a caller forgot to check the backend.
 pub(crate) fn primitive_devptr<B: Backend>(
     prim: &B::FloatTensorPrimitive,
-) -> u64
+) -> Option<u64>
 where
     B::FloatTensorPrimitive: 'static,
 {
-    primitive_as_cuda_view::<B>(prim)
-        .map(|v| v.ptr as u64)
-        .unwrap_or(0)
+    primitive_as_cuda_view::<B>(prim).map(|v| v.ptr as u64)
 }
 
 /// `&mut` variant of [`ensure_cuda_cache`]. Used by SP-10 to install
@@ -1978,6 +1978,10 @@ where
 /// access to the pattern's cuda cache. In practice this is invoked from
 /// `MuskingumCunge::setup_inputs` on the training thread, before any
 /// per-timestep call.
+// SAFETY-INVERSION: caller must serialize access to the cache; same
+// contract as `ensure_cuda_cache`. The `UnsafeSendCache` wrapper
+// (cusparse.rs:1158) enforces single-threaded use via the marker.
+#[allow(clippy::mut_from_ref)]
 pub(crate) unsafe fn ensure_cuda_cache_mut(
     pattern: &crate::sparse::CsrPattern,
 ) -> &mut CudaPatternCache {
@@ -2010,8 +2014,8 @@ pub(crate) unsafe fn ensure_cuda_cache_mut(
 /// On failure (any error from capture, instantiate, or the closure itself),
 /// the cache's `capture_status` is set to `FallbackReason(...)` and
 /// `graph_fwd` is left `None` so subsequent `route_timestep` calls take the
-/// SP-9 direct-launch path. Logs via `tracing::info!` / `tracing::warn!`
-/// either way so silent fallbacks are greppable in training logs.
+/// SP-9 direct-launch path. Logs via `eprintln!` either way so silent
+/// fallbacks are greppable in training logs.
 ///
 /// Only called when `cfg.params.use_cuda_graphs == true` and
 /// `sparse_solver == Cuda`. Bypassed entirely otherwise.
@@ -2077,8 +2081,8 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             wrap_prim::<I>(n.clone()),
             wrap_prim::<I>(q_spatial.clone()),
             wrap_prim::<I>(p_spatial.clone()),
-            wrap_prim::<I>(n.clone()), /* placeholder for q_t — value doesn't matter */
-            wrap_prim::<I>(n.clone()), /* placeholder for q_prime_t */
+            wrap_prim::<I>(n.clone()), /* placeholder: value-independent — only allocation sequence matters for devptr discovery */
+            wrap_prim::<I>(n.clone()), /* placeholder: value-independent — only allocation sequence matters for devptr discovery */
             wrap_prim::<I>(length.clone()),
             wrap_prim::<I>(slope.clone()),
             wrap_prim::<I>(x_storage.clone()),
@@ -2141,10 +2145,12 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
         .exclusive_with_server(|_server| -> Result<crate::cuda_graph::CudaGraph, String> {
             // ---- First pass: discover src ptrs ----
             let (probe_q_next, probe_states) = probe_inputs();
-            let src_q_next = primitive_devptr::<I>(&probe_q_next);
+            let src_q_next = primitive_devptr::<I>(&probe_q_next)
+                .expect("primitive_devptr called on non-CUDA backend (probe q_next)");
             let mut src_states = [0u64; NUM_SAVED_STATE];
             for (i, s) in probe_states.iter().enumerate() {
-                src_states[i] = primitive_devptr::<I>(s);
+                src_states[i] = primitive_devptr::<I>(s)
+                    .expect("primitive_devptr called on non-CUDA backend (probe state)");
             }
             // Drop probe outputs so cubecl frees their buffers (releasing
             // the addresses we just observed back to the allocator; the
@@ -2166,8 +2172,32 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             // src device-pointer addresses (deterministic-allocator
             // assumption). Then capture_forward_with_outputs appends the
             // memcpy nodes so the outputs land in the scratch destinations.
+            //
+            // Defensive: confirm cubecl allocator gave us the same
+            // addresses as the probe pass. If not, the captured graph
+            // would memcpy from stale addresses on every replay, silently
+            // corrupting outputs. Converts that silent nondeterminism into
+            // a loud fallback-with-log.
             let closure = || -> Result<(), String> {
-                let (_q_next_prim2, _state_prims2) = probe_inputs();
+                let (q_next_prim2, state_prims2) = probe_inputs();
+                let q_devptr2 = primitive_devptr::<I>(&q_next_prim2)
+                    .expect("primitive_devptr called on non-CUDA backend (capture q_next)");
+                if q_devptr2 != src_q_next {
+                    return Err(format!(
+                        "nondeterministic allocator: q_next devptr changed {:#x} -> {:#x}",
+                        src_q_next, q_devptr2
+                    ));
+                }
+                for (i, p) in state_prims2.iter().enumerate() {
+                    let dev = primitive_devptr::<I>(p)
+                        .expect("primitive_devptr called on non-CUDA backend (capture state)");
+                    if dev != src_states[i] {
+                        return Err(format!(
+                            "nondeterministic allocator: state[{i}] devptr changed {:#x} -> {:#x}",
+                            src_states[i], dev
+                        ));
+                    }
+                }
                 // Drop happens at end of scope after end_capture executes
                 // its closure; the cubecl frees are stream-ordered so the
                 // copies above (which reference the same handles) finish
