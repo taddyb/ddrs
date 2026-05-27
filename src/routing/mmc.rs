@@ -195,8 +195,13 @@ impl<I: Backend> MuskingumCunge<I> {
 
         // SP-10: eagerly capture the per-timestep CUDA graph once, here at
         // setup time, so the per-step path can just replay it. Bypassed if
-        // graphs aren't requested, or on the CPU sparse path.
-        if self.cfg.params.use_cuda_graphs && self.sparse_solver == SparseSolver::Cuda {
+        // graphs aren't requested, on the CPU sparse path, or if the inner
+        // backend isn't `Cuda<f32, i32>` (the CPU-fallback case: the user
+        // requested cuda but is on NdArray — capture would TypeId-panic).
+        if self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>()
+        {
             self.try_capture_forward_graph();
         }
     }
@@ -278,12 +283,30 @@ impl<I: Backend> MuskingumCunge<I> {
         let pattern = self.pattern.as_ref().unwrap();
         let assembler = self.assembler.as_ref().unwrap();
 
-        crate::routing::mmc_op::timestep_forward::<I>(
-            &self.cfg, pattern, assembler,
-            n, q_spatial, p_spatial,
-            q_t, q_prime_clamp,
-            length, slope, x_storage,
-        )
+        // SP-10: dispatch to the graph-replay path when graphs are on, we
+        // are running on the CUDA sparse solver, AND the inner backend is
+        // `Cuda<f32, i32>` (TypeId-gated to avoid the cuSPARSE/cubecl call
+        // path on NdArray, which would panic in `compute_client`). The
+        // replay function falls back to `timestep_forward` if capture
+        // failed and no graph is installed on the cache.
+        if self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>()
+        {
+            crate::routing::mmc_op::timestep_forward_via_graph::<I>(
+                &self.cfg, pattern, assembler,
+                n, q_spatial, p_spatial,
+                q_t, q_prime_clamp,
+                length, slope, x_storage,
+            )
+        } else {
+            crate::routing::mmc_op::timestep_forward::<I>(
+                &self.cfg, pattern, assembler,
+                n, q_spatial, p_spatial,
+                q_t, q_prime_clamp,
+                length, slope, x_storage,
+            )
+        }
     }
 
     /// Forward over the full window. Output shape `[n, T]` (segment × time).

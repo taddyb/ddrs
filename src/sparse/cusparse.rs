@@ -1970,6 +1970,88 @@ where
     primitive_as_cuda_view::<B>(prim).map(|v| v.ptr as u64)
 }
 
+/// SP-10: wrap a cubecl `Handle` (e.g. one of the `PersistentScratch.in_q*`
+/// buffers) as an inner-backend `FloatTensorPrimitive` of shape `[n]`.
+///
+/// Clones the Handle so the underlying refcounted allocation stays alive
+/// after the returned primitive is dropped — the caller's original Handle
+/// (held inside `PersistentScratch`) remains valid for the cache lifetime.
+///
+/// Used by `try_capture_forward` so the captured graph's input reads come
+/// from the persistent scratch buffers; on replay we just D2D-copy the
+/// per-step `q_t` / `q_prime_t` into those scratch destinations before
+/// `cuGraphLaunch`.
+pub(crate) fn handle_to_primitive<B: Backend + 'static>(
+    handle: &burn_cubecl::cubecl::server::Handle,
+    n: usize,
+    device: &B::Device,
+) -> B::FloatTensorPrimitive {
+    use burn::tensor::{DType, Shape};
+    let client = compute_client::<B>(device);
+    let shape = Shape::from(vec![n]);
+    // SAFETY: TypeId of B::Device == CudaDevice is asserted inside compute_client.
+    let cuda_device: cubecl::cuda::CudaDevice =
+        unsafe { std::ptr::read(device as *const B::Device as *const cubecl::cuda::CudaDevice) };
+    let cube = CubeTensor::<CudaRuntime>::from_handle(
+        client,
+        cuda_device,
+        shape,
+        handle.clone(),
+        DType::F32,
+    );
+    cube_tensor_to_primitive::<B>(cube)
+}
+
+/// SP-10: allocate a fresh cubecl `Handle` of `[n × f32]`, D2D-copy from
+/// `src_handle` into it, then wrap as an inner-backend `FloatTensorPrimitive`.
+///
+/// Used by `timestep_forward_via_graph` to publish the graph's scratch
+/// outputs as autograd-tape-eligible primitives owned by the per-step result.
+/// The fresh handle keeps the result alive past the next graph replay (which
+/// would overwrite the scratch contents).
+///
+/// # Safety
+/// - `src_handle` must contain valid f32 data of at least `n` elements.
+/// - `stream` must be cubecl's primary stream, with context currently bound.
+/// - Caller is responsible for stream-ordering with subsequent reads.
+pub(crate) unsafe fn fresh_primitive_from_scratch<B: Backend + 'static>(
+    src_handle: &burn_cubecl::cubecl::server::Handle,
+    n: usize,
+    stream: cudarc::driver::sys::CUstream,
+    device: &B::Device,
+) -> B::FloatTensorPrimitive {
+    use burn::tensor::{DType, Shape};
+    use burn_cubecl::cubecl::server::Handle;
+    let client = compute_client::<B>(device);
+    let n_bytes = n * std::mem::size_of::<f32>();
+    // Allocate fresh device buffer.
+    let dst_handle: Handle = client.empty(n_bytes);
+
+    // SAFETY: src is alive (caller-owned through `&Handle`); dst is the freshly
+    // allocated handle (alive for this call and beyond, owned by `dst_handle`).
+    // Both pointers are CUDA device pointers. The D2D copy is enqueued on
+    // cubecl's active stream so it serializes with subsequent kernels.
+    unsafe {
+        let src_ptr = handle_devptr(&client, src_handle);
+        let dst_ptr = handle_devptr(&client, &dst_handle);
+        cudarc::driver::result::memcpy_dtod_async(dst_ptr, src_ptr, n_bytes, stream)
+            .expect("fresh_primitive_from_scratch: D2D copy failed");
+    }
+
+    let shape = Shape::from(vec![n]);
+    // SAFETY: TypeId of B::Device == CudaDevice is asserted inside compute_client.
+    let cuda_device: cubecl::cuda::CudaDevice =
+        unsafe { std::ptr::read(device as *const B::Device as *const cubecl::cuda::CudaDevice) };
+    let cube = CubeTensor::<CudaRuntime>::from_handle(
+        client,
+        cuda_device,
+        shape,
+        dst_handle,
+        DType::F32,
+    );
+    cube_tensor_to_primitive::<B>(cube)
+}
+
 /// `&mut` variant of [`ensure_cuda_cache`]. Used by SP-10 to install
 /// captured graphs onto the cache from `setup_inputs`.
 ///
@@ -2048,13 +2130,18 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
         ));
     }
 
-    // 2. Build the scratch-backed inputs once, OUTSIDE capture. We seed the
-    //    in_q / in_qp scratch buffers with the caller-supplied q_t / q_p
-    //    primitives by D2D-copying their device pointers; this happens at
-    //    cubecl-allocator level via creating wrapping tensors that hold the
-    //    scratch handles. For the capture trial run we just reuse the
-    //    caller-supplied primitives (Task 5's only goal here is to learn
-    //    output pointers — the actual seeding is Task 6's job at replay).
+    // 2. Build the scratch-backed inputs once, OUTSIDE capture.
+    //
+    // Per-step inputs `q_t` and `q_prime_t` must read from the persistent
+    // `scratch.in_q` / `scratch.in_qp` buffers so the captured kernels'
+    // device-pointer reads are stable. On replay, Task 6 D2D-copies the
+    // current step's `q_t` / `q_prime_t` into these scratch destinations
+    // before `cuGraphLaunch`.
+    //
+    // Static inputs (n, q_spatial, p_spatial, length, slope, x_storage) are
+    // bound to `self.*` on `MuskingumCunge` and keep stable cubecl handles
+    // (and therefore devptrs) for the engine's lifetime — replay reuses
+    // the same primitives, so the captured kernels read the same addresses.
     let client = compute_client::<I>(device);
 
     // Make sure all prior cubecl work has been submitted to the stream.
@@ -2071,6 +2158,19 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     // OUTSIDE the capture region. The src pointers observed here are the
     // ones we'll memcpy from inside capture (assumption: cubecl's allocator
     // is deterministic for the same allocation sequence).
+    //
+    // For `q_t` and `q_prime_t` we wrap the scratch `in_q`/`in_qp` handles
+    // so the captured kernels read from those fixed devptrs. For static
+    // inputs we reuse the caller's primitives (stable across the engine's
+    // lifetime).
+    let scratch_in_q_prim = {
+        let s = cache.scratch.as_ref().unwrap();
+        handle_to_primitive::<I>(&s.in_q, pattern.n, device)
+    };
+    let scratch_in_qp_prim = {
+        let s = cache.scratch.as_ref().unwrap();
+        handle_to_primitive::<I>(&s.in_qp, pattern.n, device)
+    };
     let probe_inputs = || -> (
         I::FloatTensorPrimitive,
         [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -2081,8 +2181,8 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             wrap_prim::<I>(n.clone()),
             wrap_prim::<I>(q_spatial.clone()),
             wrap_prim::<I>(p_spatial.clone()),
-            wrap_prim::<I>(n.clone()), /* placeholder: value-independent — only allocation sequence matters for devptr discovery */
-            wrap_prim::<I>(n.clone()), /* placeholder: value-independent — only allocation sequence matters for devptr discovery */
+            wrap_prim::<I>(scratch_in_q_prim.clone()),
+            wrap_prim::<I>(scratch_in_qp_prim.clone()),
             wrap_prim::<I>(length.clone()),
             wrap_prim::<I>(slope.clone()),
             wrap_prim::<I>(x_storage.clone()),

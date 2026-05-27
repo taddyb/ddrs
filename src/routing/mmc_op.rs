@@ -836,3 +836,277 @@ where
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
 }
+
+/// SP-10 Task 6: forward-graph replay path.
+///
+/// Same external contract as [`timestep_forward`], but instead of building
+/// `Q_next` by re-running the S1..S28 kernel chain, it:
+///
+///   1. D2D-copies the per-step `q_t` → `scratch.in_q` and
+///      `q_prime_t` → `scratch.in_qp`.
+///   2. `cuGraphLaunch`'s the once-captured forward CUDA graph (lives on
+///      `cache.graph_fwd`). Replay writes all 24 outputs (Q_next + 23 saved
+///      intermediates) into the persistent scratch destinations.
+///   3. For each output, allocates a fresh cubecl handle and D2D-copies from
+///      its scratch destination into it (via
+///      [`crate::sparse::cusparse::fresh_primitive_from_scratch`]). The fresh
+///      handles are autograd-tape-eligible primitives owned by the per-step
+///      result; they keep their content alive past the next replay (which
+///      would otherwise overwrite the scratch contents).
+///   4. Builds the `TimestepState` from the 23 fresh state primitives and
+///      registers a `TimestepOp` node on the tape (identical to the
+///      direct-launch path).
+///
+/// Falls back to [`timestep_forward`] if no graph is installed on the cache
+/// (e.g. when capture failed at setup time and recorded a fallback reason).
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_via_graph<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    // SAFETY: route_timestep is the training thread's entry; no other thread
+    // accesses this pattern's cuda cache. The borrow lives only for the
+    // duration of this call.
+    let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+
+    // If no graph was installed (capture failed), fall through to direct launch.
+    if cache.graph_fwd.is_none() || cache.scratch.is_none() {
+        return timestep_forward::<I>(
+            cfg, pattern, assembler,
+            n_at, q_spatial_at, p_spatial_at,
+            q_t_at, q_prime_t_at, length_at, slope_at, x_storage_at,
+        );
+    }
+
+    let scratch = cache.scratch.as_ref().expect("scratch must exist when graph_fwd does");
+    let graph = cache.graph_fwd.as_ref().expect("graph_fwd checked above");
+    // Hop the raw CUgraphExec pointer across the closure as `usize` —
+    // `&CudaGraph` is !Send because the raw CUgraphExec is `*mut _`.
+    let graph_exec_addr: usize = graph.exec_raw() as usize;
+    let n_seg = pattern.n;
+    let nnz = pattern.col.len();
+    let bytes_n = n_seg * std::mem::size_of::<f32>();
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    // Unwrap autograd primitives.
+    let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        _ => panic!("expected float tensor"),
+    };
+    let n_aut = unwrap_at(n_at);
+    let qsp_aut = unwrap_at(q_spatial_at);
+    let psp_aut = unwrap_at(p_spatial_at);
+    let qt_aut = unwrap_at(q_t_at);
+    let qpt_aut = unwrap_at(q_prime_t_at);
+    let length_aut = unwrap_at(length_at);
+    let slope_aut = unwrap_at(slope_at);
+    let xst_aut = unwrap_at(x_storage_at);
+
+    let n_p = n_aut.primitive.clone();
+    let qsp_p = qsp_aut.primitive.clone();
+    let psp_p = psp_aut.primitive.clone();
+    let qt_p = qt_aut.primitive.clone();
+    let qpt_p = qpt_aut.primitive.clone();
+    let length_p = length_aut.primitive.clone();
+    let slope_p = slope_aut.primitive.clone();
+    let xst_p = xst_aut.primitive.clone();
+
+    let device = I::float_device(&qt_p);
+
+    // Get per-step input devptrs (we'll D2D-copy these into scratch.in_q/in_qp).
+    let qt_devptr = crate::sparse::cusparse::primitive_devptr::<I>(&qt_p)
+        .expect("q_t primitive must be CUDA tensor in graph-replay path");
+    let qpt_devptr = crate::sparse::cusparse::primitive_devptr::<I>(&qpt_p)
+        .expect("q_prime_t primitive must be CUDA tensor in graph-replay path");
+
+    let client = crate::sparse::cusparse::compute_client::<I>(&device);
+    // Flush any pending cubecl work before the graph replay so prior kernels
+    // serialize correctly with the in_q/in_qp seeding copies below.
+    client.flush().expect("flush before graph replay");
+
+    // Persistent scratch destination pointers.
+    let dst_in_q = unsafe { crate::sparse::cusparse::handle_devptr(&client, &scratch.in_q) };
+    let dst_in_qp = unsafe { crate::sparse::cusparse::handle_devptr(&client, &scratch.in_qp) };
+
+    // -------- Drive CUDA work directly from this thread --------
+    //
+    // We CANNOT submit BURN/cubecl work from inside `exclusive_with_server`
+    // (the channel deadlocks since the server is busy in our closure). The
+    // capture path (`try_capture_forward`) takes the same approach: bind
+    // cubecl's primary CUDA context to this thread, then drive all CUDA APIs
+    // directly. Mirror that here so replay sees the same context.
+    //
+    // SAFETY: retain+set_current is harmless if already bound. Primary
+    // context for device 0 matches cubecl's (cubecl uses CudaDevice::default()
+    // → ordinal 0). cubecl's ComputeClient::empty (used by
+    // fresh_primitive_from_scratch) tolerates being called from this thread.
+    unsafe {
+        let cu_dev = cudarc::driver::result::device::get(0)
+            .expect("graph-replay: cuDeviceGet(0) failed");
+        let ctx = cudarc::driver::result::primary_ctx::retain(cu_dev)
+            .expect("graph-replay: primary_ctx::retain failed");
+        cudarc::driver::result::ctx::set_current(ctx)
+            .expect("graph-replay: ctx::set_current failed");
+    }
+
+    let stream_addr: usize = crate::sparse::cusparse::cubecl_stream_active::<I>(&device) as usize;
+    let stream = stream_addr as cudarc::driver::sys::CUstream;
+
+    // 1. Seed: D2D q_t -> in_q, q_prime_t -> in_qp.
+    // SAFETY: src/dst pointers are valid CUDA device pointers on cubecl's
+    // memory pool; bytes <= alloc size; stream is cubecl's primary stream;
+    // context is bound on this thread.
+    unsafe {
+        cudarc::driver::result::memcpy_dtod_async(
+            dst_in_q, qt_devptr, bytes_n, stream,
+        )
+        .expect("graph-replay: D2D q_t -> in_q failed");
+        cudarc::driver::result::memcpy_dtod_async(
+            dst_in_qp, qpt_devptr, bytes_n, stream,
+        )
+        .expect("graph-replay: D2D q_prime_t -> in_qp failed");
+    }
+
+    // 2. Replay the captured graph.
+    //
+    // SAFETY: graph_exec is the valid CUgraphExec owned by `cache.graph_fwd`
+    // (alive for the cache lifetime). Context is bound on this thread.
+    let graph_exec = graph_exec_addr as cudarc::driver::sys::CUgraphExec;
+    unsafe {
+        cudarc::driver::result::graph::launch(graph_exec, stream)
+            .expect("graph-replay: cuGraphLaunch failed");
+    }
+
+    // 3. Allocate fresh handles + D2D-copy outputs.
+    //
+    // SAFETY: src scratch handles alive for the cache lifetime; stream is
+    // cubecl's primary stream; copies are stream-ordered after the launch.
+    use crate::sparse::cusparse::fresh_primitive_from_scratch;
+    let q_next_prim = unsafe {
+        fresh_primitive_from_scratch::<I>(&scratch.out_q, n_seg, stream, &device)
+    };
+    let state_arr: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = unsafe {
+        [
+            fresh_primitive_from_scratch::<I>(&scratch.state_depth, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_top_width, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_side_slope, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_bottom_width, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_hydraulic_radius, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_velocity_unclamped, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_velocity_clamped, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_celerity, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_k_muskingum, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_denom, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c1, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c2, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c3, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c4, n_seg, stream, &device),
+            // state_a_values has size [nnz], not [n].
+            fresh_primitive_from_scratch::<I>(&scratch.state_a_values, nnz, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_b_rhs, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_i_t, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_x_sol, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_ratio, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_denominator, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_q_eps, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_side_slope_raw, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_bw_raw, n_seg, stream, &device),
+        ]
+    };
+
+    let _ = assembler; // unused — same as direct-launch path; kept for API parity.
+
+    // Unpack state primitives. Indices MUST match `forward_saved_idx`.
+    use forward_saved_idx as fsi;
+    let [
+        depth_p, top_width_p, side_slope_p, bottom_width_p,
+        hyd_radius_p, velocity_un_p, velocity_cl_p, celerity_p,
+        k_muskingum_p, denom_p, c1_prim, c2_p, c3_p, c4_p,
+        a_values_prim, b_rhs_prim, i_t_prim, x_sol_prim,
+        ratio_p, denominator_p, q_eps_p, side_slope_raw_p, bw_raw_p,
+    ] = state_arr;
+    let _ = (fsi::DEPTH, fsi::BW_RAW); // index sanity touch
+
+    // Build TimestepState. Backward needs the per-step `q_t`/`q_prime_t`
+    // primitives (NOT scratch handles — scratch gets overwritten on next
+    // replay, but the backward closure runs on `loss.backward()` after the
+    // forward window completes, so it has to see the per-step values).
+    let state = TimestepState::<I> {
+        pattern: pattern.clone(),
+        n: n_p,
+        q_spatial: qsp_p,
+        p_spatial: psp_p,
+        q_t: qt_p,
+        q_prime_t: qpt_p,
+        length: length_p,
+        slope: slope_p,
+        x_storage: xst_p,
+        depth: depth_p,
+        top_width: top_width_p,
+        side_slope: side_slope_p,
+        bottom_width: bottom_width_p,
+        hydraulic_radius: hyd_radius_p,
+        velocity_unclamped: velocity_un_p,
+        velocity_clamped: velocity_cl_p,
+        celerity: celerity_p,
+        k_muskingum: k_muskingum_p,
+        denom: denom_p,
+        c1: c1_prim,
+        c2: c2_p,
+        c3: c3_p,
+        c4: c4_p,
+        a_values: a_values_prim,
+        b_rhs: b_rhs_prim,
+        i_t: i_t_prim,
+        x_sol: x_sol_prim,
+        ratio: ratio_p,
+        denominator: denominator_p,
+        q_eps: q_eps_p,
+        side_slope_raw: side_slope_raw_p,
+        bw_raw: bw_raw_p,
+        bottom_width_lb,
+        depth_lb,
+        velocity_lb,
+        discharge_lb,
+        dt,
+        use_cuda,
+    };
+
+    let result_prim = match TimestepOp
+        .prepare::<NoCheckpointing>([
+            n_aut.node.clone(),
+            qsp_aut.node.clone(),
+            psp_aut.node.clone(),
+            qt_aut.node.clone(),
+            qpt_aut.node.clone(),
+        ])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    };
+
+    Tensor::from_primitive(TensorPrimitive::Float(result_prim))
+}
