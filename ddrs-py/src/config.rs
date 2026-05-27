@@ -12,12 +12,13 @@ use crate::error::BridgeError;
 /// Load `Config` from a YAML path with consistent error wrapping.
 pub fn load_config(path: &str) -> Result<Config, BridgeError> {
     Config::from_yaml_file(Path::new(path)).map_err(|source| BridgeError::Config {
-        path: path.to_string(),
+        path: path.into(),
         source,
     })
 }
 
 /// Pull `cfg.mlp` or return a typed error if absent.
+#[allow(dead_code)] // used in Task 3 (mlp.rs) and Task 5 (conus.rs)
 pub fn require_mlp_section<'a>(
     cfg: &'a Config,
     path: &str,
@@ -29,6 +30,7 @@ pub fn require_mlp_section<'a>(
 
 /// Convert a ddrs YAML `MlpConfigSection` into the ddrs `MlpConfig` used to
 /// build an `Mlp<B>` template.
+#[allow(dead_code)] // used in Task 3 (mlp.rs)
 pub fn mlp_config_from_section(section: &MlpConfigSection) -> MlpConfig {
     MlpConfig::new(section.input_var_names.clone(), section.learnable_parameters.clone())
         .with_hidden_size(section.hidden_size)

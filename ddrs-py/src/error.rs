@@ -8,7 +8,7 @@ use thiserror::Error;
 pub enum BridgeError {
     #[error("config load failed at {path:?}: {source}")]
     Config {
-        path: String,
+        path: std::path::PathBuf,
         #[source]
         source: ddrs::data::error::DataError,
     },
@@ -18,7 +18,7 @@ pub enum BridgeError {
     AttrShapeMismatch { rows: usize, cols: usize, expected_cols: usize },
     #[error("checkpoint load failed at {path:?}: {source}")]
     Checkpoint {
-        path: String,
+        path: std::path::PathBuf,
         #[source]
         source: ddrs::data::error::DataError,
     },
