@@ -4,10 +4,10 @@
 //! See `~/projects/ddr/CLAUDE.md` for the reference algorithm.
 
 pub mod config;
+pub mod cuda_graph;
 pub mod data;
 pub mod geometry;
 pub mod nn;
 pub mod routing;
 pub mod sparse;
-pub mod cuda_graph;
 pub mod training;

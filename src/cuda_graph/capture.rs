@@ -26,9 +26,8 @@
 use cudarc::driver::result::{graph as cu_graph_api, stream as cu_stream_api};
 use cudarc::driver::sys::{
     CUgraph, CUgraphExec, CUgraphInstantiate_flags, CUstream, CUstreamCaptureMode_enum,
-    CUstreamCaptureStatus, CUstreamCaptureStatus_enum, cuStreamIsCapturing,
+    CUstreamCaptureStatus_enum,
 };
-use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -203,15 +202,7 @@ where
 pub unsafe fn capture_status(
     stream: CUstream,
 ) -> Result<CUstreamCaptureStatus_enum, cudarc::driver::DriverError> {
-    // cudarc 0.19.7's `stream` result module does not wrap `cuStreamIsCapturing`,
-    // so we call the sys binding directly and convert via `CUresult::result()`
-    // (inherent impl on `CUresult`).
-    let mut status: MaybeUninit<CUstreamCaptureStatus> = MaybeUninit::uninit();
-    // SAFETY: `stream` is valid per caller; `status` is a writable
-    // MaybeUninit slot for the driver to populate. Context-binding is the
-    // caller's responsibility (see module docs).
-    unsafe { cuStreamIsCapturing(stream, status.as_mut_ptr()) }.result()?;
-    // SAFETY: `cuStreamIsCapturing` returning success guarantees `status`
-    // was written.
-    Ok(unsafe { status.assume_init() })
+    // SAFETY: `stream` validity and context-binding are caller invariants
+    // (see this function's safety doc and the module-level docs).
+    unsafe { cu_stream_api::is_capturing(stream) }
 }
