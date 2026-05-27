@@ -1004,6 +1004,15 @@ pub fn __spike_cube_round_trip<B: Backend + 'static>(
 
 use std::marker::PhantomData;
 
+/// SP-10 observability. Surfaces whether capture succeeded; if not, the
+/// reason so training-log greps catch silent fallbacks.
+#[derive(Debug, Clone)]
+pub(crate) enum CaptureStatus {
+    NotAttempted,
+    Captured,
+    FallbackReason(String),
+}
+
 /// Per-pattern cuSPARSE state. Built lazily on first GPU solve call.
 ///
 /// !Send because cuSPARSE descriptors and CUDA contexts are tied to the
@@ -1050,6 +1059,28 @@ pub(crate) struct CudaPatternCache {
     pub(crate) workspace_spmv_nt: burn_cubecl::cubecl::server::Handle,
     /// Workspace for `cusparseSpMV(NON_TRANSPOSE, sp_mat_rowsum, ...)`.
     pub(crate) workspace_rowsum: burn_cubecl::cubecl::server::Handle,
+    // ── SP-10 CUDA Graphs ─────────────────────────────────────────────
+    // NB: declaration order matters — Rust drops struct fields in
+    // declaration order. `graph_fwd` and `graph_bwd` must be declared
+    // BEFORE `scratch` so the captured CUgraphExec objects (which hold
+    // pointers into scratch buffers) are destroyed first. Drop::drop
+    // also explicitly sets the graphs to None at its top, but the
+    // declaration order is the backstop.
+    /// Forward-direction captured CUDA graph. `None` if capture failed
+    /// or `params.use_cuda_graphs == false`.
+    pub(crate) graph_fwd: Option<crate::cuda_graph::CudaGraph>,
+    /// Backward-direction captured CUDA graph. Same fallback semantics.
+    pub(crate) graph_bwd: Option<crate::cuda_graph::CudaGraph>,
+    /// Persistent per-instance scratch buffers. Allocated in
+    /// `MuskingumCunge::setup_inputs`; consumed by both forward and
+    /// backward graph capture/replay.
+    pub(crate) scratch: Option<crate::cuda_graph::PersistentScratch>,
+    /// `(n_segments, sparse_solver_kind)` signature at capture time. If
+    /// this changes between batches, drop both graphs and recapture.
+    pub(crate) capture_sig: Option<(usize, crate::config::SparseSolver)>,
+    /// Observability: surfaces silent fallbacks. Logged at end of
+    /// setup_inputs.
+    pub(crate) capture_status: CaptureStatus,
     /// Number of reaches (rows = cols of the square network matrix).
     pub(crate) n: usize,
     /// Number of non-zeros in the network adjacency.
@@ -1060,6 +1091,18 @@ pub(crate) struct CudaPatternCache {
 
 impl Drop for CudaPatternCache {
     fn drop(&mut self) {
+        // SP-10: drop captured graphs first. CudaGraph::drop destroys the
+        // CUgraphExec then the CUgraph template; both reference scratch
+        // device pointers internally (baked into the exec by CUDA, not
+        // tracked by Rust). Field-declaration order already places
+        // graph_fwd/graph_bwd before scratch, but assigning None here is
+        // an explicit belt-and-braces that runs before any other Drop
+        // logic below.
+        self.graph_fwd = None;
+        self.graph_bwd = None;
+        // `scratch` (Option<PersistentScratch>) is dropped automatically
+        // in struct-field declaration order, after the cuSPARSE
+        // descriptor teardown below.
         // SAFETY: cuSPARSE descriptors are destroyed before the Handle fields
         // drop (struct field declaration order: handle → d_crow → d_col →
         // d_row_for_nnz → d_adj_values → sp_mat → desc_forward → desc_backward →
@@ -1631,6 +1674,13 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         workspace_spmv_n,
         workspace_spmv_nt,
         workspace_rowsum,
+        // SP-10: graphs + scratch start unpopulated; setup_inputs fills
+        // them after the cache is built when use_cuda_graphs is on.
+        graph_fwd: None,
+        graph_bwd: None,
+        scratch: None,
+        capture_sig: None,
+        capture_status: CaptureStatus::NotAttempted,
         n: pattern.n,
         nnz: pattern.col.len(),
         _not_send: PhantomData,
