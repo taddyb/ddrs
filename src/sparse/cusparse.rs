@@ -187,7 +187,13 @@ where
     //    the host. cuSPARSE, running on the same stream, will execute after.
     //    This is cheaper than B::sync (which blocks the host via cuEventSynchronize).
     let client = compute_client::<B>(device);
-    client.flush().expect("cubecl client flush failed before cusparse_backward_solve");
+    // SP-10: use flush_no_sync so this call is safe inside a
+    // cuStreamBeginCapture region (the regular client.flush() triggers
+    // cuEventSynchronize via the drop_queue rotation, which would
+    // invalidate the capture). flush_no_sync is also strictly cheaper on
+    // the non-capture path: CUDA kernel/copy submission happens at issue
+    // time, so there is no batch-submit step to drain.
+    client.flush_no_sync().expect("cubecl client flush_no_sync failed before cusparse_backward_solve");
 
     // 5. Extract device pointers for a_values + b.
     // SAFETY: a_values_prim and b_prim must stay alive for the duration of
@@ -427,7 +433,8 @@ where
     //    submits pending work to the CUDA stream without blocking the host.
     //    cuSPARSE, running on the same stream, will execute after.
     let client = compute_client::<B>(device);
-    client.flush().expect("cubecl client flush failed before cusparse_spmv_forward");
+    // SP-10: flush_no_sync (see cusparse_backward_solve for rationale).
+    client.flush_no_sync().expect("cubecl client flush_no_sync failed before cusparse_spmv_forward");
 
     // 3. Extract device pointer for q.
     // SAFETY: q_prim must stay alive for the duration of this function. cubecl's
@@ -582,7 +589,8 @@ where
     //    submits pending work to the CUDA stream without blocking the host.
     //    cuSPARSE, running on the same stream, will execute after.
     let client = compute_client::<B>(device);
-    client.flush().expect("cubecl client flush failed before cusparse_spmv_backward");
+    // SP-10: flush_no_sync (see cusparse_backward_solve for rationale).
+    client.flush_no_sync().expect("cubecl client flush_no_sync failed before cusparse_spmv_backward");
 
     // 3. Extract device pointer for gi.
     // SAFETY: gi_prim must stay alive for the duration of this function. cubecl's
@@ -737,7 +745,8 @@ where
     //    submits pending work to the CUDA stream without blocking the host.
     //    cuSPARSE, running on the same stream, will execute after.
     let client = compute_client::<B>(device);
-    client.flush().expect("cubecl client flush failed before cusparse_assemble_backward");
+    // SP-10: flush_no_sync (see cusparse_backward_solve for rationale).
+    client.flush_no_sync().expect("cubecl client flush_no_sync failed before cusparse_assemble_backward");
 
     // 3. Extract device pointer for gA.
     // SAFETY: g_a_prim must stay alive for the duration of this function. cubecl's
@@ -1787,7 +1796,11 @@ where
     //    the host. cuSPARSE, running on the same stream, will execute after.
     //    This is cheaper than B::sync (which blocks the host via cuEventSynchronize).
     let client = compute_client::<B>(device);
-    client.flush().expect("cubecl client flush failed before cusparse_forward");
+    // SP-10: flush_no_sync (see cusparse_backward_solve for rationale).
+    // CRITICAL for graph capture: this call must NOT cuEventSynchronize,
+    // because cusparse_forward runs inside the cuStreamBeginCapture
+    // closure in try_capture_forward.
+    client.flush_no_sync().expect("cubecl client flush_no_sync failed before cusparse_forward");
 
     // 4. Extract device pointers for a_values + b.
     // SAFETY: a_values_prim and b_prim must stay alive for the duration of
@@ -2144,9 +2157,14 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     // the same primitives, so the captured kernels read the same addresses.
     let client = compute_client::<I>(device);
 
-    // Make sure all prior cubecl work has been submitted to the stream.
-    // capture begins on a clean stream below.
-    client.flush().expect("client flush before forward capture");
+    // Make sure all prior cubecl work has been submitted to the stream
+    // AND the drop_queue is empty before capture begins. The drop_queue
+    // is double-buffered: the first flush rotates `staged` -> `pending`
+    // and records a new fence; the second flush syncs that fence and
+    // clears `pending`. After two calls the queue is guaranteed empty,
+    // so no host-sync can fire from inside the capture region.
+    client.flush().expect("client flush #1 before forward capture");
+    client.flush().expect("client flush #2 before forward capture");
 
     // Cubecl's primary CUstream is a raw pointer (!Send). We pass its
     // address as `usize` into the server closure and reconstruct it there.
