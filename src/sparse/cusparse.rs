@@ -2166,9 +2166,72 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     client.flush().expect("client flush #1 before forward capture");
     client.flush().expect("client flush #2 before forward capture");
 
-    // Cubecl's primary CUstream is a raw pointer (!Send). We pass its
-    // address as `usize` into the server closure and reconstruct it there.
-    let stream_addr: usize = cubecl_stream_active::<I>(device) as usize;
+    // Bind CUDA primary context on this thread BEFORE doing any cudarc
+    // capture/graph calls.
+    //
+    // Why not exclusive_with_server? Anything inside that closure that calls
+    // back into cubecl (e.g. forward_chain_inner -> cubecl_stream_active ->
+    // exclusive_with_server) re-enters the runtime's RefCell-guarded
+    // service state and panics with BorrowMutError.
+    //
+    // Mirror Task 0's spike (tests/sp10_spike_capture.rs:54-70): retain the
+    // device-0 primary context (same one cubecl uses) and set it current on
+    // this thread. cubecl_stream_active and forward_chain_inner each
+    // open+close their own exclusive_with_server scopes — safe to call here
+    // without nesting.
+    //
+    // The CtxGuard releases the primary context on all exit paths.
+    let cu_device: cudarc::driver::sys::CUdevice = match unsafe {
+        cudarc::driver::result::device::get(0)
+    } {
+        Ok(d) => d,
+        Err(e) => {
+            cache.capture_status =
+                CaptureStatus::FallbackReason(format!("forward: cuDeviceGet(0) failed: {e:?}"));
+            eprintln!(
+                "SP-10 forward graph capture FAILED, falling back: cuDeviceGet(0) failed: {e:?}"
+            );
+            return;
+        }
+    };
+    let primary_ctx = match unsafe { cudarc::driver::result::primary_ctx::retain(cu_device) } {
+        Ok(c) => c,
+        Err(e) => {
+            cache.capture_status = CaptureStatus::FallbackReason(format!(
+                "forward: primary_ctx::retain failed: {e:?}"
+            ));
+            eprintln!(
+                "SP-10 forward graph capture FAILED, falling back: primary_ctx::retain failed: {e:?}"
+            );
+            return;
+        }
+    };
+    // RAII: release the primary context refcount on every exit path.
+    struct CtxGuard {
+        cu_device: cudarc::driver::sys::CUdevice,
+    }
+    impl Drop for CtxGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = cudarc::driver::result::primary_ctx::release(self.cu_device);
+            }
+        }
+    }
+    let _ctx_guard = CtxGuard { cu_device };
+
+    if let Err(e) = unsafe { cudarc::driver::result::ctx::set_current(primary_ctx) } {
+        cache.capture_status =
+            CaptureStatus::FallbackReason(format!("forward: ctx::set_current failed: {e:?}"));
+        eprintln!(
+            "SP-10 forward graph capture FAILED, falling back: ctx::set_current failed: {e:?}"
+        );
+        return;
+    }
+
+    // Cubecl's primary CUstream. cubecl_stream_active opens its own
+    // exclusive_with_server scope internally — that's fine because we're
+    // not inside one ourselves.
+    let stream: cudarc::driver::sys::CUstream = cubecl_stream_active::<I>(device);
 
     // -------- First pass: discover output handle device-pointers ---------
     //
@@ -2252,90 +2315,79 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     let mut state_bytes = [bytes_n; NUM_SAVED_STATE];
     state_bytes[crate::routing::mmc_op::forward_saved_idx::A_VALUES] = bytes_nnz;
 
-    // First pass to learn src pointers. We run this *outside* capture but
-    // inside exclusive_with_server so context bindings line up uniformly.
-    // (Both passes happen inside the same closure to keep all CUDA
-    // operations on the same thread.)
-    let capture_result: Result<
-        crate::cuda_graph::CudaGraph,
-        String,
-    > = client
-        .exclusive_with_server(|_server| -> Result<crate::cuda_graph::CudaGraph, String> {
-            // ---- First pass: discover src ptrs ----
-            let (probe_q_next, probe_states) = probe_inputs();
-            let src_q_next = primitive_devptr::<I>(&probe_q_next)
-                .expect("primitive_devptr called on non-CUDA backend (probe q_next)");
-            let mut src_states = [0u64; NUM_SAVED_STATE];
-            for (i, s) in probe_states.iter().enumerate() {
-                src_states[i] = primitive_devptr::<I>(s)
-                    .expect("primitive_devptr called on non-CUDA backend (probe state)");
-            }
-            // Drop probe outputs so cubecl frees their buffers (releasing
-            // the addresses we just observed back to the allocator; the
-            // capture-pass re-run should then reuse the same addresses).
-            drop(probe_q_next);
-            drop(probe_states);
+    // First pass to learn src pointers. Runs OUTSIDE capture and OUTSIDE
+    // exclusive_with_server — context is bound on this thread by the
+    // CtxGuard above, and forward_chain_inner manages its own
+    // exclusive_with_server scopes internally.
+    let capture_result: Result<crate::cuda_graph::CudaGraph, String> = (|| {
+        // ---- First pass: discover src ptrs ----
+        let (probe_q_next, probe_states) = probe_inputs();
+        let src_q_next = primitive_devptr::<I>(&probe_q_next)
+            .expect("primitive_devptr called on non-CUDA backend (probe q_next)");
+        let mut src_states = [0u64; NUM_SAVED_STATE];
+        for (i, s) in probe_states.iter().enumerate() {
+            src_states[i] = primitive_devptr::<I>(s)
+                .expect("primitive_devptr called on non-CUDA backend (probe state)");
+        }
+        // Drop probe outputs so cubecl frees their buffers (releasing
+        // the addresses we just observed back to the allocator; the
+        // capture-pass re-run should then reuse the same addresses).
+        drop(probe_q_next);
+        drop(probe_states);
 
-            // Build the output_copies tuple list.
-            let mut output_copies: Vec<(u64, u64, u64)> =
-                Vec::with_capacity(1 + NUM_SAVED_STATE);
-            output_copies.push((src_q_next, dst_out_q, bytes_n));
-            for i in 0..NUM_SAVED_STATE {
-                output_copies.push((src_states[i], dst_states[i], state_bytes[i]));
-            }
+        // Build the output_copies tuple list.
+        let mut output_copies: Vec<(u64, u64, u64)> = Vec::with_capacity(1 + NUM_SAVED_STATE);
+        output_copies.push((src_q_next, dst_out_q, bytes_n));
+        for i in 0..NUM_SAVED_STATE {
+            output_copies.push((src_states[i], dst_states[i], state_bytes[i]));
+        }
 
-            // ---- Second pass inside capture region ----
-            //
-            // The closure re-runs the chain; cubecl should reuse the same
-            // src device-pointer addresses (deterministic-allocator
-            // assumption). Then capture_forward_with_outputs appends the
-            // memcpy nodes so the outputs land in the scratch destinations.
-            //
-            // Defensive: confirm cubecl allocator gave us the same
-            // addresses as the probe pass. If not, the captured graph
-            // would memcpy from stale addresses on every replay, silently
-            // corrupting outputs. Converts that silent nondeterminism into
-            // a loud fallback-with-log.
-            let closure = || -> Result<(), String> {
-                let (q_next_prim2, state_prims2) = probe_inputs();
-                let q_devptr2 = primitive_devptr::<I>(&q_next_prim2)
-                    .expect("primitive_devptr called on non-CUDA backend (capture q_next)");
-                if q_devptr2 != src_q_next {
+        // ---- Second pass inside capture region ----
+        //
+        // The closure re-runs the chain; cubecl should reuse the same src
+        // device-pointer addresses (deterministic-allocator assumption).
+        // Then capture_forward_with_outputs appends the memcpy nodes so
+        // the outputs land in the scratch destinations.
+        //
+        // Defensive: confirm cubecl allocator gave us the same addresses
+        // as the probe pass. If not, the captured graph would memcpy from
+        // stale addresses on every replay, silently corrupting outputs.
+        // Converts that silent nondeterminism into a loud fallback-with-log.
+        let closure = || -> Result<(), String> {
+            let (q_next_prim2, state_prims2) = probe_inputs();
+            let q_devptr2 = primitive_devptr::<I>(&q_next_prim2)
+                .expect("primitive_devptr called on non-CUDA backend (capture q_next)");
+            if q_devptr2 != src_q_next {
+                return Err(format!(
+                    "nondeterministic allocator: q_next devptr changed {:#x} -> {:#x}",
+                    src_q_next, q_devptr2
+                ));
+            }
+            for (i, p) in state_prims2.iter().enumerate() {
+                let dev = primitive_devptr::<I>(p)
+                    .expect("primitive_devptr called on non-CUDA backend (capture state)");
+                if dev != src_states[i] {
                     return Err(format!(
-                        "nondeterministic allocator: q_next devptr changed {:#x} -> {:#x}",
-                        src_q_next, q_devptr2
+                        "nondeterministic allocator: state[{i}] devptr changed {:#x} -> {:#x}",
+                        src_states[i], dev
                     ));
                 }
-                for (i, p) in state_prims2.iter().enumerate() {
-                    let dev = primitive_devptr::<I>(p)
-                        .expect("primitive_devptr called on non-CUDA backend (capture state)");
-                    if dev != src_states[i] {
-                        return Err(format!(
-                            "nondeterministic allocator: state[{i}] devptr changed {:#x} -> {:#x}",
-                            src_states[i], dev
-                        ));
-                    }
-                }
-                // Drop happens at end of scope after end_capture executes
-                // its closure; the cubecl frees are stream-ordered so the
-                // copies above (which reference the same handles) finish
-                // first within the captured graph.
-                Ok(())
-            };
-
-            // SAFETY: stream is cubecl's primary stream; we are inside
-            // exclusive_with_server so context is bound; closure issues no
-            // host-sync calls; output_copies dst pointers live in scratch
-            // (owned by cache, outlives returned CudaGraph).
-            let stream = stream_addr as cudarc::driver::sys::CUstream;
-            let graph = unsafe {
-                capture_forward_with_outputs(stream, closure, &output_copies)
             }
+            // Drop happens at end of scope after end_capture executes its
+            // closure; the cubecl frees are stream-ordered so the copies
+            // above (which reference the same handles) finish first within
+            // the captured graph.
+            Ok(())
+        };
+
+        // SAFETY: stream is cubecl's primary stream; the primary context
+        // is bound on this thread (CtxGuard above); closure issues no
+        // host-sync calls; output_copies dst pointers live in scratch
+        // (owned by cache, outlives returned CudaGraph).
+        let graph = unsafe { capture_forward_with_outputs(stream, closure, &output_copies) }
             .map_err(|e: CaptureError| format!("{e}"))?;
-            Ok(graph)
-        })
-        .map_err(|e| format!("exclusive_with_server failed: {e}"))
-        .and_then(|inner| inner);
+        Ok(graph)
+    })();
 
     match capture_result {
         Ok(graph) => {

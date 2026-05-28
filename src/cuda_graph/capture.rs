@@ -12,16 +12,32 @@
 //! without that context bound gets `CUDA_ERROR_INVALID_CONTEXT` from
 //! `cuGraphInstantiate` / `cuGraphLaunch`.
 //!
-//! Callers MUST invoke these helpers from inside
-//! `cubecl::client::ComputeClient::exclusive_with_server(|server| ...)` (the
-//! same pattern SP-7 added for `cubecl_stream_active`). That closure runs on
-//! cubecl's server thread where the primary context is current.
+//! Callers MUST ensure the CUDA primary context is current on the calling
+//! thread before invoking these helpers. Two equivalent ways to do that:
 //!
-//! Internal context-binding was considered and rejected because (a) it would
-//! couple this module to the burn/cubecl runtime types and (b) the hot path
-//! (`route_timestep`) is going to wrap an entire forward+launch+backward block
-//! in a single `exclusive_with_server` scope anyway, so paying the
-//! closure-dispatch per individual `launch()` call would be wasteful.
+//! 1. **Manual bind (preferred for capture sites).** Retain the primary
+//!    context for cubecl's device and set it current on this thread:
+//!    ```ignore
+//!    let cu_device = cudarc::driver::result::device::get(0)?;
+//!    let ctx = unsafe { cudarc::driver::result::primary_ctx::retain(cu_device)? };
+//!    unsafe { cudarc::driver::result::ctx::set_current(ctx)?; }
+//!    // ... call capture helpers / launch ...
+//!    unsafe { cudarc::driver::result::primary_ctx::release(cu_device)?; }
+//!    ```
+//!    Use this when the capture closure itself calls back into cubecl (e.g.
+//!    `forward_chain_inner` -> `cubecl_stream_active` opens its own
+//!    `exclusive_with_server`). Wrapping such a closure in an outer
+//!    `exclusive_with_server` re-enters the runtime's RefCell-guarded service
+//!    state and panics with `BorrowMutError`.
+//!
+//! 2. **Inside `exclusive_with_server`.** Works for leaf operations (no
+//!    re-entry into cubecl), since the closure runs on cubecl's server thread
+//!    where the primary context is already current. Used by SP-7's
+//!    [`cubecl_stream_active`].
+//!
+//! Internal context-binding in this module was considered and rejected
+//! because callers already know which device they're targeting and need to
+//! own the retain/release lifetime (release-on-drop in their own RAII guard).
 
 use cudarc::driver::result::{graph as cu_graph_api, stream as cu_stream_api};
 use cudarc::driver::sys::{
