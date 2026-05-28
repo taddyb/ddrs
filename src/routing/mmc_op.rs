@@ -683,6 +683,329 @@ where
     (q_next_prim, saved)
 }
 
+/// Pinning variant of [`forward_chain_inner`]. Mirrors the existing chain
+/// line-for-line and kernel-for-kernel, but pushes a clone of every
+/// intermediate `FloatTensorPrimitive` into `pin` so the caller can keep the
+/// underlying cubecl `Handle`s alive past the closure scope.
+///
+/// Why this exists: cubecl's persistent memory pool may recycle the device
+/// address of a `Handle` the moment the last reference drops. When a CUDA
+/// graph captures kernels that read/write those addresses, replaying the
+/// graph after the addresses have been recycled triggers
+/// `CUDA_ERROR_ILLEGAL_ADDRESS`. Holding every intermediate handle in a
+/// caller-owned sink prevents that recycling for the lifetime of the graph.
+///
+/// Compound BURN expressions in [`forward_chain_inner`] are split here into
+/// single-op steps so every sub-expression temp is also pinned — not just
+/// the named outputs. Keep the kernel order identical to
+/// [`forward_chain_inner`] so V9 bit-match still holds. If you change one,
+/// change both.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) fn forward_chain_inner_pinned<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+    pin: &mut Vec<I::FloatTensorPrimitive>,
+) -> (
+    I::FloatTensorPrimitive,
+    [I::FloatTensorPrimitive; NUM_SAVED_STATE],
+)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+        match t.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        }
+    };
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+    // Clone the underlying primitive of `t` (cheap Arc-bump on cubecl Handle)
+    // and push it into `pin`. Does not consume the tensor.
+    let pin_clone = |t: &Tensor<I, 1>, pin: &mut Vec<I::FloatTensorPrimitive>| {
+        let p = match t.clone().into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        };
+        pin.push(p);
+    };
+
+    let qt_prim_for_spmv = unwrap(qt_in.clone());
+    let device = I::float_device(&qt_prim_for_spmv);
+
+    // S1
+    let q_eps = qsp_in.clone() + 1e-6_f32;
+    pin_clone(&q_eps, pin);
+
+    // S2: numerator = qt_in * n_in * (q_eps + 1.0)
+    //   Rust eval order: ((qt_in*n_in) * (q_eps+1.0)). Outer mul evaluates
+    //   lhs first (the qt*n product), then rhs (q_eps + 1.0).
+    let qt_n = qt_in.clone() * n_in.clone();
+    pin_clone(&qt_n, pin);
+    let q_eps_plus_one = q_eps.clone() + 1.0;
+    pin_clone(&q_eps_plus_one, pin);
+    let numerator = qt_n * q_eps_plus_one;
+    pin_clone(&numerator, pin);
+
+    // S3: denominator = psp_in * slope_in.sqrt() + 1e-8
+    let slope_sqrt = slope_in.clone().sqrt();
+    pin_clone(&slope_sqrt, pin);
+    let psp_slope_sqrt = psp_in.clone() * slope_sqrt;
+    pin_clone(&psp_slope_sqrt, pin);
+    let denominator = psp_slope_sqrt + 1e-8_f32;
+    pin_clone(&denominator, pin);
+
+    // S4
+    let ratio = numerator.clone() / denominator.clone();
+    pin_clone(&ratio, pin);
+
+    // S5: exponent = (q_eps * 3.0 + 5.0).recip() * 3.0
+    let q_eps_times_3 = q_eps.clone() * 3.0;
+    pin_clone(&q_eps_times_3, pin);
+    let q_eps_times_3_plus_5 = q_eps_times_3 + 5.0;
+    pin_clone(&q_eps_times_3_plus_5, pin);
+    let exponent_recip = q_eps_times_3_plus_5.recip();
+    pin_clone(&exponent_recip, pin);
+    let exponent = exponent_recip * 3.0;
+    pin_clone(&exponent, pin);
+
+    // S6: depth = ratio.powf(exponent).clamp_min(depth_lb)
+    let depth_pre_clamp = ratio.clone().powf(exponent.clone());
+    pin_clone(&depth_pre_clamp, pin);
+    let depth = depth_pre_clamp.clamp_min(depth_lb);
+    pin_clone(&depth, pin);
+
+    // S7: top_width = psp_in * depth.powf(q_eps)
+    //   Mul evaluates lhs first (psp_in, trivial), then rhs (powf).
+    let depth_pow_q_eps = depth.clone().powf(q_eps.clone());
+    pin_clone(&depth_pow_q_eps, pin);
+    let top_width = psp_in.clone() * depth_pow_q_eps;
+    pin_clone(&top_width, pin);
+
+    // S8: side_slope_raw = top_width * q_eps / (depth * 2.0)
+    //   Parses as ((top_width*q_eps) / (depth*2.0)). lhs first.
+    let top_width_q_eps = top_width.clone() * q_eps.clone();
+    pin_clone(&top_width_q_eps, pin);
+    let depth_times_2 = depth.clone() * 2.0;
+    pin_clone(&depth_times_2, pin);
+    let side_slope_raw = top_width_q_eps / depth_times_2;
+    pin_clone(&side_slope_raw, pin);
+
+    // S9
+    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
+    pin_clone(&side_slope, pin);
+
+    // S10: bw_raw = top_width - side_slope * depth * 2.0
+    //   Parses as top_width - ((side_slope*depth)*2.0). lhs (top_width)
+    //   trivial; eval rhs: side_slope*depth, then *2.0, then sub.
+    let ss_depth = side_slope.clone() * depth.clone();
+    pin_clone(&ss_depth, pin);
+    let ss_depth_2 = ss_depth * 2.0;
+    pin_clone(&ss_depth_2, pin);
+    let bw_raw = top_width.clone() - ss_depth_2;
+    pin_clone(&bw_raw, pin);
+
+    // S11
+    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
+    pin_clone(&bottom_width, pin);
+
+    // S12: _area = (top_width + bottom_width) * depth / 2.0
+    let tw_plus_bw = top_width.clone() + bottom_width.clone();
+    pin_clone(&tw_plus_bw, pin);
+    let area_times_2 = tw_plus_bw * depth.clone();
+    pin_clone(&area_times_2, pin);
+    let _area = area_times_2 / 2.0;
+    pin_clone(&_area, pin);
+
+    // S13: wp = bottom_width + depth * (side_slope^2 + 1).sqrt() * 2.0
+    //   Precedence: bottom_width + (depth * sqrt(ss^2+1) * 2.0).
+    //   Inner mul left-assoc: (depth * sqrt(...)) * 2.0.
+    //   Outer + evaluates lhs (bottom_width, trivial), then rhs.
+    //   Inside rhs: outer mul lhs first → inner mul lhs first (depth,
+    //   trivial) → inner mul rhs (sqrt arg → ss^2 → +1 → sqrt) → inner
+    //   mul → *2.0 → outer +.
+    let ss_sq = side_slope.clone().powf_scalar(2.0);
+    pin_clone(&ss_sq, pin);
+    let ss_sq_plus_one = ss_sq + 1.0;
+    pin_clone(&ss_sq_plus_one, pin);
+    let ss_sq_plus_one_sqrt = ss_sq_plus_one.sqrt();
+    pin_clone(&ss_sq_plus_one_sqrt, pin);
+    let depth_ss = depth.clone() * ss_sq_plus_one_sqrt;
+    pin_clone(&depth_ss, pin);
+    let depth_ss_2 = depth_ss * 2.0;
+    pin_clone(&depth_ss_2, pin);
+    let wp = bottom_width.clone() + depth_ss_2;
+    pin_clone(&wp, pin);
+
+    // S14
+    let hyd_radius = _area.clone() / wp.clone();
+    pin_clone(&hyd_radius, pin);
+
+    // S15: velocity_un = n_in.recip() * hyd_radius.powf_scalar(2/3) * slope_in.sqrt()
+    //   Parses as ((n_in.recip() * hr_pow) * slope_in.sqrt()).
+    //   Eval: outer mul lhs first → inner mul lhs (n_in.recip) → inner
+    //   mul rhs (hr_pow) → inner mul → outer mul rhs (slope_sqrt2) →
+    //   outer mul.
+    let n_recip = n_in.clone().recip();
+    pin_clone(&n_recip, pin);
+    let hr_pow = hyd_radius.clone().powf_scalar(2.0 / 3.0);
+    pin_clone(&hr_pow, pin);
+    let n_recip_hr = n_recip * hr_pow;
+    pin_clone(&n_recip_hr, pin);
+    let slope_sqrt2 = slope_in.clone().sqrt();
+    pin_clone(&slope_sqrt2, pin);
+    let velocity_un = n_recip_hr * slope_sqrt2;
+    pin_clone(&velocity_un, pin);
+
+    // S16
+    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
+    pin_clone(&velocity_cl, pin);
+
+    // S17
+    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
+    pin_clone(&celerity, pin);
+
+    // S18..S23: Muskingum coefficients
+    let k_muskingum = length_in.clone() / celerity.clone();
+    pin_clone(&k_muskingum, pin);
+
+    // S19: one_minus_x = -xst_in + 1.0
+    let neg_xst = -xst_in.clone();
+    pin_clone(&neg_xst, pin);
+    let one_minus_x = neg_xst + 1.0;
+    pin_clone(&one_minus_x, pin);
+
+    // S20
+    let two_k = k_muskingum.clone() * 2.0;
+    pin_clone(&two_k, pin);
+    // S21
+    let two_kx = two_k.clone() * xst_in.clone();
+    pin_clone(&two_kx, pin);
+    // S22
+    let two_k_1mx = two_k.clone() * one_minus_x.clone();
+    pin_clone(&two_k_1mx, pin);
+    // S23
+    let denom = two_k_1mx.clone() + dt;
+    pin_clone(&denom, pin);
+
+    // c1 = (-two_kx + dt) / denom
+    let neg_two_kx = -two_kx.clone();
+    pin_clone(&neg_two_kx, pin);
+    let c1_num = neg_two_kx + dt;
+    pin_clone(&c1_num, pin);
+    let c1 = c1_num / denom.clone();
+    pin_clone(&c1, pin);
+
+    // c2 = (two_kx + dt) / denom
+    let c2_num = two_kx.clone() + dt;
+    pin_clone(&c2_num, pin);
+    let c2 = c2_num / denom.clone();
+    pin_clone(&c2, pin);
+
+    // c3 = (two_k_1mx - dt) / denom
+    let c3_num = two_k_1mx.clone() - dt;
+    pin_clone(&c3_num, pin);
+    let c3 = c3_num / denom.clone();
+    pin_clone(&c3, pin);
+
+    // c4 = denom.recip() * (2.0 * dt)
+    let denom_recip = denom.clone().recip();
+    pin_clone(&denom_recip, pin);
+    let c4 = denom_recip * (2.0 * dt);
+    pin_clone(&c4, pin);
+
+    // S24: i_t = N · q_t (inner-backend SpMV) — opaque primitive op.
+    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda);
+    pin.push(i_t_prim.clone());
+    let i_t = wrap(i_t_prim.clone());
+
+    // S25: b_rhs = c2*i_t + c3*qt_in + c4*qpt_in
+    //   Parses as ((c2*i_t) + (c3*qt_in)) + (c4*qpt_in). Left-assoc +.
+    //   Eval: outer + lhs first → inner + lhs (c2*i_t) → inner + rhs
+    //   (c3*qt_in) → inner + → outer + rhs (c4*qpt_in) → outer +.
+    let c2_it = c2.clone() * i_t.clone();
+    pin_clone(&c2_it, pin);
+    let c3_qt = c3.clone() * qt_in.clone();
+    pin_clone(&c3_qt, pin);
+    let c2_it_c3_qt = c2_it + c3_qt;
+    pin_clone(&c2_it_c3_qt, pin);
+    let c4_qpt = c4.clone() * qpt_in.clone();
+    pin_clone(&c4_qpt, pin);
+    let b_rhs = c2_it_c3_qt + c4_qpt;
+    pin_clone(&b_rhs, pin);
+
+    // S26: A_values = assemble_primitive(c1) — opaque primitive op.
+    let c1_prim = unwrap(c1.clone());
+    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device);
+    pin.push(a_values_prim.clone());
+
+    // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — opaque primitive op.
+    let b_rhs_prim = unwrap(b_rhs.clone());
+    let (x_sol_prim, _saved_x) = dispatch::forward_primitive::<I>(
+        pattern,
+        &a_values_prim,
+        &b_rhs_prim,
+        &device,
+        use_cuda,
+    );
+    pin.push(x_sol_prim.clone());
+    let x_sol = wrap(x_sol_prim.clone());
+
+    // S28: q_next = max(x_sol, discharge_lb)
+    let q_next = x_sol.clone().clamp_min(discharge_lb);
+    pin_clone(&q_next, pin);
+    let q_next_prim = unwrap(q_next);
+
+    // Saved-state array — order MUST match `forward_saved_idx` and mirror
+    // the original `forward_chain_inner` exactly.
+    let saved: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = [
+        unwrap(depth),         // 0  DEPTH
+        unwrap(top_width),     // 1  TOP_WIDTH
+        unwrap(side_slope),    // 2  SIDE_SLOPE
+        unwrap(bottom_width),  // 3  BOTTOM_WIDTH
+        unwrap(hyd_radius),    // 4  HYDRAULIC_RADIUS
+        unwrap(velocity_un),   // 5  VELOCITY_UNCLAMPED
+        unwrap(velocity_cl),   // 6  VELOCITY_CLAMPED
+        unwrap(celerity),      // 7  CELERITY
+        unwrap(k_muskingum),   // 8  K_MUSKINGUM
+        unwrap(denom),         // 9  DENOM
+        c1_prim,               // 10 C1
+        unwrap(c2),            // 11 C2
+        unwrap(c3),            // 12 C3
+        unwrap(c4),            // 13 C4
+        a_values_prim,         // 14 A_VALUES
+        b_rhs_prim,            // 15 B_RHS
+        i_t_prim,              // 16 I_T
+        x_sol_prim,            // 17 X_SOL
+        unwrap(ratio),         // 18 RATIO
+        unwrap(denominator),   // 19 DENOMINATOR
+        unwrap(q_eps),         // 20 Q_EPS
+        unwrap(side_slope_raw),// 21 SIDE_SLOPE_RAW
+        unwrap(bw_raw),        // 22 BW_RAW
+    ];
+
+    (q_next_prim, saved)
+}
+
 /// Forward + register-on-tape entry point. Called from
 /// `MuskingumCunge::route_timestep` (Task 4). Returns Q_{t+1} as an
 /// autograd-tracked rank-1 tensor.

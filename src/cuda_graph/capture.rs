@@ -39,6 +39,9 @@
 //! because callers already know which device they're targeting and need to
 //! own the retain/release lifetime (release-on-drop in their own RAII guard).
 
+use cubecl::MemoryAllocationMode;
+use cubecl::client::ComputeClient;
+use cubecl::cuda::CudaRuntime;
 use cudarc::driver::result::{graph as cu_graph_api, stream as cu_stream_api};
 use cudarc::driver::sys::{
     CUgraph, CUgraphExec, CUgraphInstantiate_flags, CUstream, CUstreamCaptureMode_enum,
@@ -261,6 +264,76 @@ where
     }
 }
 
+/// SP-10 Task B: RAII guard that switches cubecl's allocator into
+/// [`MemoryAllocationMode::Persistent`] for the lifetime of the guard, then
+/// restores [`MemoryAllocationMode::Auto`] on drop.
+///
+/// # Why this exists
+///
+/// `try_capture_forward` (Task C) runs a forward pass inside a CUDA stream-
+/// capture region. Any cubecl `Handle` allocated during capture must keep its
+/// device address stable until the captured graph stops being replayed —
+/// otherwise the embedded D2D-copy nodes would source from recycled pages.
+///
+/// Switching the allocator into `Persistent` mode tells cubecl's
+/// `MemoryManagement` to route allocations through the persistent pool, which
+/// does NOT recycle device addresses across `free`s within a stream lifetime.
+/// We restore `Auto` on drop so post-capture code (training timesteps, etc.)
+/// returns to cubecl's normal short-lived recycle behavior.
+///
+/// # Restore semantics
+///
+/// cubecl 0.10.x exposes a setter (`ComputeClient::allocation_mode`) but no
+/// public getter for the current mode. On drop we therefore restore `Auto`
+/// unconditionally — that's the cubecl default per
+/// `MemoryAllocationMode::default()` (memory_manage.rs:109). If a future
+/// caller nests guards, the inner drop will clobber the outer's mode; do not
+/// nest.
+///
+/// # Safety contract
+///
+/// `ComputeClient::allocation_mode` is marked `unsafe` upstream because it
+/// "isn't thread safe and might create memory leaks" (cubecl client.rs:903–906).
+/// `PersistentModeGuard` itself is a safe wrapper; callers must ensure:
+/// - The guard is constructed and dropped on the same thread that owns the
+///   `ComputeClient`'s active stream context.
+/// - No other thread mutates the allocator mode for `client` during the
+///   guard's lifetime.
+/// - The guard does not outlive any persistent-mode allocations that depend
+///   on the mode staying `Persistent` (in practice the guard wraps the entire
+///   capture region; allocations made during capture are released or pinned
+///   by the caller before the guard drops).
+pub struct PersistentModeGuard<'c> {
+    client: &'c ComputeClient<CudaRuntime>,
+}
+
+impl<'c> PersistentModeGuard<'c> {
+    /// Switch `client`'s allocator into `Persistent` mode and return a guard
+    /// that restores `Auto` on drop.
+    ///
+    /// See the type-level docs for the safety contract.
+    pub fn new(client: &'c ComputeClient<CudaRuntime>) -> Self {
+        // SAFETY: per the type-level safety contract, the caller owns the
+        // active stream context on this thread and no other thread is
+        // mutating allocator state for `client`. The setter is `unsafe`
+        // upstream solely for those thread-safety reasons.
+        unsafe {
+            client.allocation_mode(MemoryAllocationMode::Persistent);
+        }
+        Self { client }
+    }
+}
+
+impl Drop for PersistentModeGuard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: same contract as `new` — single-threaded ownership of the
+        // allocator-mode toggle for the duration of the guard.
+        unsafe {
+            self.client.allocation_mode(MemoryAllocationMode::Auto);
+        }
+    }
+}
+
 /// Probe a stream's current capture status. Mostly diagnostic — useful in
 /// tests to assert the stream entered/exited capture cleanly.
 ///
@@ -273,4 +346,53 @@ pub unsafe fn capture_status(
     // SAFETY: `stream` validity and context-binding are caller invariants
     // (see this function's safety doc and the module-level docs).
     unsafe { cu_stream_api::is_capturing(stream) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cubecl::Runtime;
+    use cubecl::cuda::CudaDevice;
+
+    /// Smoke-test that `PersistentModeGuard::new` and `Drop` execute without
+    /// panicking against a real CUDA `ComputeClient`.
+    ///
+    /// We cannot verify the mode transition from the test side because cubecl
+    /// 0.10.x does not expose a public `current_mode()` getter on
+    /// `ComputeClient` / `MemoryManagement`. The mode is queried only from
+    /// inside the allocator path (`MemoryManagement::reserve`, see
+    /// memory_manage.rs:469). The functional verification of "did persistent
+    /// mode actually take effect" comes from Task C's bit-match V9 test,
+    /// which depends on the device-pointer stability that persistent mode
+    /// provides.
+    ///
+    /// Marked `#[ignore]` so it runs only with `--ignored` on hosts with CUDA.
+    #[test]
+    #[ignore]
+    fn persistent_mode_guard_smoke() {
+        // Skip cleanly on CPU-only hosts.
+        let cuda_available = std::panic::catch_unwind(CudaDevice::default).is_ok();
+        if !cuda_available {
+            eprintln!("skipping: no CUDA device");
+            return;
+        }
+        let device = CudaDevice::default();
+        let client = <CudaRuntime as Runtime>::client(&device);
+
+        // Lifetime: enter scope -> guard switches to Persistent ->
+        //           drop at scope end -> guard restores Auto.
+        {
+            let _guard = PersistentModeGuard::new(&client);
+            // No allocations done here on purpose; we are smoke-testing the
+            // toggle, not exercising the persistent pool. Task C wires the
+            // pool exercise into the capture path.
+        }
+
+        // Re-enter the scope to confirm we can construct & drop the guard
+        // repeatedly without panicking (i.e. Drop did not leave the
+        // allocator in a wedged state).
+        {
+            let _guard = PersistentModeGuard::new(&client);
+        }
+    }
 }
