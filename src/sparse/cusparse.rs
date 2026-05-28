@@ -1084,6 +1084,26 @@ pub(crate) struct CudaPatternCache {
     /// `MuskingumCunge::setup_inputs`; consumed by both forward and
     /// backward graph capture/replay.
     pub(crate) scratch: Option<crate::cuda_graph::PersistentScratch>,
+    /// SP-10: pinned primitives from the capture pass of
+    /// `forward_chain_inner_pinned`. Keeps every intermediate cubecl Handle
+    /// alive for the cache's lifetime so the persistent pool never recycles
+    /// their device addresses — which would otherwise invalidate the captured
+    /// CUDA graph and cause `CUDA_ERROR_ILLEGAL_ADDRESS` on the second
+    /// replay.
+    ///
+    /// Type-erased via `Box<dyn Any + Send>` because `CudaPatternCache` is
+    /// non-generic but the primitives are `I::FloatTensorPrimitive`. The
+    /// capture-pass code stores the concrete type; the cache simply keeps
+    /// them alive until Drop.
+    ///
+    /// Memory footprint: ~65 × n × 4 bytes per cache instance (~1.3 MB at
+    /// n=5K, ~90 MB at full CONUS n=346,321). Drops when the cache drops.
+    ///
+    /// Declared AFTER `graph_fwd` / `graph_bwd` so Rust's field-drop order
+    /// destroys the captured graphs BEFORE freeing the handles they
+    /// reference. `Drop::drop` also explicitly nulls this field after the
+    /// graphs as a belt-and-braces.
+    pub(crate) pinned_intermediates: Option<Vec<Box<dyn std::any::Any + Send>>>,
     /// `(n_segments, sparse_solver_kind)` signature at capture time. If
     /// this changes between batches, drop both graphs and recapture.
     pub(crate) capture_sig: Option<(usize, crate::config::SparseSolver)>,
@@ -1109,6 +1129,10 @@ impl Drop for CudaPatternCache {
         // logic below.
         self.graph_fwd = None;
         self.graph_bwd = None;
+        // SP-10 Task D: drop the pinned capture-pass intermediates AFTER the
+        // graphs so the captured CUgraphExec is destroyed before the
+        // referenced cubecl Handles are freed.
+        self.pinned_intermediates = None;
         // `scratch` (Option<PersistentScratch>) is dropped automatically
         // in struct-field declaration order, after the cuSPARSE
         // descriptor teardown below.
@@ -1688,6 +1712,7 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
         graph_fwd: None,
         graph_bwd: None,
         scratch: None,
+        pinned_intermediates: None,
         capture_sig: None,
         capture_status: CaptureStatus::NotAttempted,
         n: pattern.n,
