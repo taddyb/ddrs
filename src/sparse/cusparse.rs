@@ -954,6 +954,13 @@ pub fn __spike_active_stream<B: Backend + 'static>(
 }
 
 #[doc(hidden)]
+pub fn __spike_compute_client<B: Backend + 'static>(
+    device: &B::Device,
+) -> cubecl::client::ComputeClient<CudaRuntime> {
+    compute_client::<B>(device)
+}
+
+#[doc(hidden)]
 pub fn __spike_cube_round_trip<B: Backend + 'static>(
     device: &B::Device,
     data: Vec<f32>,

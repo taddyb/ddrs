@@ -8,6 +8,7 @@
 //! See `.claude/specs/2026-05-26-sp10-cuda-graphs-design.md`.
 
 pub mod capture;
+pub mod geometry_kernel;
 pub mod scratch;
 
 pub use capture::{
