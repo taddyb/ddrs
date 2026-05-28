@@ -191,6 +191,14 @@ where
     // Context-binding is the caller's responsibility. We pass the auto-free-
     // on-launch flag so any cubecl async frees that ended up as graph nodes
     // are reclaimed by the driver after replay completes.
+    //
+    // SP-10 Task C2 note: empirically toggling this flag did not change the
+    // replay #3 ILLEGAL_ADDRESS pattern under the current pinning scheme,
+    // so we keep the original behavior. The remaining issue is suspected to
+    // be cuSPARSE-internal C-side allocations from `cusparseSpSV_solve` /
+    // `cusparseSpMV` that are captured into the graph as memory nodes and
+    // recycled across replays — a different remediation track from cubecl-
+    // side Handle pinning.
     let exec = match unsafe {
         cu_graph_api::instantiate(
             template,

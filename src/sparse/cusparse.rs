@@ -2299,7 +2299,9 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     // free list; cubecl's deterministic allocator should re-issue the
     // same device addresses to the capture pass (verified by the
     // devptr-stability check below).
-    let run_chain_pinned = |pin: &mut Vec<I::FloatTensorPrimitive>| -> (
+    let run_chain_pinned = |pin: &mut Vec<I::FloatTensorPrimitive>,
+                            extra_pin: &mut Vec<Box<dyn std::any::Any + Send>>|
+     -> (
         I::FloatTensorPrimitive,
         [I::FloatTensorPrimitive; NUM_SAVED_STATE],
     ) {
@@ -2315,6 +2317,7 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             wrap_prim::<I>(slope.clone()),
             wrap_prim::<I>(x_storage.clone()),
             pin,
+            extra_pin,
         )
     };
 
@@ -2372,6 +2375,9 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     // outlives `capture_result` and can be moved onto the cache. The
     // closure receives `&mut capture_pin` and grows it in place.
     let mut capture_pin: Vec<I::FloatTensorPrimitive> = Vec::with_capacity(64);
+    // SP-10 Task C2: separate sink for type-erased Int/Float primitives
+    // (pattern uploads + arithmetic-chain temps inside assemble_primitive).
+    let mut capture_extra_pin: Vec<Box<dyn std::any::Any + Send>> = Vec::with_capacity(32);
     let capture_result: Result<crate::cuda_graph::CudaGraph, String> = {
         // ---- First pass: discover src ptrs ----
         //
@@ -2380,7 +2386,8 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
         // free list, allowing cubecl's deterministic allocator to re-issue
         // the same device addresses to the capture-pass run.
         let mut probe_pin: Vec<I::FloatTensorPrimitive> = Vec::with_capacity(64);
-        let (probe_q_next, probe_states) = run_chain_pinned(&mut probe_pin);
+        let mut probe_extra_pin: Vec<Box<dyn std::any::Any + Send>> = Vec::with_capacity(32);
+        let (probe_q_next, probe_states) = run_chain_pinned(&mut probe_pin, &mut probe_extra_pin);
         let src_q_next = primitive_devptr::<I>(&probe_q_next)
             .expect("primitive_devptr called on non-CUDA backend (probe q_next)");
         let mut src_states = [0u64; NUM_SAVED_STATE];
@@ -2388,13 +2395,15 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             src_states[i] = primitive_devptr::<I>(s)
                 .expect("primitive_devptr called on non-CUDA backend (probe state)");
         }
-        // Drop probe outputs and `probe_pin` so cubecl frees their
-        // buffers (releasing the addresses we just observed back to the
-        // persistent pool's free list; the capture-pass re-run should
-        // then re-issue the same addresses via deterministic allocation).
+        // Drop probe outputs, `probe_pin`, and `probe_extra_pin` so cubecl
+        // frees their buffers (releasing the addresses we just observed
+        // back to the persistent pool's free list; the capture-pass re-run
+        // should then re-issue the same addresses via deterministic
+        // allocation).
         drop(probe_q_next);
         drop(probe_states);
         drop(probe_pin);
+        drop(probe_extra_pin);
 
         // Build the output_copies tuple list.
         let mut output_copies: Vec<(u64, u64, u64)> = Vec::with_capacity(1 + NUM_SAVED_STATE);
@@ -2422,8 +2431,10 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
         // recycles their device addresses while `cache.graph_fwd` is
         // live.
         let capture_pin_ref = &mut capture_pin;
+        let capture_extra_pin_ref = &mut capture_extra_pin;
         let closure = || -> Result<(), String> {
-            let (q_next_prim2, state_prims2) = run_chain_pinned(capture_pin_ref);
+            let (q_next_prim2, state_prims2) =
+                run_chain_pinned(capture_pin_ref, capture_extra_pin_ref);
             let q_devptr2 = primitive_devptr::<I>(&q_next_prim2)
                 .expect("primitive_devptr called on non-CUDA backend (capture q_next)");
             if q_devptr2 != src_q_next {
@@ -2471,9 +2482,15 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             // these handles — preserving every captured devptr until the
             // graph is destroyed.
             let mut erased: Vec<Box<dyn std::any::Any + Send>> =
-                Vec::with_capacity(capture_pin.len());
+                Vec::with_capacity(capture_pin.len() + capture_extra_pin.len());
             for prim in capture_pin {
                 erased.push(Box::new(prim) as Box<dyn std::any::Any + Send>);
+            }
+            // SP-10 Task C2: also move the helper-internal Handles
+            // (pattern uploads + arithmetic temps inside assemble_primitive)
+            // onto the cache. They are already type-erased.
+            for boxed in capture_extra_pin {
+                erased.push(boxed);
             }
             cache.pinned_intermediates = Some(erased);
             cache.capture_status = CaptureStatus::Captured;

@@ -60,6 +60,11 @@ pub(crate) fn forward_primitive<B: Backend + 'static>(
     b_prim: &B::FloatTensorPrimitive,
     device: &B::Device,
     use_cuda: bool,
+    // SP-10 Task C2: capture-pass sink. `None` in production. The CUDA solve
+    // returns its `x_handle` as the output primitive, which the caller pins
+    // directly — so no additional Handles materialize internally for the
+    // CUDA path. Parameter retained for symmetry with other forward helpers.
+    _pin: Option<&mut Vec<Box<dyn std::any::Any + Send>>>,
 ) -> (B::FloatTensorPrimitive, SavedX<B>)
 where
     B::FloatTensorPrimitive: 'static,
@@ -133,11 +138,17 @@ where
 }
 
 /// Site 1 dispatch: forward `y = N · q`.
+///
+/// SP-10 Task C2: `_pin` collects internal Handles when invoked from the
+/// CUDA-graph capture pass. The CUDA path's `cusparse_spmv_forward` returns
+/// its `y_handle` as the output primitive (caller pins it), so the sink is
+/// not used on that path. Parameter retained for symmetry / future use.
 pub(crate) fn spmv_forward_dispatch<I: Backend + 'static>(
     pattern: &Arc<CsrPattern>,
     q_prim: &I::FloatTensorPrimitive,
     device: &I::Device,
     use_cuda: bool,
+    _pin: Option<&mut Vec<Box<dyn std::any::Any + Send>>>,
 ) -> I::FloatTensorPrimitive
 where
     I::FloatTensorPrimitive: 'static,

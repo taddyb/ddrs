@@ -627,7 +627,7 @@ where
     let c4 = denom.clone().recip() * (2.0 * dt);
 
     // S24: i_t = N · q_t (inner-backend SpMV)
-    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda);
+    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
     let i_t = wrap(i_t_prim.clone());
 
     // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
@@ -636,7 +636,7 @@ where
 
     // S26: A_values = assemble_primitive(c1)
     let c1_prim = unwrap(c1.clone());
-    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device);
+    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device, None);
 
     // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — at primitive level via dispatch.
     let b_rhs_prim = unwrap(b_rhs.clone());
@@ -646,6 +646,7 @@ where
         &b_rhs_prim,
         &device,
         use_cuda,
+        None,
     );
     let x_sol = wrap(x_sol_prim.clone());
 
@@ -713,12 +714,23 @@ pub(crate) fn forward_chain_inner_pinned<I: Backend + 'static>(
     slope_in: Tensor<I, 1>,
     xst_in: Tensor<I, 1>,
     pin: &mut Vec<I::FloatTensorPrimitive>,
+    // SP-10 Task C2: type-erased sink for Handles materialized inside
+    // assemble_primitive / spmv_primitive / forward_primitive that are not
+    // exposed as named outputs (e.g. pattern uploads `row_idx` / `adj` /
+    // `diag`, and the arithmetic-chain intermediates in `assemble_primitive`).
+    // These would otherwise drop on helper return and their persistent-pool
+    // slices would be recycled into post-capture allocations whose addresses
+    // overlap with what the captured graph still reads — corrupting replay.
+    //
+    // Type-erased because the bucket can hold Float OR Int primitives.
+    extra_pin: &mut Vec<Box<dyn std::any::Any + Send>>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
 )
 where
     I::FloatTensorPrimitive: 'static,
+    I::IntTensorPrimitive: 'static,
     I::Device: 'static,
 {
     use crate::config::SparseSolver;
@@ -934,7 +946,13 @@ where
     pin_clone(&c4, pin);
 
     // S24: i_t = N · q_t (inner-backend SpMV) — opaque primitive op.
-    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda);
+    let i_t_prim = sparse::spmv_primitive::<I>(
+        pattern,
+        qt_prim_for_spmv.clone(),
+        &device,
+        use_cuda,
+        Some(extra_pin),
+    );
     pin.push(i_t_prim.clone());
     let i_t = wrap(i_t_prim.clone());
 
@@ -955,7 +973,12 @@ where
 
     // S26: A_values = assemble_primitive(c1) — opaque primitive op.
     let c1_prim = unwrap(c1.clone());
-    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device);
+    let a_values_prim = sparse::assemble_primitive::<I>(
+        pattern,
+        c1_prim.clone(),
+        &device,
+        Some(extra_pin),
+    );
     pin.push(a_values_prim.clone());
 
     // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — opaque primitive op.
@@ -966,6 +989,7 @@ where
         &b_rhs_prim,
         &device,
         use_cuda,
+        Some(extra_pin),
     );
     pin.push(x_sol_prim.clone());
     let x_sol = wrap(x_sol_prim.clone());

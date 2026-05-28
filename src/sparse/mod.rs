@@ -497,6 +497,7 @@ where
         &b_at.primitive,
         &device,
         use_cuda,
+        None,
     );
 
     let result = match CsrSolveOp
@@ -626,18 +627,85 @@ fn tensor_from_pattern_i32<I: Backend>(
 /// Runs on inner backend `I` — no autograd tape participation.
 ///
 /// `c_prim` is shape `[n]`; result is shape `[nnz]`.
+///
+/// SP-10 Task C2: when called from the CUDA-graph capture pass, the caller
+/// passes `Some(pin)` to collect every internal cubecl Handle this helper
+/// materializes (the pattern-data uploads `row_idx`/`adj`/`diag` and the
+/// arithmetic-chain intermediates `c_at_rows`, `c_at_rows.neg()`,
+/// `c_at_rows.neg() * adj`). Without pinning, these short-lived Handles
+/// drop on return, their slices return to cubecl's persistent free list,
+/// and subsequent fresh allocations recycle device addresses that the
+/// captured graph kernels still hold — corrupting replays.
+///
+/// Production callers pass `None` and behavior is unchanged: the Handles
+/// drop and cubecl recycles them via its normal allocator.
 pub fn assemble_primitive<I: Backend>(
     pattern: &CsrPattern,
     c_prim: I::FloatTensorPrimitive,
     device: &I::Device,
-) -> I::FloatTensorPrimitive {
+    pin: Option<&mut Vec<Box<dyn std::any::Any + Send>>>,
+) -> I::FloatTensorPrimitive
+where
+    I::FloatTensorPrimitive: 'static,
+    I::IntTensorPrimitive: 'static,
+{
     let row_idx = tensor_from_pattern_i32::<I>(&pattern.row_for_nnz, device);
     let adj = tensor_from_pattern_f32::<I>(&pattern.adj_values, device);
     let diag = tensor_from_pattern_f32::<I>(&pattern.diag_mask, device);
     let c: Tensor<I, 1> = Tensor::from_primitive(TensorPrimitive::Float(c_prim));
 
+    // SP-10 Task C2: if pinning, capture the pattern-upload Handles BEFORE
+    // they feed into ops (cheap Arc-bump clones).
+    let pinned_row_idx = pin.as_ref().map(|_| row_idx.clone());
+    let pinned_adj = pin.as_ref().map(|_| adj.clone());
+    let pinned_diag = pin.as_ref().map(|_| diag.clone());
+
     let c_at_rows = c.gather(0, row_idx);
-    let out = diag + c_at_rows.neg() * adj;
+    let pinned_c_at_rows = pin.as_ref().map(|_| c_at_rows.clone());
+    let neg_c_at_rows = c_at_rows.neg();
+    let pinned_neg = pin.as_ref().map(|_| neg_c_at_rows.clone());
+    let neg_times_adj = neg_c_at_rows * adj;
+    let pinned_neg_adj = pin.as_ref().map(|_| neg_times_adj.clone());
+    let out = diag + neg_times_adj;
+
+    // Push pinned intermediates into the sink (type-erased).
+    if let Some(pin) = pin {
+        // Pattern uploads (Int + Float).
+        if let Some(t) = pinned_row_idx {
+            pin.push(Box::new(t.into_primitive()));
+        }
+        if let Some(t) = pinned_adj {
+            pin.push(Box::new(match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }));
+        }
+        if let Some(t) = pinned_diag {
+            pin.push(Box::new(match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }));
+        }
+        if let Some(t) = pinned_c_at_rows {
+            pin.push(Box::new(match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }));
+        }
+        if let Some(t) = pinned_neg {
+            pin.push(Box::new(match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }));
+        }
+        if let Some(t) = pinned_neg_adj {
+            pin.push(Box::new(match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }));
+        }
+    }
+
     match out.into_primitive() {
         TensorPrimitive::Float(p) => p,
         _ => unreachable!(),
@@ -720,17 +788,22 @@ pub(crate) fn cpu_spmv_backward<I: Backend>(
 /// Primitive-level SpMV `i_t = N · q` on inner backend `I`.
 ///
 /// `q_prim` is shape `[n]`; result is shape `[n]`.
+///
+/// SP-10 Task C2: `pin` collects every internal cubecl Handle when invoked
+/// from the CUDA-graph capture pass. Production callers pass `None`.
 pub fn spmv_primitive<I: Backend + 'static>(
     pattern: &std::sync::Arc<CsrPattern>,
     q_prim: I::FloatTensorPrimitive,
     device: &I::Device,
     use_cuda: bool,
+    pin: Option<&mut Vec<Box<dyn std::any::Any + Send>>>,
 ) -> I::FloatTensorPrimitive
 where
     I::FloatTensorPrimitive: 'static,
+    I::IntTensorPrimitive: 'static,
     I::Device: 'static,
 {
-    crate::sparse::dispatch::spmv_forward_dispatch::<I>(pattern, &q_prim, device, use_cuda)
+    crate::sparse::dispatch::spmv_forward_dispatch::<I>(pattern, &q_prim, device, use_cuda, pin)
 }
 
 /// Backward of `assemble_primitive`: given `gA_values` of shape `[nnz]`,
