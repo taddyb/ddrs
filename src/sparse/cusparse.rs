@@ -2597,8 +2597,38 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     // this thread; the closure body issues only stream-ordered work; no
     // host-sync; all scratch devptrs are owned by `cache` (alive for the
     // returned CudaGraph's lifetime).
+    //
+    // SP-10 CONUS-scale fix: cubecl's kernel-launch path internally calls
+    // `create_with_data` on every `cube_kernel::launch`, which (a) allocates
+    // a small device buffer for kernel-argument-info and (b) does an H2D
+    // copy into it. If those allocations happen INSIDE the capture region,
+    // cubecl's CUDA storage hits `cuMemAllocAsync` on a stream that is
+    // currently in capture mode — so the allocation is recorded as a graph
+    // memalloc node instead of executing a real CUDA allocation. cubecl
+    // returns the captured devptr to its pool's free-list when the
+    // temporary info-buffer Handle drops. The pool later hands that slot
+    // out for some unrelated `client.empty()`/`from_data` call (e.g. the
+    // `Tensor::from_data` host-roundtrip in `forward()`), and the
+    // subsequent `cuMemcpyHtoDAsync` to that "live in graph only" devptr
+    // segfaults inside libcuda.
+    //
+    // At sandbox `n=5` the prior cubecl pool state happens to absorb the
+    // capture-time growth into already-existing slots, so the crash doesn't
+    // surface. At CONUS `n=3824` the pool grows during capture (more
+    // / bigger bindings → bigger info buffer), and we hit it.
+    //
+    // Mitigation: run the entire kernel chain ONCE outside capture as a
+    // warm-up so cubecl's pool grows under normal allocation (the
+    // resulting kernel-info devptrs are real allocations). The temporary
+    // info-buffer Handles drop at the end of the warm-up `launch` call and
+    // return to the drop_queue; a `client.flush()` after the warm-up
+    // recycles them onto the free-list. The subsequent in-capture launch
+    // reuses those existing slots (no new `cuMemAllocAsync`), so capture
+    // no longer absorbs growth nodes.
     let capture_result: Result<crate::cuda_graph::CudaGraph, String> = {
-        let closure = || -> Result<(), String> {
+        // The fused kernel chain, factored so we can run it once as a warm-up
+        // and again inside capture.
+        let kernel_chain = || -> Result<(), String> {
             // ── K1: S1..S23 ───────────────────────────────────────────────
             let mk_in = |hd: &Handle| -> TensorArg<CudaRuntime> {
                 unsafe {
@@ -2735,9 +2765,28 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             Ok(())
         };
 
+        // WARM-UP: run the chain once OUTSIDE capture so cubecl's pool
+        // grows under normal allocation. The kernel-info Handles dropped
+        // at the end of each launch enter the drop_queue; the subsequent
+        // double-flush below releases them back to the free-list, so the
+        // in-capture run reuses existing slots and emits NO new
+        // `cuMemAllocAsync` graph nodes.
+        if let Err(e) = kernel_chain() {
+            cache.capture_status =
+                CaptureStatus::FallbackReason(format!("forward warm-up: {e}"));
+            eprintln!("SP-10 forward graph WARM-UP FAILED, falling back: {e}");
+            return;
+        }
+        // Two blocking flushes: the first submits the warm-up work to the
+        // server and waits, ensuring all temporary info-buffer Handles
+        // have been dropped on the server side; the second cycles the
+        // drop_queue from staged→pending→free so reuse is enabled.
+        client.flush().expect("client flush #1 after warm-up");
+        client.flush().expect("client flush #2 after warm-up");
+
         // SAFETY: stream + ctx invariants validated above; closure is
-        // host-sync-free; no cubecl allocations inside.
-        unsafe { capture_on_stream(stream, closure) }
+        // host-sync-free; no cubecl allocations inside (post-warm-up).
+        unsafe { capture_on_stream(stream, kernel_chain) }
             .map_err(|e: CaptureError| format!("{e}"))
     };
 
