@@ -71,6 +71,7 @@ params:
   log_space_parameters:
     - n
   sparse_solver: cuda    # opt-in for GPU cuSPARSE solve (requires CUDA backend)
+  use_cuda_graphs: true  # SP-10: forward CUDA Graph capture+replay (CUDA backend only; V7a=0.385)
 
 # Test-mode overlay. When the binary is run with --mode testing, these keys
 # replace the corresponding ones in `experiment:`. Absent keys inherit.
