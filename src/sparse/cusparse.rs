@@ -2832,11 +2832,6 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             cache.graph_fwd = Some(graph);
             cache.capture_status = CaptureStatus::Captured;
             cache.capture_sig = Some((pattern.n, cfg.params.sparse_solver));
-            eprintln!(
-                "SP-10 forward graph captured (n={}, nnz={})",
-                pattern.n,
-                pattern.col.len()
-            );
         }
         Err(e) => {
             cache.capture_status = CaptureStatus::FallbackReason(format!("forward: {e}"));
