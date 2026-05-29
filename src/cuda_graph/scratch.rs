@@ -19,6 +19,23 @@ pub struct PersistentScratch {
     pub in_qp: Handle,
     pub out_q: Handle,
 
+    // SP-10 Phase 3: static-input mirrors. Constant per training batch.
+    // Populated once via D2D from caller primitives in `try_capture_forward`
+    // (before `cuStreamBeginCapture`); the captured K1 kernel reads from
+    // these stable scratch handles so the graph remains valid across
+    // replays even if the caller's source primitives' allocations move.
+    pub in_n: Handle,
+    pub in_qsp: Handle,
+    pub in_psp: Handle,
+    pub in_length: Handle,
+    pub in_slope: Handle,
+    pub in_xst: Handle,
+
+    // SP-10 Phase 3: persistent device upload of pattern.diag_mask (nnz f32).
+    // Read by the fused assemble kernel as a static input. Constant per
+    // CsrPattern; populated once at scratch allocation.
+    pub pattern_diag_mask: Handle,
+
     // 24 saved-state outputs (forward) / inputs (backward).
     pub state_depth: Handle,
     pub state_top_width: Handle,
@@ -58,9 +75,14 @@ impl PersistentScratch {
     /// the adjacency. Most scratch buffers are `[n_segments]` f32, but
     /// `state_a_values` (output of `assemble_primitive`) is `[nnz]` f32, so
     /// it needs its own size.
+    ///
+    /// `pattern` is borrowed only to upload `diag_mask` into
+    /// `pattern_diag_mask` — read by the fused assemble kernel during graph
+    /// replay.
     pub fn allocate<B: Backend + 'static>(
         n_segments: usize,
         nnz: usize,
+        pattern: &crate::sparse::CsrPattern,
         device: &B::Device,
     ) -> Self {
         let client = crate::sparse::cusparse::compute_client::<B>(device);
@@ -69,9 +91,23 @@ impl PersistentScratch {
         let mk = || client.empty(n_bytes);
         let mk_nnz = || client.empty(nnz_bytes);
 
+        // Upload diag_mask to device. `create_from_slice` allocates and
+        // schedules an H2D copy; the returned Handle owns the device buffer
+        // for the cache lifetime.
+        let diag_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                pattern.diag_mask.as_ptr() as *const u8,
+                pattern.diag_mask.len() * std::mem::size_of::<f32>(),
+            )
+        };
+        let pattern_diag_mask = client.create_from_slice(diag_bytes);
+
         Self {
             n_segments,
             in_q: mk(), in_qp: mk(), out_q: mk(),
+            in_n: mk(), in_qsp: mk(), in_psp: mk(),
+            in_length: mk(), in_slope: mk(), in_xst: mk(),
+            pattern_diag_mask,
             state_depth: mk(), state_top_width: mk(), state_side_slope: mk(),
             state_bottom_width: mk(), state_hydraulic_radius: mk(),
             state_velocity_unclamped: mk(), state_velocity_clamped: mk(),

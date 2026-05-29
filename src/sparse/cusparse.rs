@@ -1965,6 +1965,189 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// SP-10 Phase 3: cuSPARSE variants that write into caller-owned dst Handles.
+//
+// The default `cusparse_spmv_forward` / `cusparse_forward` allocate a fresh
+// output Handle via the cubecl client each call. That allocation is illegal
+// inside `cuStreamBeginCapture` (the cubecl pool would record an alloc node
+// in the graph). These variants take a pre-allocated dst Handle (typically
+// pointing into `PersistentScratch`) and only enqueue stream-ordered work.
+// ---------------------------------------------------------------------------
+
+/// SP-10 Phase 3: `y = N · q` via cuSPARSE SpMV(NON_TRANSPOSE), writing into
+/// a caller-owned dst Handle. No allocations on the cubecl pool.
+///
+/// `q_devptr` is the source device pointer (e.g. the devptr of
+/// `scratch.in_q`); `dst_devptr` is the destination device pointer (e.g.
+/// the devptr of `scratch.state_i_t`). The caller pre-resolves these so we
+/// can run the entire body inside the capture region without touching the
+/// cubecl Handle table.
+///
+/// # Safety
+/// - `q_devptr` and `dst_devptr` must be valid CUDA device pointers of at
+///   least `cache.n` f32 elements, allocated on cubecl's primary stream pool.
+/// - The caller has bound cubecl's primary CUDA context on the current
+///   thread (see `try_capture_forward` for the canonical pattern).
+/// - This function may be called inside `cuStreamBeginCapture` — it does
+///   no host-sync.
+pub(crate) unsafe fn cusparse_spmv_into_devptrs(
+    cache: &CudaPatternCache,
+    client: &cubecl::client::ComputeClient<CudaRuntime>,
+    q_devptr: u64,
+    dst_devptr: u64,
+    stream: cudarc::driver::sys::CUstream,
+) {
+    use cudarc::cusparse::sys::{
+        cudaDataType_t::CUDA_R_32F,
+        cusparseCreateDnVec,
+        cusparseDestroyDnVec,
+        cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        cusparseSpMV,
+        cusparseSpMVAlg_t::CUSPARSE_SPMV_ALG_DEFAULT,
+        cusparseSetStream,
+    };
+
+    // Bind cuSPARSE to the captured stream.
+    unsafe {
+        let stream_for_cusparse = stream as *mut cudarc::cusparse::sys::CUstream_st;
+        cusparseSetStream(cache.handle, stream_for_cusparse)
+            .result()
+            .expect("cusparseSetStream forward SpMV (into_devptrs) failed");
+    }
+
+    // flush_no_sync is safe inside capture: it submits prior cubecl work
+    // without cuEventSynchronize. Here our K1 already submitted directly to
+    // the captured stream, so nothing to drain — but keep flush_no_sync for
+    // consistency with the other cuSPARSE call sites.
+    client
+        .flush_no_sync()
+        .expect("cubecl client flush_no_sync failed before cusparse_spmv_into_devptrs");
+
+    let n = cache.n;
+    let workspace_ptr = unsafe { handle_device_ptr(client, &cache.workspace_spmv_n) };
+
+    unsafe {
+        let mut q_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let mut y_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        cusparseCreateDnVec(&mut q_dn, n as i64, q_devptr as *mut std::ffi::c_void, CUDA_R_32F)
+            .result()
+            .expect("cusparseCreateDnVec q failed in forward SpMV (into_devptrs)");
+        cusparseCreateDnVec(&mut y_dn, n as i64, dst_devptr as *mut std::ffi::c_void, CUDA_R_32F)
+            .result()
+            .expect("cusparseCreateDnVec y failed in forward SpMV (into_devptrs)");
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        cusparseSpMV(
+            cache.handle,
+            CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &alpha as *const f32 as *const std::ffi::c_void,
+            cache.sp_mat_spmv,
+            q_dn,
+            &beta as *const f32 as *const std::ffi::c_void,
+            y_dn,
+            CUDA_R_32F,
+            CUSPARSE_SPMV_ALG_DEFAULT,
+            workspace_ptr as *mut std::ffi::c_void,
+        )
+        .result()
+        .expect("cusparseSpMV forward (into_devptrs) failed");
+        cusparseDestroyDnVec(q_dn).result().expect("cusparseDestroyDnVec q failed");
+        cusparseDestroyDnVec(y_dn).result().expect("cusparseDestroyDnVec y failed");
+    }
+}
+
+/// SP-10 Phase 3: triangular solve `A · x = b`, writing into a caller-owned
+/// dst Handle's devptr. cuSPARSE-12.x SpSV. No cubecl allocations.
+///
+/// `a_values_devptr` is the device pointer to A's value array; `b_devptr` is
+/// the rhs vector; `dst_devptr` is the destination x vector. The caller
+/// pre-resolves all three so this function is safe inside a CUDA stream
+/// capture region.
+///
+/// # Safety
+/// Same contract as `cusparse_spmv_into_devptrs`.
+pub(crate) unsafe fn cusparse_solve_into_devptrs(
+    cache: &CudaPatternCache,
+    client: &cubecl::client::ComputeClient<CudaRuntime>,
+    a_values_devptr: u64,
+    b_devptr: u64,
+    dst_devptr: u64,
+    stream: cudarc::driver::sys::CUstream,
+) {
+    use cudarc::cusparse::sys::{
+        cudaDataType_t::CUDA_R_32F,
+        cusparseCreateDnVec,
+        cusparseDestroyDnVec,
+        cusparseOperation_t::CUSPARSE_OPERATION_NON_TRANSPOSE,
+        cusparseSpSVAlg_t::CUSPARSE_SPSV_ALG_DEFAULT,
+        cusparseSpSV_solve,
+        cusparseSetStream,
+    };
+
+    unsafe {
+        let stream_for_cusparse = stream as *mut cudarc::cusparse::sys::CUstream_st;
+        cusparseSetStream(cache.handle, stream_for_cusparse)
+            .result()
+            .expect("cusparseSetStream forward (into_devptrs) failed");
+    }
+
+    client
+        .flush_no_sync()
+        .expect("cubecl client flush_no_sync failed before cusparse_solve_into_devptrs");
+
+    let n = cache.n;
+
+    unsafe {
+        // Re-point sparse-matrix descriptor at the current a_values.
+        let crow_ptr = handle_device_ptr(client, &cache.d_crow);
+        let col_ptr = handle_device_ptr(client, &cache.d_col);
+        cudarc::cusparse::sys::cusparseCsrSetPointers(
+            cache.sp_mat,
+            crow_ptr as *mut std::ffi::c_void,
+            col_ptr as *mut std::ffi::c_void,
+            a_values_devptr as *mut std::ffi::c_void,
+        )
+        .result()
+        .expect("cusparseCsrSetPointers forward (into_devptrs) failed");
+
+        cudarc::cusparse::sys::cusparseSpSV_updateMatrix(
+            cache.handle,
+            cache.desc_forward,
+            a_values_devptr as *mut std::ffi::c_void,
+            cudarc::cusparse::sys::cusparseSpSVUpdate_t::CUSPARSE_SPSV_UPDATE_GENERAL,
+        )
+        .result()
+        .expect("cusparseSpSV_updateMatrix forward (into_devptrs) failed");
+
+        let mut b_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        let mut x_dn: cudarc::cusparse::sys::cusparseDnVecDescr_t = std::ptr::null_mut();
+        cusparseCreateDnVec(&mut b_dn, n as i64, b_devptr as *mut std::ffi::c_void, CUDA_R_32F)
+            .result()
+            .expect("cusparseCreateDnVec b failed in forward (into_devptrs)");
+        cusparseCreateDnVec(&mut x_dn, n as i64, dst_devptr as *mut std::ffi::c_void, CUDA_R_32F)
+            .result()
+            .expect("cusparseCreateDnVec x failed in forward (into_devptrs)");
+
+        let alpha: f32 = 1.0;
+        cusparseSpSV_solve(
+            cache.handle,
+            CUSPARSE_OPERATION_NON_TRANSPOSE,
+            &alpha as *const _ as *const std::ffi::c_void,
+            cache.sp_mat,
+            b_dn,
+            x_dn,
+            CUDA_R_32F,
+            CUSPARSE_SPSV_ALG_DEFAULT,
+            cache.desc_forward,
+        )
+        .result()
+        .expect("cusparseSpSV_solve forward (into_devptrs) failed");
+        cusparseDestroyDnVec(b_dn).result().expect("cusparseDestroyDnVec b failed");
+        cusparseDestroyDnVec(x_dn).result().expect("cusparseDestroyDnVec x failed");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SP-10 Task 5: forward-graph capture helpers
 // ---------------------------------------------------------------------------
 
@@ -2067,10 +2250,24 @@ pub(crate) unsafe fn fresh_primitive_from_scratch<B: Backend + 'static>(
 ) -> B::FloatTensorPrimitive {
     use burn::tensor::{DType, Shape};
     use burn_cubecl::cubecl::server::Handle;
+    use cubecl::MemoryAllocationMode;
     let client = compute_client::<B>(device);
     let n_bytes = n * std::mem::size_of::<f32>();
-    // Allocate fresh device buffer.
+    // SP-10 Phase 3 fix: allocate the fresh device buffer via the persistent
+    // pool. The Auto pool may recycle slots whose Handle was just dropped
+    // (e.g. the initial hot-start tensor that became `col0` via
+    // `unsqueeze_dim`), corrupting Tensor::cat at end of `forward()`.
+    // Persistent mode disables the recycling for this single allocation.
+    //
+    // Toggle the mode for the empty() call ONLY — restore Auto immediately
+    // so subsequent cubecl ops keep their usual fast-recycle behavior.
+    unsafe {
+        client.allocation_mode(MemoryAllocationMode::Persistent);
+    }
     let dst_handle: Handle = client.empty(n_bytes);
+    unsafe {
+        client.allocation_mode(MemoryAllocationMode::Auto);
+    }
 
     // SAFETY: src is alive (caller-owned through `&Handle`); dst is the freshly
     // allocated handle (alive for this call and beyond, owned by `dst_handle`).
@@ -2162,59 +2359,59 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    // SP-10 Phase 3: capture the fused-kernel forward chain
+    //
+    //     K1 (S1..S23) → cuSPARSE SpMV (S24) → K2 (S25 b_rhs)
+    //     → assemble (S26) → cuSPARSE SpSV (S27) → K3 (S28 q_clamp)
+    //
+    // All intermediates live in either GPU registers (inside K1/K2/K3) or in
+    // pre-allocated `PersistentScratch` slots. No cubecl Handle allocations
+    // happen inside the capture region, so there is no allocator-vs-graph
+    // recycling hazard. The captured graph reads from / writes to stable
+    // scratch device pointers throughout.
+    //
+    // Per-step inputs (`q_t`, `q_prime_t`) live in `scratch.in_q` / `scratch.in_qp`;
+    // `route_timestep` D2D-copies the current step's values into these
+    // slots before `cuGraphLaunch`.
+    //
+    // Static inputs (`n`, `q_spatial`, `p_spatial`, `length`, `slope`,
+    // `x_storage`, `pattern.diag_mask`) are seeded into scratch via a
+    // one-time D2D before `cuStreamBeginCapture` — the captured K1 / assemble
+    // kernels read those stable scratch addresses, not the caller's source
+    // primitives' addresses.
     use crate::cuda_graph::{
-        capture_forward_with_outputs, CaptureError, PersistentModeGuard, PersistentScratch,
+        capture_on_stream, CaptureError, PersistentScratch,
+        geometry_kernel::{assemble_kernel, b_rhs_kernel, forward_k1_kernel, q_clamp_kernel},
     };
-    use crate::routing::mmc_op::{forward_chain_inner_pinned, NUM_SAVED_STATE};
+    use burn_cubecl::cubecl::server::Handle;
+    use burn_cubecl::cubecl::{CubeCount, CubeDim, prelude::TensorArg};
 
-    // 1. Allocate scratch on first capture. n_segments = pattern.n,
-    //    nnz = a_values length.
+    let n_seg = pattern.n;
+    let nnz = pattern.col.len();
+    let bytes_n = (n_seg * std::mem::size_of::<f32>()) as usize;
+    let bytes_nnz_i32 = (nnz * std::mem::size_of::<i32>()) as usize;
+    let _ = bytes_nnz_i32;
+
+    // 1. Allocate scratch on first capture. `allocate` also uploads
+    //    `pattern.diag_mask` into `scratch.pattern_diag_mask`.
     if cache.scratch.is_none() {
         cache.scratch = Some(PersistentScratch::allocate::<I>(
-            pattern.n,
-            pattern.col.len(),
+            n_seg,
+            nnz,
+            pattern,
             device,
         ));
     }
 
-    // 2. Build the scratch-backed inputs once, OUTSIDE capture.
-    //
-    // Per-step inputs `q_t` and `q_prime_t` must read from the persistent
-    // `scratch.in_q` / `scratch.in_qp` buffers so the captured kernels'
-    // device-pointer reads are stable. On replay, Task 6 D2D-copies the
-    // current step's `q_t` / `q_prime_t` into these scratch destinations
-    // before `cuGraphLaunch`.
-    //
-    // Static inputs (n, q_spatial, p_spatial, length, slope, x_storage) are
-    // bound to `self.*` on `MuskingumCunge` and keep stable cubecl handles
-    // (and therefore devptrs) for the engine's lifetime — replay reuses
-    // the same primitives, so the captured kernels read the same addresses.
     let client = compute_client::<I>(device);
 
-    // Make sure all prior cubecl work has been submitted to the stream
-    // AND the drop_queue is empty before capture begins. The drop_queue
-    // is double-buffered: the first flush rotates `staged` -> `pending`
-    // and records a new fence; the second flush syncs that fence and
-    // clears `pending`. After two calls the queue is guaranteed empty,
-    // so no host-sync can fire from inside the capture region.
+    // Drain prior cubecl work before capture. Double-flush so the drop_queue
+    // (double-buffered: staged -> pending) is empty before we enter capture.
     client.flush().expect("client flush #1 before forward capture");
     client.flush().expect("client flush #2 before forward capture");
 
-    // Bind CUDA primary context on this thread BEFORE doing any cudarc
-    // capture/graph calls.
-    //
-    // Why not exclusive_with_server? Anything inside that closure that calls
-    // back into cubecl (e.g. forward_chain_inner -> cubecl_stream_active ->
-    // exclusive_with_server) re-enters the runtime's RefCell-guarded
-    // service state and panics with BorrowMutError.
-    //
-    // Mirror Task 0's spike (tests/sp10_spike_capture.rs:54-70): retain the
-    // device-0 primary context (same one cubecl uses) and set it current on
-    // this thread. cubecl_stream_active and forward_chain_inner each
-    // open+close their own exclusive_with_server scopes — safe to call here
-    // without nesting.
-    //
-    // The CtxGuard releases the primary context on all exit paths.
+    // Bind CUDA primary context on this thread BEFORE any cudarc capture /
+    // launch call. Mirrors the Task 0 spike pattern.
     let cu_device: cudarc::driver::sys::CUdevice = match unsafe {
         cudarc::driver::result::device::get(0)
     } {
@@ -2240,7 +2437,6 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             return;
         }
     };
-    // RAII: release the primary context refcount on every exit path.
     struct CtxGuard {
         cu_device: cudarc::driver::sys::CUdevice,
     }
@@ -2262,244 +2458,292 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
         return;
     }
 
-    // Cubecl's primary CUstream. cubecl_stream_active opens its own
-    // exclusive_with_server scope internally — that's fine because we're
-    // not inside one ourselves.
     let stream: cudarc::driver::sys::CUstream = cubecl_stream_active::<I>(device);
 
-    // -------- First pass: discover output handle device-pointers ---------
-    //
-    // Wrap the caller's inputs as inner-backend Tensors and run the chain
-    // OUTSIDE the capture region. The src pointers observed here are the
-    // ones we'll memcpy from inside capture (assumption: cubecl's allocator
-    // is deterministic for the same allocation sequence).
-    //
-    // For `q_t` and `q_prime_t` we wrap the scratch `in_q`/`in_qp` handles
-    // so the captured kernels read from those fixed devptrs. For static
-    // inputs we reuse the caller's primitives (stable across the engine's
-    // lifetime).
-    let scratch_in_q_prim = {
-        let s = cache.scratch.as_ref().unwrap();
-        handle_to_primitive::<I>(&s.in_q, pattern.n, device)
-    };
-    let scratch_in_qp_prim = {
-        let s = cache.scratch.as_ref().unwrap();
-        handle_to_primitive::<I>(&s.in_qp, pattern.n, device)
-    };
-
-    // SP-10 Task C: enter persistent allocator mode for BOTH probe and
-    // capture passes. Allocations made under this guard go onto cubecl's
-    // PersistentPool, whose slices stay reserved as long as their handles
-    // are alive. The capture-pass intermediates are pinned into
-    // `capture_pin` below and then moved onto `cache.pinned_intermediates`
-    // so their device addresses survive for the cache's lifetime — keeping
-    // the captured CUDA graph valid across replays. The guard restores
-    // `Auto` mode on drop so post-capture work (per-timestep replays,
-    // fresh_primitive_from_scratch, etc.) uses cubecl's normal recycling
-    // allocator.
-    let _persistent_guard = PersistentModeGuard::new(&client);
-
-    // The probe-pass closure: runs the chain once, threading a pin sink.
-    // Used twice below — probe pass with `probe_pin`, capture pass with
-    // `capture_pin`. After the probe pass we drop `probe_pin` so the
-    // probed handles release their persistent-pool slices back to the
-    // free list; cubecl's deterministic allocator should re-issue the
-    // same device addresses to the capture pass (verified by the
-    // devptr-stability check below).
-    let run_chain_pinned = |pin: &mut Vec<I::FloatTensorPrimitive>,
-                            extra_pin: &mut Vec<Box<dyn std::any::Any + Send>>|
-     -> (
-        I::FloatTensorPrimitive,
-        [I::FloatTensorPrimitive; NUM_SAVED_STATE],
-    ) {
-        forward_chain_inner_pinned::<I>(
-            cfg,
-            pattern,
-            wrap_prim::<I>(n.clone()),
-            wrap_prim::<I>(q_spatial.clone()),
-            wrap_prim::<I>(p_spatial.clone()),
-            wrap_prim::<I>(scratch_in_q_prim.clone()),
-            wrap_prim::<I>(scratch_in_qp_prim.clone()),
-            wrap_prim::<I>(length.clone()),
-            wrap_prim::<I>(slope.clone()),
-            wrap_prim::<I>(x_storage.clone()),
-            pin,
-            extra_pin,
-        )
-    };
-
-    // ---- attempt the whole sequence inside exclusive_with_server ----
-    //
-    // The capture + instantiate + launch invariants documented on
-    // `CudaGraph` require that the current thread has cubecl's primary
-    // CUDA context bound. cubecl only binds it on the server thread.
-    // `exclusive_with_server` runs our closure there.
+    // 2. Seed the static inputs into scratch via one-time D2D. After this
+    //    runs, the K1/assemble kernels can read from scratch's stable
+    //    devptrs.
     let scratch_ref = cache.scratch.as_ref().unwrap();
-    let bytes_n = (pattern.n * std::mem::size_of::<f32>()) as u64;
-    let bytes_nnz = (pattern.col.len() * std::mem::size_of::<f32>()) as u64;
+    let dst_in_n = unsafe { handle_devptr(&client, &scratch_ref.in_n) };
+    let dst_in_qsp = unsafe { handle_devptr(&client, &scratch_ref.in_qsp) };
+    let dst_in_psp = unsafe { handle_devptr(&client, &scratch_ref.in_psp) };
+    let dst_in_length = unsafe { handle_devptr(&client, &scratch_ref.in_length) };
+    let dst_in_slope = unsafe { handle_devptr(&client, &scratch_ref.in_slope) };
+    let dst_in_xst = unsafe { handle_devptr(&client, &scratch_ref.in_xst) };
 
-    // Precompute the destination devptrs from scratch handles (these are
-    // stable for the cache lifetime, so we resolve them once here).
-    let dst_out_q = unsafe { handle_devptr(&client, &scratch_ref.out_q) };
-    let dst_states: [u64; NUM_SAVED_STATE] = unsafe {
-        [
-            handle_devptr(&client, &scratch_ref.state_depth),
-            handle_devptr(&client, &scratch_ref.state_top_width),
-            handle_devptr(&client, &scratch_ref.state_side_slope),
-            handle_devptr(&client, &scratch_ref.state_bottom_width),
-            handle_devptr(&client, &scratch_ref.state_hydraulic_radius),
-            handle_devptr(&client, &scratch_ref.state_velocity_unclamped),
-            handle_devptr(&client, &scratch_ref.state_velocity_clamped),
-            handle_devptr(&client, &scratch_ref.state_celerity),
-            handle_devptr(&client, &scratch_ref.state_k_muskingum),
-            handle_devptr(&client, &scratch_ref.state_denom),
-            handle_devptr(&client, &scratch_ref.state_c1),
-            handle_devptr(&client, &scratch_ref.state_c2),
-            handle_devptr(&client, &scratch_ref.state_c3),
-            handle_devptr(&client, &scratch_ref.state_c4),
-            handle_devptr(&client, &scratch_ref.state_a_values),
-            handle_devptr(&client, &scratch_ref.state_b_rhs),
-            handle_devptr(&client, &scratch_ref.state_i_t),
-            handle_devptr(&client, &scratch_ref.state_x_sol),
-            handle_devptr(&client, &scratch_ref.state_ratio),
-            handle_devptr(&client, &scratch_ref.state_denominator),
-            handle_devptr(&client, &scratch_ref.state_q_eps),
-            handle_devptr(&client, &scratch_ref.state_side_slope_raw),
-            handle_devptr(&client, &scratch_ref.state_bw_raw),
-        ]
+    let src_n = match primitive_devptr::<I>(&n) {
+        Some(p) => p,
+        None => {
+            cache.capture_status = CaptureStatus::FallbackReason(
+                "forward: n primitive is not CUDA".into(),
+            );
+            eprintln!("SP-10 forward graph capture FAILED, falling back: n primitive is not CUDA");
+            return;
+        }
     };
-    // Saved-state sizes — only `state_a_values` (index 14) is nnz; the rest
-    // are n. Mirror `forward_saved_idx::A_VALUES`.
-    let mut state_bytes = [bytes_n; NUM_SAVED_STATE];
-    state_bytes[crate::routing::mmc_op::forward_saved_idx::A_VALUES] = bytes_nnz;
+    let src_qsp = primitive_devptr::<I>(&q_spatial).expect("q_spatial must be CUDA");
+    let src_psp = primitive_devptr::<I>(&p_spatial).expect("p_spatial must be CUDA");
+    let src_length = primitive_devptr::<I>(&length).expect("length must be CUDA");
+    let src_slope = primitive_devptr::<I>(&slope).expect("slope must be CUDA");
+    let src_xst = primitive_devptr::<I>(&x_storage).expect("x_storage must be CUDA");
 
-    // First pass to learn src pointers. Runs OUTSIDE capture and OUTSIDE
-    // exclusive_with_server — context is bound on this thread by the
-    // CtxGuard above, and forward_chain_inner_pinned manages its own
-    // exclusive_with_server scopes internally.
+    // SAFETY: src and dst are valid CUDA device pointers of at least bytes_n;
+    // stream is cubecl's primary stream; context is bound on this thread.
+    // These D2Ds run BEFORE cuStreamBeginCapture, so they do not become
+    // captured nodes — they are one-time seeds.
+    unsafe {
+        cudarc::driver::result::memcpy_dtod_async(dst_in_n, src_n, bytes_n, stream)
+            .expect("seed D2D n -> in_n failed");
+        cudarc::driver::result::memcpy_dtod_async(dst_in_qsp, src_qsp, bytes_n, stream)
+            .expect("seed D2D q_spatial -> in_qsp failed");
+        cudarc::driver::result::memcpy_dtod_async(dst_in_psp, src_psp, bytes_n, stream)
+            .expect("seed D2D p_spatial -> in_psp failed");
+        cudarc::driver::result::memcpy_dtod_async(dst_in_length, src_length, bytes_n, stream)
+            .expect("seed D2D length -> in_length failed");
+        cudarc::driver::result::memcpy_dtod_async(dst_in_slope, src_slope, bytes_n, stream)
+            .expect("seed D2D slope -> in_slope failed");
+        cudarc::driver::result::memcpy_dtod_async(dst_in_xst, src_xst, bytes_n, stream)
+            .expect("seed D2D x_storage -> in_xst failed");
+    }
+    // Submit the seed copies so they complete before capture begins. The
+    // captured stream will see scratch.in_* populated when K1 launches.
+    client.flush().expect("flush after seed D2D before capture");
+
+    // 3. Resolve scratch devptrs for cuSPARSE callouts inside capture.
+    //    Cube-launch kernels accept Handles directly (via TensorArg::from_raw_parts);
+    //    cuSPARSE callouts need raw devptrs.
+    let scratch_ref = cache.scratch.as_ref().unwrap();
+    let dp_in_q = unsafe { handle_devptr(&client, &scratch_ref.in_q) };
+    let dp_state_i_t = unsafe { handle_devptr(&client, &scratch_ref.state_i_t) };
+    let dp_state_c1 = unsafe { handle_devptr(&client, &scratch_ref.state_c1) };
+    let dp_state_a_values = unsafe { handle_devptr(&client, &scratch_ref.state_a_values) };
+    let dp_state_b_rhs = unsafe { handle_devptr(&client, &scratch_ref.state_b_rhs) };
+    let dp_state_x_sol = unsafe { handle_devptr(&client, &scratch_ref.state_x_sol) };
+    let _ = dp_state_c1;
+
+    // Scratch handles for cube kernels (clones bump Arc refcounts only).
+    let h = |hd: &Handle| -> Handle { hd.clone() };
+    let in_n_h = h(&scratch_ref.in_n);
+    let in_qsp_h = h(&scratch_ref.in_qsp);
+    let in_psp_h = h(&scratch_ref.in_psp);
+    let in_q_h = h(&scratch_ref.in_q);
+    let in_qp_h = h(&scratch_ref.in_qp);
+    let in_length_h = h(&scratch_ref.in_length);
+    let in_slope_h = h(&scratch_ref.in_slope);
+    let in_xst_h = h(&scratch_ref.in_xst);
+    let pattern_diag_mask_h = h(&scratch_ref.pattern_diag_mask);
+    let pattern_row_for_nnz_h = h(&cache.d_row_for_nnz);
+    let pattern_adj_values_h = h(&cache.d_adj_values);
+
+    let s_depth = h(&scratch_ref.state_depth);
+    let s_top_width = h(&scratch_ref.state_top_width);
+    let s_side_slope = h(&scratch_ref.state_side_slope);
+    let s_bottom_width = h(&scratch_ref.state_bottom_width);
+    let s_hyd_radius = h(&scratch_ref.state_hydraulic_radius);
+    let s_vel_un = h(&scratch_ref.state_velocity_unclamped);
+    let s_vel_cl = h(&scratch_ref.state_velocity_clamped);
+    let s_celerity = h(&scratch_ref.state_celerity);
+    let s_k_musk = h(&scratch_ref.state_k_muskingum);
+    let s_denom = h(&scratch_ref.state_denom);
+    let s_c1 = h(&scratch_ref.state_c1);
+    let s_c2 = h(&scratch_ref.state_c2);
+    let s_c3 = h(&scratch_ref.state_c3);
+    let s_c4 = h(&scratch_ref.state_c4);
+    let s_ratio = h(&scratch_ref.state_ratio);
+    let s_denominator = h(&scratch_ref.state_denominator);
+    let s_q_eps = h(&scratch_ref.state_q_eps);
+    let s_side_slope_raw = h(&scratch_ref.state_side_slope_raw);
+    let s_bw_raw = h(&scratch_ref.state_bw_raw);
+    let s_a_values = h(&scratch_ref.state_a_values);
+    let s_b_rhs = h(&scratch_ref.state_b_rhs);
+    let s_i_t = h(&scratch_ref.state_i_t);
+    let s_x_sol = h(&scratch_ref.state_x_sol);
+    let out_q_h = h(&scratch_ref.out_q);
+
+    // Scalar bounds — match `forward_chain_inner`.
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let dt = crate::routing::mmc::DT_SECONDS;
+
+    // Common cube launch parameters. One thread per element; for assemble
+    // the launch dimension is nnz instead of n_seg.
     //
-    // SP-10 Task C: declare `capture_pin` OUTSIDE the closure so it
-    // outlives `capture_result` and can be moved onto the cache. The
-    // closure receives `&mut capture_pin` and grows it in place.
-    let mut capture_pin: Vec<I::FloatTensorPrimitive> = Vec::with_capacity(64);
-    // SP-10 Task C2: separate sink for type-erased Int/Float primitives
-    // (pattern uploads + arithmetic-chain temps inside assemble_primitive).
-    let mut capture_extra_pin: Vec<Box<dyn std::any::Any + Send>> = Vec::with_capacity(32);
+    // For larger n we may need multi-cube tiling. To keep V1 sandbox (n=5)
+    // simple we use one cube with CubeDim sized to the array; cubecl will
+    // accept oversize dim because each kernel guards with `terminate!()`
+    // when ABSOLUTE_POS >= len.
+    //
+    // n_seg/256 ceiling cubes of 256 threads each — handles arbitrary n.
+    let block: u32 = 256;
+    let grid_n = ((n_seg as u32 + block - 1) / block).max(1);
+    let grid_nnz = ((nnz as u32 + block - 1) / block).max(1);
+
+    let stride_n = vec![1_usize];
+    let shape_n = vec![n_seg];
+    let stride_nnz = vec![1_usize];
+    let shape_nnz = vec![nnz];
+
+    let cache_ptr: *const CudaPatternCache = &*cache;
+
+    // 4. Capture the fused-kernel sequence.
+    //
+    // The closure runs INSIDE cuStreamBeginCapture / cuStreamEndCapture. It
+    // issues 3 cube-launch kernels + 3 cuSPARSE calls, all writing to scratch
+    // devptrs. No cubecl allocations happen inside; no host-sync calls.
+    //
+    // SAFETY: stream is cubecl's primary stream, primary context is bound on
+    // this thread; the closure body issues only stream-ordered work; no
+    // host-sync; all scratch devptrs are owned by `cache` (alive for the
+    // returned CudaGraph's lifetime).
     let capture_result: Result<crate::cuda_graph::CudaGraph, String> = {
-        // ---- First pass: discover src ptrs ----
-        //
-        // `probe_pin` collects the probe-pass intermediates. We drop it
-        // BEFORE the capture pass so persistent-pool slices return to the
-        // free list, allowing cubecl's deterministic allocator to re-issue
-        // the same device addresses to the capture-pass run.
-        let mut probe_pin: Vec<I::FloatTensorPrimitive> = Vec::with_capacity(64);
-        let mut probe_extra_pin: Vec<Box<dyn std::any::Any + Send>> = Vec::with_capacity(32);
-        let (probe_q_next, probe_states) = run_chain_pinned(&mut probe_pin, &mut probe_extra_pin);
-        let src_q_next = primitive_devptr::<I>(&probe_q_next)
-            .expect("primitive_devptr called on non-CUDA backend (probe q_next)");
-        let mut src_states = [0u64; NUM_SAVED_STATE];
-        for (i, s) in probe_states.iter().enumerate() {
-            src_states[i] = primitive_devptr::<I>(s)
-                .expect("primitive_devptr called on non-CUDA backend (probe state)");
-        }
-        // Drop probe outputs, `probe_pin`, and `probe_extra_pin` so cubecl
-        // frees their buffers (releasing the addresses we just observed
-        // back to the persistent pool's free list; the capture-pass re-run
-        // should then re-issue the same addresses via deterministic
-        // allocation).
-        drop(probe_q_next);
-        drop(probe_states);
-        drop(probe_pin);
-        drop(probe_extra_pin);
-
-        // Build the output_copies tuple list.
-        let mut output_copies: Vec<(u64, u64, u64)> = Vec::with_capacity(1 + NUM_SAVED_STATE);
-        output_copies.push((src_q_next, dst_out_q, bytes_n));
-        for i in 0..NUM_SAVED_STATE {
-            output_copies.push((src_states[i], dst_states[i], state_bytes[i]));
-        }
-
-        // ---- Second pass inside capture region ----
-        //
-        // The closure re-runs the chain; cubecl should reuse the same src
-        // device-pointer addresses (deterministic-allocator assumption).
-        // Then capture_forward_with_outputs appends the memcpy nodes so
-        // the outputs land in the scratch destinations.
-        //
-        // Defensive: confirm cubecl allocator gave us the same addresses
-        // as the probe pass. If not, the captured graph would memcpy from
-        // stale addresses on every replay, silently corrupting outputs.
-        // Converts that silent nondeterminism into a loud fallback-with-log.
-        //
-        // SP-10 Task C: `capture_pin` is grown here and KEPT ALIVE — its
-        // entries are the cubecl Handles backing every named output AND
-        // every unnamed sub-expression temp produced by the chain. By
-        // holding them past end_capture, the persistent pool never
-        // recycles their device addresses while `cache.graph_fwd` is
-        // live.
-        let capture_pin_ref = &mut capture_pin;
-        let capture_extra_pin_ref = &mut capture_extra_pin;
         let closure = || -> Result<(), String> {
-            let (q_next_prim2, state_prims2) =
-                run_chain_pinned(capture_pin_ref, capture_extra_pin_ref);
-            let q_devptr2 = primitive_devptr::<I>(&q_next_prim2)
-                .expect("primitive_devptr called on non-CUDA backend (capture q_next)");
-            if q_devptr2 != src_q_next {
-                return Err(format!(
-                    "nondeterministic allocator: q_next devptr changed {:#x} -> {:#x}",
-                    src_q_next, q_devptr2
-                ));
-            }
-            for (i, p) in state_prims2.iter().enumerate() {
-                let dev = primitive_devptr::<I>(p)
-                    .expect("primitive_devptr called on non-CUDA backend (capture state)");
-                if dev != src_states[i] {
-                    return Err(format!(
-                        "nondeterministic allocator: state[{i}] devptr changed {:#x} -> {:#x}",
-                        src_states[i], dev
-                    ));
+            // ── K1: S1..S23 ───────────────────────────────────────────────
+            let mk_in = |hd: &Handle| -> TensorArg<CudaRuntime> {
+                unsafe {
+                    TensorArg::from_raw_parts(
+                        hd.clone(),
+                        stride_n.clone().into(),
+                        shape_n.clone().into(),
+                    )
                 }
+            };
+            let mk_out = mk_in;
+            forward_k1_kernel::launch::<f32, CudaRuntime>(
+                &client,
+                CubeCount::Static(grid_n, 1, 1),
+                CubeDim::new_1d(block),
+                // 8 inputs
+                mk_in(&in_n_h),
+                mk_in(&in_qsp_h),
+                mk_in(&in_psp_h),
+                mk_in(&in_q_h),
+                mk_in(&in_qp_h),
+                mk_in(&in_length_h),
+                mk_in(&in_slope_h),
+                mk_in(&in_xst_h),
+                // 19 outputs
+                mk_out(&s_depth),
+                mk_out(&s_top_width),
+                mk_out(&s_side_slope),
+                mk_out(&s_bottom_width),
+                mk_out(&s_hyd_radius),
+                mk_out(&s_vel_un),
+                mk_out(&s_vel_cl),
+                mk_out(&s_celerity),
+                mk_out(&s_k_musk),
+                mk_out(&s_denom),
+                mk_out(&s_c1),
+                mk_out(&s_c2),
+                mk_out(&s_c3),
+                mk_out(&s_c4),
+                mk_out(&s_ratio),
+                mk_out(&s_denominator),
+                mk_out(&s_q_eps),
+                mk_out(&s_side_slope_raw),
+                mk_out(&s_bw_raw),
+                // scalars
+                bottom_width_lb,
+                depth_lb,
+                velocity_lb,
+                dt,
+            );
+            // Drain cube's async submit queue onto the captured stream. cube
+            // `launch` goes through `device.submit` (channel-async); without
+            // this flush, the kernel may not have landed on `stream` by the
+            // time cuStreamEndCapture runs.
+            client.flush_no_sync().expect("flush_no_sync after K1");
+
+            // ── SpMV: i_t = N · q_t ───────────────────────────────────────
+            //
+            // SAFETY: cache_ptr is a borrow of the live `cache` (we hold
+            // `&mut cache` in the enclosing scope); we re-borrow here to
+            // satisfy the call signature. dp_in_q / dp_state_i_t are stable
+            // scratch devptrs allocated above. The stream is cubecl's.
+            unsafe {
+                cusparse_spmv_into_devptrs(
+                    &*cache_ptr,
+                    &client,
+                    dp_in_q,
+                    dp_state_i_t,
+                    stream,
+                );
             }
-            // SP-10 Task C: also pin the named outputs themselves
-            // (q_next_prim2 + state_prims2). They are the same handles
-            // whose devptrs the captured memcpy nodes reference; pinning
-            // them is what guarantees those addresses survive replay.
-            capture_pin_ref.push(q_next_prim2);
-            for s in state_prims2 {
-                capture_pin_ref.push(s);
+
+            // ── K2: b_rhs = c2*i_t + c3*q_t + c4*q_prime_t ───────────────
+            b_rhs_kernel::launch::<f32, CudaRuntime>(
+                &client,
+                CubeCount::Static(grid_n, 1, 1),
+                CubeDim::new_1d(block),
+                mk_in(&s_c2),
+                mk_in(&s_c3),
+                mk_in(&s_c4),
+                mk_in(&s_i_t),
+                mk_in(&in_q_h),
+                mk_in(&in_qp_h),
+                mk_out(&s_b_rhs),
+            );
+            client.flush_no_sync().expect("flush_no_sync after K2");
+
+            // ── assemble: a_values[k] = diag[k] - c1[row[k]] * adj[k] ───
+            let mk_in_nnz = |hd: &Handle| -> TensorArg<CudaRuntime> {
+                unsafe {
+                    TensorArg::from_raw_parts(
+                        hd.clone(),
+                        stride_nnz.clone().into(),
+                        shape_nnz.clone().into(),
+                    )
+                }
+            };
+            let mk_out_nnz = mk_in_nnz;
+            assemble_kernel::launch::<f32, CudaRuntime>(
+                &client,
+                CubeCount::Static(grid_nnz, 1, 1),
+                CubeDim::new_1d(block),
+                mk_in(&s_c1),                  // c (shape [n])
+                mk_in_nnz(&pattern_row_for_nnz_h), // row_for_nnz (i32, [nnz])
+                mk_in_nnz(&pattern_adj_values_h),  // adj (f32, [nnz])
+                mk_in_nnz(&pattern_diag_mask_h),   // diag (f32, [nnz])
+                mk_out_nnz(&s_a_values),
+            );
+            client.flush_no_sync().expect("flush_no_sync after assemble");
+
+            // ── SpSV: A · x = b_rhs ───────────────────────────────────────
+            unsafe {
+                cusparse_solve_into_devptrs(
+                    &*cache_ptr,
+                    &client,
+                    dp_state_a_values,
+                    dp_state_b_rhs,
+                    dp_state_x_sol,
+                    stream,
+                );
             }
+
+            // ── K3: q_next = max(x_sol, discharge_lb) ─────────────────────
+            q_clamp_kernel::launch::<f32, CudaRuntime>(
+                &client,
+                CubeCount::Static(grid_n, 1, 1),
+                CubeDim::new_1d(block),
+                mk_in(&s_x_sol),
+                mk_out(&out_q_h),
+                discharge_lb,
+            );
+            client.flush_no_sync().expect("flush_no_sync after K3");
+
             Ok(())
         };
 
-        // SAFETY: stream is cubecl's primary stream; the primary context
-        // is bound on this thread (CtxGuard above); closure issues no
-        // host-sync calls; output_copies dst pointers live in scratch
-        // (owned by cache, outlives returned CudaGraph).
-        unsafe { capture_forward_with_outputs(stream, closure, &output_copies) }
+        // SAFETY: stream + ctx invariants validated above; closure is
+        // host-sync-free; no cubecl allocations inside.
+        unsafe { capture_on_stream(stream, closure) }
             .map_err(|e: CaptureError| format!("{e}"))
     };
 
     match capture_result {
         Ok(graph) => {
             cache.graph_fwd = Some(graph);
-            // SP-10 Task C: move the capture-pass pin Vec onto the cache.
-            // Type-erase via Box<dyn Any + Send> so the non-generic cache
-            // can hold primitives parameterised on `I`. Drop ordering on
-            // CudaPatternCache ensures `graph_fwd` drops first, THEN
-            // these handles — preserving every captured devptr until the
-            // graph is destroyed.
-            let mut erased: Vec<Box<dyn std::any::Any + Send>> =
-                Vec::with_capacity(capture_pin.len() + capture_extra_pin.len());
-            for prim in capture_pin {
-                erased.push(Box::new(prim) as Box<dyn std::any::Any + Send>);
-            }
-            // SP-10 Task C2: also move the helper-internal Handles
-            // (pattern uploads + arithmetic temps inside assemble_primitive)
-            // onto the cache. They are already type-erased.
-            for boxed in capture_extra_pin {
-                erased.push(boxed);
-            }
-            cache.pinned_intermediates = Some(erased);
             cache.capture_status = CaptureStatus::Captured;
             cache.capture_sig = Some((pattern.n, cfg.params.sparse_solver));
             eprintln!(
@@ -2513,5 +2757,4 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
             eprintln!("SP-10 forward graph capture FAILED, falling back: {e}");
         }
     }
-    // `_persistent_guard` drops here — allocator restored to `Auto`.
 }

@@ -325,6 +325,34 @@ impl<I: Backend> MuskingumCunge<I> {
             .clone()
             .clamp_min(discharge_lb);
 
+        // SP-10 Phase 3: when CUDA graphs are active, the captured-graph
+        // replay path in `route_timestep` causes cubecl's `Auto`-mode
+        // memory pool to reclaim the slot underlying `initial` (the hot-
+        // start Q0 tensor) before `Tensor::cat` reads column 0 at the end
+        // of this function. Empirically the slot gets overwritten with
+        // unrelated f32 bytes between the first route_timestep call and
+        // the final cat. Force a host roundtrip on `initial` to detach
+        // its data from any cubecl-pool slice that downstream replays
+        // might recycle.
+        //
+        // This affects only the CUDA-graphs path; the default V1 path
+        // does not exhibit the corruption (the BURN-chain forward holds
+        // its own refs on every intermediate, so cubecl can't recycle
+        // `initial`'s slot until `forward()` returns).
+        //
+        // Cost: a single host roundtrip on a [n] f32 tensor at setup.
+        // Negligible compared to the per-timestep overhead the graphs path
+        // saves.
+        let initial = if self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>()
+        {
+            let data = initial.into_data();
+            Tensor::<Autodiff<I>, 1>::from_data(data, &self.device)
+        } else {
+            initial
+        };
+
         let mut columns: Vec<Tensor<Autodiff<I>, 2>> = Vec::with_capacity(num_timesteps);
         columns.push(initial.unsqueeze_dim::<2>(1));
 

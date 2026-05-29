@@ -375,6 +375,34 @@ pub fn b_rhs_kernel<F: Float + cubecl::CubeElement>(
         c2_input[i] * i_t_input[i] + c3_input[i] * qt_input[i] + c4_input[i] * qpt_input[i];
 }
 
+/// SP-10 Phase 3 fused assemble (S26): produce
+/// `a_values[k] = diag_mask[k] - c[row[k]] * adj[k]` over nnz indices.
+///
+/// Mirrors `assemble_primitive` (`src/sparse/mod.rs:642`): `out = diag +
+/// (-c.gather(0, row_idx)) * adj`. The fused kernel keeps the gather and
+/// multiplication in registers — no intermediate global writes — and writes
+/// directly to the caller-owned `o_a_values` Handle.
+///
+/// Launched with one thread per nnz element.
+#[cube(launch)]
+pub fn assemble_kernel<F: Float + cubecl::CubeElement>(
+    c_input: &Tensor<F>,
+    row_for_nnz: &Tensor<i32>,
+    adj_input: &Tensor<F>,
+    diag_input: &Tensor<F>,
+    o_a_values: &mut Tensor<F>,
+) {
+    if ABSOLUTE_POS >= o_a_values.len() {
+        terminate!();
+    }
+    let k = ABSOLUTE_POS;
+    // row_for_nnz is i32; cast to usize for tensor indexing.
+    let row_i32 = row_for_nnz[k];
+    let row_idx = usize::cast_from(row_i32);
+    let c_at_row = c_input[row_idx];
+    o_a_values[k] = diag_input[k] - c_at_row * adj_input[k];
+}
+
 /// SP-10 Phase 2 K3: fused S28 of `forward_chain_inner`.
 ///
 ///     q_next = max(x_sol, discharge_lb)

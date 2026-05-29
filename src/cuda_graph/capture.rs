@@ -162,12 +162,30 @@ where
     F: FnOnce() -> Result<(), String>,
 {
     // SAFETY: `stream` validity and context-binding are caller invariants.
-    // THREAD_LOCAL is the strictest capture mode and gives the loudest error
-    // if any cubecl thread leaks a CUDA call out of the captured scope.
+    //
+    // SP-10 Phase 3: use GLOBAL capture mode (not THREAD_LOCAL).
+    //
+    // cubecl's cube launches (`cube_kernel::launch::<>`) go through
+    // `ComputeClient::device.submit(closure)` which is a channel-async path:
+    // the closure runs on cubecl's server thread, not the caller's thread.
+    // When the server thread issues `cuLaunchKernel` on cubecl's primary
+    // stream (which is the same stream we're capturing on), CUDA needs to
+    // record that kernel as a graph node, even though the issuing thread
+    // ≠ the capture-begin thread.
+    //
+    // THREAD_LOCAL mode would either drop those launches silently or error;
+    // GLOBAL mode captures any launch on the captured stream regardless of
+    // which thread issued it. cuSPARSE callouts (which DO run on the
+    // caller's thread) are still captured under GLOBAL too.
+    //
+    // The trade-off: with GLOBAL, an unrelated cubecl op on the SAME stream
+    // from a concurrent operation could also be captured. SP-7's
+    // single-threaded training contract prevents that — there is no other
+    // user of this stream during setup_inputs.
     unsafe {
         cu_stream_api::begin_capture(
             stream,
-            CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+            CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_GLOBAL,
         )
         .map_err(CaptureError::BeginFailed)?;
     }
