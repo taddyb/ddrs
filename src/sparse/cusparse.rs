@@ -915,6 +915,43 @@ pub(crate) fn cubecl_stream_active<B: Backend + 'static>(
     ptr as cudarc::driver::sys::CUstream
 }
 
+/// SP-10 multi-batch OOM fix: ask cubecl to explicitly free `is_free()`
+/// persistent-pool slices. Called between training batches.
+///
+/// # Why this is needed
+///
+/// The CUDA-graph replay path (`mmc_op::timestep_forward_via_graph`) calls
+/// [`fresh_primitive_from_scratch`] ~24 times per timestep. Each call
+/// allocates a fresh `[n] f32` buffer through cubecl's *persistent* pool
+/// (because Auto-pool recycling corrupted `Tensor::cat` at end of `forward()`
+/// — see comment on `fresh_primitive_from_scratch`).
+///
+/// The persistent pool's `try_reserve` only returns slices of the EXACT
+/// effective size. Different mini-batches see different gauge-subgraph sizes
+/// `n` (3773, 2876, 3640, 4969, …), so per-batch slices never match across
+/// batches. They also never auto-dealloc — the pool just marks them
+/// `is_free()` and keeps them alive forever. Result: the persistent pool
+/// grows by ~`24 × T_hours × sizeof(f32) × n` bytes per batch (~roughly 1 GB
+/// per gauge-batch at `rho=90, n≈5K`), and CUDA OOMs after 4–5 batches.
+///
+/// `client.memory_cleanup()` triggers
+/// `MemoryManagement::cleanup(explicit=true)`, which in turn calls
+/// `PersistentPool::cleanup(explicit=true)` — that path enumerates free
+/// slices and calls `storage.dealloc` on each, then `storage.flush()`.
+/// After this call the GPU pool footprint drops back to the resident set
+/// of currently-held handles (the next batch's `setup_inputs` work, the
+/// MLP weights, etc.).
+///
+/// Safe no-op when `B` is not `Cuda<f32, i32>` (e.g. NdArray training
+/// jobs). Caller does not need to gate on `backend_is_cuda` — we do it here.
+pub fn cuda_memory_cleanup<B: Backend + 'static>(device: &B::Device) {
+    if !crate::sparse::dispatch::backend_is_cuda::<B>() {
+        return;
+    }
+    let client = compute_client::<B>(device);
+    client.memory_cleanup();
+}
+
 /// Convert a `CubeTensor<CudaRuntime>` into the BURN backend's
 /// `FloatTensorPrimitive`. Inverse of `primitive_as_cuda_view`.
 ///
