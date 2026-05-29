@@ -127,6 +127,10 @@ pub struct Params {
     pub attribute_minimums: AttributeMinimums,
     pub tau: u32,
     pub sparse_solver: SparseSolver,
+    /// SP-10: enable per-timestep CUDA-graph capture/replay on the CUDA
+    /// path. No effect on the CPU path. Defaults to `false`; flipped to
+    /// `true` in `config/merit_training.yaml` only after V9/V10/V7a pass.
+    pub use_cuda_graphs: bool,
 }
 
 impl Default for Params {
@@ -140,6 +144,7 @@ impl Default for Params {
             attribute_minimums: AttributeMinimums::default(),
             tau: 3,
             sparse_solver: SparseSolver::default(),
+            use_cuda_graphs: false,
         }
     }
 }
@@ -157,6 +162,7 @@ struct ParamsRaw {
     log_space_parameters: Vec<String>,
     tau: Option<u32>,
     sparse_solver: Option<String>,
+    use_cuda_graphs: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -201,6 +207,9 @@ impl From<ParamsRaw> for Params {
             Some("cpu") | Some("CPU") | None => SparseSolver::Cpu,
             Some(other) => panic!("unknown sparse_solver: {other:?} (expected \"cpu\" or \"cuda\")"),
         };
+        if let Some(b) = r.use_cuda_graphs {
+            p.use_cuda_graphs = b;
+        }
         p
     }
 }
@@ -349,8 +358,10 @@ mod tests {
         assert_eq!(mlp.input_var_names.len(), 10);
         // tau defaults to 3 when not set in YAML.
         assert_eq!(cfg.params.tau, 3);
-        // sparse_solver defaults to Cpu when not set in YAML.
-        assert_eq!(cfg.params.sparse_solver, SparseSolver::Cpu);
+        // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
+        assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
+        // SP-10: use_cuda_graphs defaults to false when not set in YAML.
+        assert!(!cfg.params.use_cuda_graphs);
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");

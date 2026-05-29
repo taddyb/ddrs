@@ -132,6 +132,18 @@ pub fn train<I: Backend>(
                 checkpoint_dir.join(format!("epoch_{epoch}_mb_{}", state.mini_batch));
             save_mlp(&ckpt_path, &state.mlp.clone().valid())?;
 
+            // SP-10 multi-batch OOM fix: every per-timestep call to
+            // `fresh_primitive_from_scratch` (~24 per t on the CUDA-graph
+            // replay path) allocates a fresh persistent-pool slice. The
+            // persistent pool never recycles slices of differently-sized
+            // gauge subgraphs across batches; without an explicit cleanup the
+            // pool grows ~1 GB per batch and CUDA OOMs after ~4 mini-batches.
+            // `cuda_memory_cleanup` calls `client.memory_cleanup()`, which
+            // dealloc's all currently-free persistent slices. No-op on
+            // non-CUDA backends. See `cusparse::cuda_memory_cleanup` for
+            // the full diagnosis.
+            crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
+
             eprintln!("  mb={} loss={:.6}", state.mini_batch, loss_f32);
             state.mini_batch += 1;
             mb_done += 1;

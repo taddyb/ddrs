@@ -72,7 +72,7 @@ fn v8_spmv_forward_cpu_vs_cuda_bit_match() {
         _ => unreachable!(),
     };
     // use_cuda=false → CPU .scatter path.
-    let y_cpu_prim = spmv_primitive::<NdB>(&pattern, q_cpu_prim, &nd_dev, false);
+    let y_cpu_prim = spmv_primitive::<NdB>(&pattern, q_cpu_prim, &nd_dev, false, None);
     let y_cpu_vec: Vec<f32> =
         Tensor::<NdB, 1>::from_primitive(TensorPrimitive::Float(y_cpu_prim))
             .to_data()
@@ -86,7 +86,7 @@ fn v8_spmv_forward_cpu_vs_cuda_bit_match() {
         _ => unreachable!(),
     };
     // use_cuda=true → cusparseSpMV path.
-    let y_cuda_prim = spmv_primitive::<CudaB>(&pattern, q_cuda_prim, &cuda_dev, true);
+    let y_cuda_prim = spmv_primitive::<CudaB>(&pattern, q_cuda_prim, &cuda_dev, true, None);
     let y_cuda_vec: Vec<f32> =
         Tensor::<CudaB, 1>::from_primitive(TensorPrimitive::Float(y_cuda_prim))
             .to_data()

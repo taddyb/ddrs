@@ -23,8 +23,9 @@ use std::sync::Arc;
 use burn::backend::Autodiff;
 use burn::tensor::{backend::Backend, Tensor};
 
+use burn::tensor::TensorPrimitive;
+
 use crate::config::{Config, SparseSolver};
-use crate::geometry::compute_trapezoidal_geometry;
 use crate::routing::utils::denormalize;
 use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAdjacency};
 
@@ -116,7 +117,10 @@ impl<I: Backend> MuskingumCunge<I> {
         streamflow: Tensor<Autodiff<I>, 2>,
         params: SpatialParameters<I>,
         carry_state: bool,
-    ) {
+    ) where
+        I::FloatTensorPrimitive: 'static,
+        I::Device: 'static,
+    {
         let n = inputs.adjacency.n;
 
         // Upload per-reach channel attributes from the bundled SparseAdjacency.
@@ -188,6 +192,52 @@ impl<I: Backend> MuskingumCunge<I> {
             .clamp_min(self.cfg.params.attribute_minimums.discharge);
             self.discharge_t = Some(q0);
         }
+
+        // SP-10: eagerly capture the per-timestep CUDA graph once, here at
+        // setup time, so the per-step path can just replay it. Bypassed if
+        // graphs aren't requested, on the CPU sparse path, or if the inner
+        // backend isn't `Cuda<f32, i32>` (the CPU-fallback case: the user
+        // requested cuda but is on NdArray — capture would TypeId-panic).
+        if self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>()
+        {
+            self.try_capture_forward_graph();
+        }
+    }
+
+    /// SP-10: extract inner-backend primitives from the autograd-tracked
+    /// inputs and call into `cusparse::try_capture_forward`. Lives behind a
+    /// `use_cuda_graphs` gate; default V1 config skips it entirely.
+    fn try_capture_forward_graph(&self)
+    where
+        I::FloatTensorPrimitive: 'static,
+        I::Device: 'static,
+    {
+        let into_inner = |t: Tensor<Autodiff<I>, 1>| -> I::FloatTensorPrimitive {
+            match t.into_primitive() {
+                TensorPrimitive::Float(p) => p.primitive,
+                _ => unreachable!(),
+            }
+        };
+        let pattern = self.pattern.as_ref().unwrap();
+        // SAFETY: setup_inputs is the training thread's entry point; no
+        // other thread has access to this pattern's cuda cache. The
+        // returned &mut is valid for the duration of try_capture_forward.
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache_mut(pattern) };
+        let n_seg = self.n_segments.expect("n_segments set");
+        crate::sparse::cusparse::try_capture_forward::<I>(
+            cache,
+            &self.cfg,
+            pattern,
+            into_inner(self.n.as_ref().unwrap().clone()),
+            into_inner(self.q_spatial.as_ref().unwrap().clone()),
+            into_inner(self.p_spatial_broadcast(n_seg)),
+            into_inner(self.length.as_ref().unwrap().clone()),
+            into_inner(self.slope.as_ref().unwrap().clone()),
+            into_inner(self.x_storage.as_ref().unwrap().clone()),
+            &self.device,
+        );
     }
 
     /// Muskingum-Cunge coefficients `(c1, c2, c3, c4)`. Direct port of
@@ -233,12 +283,30 @@ impl<I: Backend> MuskingumCunge<I> {
         let pattern = self.pattern.as_ref().unwrap();
         let assembler = self.assembler.as_ref().unwrap();
 
-        crate::routing::mmc_op::timestep_forward::<I>(
-            &self.cfg, pattern, assembler,
-            n, q_spatial, p_spatial,
-            q_t, q_prime_clamp,
-            length, slope, x_storage,
-        )
+        // SP-10: dispatch to the graph-replay path when graphs are on, we
+        // are running on the CUDA sparse solver, AND the inner backend is
+        // `Cuda<f32, i32>` (TypeId-gated to avoid the cuSPARSE/cubecl call
+        // path on NdArray, which would panic in `compute_client`). The
+        // replay function falls back to `timestep_forward` if capture
+        // failed and no graph is installed on the cache.
+        if self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>()
+        {
+            crate::routing::mmc_op::timestep_forward_via_graph::<I>(
+                &self.cfg, pattern, assembler,
+                n, q_spatial, p_spatial,
+                q_t, q_prime_clamp,
+                length, slope, x_storage,
+            )
+        } else {
+            crate::routing::mmc_op::timestep_forward::<I>(
+                &self.cfg, pattern, assembler,
+                n, q_spatial, p_spatial,
+                q_t, q_prime_clamp,
+                length, slope, x_storage,
+            )
+        }
     }
 
     /// Forward over the full window. Output shape `[n, T]` (segment × time).
@@ -256,6 +324,34 @@ impl<I: Backend> MuskingumCunge<I> {
             .unwrap()
             .clone()
             .clamp_min(discharge_lb);
+
+        // SP-10 Phase 3: when CUDA graphs are active, the captured-graph
+        // replay path in `route_timestep` causes cubecl's `Auto`-mode
+        // memory pool to reclaim the slot underlying `initial` (the hot-
+        // start Q0 tensor) before `Tensor::cat` reads column 0 at the end
+        // of this function. Empirically the slot gets overwritten with
+        // unrelated f32 bytes between the first route_timestep call and
+        // the final cat. Force a host roundtrip on `initial` to detach
+        // its data from any cubecl-pool slice that downstream replays
+        // might recycle.
+        //
+        // This affects only the CUDA-graphs path; the default V1 path
+        // does not exhibit the corruption (the BURN-chain forward holds
+        // its own refs on every intermediate, so cubecl can't recycle
+        // `initial`'s slot until `forward()` returns).
+        //
+        // Cost: a single host roundtrip on a [n] f32 tensor at setup.
+        // Negligible compared to the per-timestep overhead the graphs path
+        // saves.
+        let initial = if self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>()
+        {
+            let data = initial.into_data();
+            Tensor::<Autodiff<I>, 1>::from_data(data, &self.device)
+        } else {
+            initial
+        };
 
         let mut columns: Vec<Tensor<Autodiff<I>, 2>> = Vec::with_capacity(num_timesteps);
         columns.push(initial.unsqueeze_dim::<2>(1));

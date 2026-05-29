@@ -24,9 +24,13 @@ use ddrs::config::Config;
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use ddrs::sparse::SparseAdjacency;
 
-type Inner = NdArray<f32>;
-type B = Autodiff<Inner>;
-type D = <Inner as burn::tensor::backend::BackendTypes>::Device;
+// Default inner backend = NdArray (CPU, deterministic). The graph-replay path
+// requires the inner backend to be `Cuda<f32, i32>`, so when DDRS_FORCE_GRAPHS=1
+// we dispatch to a Cuda-inner variant of the routing run below.
+type InnerCpu = NdArray<f32>;
+type DCpu = <InnerCpu as burn::tensor::backend::BackendTypes>::Device;
+type InnerGpu = burn_cuda::Cuda<f32, i32>;
+type DGpu = <InnerGpu as burn::tensor::backend::BackendTypes>::Device;
 
 const N_REACHES: usize = 5;
 
@@ -70,7 +74,54 @@ fn ddr_config() -> Config {
     cfg.params.attribute_minimums.bottom_width = 0.1; // matches DDR sandbox config
     cfg.params.log_space_parameters = vec!["n".to_string()]; // DDR sandbox: n is log-space
     cfg.params.defaults.insert("p_spatial".to_string(), 21.0);
+    // SP-10: opt-in CUDA graphs for V1 sanity check. Setting this also forces
+    // the CUDA sparse solver since graphs only apply on that path.
+    if std::env::var("DDRS_FORCE_GRAPHS").is_ok() {
+        cfg.params.use_cuda_graphs = true;
+        cfg.params.sparse_solver = ddrs::config::SparseSolver::Cuda;
+        eprintln!("DDRS_FORCE_GRAPHS=1: use_cuda_graphs=true, sparse_solver=Cuda");
+    }
     cfg
+}
+
+/// Run the MuskingumCunge forward over the sandbox inputs and return the
+/// output in topological order, shape `[N_REACHES * n_timesteps]`. Generic
+/// over the inner backend so we can dispatch CPU / GPU at runtime.
+fn run_mc<Inner>(
+    device: &<Inner as burn::tensor::backend::BackendTypes>::Device,
+    qprime_flat: &[f32],
+    adjacency_flat: &[f32],
+    n_timesteps: usize,
+) -> Vec<f32>
+where
+    Inner: burn::tensor::backend::Backend,
+    Inner::FloatTensorPrimitive: 'static,
+    <Inner as burn::tensor::backend::BackendTypes>::Device: 'static,
+{
+    type Bv<I> = Autodiff<I>;
+    let qprime: Tensor<Bv<Inner>, 2> =
+        Tensor::<Bv<Inner>, 1>::from_floats(qprime_flat, device).reshape([n_timesteps, N_REACHES]);
+
+    let adjacency = SparseAdjacency::from_dense(
+        N_REACHES,
+        adjacency_flat,
+        vec![5000.0; N_REACHES],
+        vec![0.001; N_REACHES],
+    );
+    let inputs = RoutingInputs::<Inner> {
+        adjacency,
+        x_storage: Tensor::ones([N_REACHES], device) * 0.25,
+    };
+    let params = SpatialParameters::<Inner> {
+        n: Tensor::ones([N_REACHES], device) * 0.5,
+        q_spatial: Tensor::ones([N_REACHES], device) * 0.5,
+        p_spatial: None,
+    };
+
+    let mut mc = MuskingumCunge::<Inner>::new(ddr_config(), device.clone());
+    mc.setup_inputs(inputs, qprime, params, false);
+    let out = mc.forward();
+    out.into_data().to_vec().unwrap()
 }
 
 fn main() -> std::io::Result<()> {
@@ -99,32 +150,22 @@ fn main() -> std::io::Result<()> {
     // ddr_discharge_rapid2.csv has shape (N, T)
     let ddr_rapid2_flat = read_matrix_csv(&fixtures.join("ddr_discharge_rapid2.csv"), N_REACHES, n_timesteps);
 
-    // ---- set up BURN tensors ----
-    let device = D::default();
-    let qprime: Tensor<B, 2> =
-        Tensor::<B, 1>::from_floats(qprime_flat.as_slice(), &device).reshape([n_timesteps, N_REACHES]);
-
-    let adjacency = SparseAdjacency::from_dense(
-        N_REACHES,
-        &adjacency_flat,
-        vec![5000.0; N_REACHES],
-        vec![0.001; N_REACHES],
-    );
-    let inputs = RoutingInputs::<Inner> {
-        adjacency,
-        x_storage: Tensor::ones([N_REACHES], &device) * 0.25,
+    // ---- run MuskingumCunge: dispatch on backend per DDRS_FORCE_GRAPHS env var ----
+    let topo_data: Vec<f32> = if std::env::var("DDRS_FORCE_GRAPHS").is_ok() {
+        run_mc::<InnerGpu>(
+            &DGpu::default(),
+            &qprime_flat,
+            &adjacency_flat,
+            n_timesteps,
+        )
+    } else {
+        run_mc::<InnerCpu>(
+            &DCpu::default(),
+            &qprime_flat,
+            &adjacency_flat,
+            n_timesteps,
+        )
     };
-    let params = SpatialParameters::<Inner> {
-        n: Tensor::ones([N_REACHES], &device) * 0.5,
-        q_spatial: Tensor::ones([N_REACHES], &device) * 0.5,
-        p_spatial: None,
-    };
-
-    // ---- run MuskingumCunge ----
-    let mut mc = MuskingumCunge::<Inner>::new(ddr_config(), device.clone());
-    mc.setup_inputs(inputs, qprime, params, false);
-    let out = mc.forward(); // shape [N, T] in topological order
-    let topo_data: Vec<f32> = out.into_data().to_vec().unwrap();
 
     // ---- reorder topo -> RAPID2 ----
     let rapid2_idx_in_topo: Vec<usize> = rapid2_order

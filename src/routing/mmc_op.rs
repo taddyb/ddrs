@@ -488,6 +488,548 @@ where
     }
 }
 
+/// Number of saved-state primitives `forward_chain_inner` returns, in
+/// addition to `q_next`. Matches the count of `state_*` fields on
+/// `crate::cuda_graph::PersistentScratch` (and the indices in
+/// [`ForwardSavedIdx`]).
+pub(crate) const NUM_SAVED_STATE: usize = 23;
+
+/// Position of each saved-state primitive in the array returned by
+/// [`forward_chain_inner`]. Mirrors the declaration order of the `state_*`
+/// fields on `PersistentScratch` so the SP-10 capture path can index by
+/// position without re-typing the field name list.
+#[allow(dead_code)]
+pub(crate) mod forward_saved_idx {
+    pub const DEPTH: usize = 0;
+    pub const TOP_WIDTH: usize = 1;
+    pub const SIDE_SLOPE: usize = 2;
+    pub const BOTTOM_WIDTH: usize = 3;
+    pub const HYDRAULIC_RADIUS: usize = 4;
+    pub const VELOCITY_UNCLAMPED: usize = 5;
+    pub const VELOCITY_CLAMPED: usize = 6;
+    pub const CELERITY: usize = 7;
+    pub const K_MUSKINGUM: usize = 8;
+    pub const DENOM: usize = 9;
+    pub const C1: usize = 10;
+    pub const C2: usize = 11;
+    pub const C3: usize = 12;
+    pub const C4: usize = 13;
+    pub const A_VALUES: usize = 14;
+    pub const B_RHS: usize = 15;
+    pub const I_T: usize = 16;
+    pub const X_SOL: usize = 17;
+    pub const RATIO: usize = 18;
+    pub const DENOMINATOR: usize = 19;
+    pub const Q_EPS: usize = 20;
+    pub const SIDE_SLOPE_RAW: usize = 21;
+    pub const BW_RAW: usize = 22;
+}
+
+/// Inner-backend S1..S28 chain. Operates on `I::FloatTensorPrimitive`s — no
+/// autograd tape pushes. Returns `(q_next, [saved_state; NUM_SAVED_STATE])`.
+///
+/// Shared between [`timestep_forward`] (regular per-step path) and SP-10's
+/// `try_capture_forward` (CUDA-graph capture path) so that exactly the same
+/// kernel sequence runs in both cases — keeping V1 ABSOLUTE MATCH while also
+/// giving capture a deterministic chain to record.
+///
+/// The saved-state array is indexed by [`forward_saved_idx`], whose order
+/// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn forward_chain_inner<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+) -> (
+    I::FloatTensorPrimitive,
+    [I::FloatTensorPrimitive; NUM_SAVED_STATE],
+)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+        match t.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        }
+    };
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+
+    let qt_prim_for_spmv = unwrap(qt_in.clone());
+    let device = I::float_device(&qt_prim_for_spmv);
+
+    // S1
+    let q_eps = qsp_in.clone() + 1e-6_f32;
+    // S2
+    let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
+    // S3
+    let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
+    // S4
+    let ratio = numerator.clone() / denominator.clone();
+    // S5
+    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+    // S6
+    let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
+    // S7
+    let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
+    // S8 (pre-clamp side slope)
+    let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
+    // S9
+    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
+    // S10 (pre-clamp bw)
+    let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
+    // S11
+    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
+    // S12
+    let _area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
+    // S13
+    let wp = bottom_width.clone()
+        + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
+    // S14
+    let hyd_radius = _area.clone() / wp.clone();
+    // S15
+    let velocity_un = n_in.clone().recip() * hyd_radius.clone().powf_scalar(2.0 / 3.0)
+        * slope_in.clone().sqrt();
+    // S16
+    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
+    // S17
+    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
+
+    // S18..S23: Muskingum coefficients
+    let k_muskingum = length_in.clone() / celerity.clone();
+    let one_minus_x = -xst_in.clone() + 1.0;
+    let two_k = k_muskingum.clone() * 2.0;
+    let two_kx = two_k.clone() * xst_in.clone();
+    let two_k_1mx = two_k.clone() * one_minus_x.clone();
+    let denom = two_k_1mx.clone() + dt;
+    let c1 = (-two_kx.clone() + dt) / denom.clone();
+    let c2 = (two_kx.clone() + dt) / denom.clone();
+    let c3 = (two_k_1mx.clone() - dt) / denom.clone();
+    let c4 = denom.clone().recip() * (2.0 * dt);
+
+    // S24: i_t = N · q_t (inner-backend SpMV)
+    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
+    let i_t = wrap(i_t_prim.clone());
+
+    // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
+    let b_rhs =
+        c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
+
+    // S26: A_values = assemble_primitive(c1)
+    let c1_prim = unwrap(c1.clone());
+    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device, None);
+
+    // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — at primitive level via dispatch.
+    let b_rhs_prim = unwrap(b_rhs.clone());
+    let (x_sol_prim, _saved_x) = dispatch::forward_primitive::<I>(
+        pattern,
+        &a_values_prim,
+        &b_rhs_prim,
+        &device,
+        use_cuda,
+        None,
+    );
+    let x_sol = wrap(x_sol_prim.clone());
+
+    // S28: q_next = max(x_sol, discharge_lb)
+    let q_next = x_sol.clone().clamp_min(discharge_lb);
+    let q_next_prim = unwrap(q_next);
+
+    // Saved-state array — order MUST match `forward_saved_idx`.
+    let saved: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = [
+        unwrap(depth),         // 0  DEPTH
+        unwrap(top_width),     // 1  TOP_WIDTH
+        unwrap(side_slope),    // 2  SIDE_SLOPE
+        unwrap(bottom_width),  // 3  BOTTOM_WIDTH
+        unwrap(hyd_radius),    // 4  HYDRAULIC_RADIUS
+        unwrap(velocity_un),   // 5  VELOCITY_UNCLAMPED
+        unwrap(velocity_cl),   // 6  VELOCITY_CLAMPED
+        unwrap(celerity),      // 7  CELERITY
+        unwrap(k_muskingum),   // 8  K_MUSKINGUM
+        unwrap(denom),         // 9  DENOM
+        c1_prim,               // 10 C1
+        unwrap(c2),            // 11 C2
+        unwrap(c3),            // 12 C3
+        unwrap(c4),            // 13 C4
+        a_values_prim,         // 14 A_VALUES
+        b_rhs_prim,            // 15 B_RHS
+        i_t_prim,              // 16 I_T
+        x_sol_prim,            // 17 X_SOL
+        unwrap(ratio),         // 18 RATIO
+        unwrap(denominator),   // 19 DENOMINATOR
+        unwrap(q_eps),         // 20 Q_EPS
+        unwrap(side_slope_raw),// 21 SIDE_SLOPE_RAW
+        unwrap(bw_raw),        // 22 BW_RAW
+    ];
+
+    (q_next_prim, saved)
+}
+
+/// Pinning variant of [`forward_chain_inner`]. Mirrors the existing chain
+/// line-for-line and kernel-for-kernel, but pushes a clone of every
+/// intermediate `FloatTensorPrimitive` into `pin` so the caller can keep the
+/// underlying cubecl `Handle`s alive past the closure scope.
+///
+/// Why this exists: cubecl's persistent memory pool may recycle the device
+/// address of a `Handle` the moment the last reference drops. When a CUDA
+/// graph captures kernels that read/write those addresses, replaying the
+/// graph after the addresses have been recycled triggers
+/// `CUDA_ERROR_ILLEGAL_ADDRESS`. Holding every intermediate handle in a
+/// caller-owned sink prevents that recycling for the lifetime of the graph.
+///
+/// Compound BURN expressions in [`forward_chain_inner`] are split here into
+/// single-op steps so every sub-expression temp is also pinned — not just
+/// the named outputs. Keep the kernel order identical to
+/// [`forward_chain_inner`] so V9 bit-match still holds. If you change one,
+/// change both.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub(crate) fn forward_chain_inner_pinned<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+    pin: &mut Vec<I::FloatTensorPrimitive>,
+    // SP-10 Task C2: type-erased sink for Handles materialized inside
+    // assemble_primitive / spmv_primitive / forward_primitive that are not
+    // exposed as named outputs (e.g. pattern uploads `row_idx` / `adj` /
+    // `diag`, and the arithmetic-chain intermediates in `assemble_primitive`).
+    // These would otherwise drop on helper return and their persistent-pool
+    // slices would be recycled into post-capture allocations whose addresses
+    // overlap with what the captured graph still reads — corrupting replay.
+    //
+    // Type-erased because the bucket can hold Float OR Int primitives.
+    extra_pin: &mut Vec<Box<dyn std::any::Any + Send>>,
+) -> (
+    I::FloatTensorPrimitive,
+    [I::FloatTensorPrimitive; NUM_SAVED_STATE],
+)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::IntTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+        match t.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        }
+    };
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+    // Clone the underlying primitive of `t` (cheap Arc-bump on cubecl Handle)
+    // and push it into `pin`. Does not consume the tensor.
+    let pin_clone = |t: &Tensor<I, 1>, pin: &mut Vec<I::FloatTensorPrimitive>| {
+        let p = match t.clone().into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        };
+        pin.push(p);
+    };
+
+    let qt_prim_for_spmv = unwrap(qt_in.clone());
+    let device = I::float_device(&qt_prim_for_spmv);
+
+    // S1
+    let q_eps = qsp_in.clone() + 1e-6_f32;
+    pin_clone(&q_eps, pin);
+
+    // S2: numerator = qt_in * n_in * (q_eps + 1.0)
+    //   Rust eval order: ((qt_in*n_in) * (q_eps+1.0)). Outer mul evaluates
+    //   lhs first (the qt*n product), then rhs (q_eps + 1.0).
+    let qt_n = qt_in.clone() * n_in.clone();
+    pin_clone(&qt_n, pin);
+    let q_eps_plus_one = q_eps.clone() + 1.0;
+    pin_clone(&q_eps_plus_one, pin);
+    let numerator = qt_n * q_eps_plus_one;
+    pin_clone(&numerator, pin);
+
+    // S3: denominator = psp_in * slope_in.sqrt() + 1e-8
+    let slope_sqrt = slope_in.clone().sqrt();
+    pin_clone(&slope_sqrt, pin);
+    let psp_slope_sqrt = psp_in.clone() * slope_sqrt;
+    pin_clone(&psp_slope_sqrt, pin);
+    let denominator = psp_slope_sqrt + 1e-8_f32;
+    pin_clone(&denominator, pin);
+
+    // S4
+    let ratio = numerator.clone() / denominator.clone();
+    pin_clone(&ratio, pin);
+
+    // S5: exponent = (q_eps * 3.0 + 5.0).recip() * 3.0
+    let q_eps_times_3 = q_eps.clone() * 3.0;
+    pin_clone(&q_eps_times_3, pin);
+    let q_eps_times_3_plus_5 = q_eps_times_3 + 5.0;
+    pin_clone(&q_eps_times_3_plus_5, pin);
+    let exponent_recip = q_eps_times_3_plus_5.recip();
+    pin_clone(&exponent_recip, pin);
+    let exponent = exponent_recip * 3.0;
+    pin_clone(&exponent, pin);
+
+    // S6: depth = ratio.powf(exponent).clamp_min(depth_lb)
+    let depth_pre_clamp = ratio.clone().powf(exponent.clone());
+    pin_clone(&depth_pre_clamp, pin);
+    let depth = depth_pre_clamp.clamp_min(depth_lb);
+    pin_clone(&depth, pin);
+
+    // S7: top_width = psp_in * depth.powf(q_eps)
+    //   Mul evaluates lhs first (psp_in, trivial), then rhs (powf).
+    let depth_pow_q_eps = depth.clone().powf(q_eps.clone());
+    pin_clone(&depth_pow_q_eps, pin);
+    let top_width = psp_in.clone() * depth_pow_q_eps;
+    pin_clone(&top_width, pin);
+
+    // S8: side_slope_raw = top_width * q_eps / (depth * 2.0)
+    //   Parses as ((top_width*q_eps) / (depth*2.0)). lhs first.
+    let top_width_q_eps = top_width.clone() * q_eps.clone();
+    pin_clone(&top_width_q_eps, pin);
+    let depth_times_2 = depth.clone() * 2.0;
+    pin_clone(&depth_times_2, pin);
+    let side_slope_raw = top_width_q_eps / depth_times_2;
+    pin_clone(&side_slope_raw, pin);
+
+    // S9
+    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
+    pin_clone(&side_slope, pin);
+
+    // S10: bw_raw = top_width - side_slope * depth * 2.0
+    //   Parses as top_width - ((side_slope*depth)*2.0). lhs (top_width)
+    //   trivial; eval rhs: side_slope*depth, then *2.0, then sub.
+    let ss_depth = side_slope.clone() * depth.clone();
+    pin_clone(&ss_depth, pin);
+    let ss_depth_2 = ss_depth * 2.0;
+    pin_clone(&ss_depth_2, pin);
+    let bw_raw = top_width.clone() - ss_depth_2;
+    pin_clone(&bw_raw, pin);
+
+    // S11
+    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
+    pin_clone(&bottom_width, pin);
+
+    // S12: _area = (top_width + bottom_width) * depth / 2.0
+    let tw_plus_bw = top_width.clone() + bottom_width.clone();
+    pin_clone(&tw_plus_bw, pin);
+    let area_times_2 = tw_plus_bw * depth.clone();
+    pin_clone(&area_times_2, pin);
+    let _area = area_times_2 / 2.0;
+    pin_clone(&_area, pin);
+
+    // S13: wp = bottom_width + depth * (side_slope^2 + 1).sqrt() * 2.0
+    //   Precedence: bottom_width + (depth * sqrt(ss^2+1) * 2.0).
+    //   Inner mul left-assoc: (depth * sqrt(...)) * 2.0.
+    //   Outer + evaluates lhs (bottom_width, trivial), then rhs.
+    //   Inside rhs: outer mul lhs first → inner mul lhs first (depth,
+    //   trivial) → inner mul rhs (sqrt arg → ss^2 → +1 → sqrt) → inner
+    //   mul → *2.0 → outer +.
+    let ss_sq = side_slope.clone().powf_scalar(2.0);
+    pin_clone(&ss_sq, pin);
+    let ss_sq_plus_one = ss_sq + 1.0;
+    pin_clone(&ss_sq_plus_one, pin);
+    let ss_sq_plus_one_sqrt = ss_sq_plus_one.sqrt();
+    pin_clone(&ss_sq_plus_one_sqrt, pin);
+    let depth_ss = depth.clone() * ss_sq_plus_one_sqrt;
+    pin_clone(&depth_ss, pin);
+    let depth_ss_2 = depth_ss * 2.0;
+    pin_clone(&depth_ss_2, pin);
+    let wp = bottom_width.clone() + depth_ss_2;
+    pin_clone(&wp, pin);
+
+    // S14
+    let hyd_radius = _area.clone() / wp.clone();
+    pin_clone(&hyd_radius, pin);
+
+    // S15: velocity_un = n_in.recip() * hyd_radius.powf_scalar(2/3) * slope_in.sqrt()
+    //   Parses as ((n_in.recip() * hr_pow) * slope_in.sqrt()).
+    //   Eval: outer mul lhs first → inner mul lhs (n_in.recip) → inner
+    //   mul rhs (hr_pow) → inner mul → outer mul rhs (slope_sqrt2) →
+    //   outer mul.
+    let n_recip = n_in.clone().recip();
+    pin_clone(&n_recip, pin);
+    let hr_pow = hyd_radius.clone().powf_scalar(2.0 / 3.0);
+    pin_clone(&hr_pow, pin);
+    let n_recip_hr = n_recip * hr_pow;
+    pin_clone(&n_recip_hr, pin);
+    let slope_sqrt2 = slope_in.clone().sqrt();
+    pin_clone(&slope_sqrt2, pin);
+    let velocity_un = n_recip_hr * slope_sqrt2;
+    pin_clone(&velocity_un, pin);
+
+    // S16
+    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
+    pin_clone(&velocity_cl, pin);
+
+    // S17
+    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
+    pin_clone(&celerity, pin);
+
+    // S18..S23: Muskingum coefficients
+    let k_muskingum = length_in.clone() / celerity.clone();
+    pin_clone(&k_muskingum, pin);
+
+    // S19: one_minus_x = -xst_in + 1.0
+    let neg_xst = -xst_in.clone();
+    pin_clone(&neg_xst, pin);
+    let one_minus_x = neg_xst + 1.0;
+    pin_clone(&one_minus_x, pin);
+
+    // S20
+    let two_k = k_muskingum.clone() * 2.0;
+    pin_clone(&two_k, pin);
+    // S21
+    let two_kx = two_k.clone() * xst_in.clone();
+    pin_clone(&two_kx, pin);
+    // S22
+    let two_k_1mx = two_k.clone() * one_minus_x.clone();
+    pin_clone(&two_k_1mx, pin);
+    // S23
+    let denom = two_k_1mx.clone() + dt;
+    pin_clone(&denom, pin);
+
+    // c1 = (-two_kx + dt) / denom
+    let neg_two_kx = -two_kx.clone();
+    pin_clone(&neg_two_kx, pin);
+    let c1_num = neg_two_kx + dt;
+    pin_clone(&c1_num, pin);
+    let c1 = c1_num / denom.clone();
+    pin_clone(&c1, pin);
+
+    // c2 = (two_kx + dt) / denom
+    let c2_num = two_kx.clone() + dt;
+    pin_clone(&c2_num, pin);
+    let c2 = c2_num / denom.clone();
+    pin_clone(&c2, pin);
+
+    // c3 = (two_k_1mx - dt) / denom
+    let c3_num = two_k_1mx.clone() - dt;
+    pin_clone(&c3_num, pin);
+    let c3 = c3_num / denom.clone();
+    pin_clone(&c3, pin);
+
+    // c4 = denom.recip() * (2.0 * dt)
+    let denom_recip = denom.clone().recip();
+    pin_clone(&denom_recip, pin);
+    let c4 = denom_recip * (2.0 * dt);
+    pin_clone(&c4, pin);
+
+    // S24: i_t = N · q_t (inner-backend SpMV) — opaque primitive op.
+    let i_t_prim = sparse::spmv_primitive::<I>(
+        pattern,
+        qt_prim_for_spmv.clone(),
+        &device,
+        use_cuda,
+        Some(extra_pin),
+    );
+    pin.push(i_t_prim.clone());
+    let i_t = wrap(i_t_prim.clone());
+
+    // S25: b_rhs = c2*i_t + c3*qt_in + c4*qpt_in
+    //   Parses as ((c2*i_t) + (c3*qt_in)) + (c4*qpt_in). Left-assoc +.
+    //   Eval: outer + lhs first → inner + lhs (c2*i_t) → inner + rhs
+    //   (c3*qt_in) → inner + → outer + rhs (c4*qpt_in) → outer +.
+    let c2_it = c2.clone() * i_t.clone();
+    pin_clone(&c2_it, pin);
+    let c3_qt = c3.clone() * qt_in.clone();
+    pin_clone(&c3_qt, pin);
+    let c2_it_c3_qt = c2_it + c3_qt;
+    pin_clone(&c2_it_c3_qt, pin);
+    let c4_qpt = c4.clone() * qpt_in.clone();
+    pin_clone(&c4_qpt, pin);
+    let b_rhs = c2_it_c3_qt + c4_qpt;
+    pin_clone(&b_rhs, pin);
+
+    // S26: A_values = assemble_primitive(c1) — opaque primitive op.
+    let c1_prim = unwrap(c1.clone());
+    let a_values_prim = sparse::assemble_primitive::<I>(
+        pattern,
+        c1_prim.clone(),
+        &device,
+        Some(extra_pin),
+    );
+    pin.push(a_values_prim.clone());
+
+    // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — opaque primitive op.
+    let b_rhs_prim = unwrap(b_rhs.clone());
+    let (x_sol_prim, _saved_x) = dispatch::forward_primitive::<I>(
+        pattern,
+        &a_values_prim,
+        &b_rhs_prim,
+        &device,
+        use_cuda,
+        Some(extra_pin),
+    );
+    pin.push(x_sol_prim.clone());
+    let x_sol = wrap(x_sol_prim.clone());
+
+    // S28: q_next = max(x_sol, discharge_lb)
+    let q_next = x_sol.clone().clamp_min(discharge_lb);
+    pin_clone(&q_next, pin);
+    let q_next_prim = unwrap(q_next);
+
+    // Saved-state array — order MUST match `forward_saved_idx` and mirror
+    // the original `forward_chain_inner` exactly.
+    let saved: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = [
+        unwrap(depth),         // 0  DEPTH
+        unwrap(top_width),     // 1  TOP_WIDTH
+        unwrap(side_slope),    // 2  SIDE_SLOPE
+        unwrap(bottom_width),  // 3  BOTTOM_WIDTH
+        unwrap(hyd_radius),    // 4  HYDRAULIC_RADIUS
+        unwrap(velocity_un),   // 5  VELOCITY_UNCLAMPED
+        unwrap(velocity_cl),   // 6  VELOCITY_CLAMPED
+        unwrap(celerity),      // 7  CELERITY
+        unwrap(k_muskingum),   // 8  K_MUSKINGUM
+        unwrap(denom),         // 9  DENOM
+        c1_prim,               // 10 C1
+        unwrap(c2),            // 11 C2
+        unwrap(c3),            // 12 C3
+        unwrap(c4),            // 13 C4
+        a_values_prim,         // 14 A_VALUES
+        b_rhs_prim,            // 15 B_RHS
+        i_t_prim,              // 16 I_T
+        x_sol_prim,            // 17 X_SOL
+        unwrap(ratio),         // 18 RATIO
+        unwrap(denominator),   // 19 DENOMINATOR
+        unwrap(q_eps),         // 20 Q_EPS
+        unwrap(side_slope_raw),// 21 SIDE_SLOPE_RAW
+        unwrap(bw_raw),        // 22 BW_RAW
+    ];
+
+    (q_next_prim, saved)
+}
+
 /// Forward + register-on-tape entry point. Called from
 /// `MuskingumCunge::route_timestep` (Task 4). Returns Q_{t+1} as an
 /// autograd-tracked rank-1 tensor.
@@ -549,103 +1091,37 @@ where
     let slope_p = slope_aut.primitive.clone();
     let xst_p = xst_aut.primitive.clone();
 
-    let device = I::float_device(&n_p);
-
-    // --- S1..S17: trapezoidal geometry + clamp + celerity. Compute on inner backend. ---
+    // --- S1..S28: trapezoidal geometry + clamp + celerity + solve. Compute on inner backend. ---
     let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
         Tensor::from_primitive(TensorPrimitive::Float(p))
     };
-    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-        match t.into_primitive() {
-            TensorPrimitive::Float(p) => p,
-            _ => unreachable!(),
-        }
-    };
 
-    let n_in = wrap(n_p.clone());
-    let qsp_in = wrap(qsp_p.clone());
-    let psp_in = wrap(psp_p.clone());
-    let qt_in = wrap(qt_p.clone());
-    let qpt_in = wrap(qpt_p.clone());
-    let length_in = wrap(length_p.clone());
-    let slope_in = wrap(slope_p.clone());
-    let xst_in = wrap(xst_p.clone());
-
-    // S1
-    let q_eps = qsp_in.clone() + 1e-6_f32;
-    // S2
-    let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
-    // S3
-    let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
-    // S4
-    let ratio = numerator.clone() / denominator.clone();
-    // S5
-    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
-    // S6
-    let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
-    // S7
-    let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
-    // S8 (pre-clamp side slope)
-    let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
-    // S9
-    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
-    // S10 (pre-clamp bw)
-    let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
-    // S11
-    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
-    // S12
-    let area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
-    // S13
-    let wp = bottom_width.clone()
-        + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
-    // S14
-    let hyd_radius = area.clone() / wp.clone();
-    // S15
-    let velocity_un = n_in.clone().recip() * hyd_radius.clone().powf_scalar(2.0 / 3.0)
-        * slope_in.clone().sqrt();
-    // S16
-    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
-    // S17
-    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
-
-    // S18..S23: Muskingum coefficients
-    let k_muskingum = length_in.clone() / celerity.clone();
-    let one_minus_x = -xst_in.clone() + 1.0;
-    let two_k = k_muskingum.clone() * 2.0;
-    let two_kx = two_k.clone() * xst_in.clone();
-    let two_k_1mx = two_k.clone() * one_minus_x.clone();
-    let denom = two_k_1mx.clone() + dt;
-    let c1 = (-two_kx.clone() + dt) / denom.clone();
-    let c2 = (two_kx.clone() + dt) / denom.clone();
-    let c3 = (two_k_1mx.clone() - dt) / denom.clone();
-    let c4 = denom.clone().recip() * (2.0 * dt);
-
-    // S24: i_t = N · q_t (inner-backend SpMV)
-    let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_p.clone(), &device, use_cuda);
-    let i_t = wrap(i_t_prim.clone());
-
-    // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
-    let b_rhs =
-        c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
-
-    // S26: A_values = assemble_primitive(c1)
-    let c1_prim = unwrap(c1.clone());
-    let a_values_prim = sparse::assemble_primitive::<I>(pattern, c1_prim.clone(), &device);
-
-    // S27: x_sol = triangular_csr_solve(a_values, b_rhs) — at primitive level via dispatch.
-    let b_rhs_prim = unwrap(b_rhs.clone());
-    let (x_sol_prim, _saved_x) = dispatch::forward_primitive::<I>(
+    let (q_next_prim, saved) = forward_chain_inner::<I>(
+        cfg,
         pattern,
-        &a_values_prim,
-        &b_rhs_prim,
-        &device,
-        use_cuda,
+        wrap(n_p.clone()),
+        wrap(qsp_p.clone()),
+        wrap(psp_p.clone()),
+        wrap(qt_p.clone()),
+        wrap(qpt_p.clone()),
+        wrap(length_p.clone()),
+        wrap(slope_p.clone()),
+        wrap(xst_p.clone()),
     );
-    let x_sol = wrap(x_sol_prim.clone());
 
-    // S28: q_next = max(x_sol, discharge_lb)
-    let q_next = x_sol.clone().clamp_min(discharge_lb);
-    let q_next_prim = unwrap(q_next);
+    // Unpack saved-state array into named TimestepState fields. Indices MUST
+    // match `forward_saved_idx`.
+    use forward_saved_idx as fsi;
+    let [
+        depth_p, top_width_p, side_slope_p, bottom_width_p,
+        hyd_radius_p, velocity_un_p, velocity_cl_p, celerity_p,
+        k_muskingum_p, denom_p, c1_prim, c2_p, c3_p, c4_p,
+        a_values_prim, b_rhs_prim, i_t_prim, x_sol_prim,
+        ratio_p, denominator_p, q_eps_p, side_slope_raw_p, bw_raw_p,
+    ] = saved;
+    // Compile-time sanity: confirm the index constants are aligned with the
+    // destructure above (touch each so a future re-order is caught).
+    let _ = (fsi::DEPTH, fsi::BW_RAW);
 
     // Build TimestepState saving every intermediate the backward needs.
     let state = TimestepState::<I> {
@@ -658,29 +1134,29 @@ where
         length: length_p,
         slope: slope_p,
         x_storage: xst_p,
-        depth: unwrap(depth),
-        top_width: unwrap(top_width),
-        side_slope: unwrap(side_slope),
-        bottom_width: unwrap(bottom_width),
-        hydraulic_radius: unwrap(hyd_radius),
-        velocity_unclamped: unwrap(velocity_un),
-        velocity_clamped: unwrap(velocity_cl),
-        celerity: unwrap(celerity),
-        k_muskingum: unwrap(k_muskingum),
-        denom: unwrap(denom),
+        depth: depth_p,
+        top_width: top_width_p,
+        side_slope: side_slope_p,
+        bottom_width: bottom_width_p,
+        hydraulic_radius: hyd_radius_p,
+        velocity_unclamped: velocity_un_p,
+        velocity_clamped: velocity_cl_p,
+        celerity: celerity_p,
+        k_muskingum: k_muskingum_p,
+        denom: denom_p,
         c1: c1_prim,
-        c2: unwrap(c2),
-        c3: unwrap(c3),
-        c4: unwrap(c4),
+        c2: c2_p,
+        c3: c3_p,
+        c4: c4_p,
         a_values: a_values_prim,
         b_rhs: b_rhs_prim,
         i_t: i_t_prim,
         x_sol: x_sol_prim,
-        ratio: unwrap(ratio),
-        denominator: unwrap(denominator),
-        q_eps: unwrap(q_eps),
-        side_slope_raw: unwrap(side_slope_raw),
-        bw_raw: unwrap(bw_raw),
+        ratio: ratio_p,
+        denominator: denominator_p,
+        q_eps: q_eps_p,
+        side_slope_raw: side_slope_raw_p,
+        bw_raw: bw_raw_p,
         bottom_width_lb,
         depth_lb,
         velocity_lb,
@@ -706,4 +1182,385 @@ where
     };
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
+}
+
+/// SP-10 Task 6: forward-graph replay path.
+///
+/// Same external contract as [`timestep_forward`], but instead of building
+/// `Q_next` by re-running the S1..S28 kernel chain, it:
+///
+///   1. D2D-copies the per-step `q_t` → `scratch.in_q` and
+///      `q_prime_t` → `scratch.in_qp`.
+///   2. `cuGraphLaunch`'s the once-captured forward CUDA graph (lives on
+///      `cache.graph_fwd`). Replay writes all 24 outputs (Q_next + 23 saved
+///      intermediates) into the persistent scratch destinations.
+///   3. For each output, allocates a fresh cubecl handle and D2D-copies from
+///      its scratch destination into it (via
+///      [`crate::sparse::cusparse::fresh_primitive_from_scratch`]). The fresh
+///      handles are autograd-tape-eligible primitives owned by the per-step
+///      result; they keep their content alive past the next replay (which
+///      would otherwise overwrite the scratch contents).
+///   4. Builds the `TimestepState` from the 23 fresh state primitives and
+///      registers a `TimestepOp` node on the tape (identical to the
+///      direct-launch path).
+///
+/// Falls back to [`timestep_forward`] if no graph is installed on the cache
+/// (e.g. when capture failed at setup time and recorded a fallback reason).
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_via_graph<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    // SAFETY: route_timestep is the training thread's entry; no other thread
+    // accesses this pattern's cuda cache. The borrow lives only for the
+    // duration of this call.
+    let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+
+    // If no graph was installed (capture failed), fall through to direct launch.
+    if cache.graph_fwd.is_none() || cache.scratch.is_none() {
+        return timestep_forward::<I>(
+            cfg, pattern, assembler,
+            n_at, q_spatial_at, p_spatial_at,
+            q_t_at, q_prime_t_at, length_at, slope_at, x_storage_at,
+        );
+    }
+
+    let scratch = cache.scratch.as_ref().expect("scratch must exist when graph_fwd does");
+    let graph = cache.graph_fwd.as_ref().expect("graph_fwd checked above");
+    // Hop the raw CUgraphExec pointer across the closure as `usize` —
+    // `&CudaGraph` is !Send because the raw CUgraphExec is `*mut _`.
+    let graph_exec_addr: usize = graph.exec_raw() as usize;
+    let n_seg = pattern.n;
+    let nnz = pattern.col.len();
+    let bytes_n = n_seg * std::mem::size_of::<f32>();
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    // Unwrap autograd primitives.
+    let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        _ => panic!("expected float tensor"),
+    };
+    let n_aut = unwrap_at(n_at);
+    let qsp_aut = unwrap_at(q_spatial_at);
+    let psp_aut = unwrap_at(p_spatial_at);
+    let qt_aut = unwrap_at(q_t_at);
+    let qpt_aut = unwrap_at(q_prime_t_at);
+    let length_aut = unwrap_at(length_at);
+    let slope_aut = unwrap_at(slope_at);
+    let xst_aut = unwrap_at(x_storage_at);
+
+    let n_p = n_aut.primitive.clone();
+    let qsp_p = qsp_aut.primitive.clone();
+    let psp_p = psp_aut.primitive.clone();
+    let qt_p = qt_aut.primitive.clone();
+    let qpt_p = qpt_aut.primitive.clone();
+    let length_p = length_aut.primitive.clone();
+    let slope_p = slope_aut.primitive.clone();
+    let xst_p = xst_aut.primitive.clone();
+
+    let device = I::float_device(&qt_p);
+
+    // Get per-step input devptrs (we'll D2D-copy these into scratch.in_q/in_qp).
+    let qt_devptr = crate::sparse::cusparse::primitive_devptr::<I>(&qt_p)
+        .expect("q_t primitive must be CUDA tensor in graph-replay path");
+    let qpt_devptr = crate::sparse::cusparse::primitive_devptr::<I>(&qpt_p)
+        .expect("q_prime_t primitive must be CUDA tensor in graph-replay path");
+
+    let client = crate::sparse::cusparse::compute_client::<I>(&device);
+    // Flush any pending cubecl work before the graph replay so prior kernels
+    // serialize correctly with the in_q/in_qp seeding copies below.
+    client.flush().expect("flush before graph replay");
+
+    // Persistent scratch destination pointers.
+    let dst_in_q = unsafe { crate::sparse::cusparse::handle_devptr(&client, &scratch.in_q) };
+    let dst_in_qp = unsafe { crate::sparse::cusparse::handle_devptr(&client, &scratch.in_qp) };
+
+    // -------- Drive CUDA work directly from this thread --------
+    //
+    // We CANNOT submit BURN/cubecl work from inside `exclusive_with_server`
+    // (the channel deadlocks since the server is busy in our closure). The
+    // capture path (`try_capture_forward`) takes the same approach: bind
+    // cubecl's primary CUDA context to this thread, then drive all CUDA APIs
+    // directly. Mirror that here so replay sees the same context.
+    //
+    // SAFETY: retain+set_current is harmless if already bound. Primary
+    // context for device 0 matches cubecl's (cubecl uses CudaDevice::default()
+    // → ordinal 0). cubecl's ComputeClient::empty (used by
+    // fresh_primitive_from_scratch) tolerates being called from this thread.
+    unsafe {
+        let cu_dev = cudarc::driver::result::device::get(0)
+            .expect("graph-replay: cuDeviceGet(0) failed");
+        let ctx = cudarc::driver::result::primary_ctx::retain(cu_dev)
+            .expect("graph-replay: primary_ctx::retain failed");
+        cudarc::driver::result::ctx::set_current(ctx)
+            .expect("graph-replay: ctx::set_current failed");
+    }
+
+    let stream_addr: usize = crate::sparse::cusparse::cubecl_stream_active::<I>(&device) as usize;
+    let stream = stream_addr as cudarc::driver::sys::CUstream;
+
+    // 1. Seed: D2D q_t -> in_q, q_prime_t -> in_qp.
+    // SAFETY: src/dst pointers are valid CUDA device pointers on cubecl's
+    // memory pool; bytes <= alloc size; stream is cubecl's primary stream;
+    // context is bound on this thread.
+    unsafe {
+        cudarc::driver::result::memcpy_dtod_async(
+            dst_in_q, qt_devptr, bytes_n, stream,
+        )
+        .expect("graph-replay: D2D q_t -> in_q failed");
+        cudarc::driver::result::memcpy_dtod_async(
+            dst_in_qp, qpt_devptr, bytes_n, stream,
+        )
+        .expect("graph-replay: D2D q_prime_t -> in_qp failed");
+    }
+
+    // 2. Replay the captured graph.
+    //
+    // SAFETY: graph_exec is the valid CUgraphExec owned by `cache.graph_fwd`
+    // (alive for the cache lifetime). Context is bound on this thread.
+    let graph_exec = graph_exec_addr as cudarc::driver::sys::CUgraphExec;
+    unsafe {
+        cudarc::driver::result::graph::launch(graph_exec, stream)
+            .expect("graph-replay: cuGraphLaunch failed");
+    }
+
+    // 3. Allocate fresh handles + D2D-copy outputs.
+    //
+    // SAFETY: src scratch handles alive for the cache lifetime; stream is
+    // cubecl's primary stream; copies are stream-ordered after the launch.
+    use crate::sparse::cusparse::fresh_primitive_from_scratch;
+    let q_next_prim = unsafe {
+        fresh_primitive_from_scratch::<I>(&scratch.out_q, n_seg, stream, &device)
+    };
+    let state_arr: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = unsafe {
+        [
+            fresh_primitive_from_scratch::<I>(&scratch.state_depth, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_top_width, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_side_slope, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_bottom_width, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_hydraulic_radius, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_velocity_unclamped, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_velocity_clamped, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_celerity, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_k_muskingum, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_denom, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c1, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c2, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c3, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_c4, n_seg, stream, &device),
+            // state_a_values has size [nnz], not [n].
+            fresh_primitive_from_scratch::<I>(&scratch.state_a_values, nnz, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_b_rhs, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_i_t, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_x_sol, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_ratio, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_denominator, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_q_eps, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_side_slope_raw, n_seg, stream, &device),
+            fresh_primitive_from_scratch::<I>(&scratch.state_bw_raw, n_seg, stream, &device),
+        ]
+    };
+
+    let _ = assembler; // unused — same as direct-launch path; kept for API parity.
+
+    // Unpack state primitives. Indices MUST match `forward_saved_idx`.
+    use forward_saved_idx as fsi;
+    let [
+        depth_p, top_width_p, side_slope_p, bottom_width_p,
+        hyd_radius_p, velocity_un_p, velocity_cl_p, celerity_p,
+        k_muskingum_p, denom_p, c1_prim, c2_p, c3_p, c4_p,
+        a_values_prim, b_rhs_prim, i_t_prim, x_sol_prim,
+        ratio_p, denominator_p, q_eps_p, side_slope_raw_p, bw_raw_p,
+    ] = state_arr;
+    let _ = (fsi::DEPTH, fsi::BW_RAW); // index sanity touch
+
+    // Build TimestepState. Backward needs the per-step `q_t`/`q_prime_t`
+    // primitives (NOT scratch handles — scratch gets overwritten on next
+    // replay, but the backward closure runs on `loss.backward()` after the
+    // forward window completes, so it has to see the per-step values).
+    let state = TimestepState::<I> {
+        pattern: pattern.clone(),
+        n: n_p,
+        q_spatial: qsp_p,
+        p_spatial: psp_p,
+        q_t: qt_p,
+        q_prime_t: qpt_p,
+        length: length_p,
+        slope: slope_p,
+        x_storage: xst_p,
+        depth: depth_p,
+        top_width: top_width_p,
+        side_slope: side_slope_p,
+        bottom_width: bottom_width_p,
+        hydraulic_radius: hyd_radius_p,
+        velocity_unclamped: velocity_un_p,
+        velocity_clamped: velocity_cl_p,
+        celerity: celerity_p,
+        k_muskingum: k_muskingum_p,
+        denom: denom_p,
+        c1: c1_prim,
+        c2: c2_p,
+        c3: c3_p,
+        c4: c4_p,
+        a_values: a_values_prim,
+        b_rhs: b_rhs_prim,
+        i_t: i_t_prim,
+        x_sol: x_sol_prim,
+        ratio: ratio_p,
+        denominator: denominator_p,
+        q_eps: q_eps_p,
+        side_slope_raw: side_slope_raw_p,
+        bw_raw: bw_raw_p,
+        bottom_width_lb,
+        depth_lb,
+        velocity_lb,
+        discharge_lb,
+        dt,
+        use_cuda,
+    };
+
+    let result_prim = match TimestepOp
+        .prepare::<NoCheckpointing>([
+            n_aut.node.clone(),
+            qsp_aut.node.clone(),
+            psp_aut.node.clone(),
+            qt_aut.node.clone(),
+            qpt_aut.node.clone(),
+        ])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    };
+
+    Tensor::from_primitive(TensorPrimitive::Float(result_prim))
+}
+
+/// SP-10 Phase 1: BURN-chain reference for the K1 fused kernel bit-match
+/// test. Runs `forward_chain_inner` and returns the 19 saved-state
+/// intermediates that K1 produces (everything in the saved-state array except
+/// indices 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
+///
+/// Returns each output as `Vec<f32>` via `into_data`, which forces a host
+/// sync so all kernels have completed before comparison.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn __spike_forward_chain_k1_outputs<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+) -> Vec<Vec<f32>>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let (_q_next, saved) = forward_chain_inner::<I>(
+        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in,
+    );
+
+    // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
+    let k1_indices: [usize; 19] = [
+        forward_saved_idx::DEPTH,
+        forward_saved_idx::TOP_WIDTH,
+        forward_saved_idx::SIDE_SLOPE,
+        forward_saved_idx::BOTTOM_WIDTH,
+        forward_saved_idx::HYDRAULIC_RADIUS,
+        forward_saved_idx::VELOCITY_UNCLAMPED,
+        forward_saved_idx::VELOCITY_CLAMPED,
+        forward_saved_idx::CELERITY,
+        forward_saved_idx::K_MUSKINGUM,
+        forward_saved_idx::DENOM,
+        forward_saved_idx::C1,
+        forward_saved_idx::C2,
+        forward_saved_idx::C3,
+        forward_saved_idx::C4,
+        forward_saved_idx::RATIO,
+        forward_saved_idx::DENOMINATOR,
+        forward_saved_idx::Q_EPS,
+        forward_saved_idx::SIDE_SLOPE_RAW,
+        forward_saved_idx::BW_RAW,
+    ];
+
+    k1_indices
+        .iter()
+        .map(|&idx| {
+            let prim = saved[idx].clone();
+            let t = Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(prim));
+            t.into_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("convert saved-state to Vec<f32>")
+        })
+        .collect()
+}
+
+/// SP-10 Phase 2: BURN-chain reference for the K2 + K3 fused kernel bit-match
+/// tests. Runs `forward_chain_inner` and returns `(b_rhs, i_t, x_sol, q_next)`
+/// as host `Vec<f32>`. K2 consumes `i_t` and produces `b_rhs`; K3 consumes
+/// `x_sol` and produces `q_next`.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn __spike_forward_chain_k23_outputs<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let (q_next_prim, saved) = forward_chain_inner::<I>(
+        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in,
+    );
+
+    let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {
+        let t = Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(prim));
+        t.into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("convert primitive to Vec<f32>")
+    };
+
+    let b_rhs = to_vec(saved[forward_saved_idx::B_RHS].clone());
+    let i_t = to_vec(saved[forward_saved_idx::I_T].clone());
+    let x_sol = to_vec(saved[forward_saved_idx::X_SOL].clone());
+    let q_next = to_vec(q_next_prim);
+
+    (b_rhs, i_t, x_sol, q_next)
 }
