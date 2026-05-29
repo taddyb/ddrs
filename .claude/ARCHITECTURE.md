@@ -147,6 +147,106 @@ despite the big absolute win on scatter.
 launch-overhead surface. Either would help GPU disproportionately
 (small per-op kernels are exactly where launch overhead dominates).
 
+## SP-10 CUDA Graphs (2026-05-29, partial — forward-only)
+
+**Goal:** collapse per-timestep launch overhead via CUDA Graph
+capture+replay. SP-9 left ~8M `cuLaunchKernel` calls as the dominant
+wall-time floor; capturing the per-step kernel sequence once and
+replaying it as a single graph node should cut that surface drastically.
+
+**The architectural journey (7 layers).** Each layer below was a real
+correctness or performance wall that had to be diagnosed and resolved
+before the next became visible. Naive capture of the SP-9 kernel
+sequence failed at every layer:
+
+1. **Host-sync inside cubecl `flush`.** cubecl's stock `flush()` calls
+   `cuEventSynchronize` to wait for in-flight work, which invalidates
+   a stream that is mid-capture. Fixed via cubecl-fork patch
+   `flush_no_sync` (commit `d562ab99` on `taddyb/cubecl` branch
+   `ddrs-sp7-stream-accessor`) — a flush variant that only submits
+   queued work without the host wait.
+
+2. **Re-entrant `exclusive_with_server`.** The first `flush_no_sync`
+   attempt re-acquired the cubecl server context inside the captured
+   region, deadlocking on the server's exclusive lock. Fixed by binding
+   the calling thread's context once before capture begins.
+
+3. **Transient cubecl-pool allocations baked into the graph.** Each
+   `Tensor` op in the SP-9 per-step sequence allocates a new pool slot.
+   Captured cuMalloc addresses become fixed in the replay, so any reuse
+   of those slots by other allocations (cusparse handles, gradient
+   buffers) corrupts the graph. The first "fix" attempted to pin
+   intermediates and switch the pool to persistent mode for the duration
+   of capture.
+
+4. **Spike #4 revealed pinning was the bug, not the fix.** A minimal
+   capture spike isolated the failure: persistent-mode + handle-pinning
+   produced `CUDA_ERROR_ILLEGAL_ADDRESS` on replay even when no other
+   allocations ran. The allocator was reshuffling pinned handles
+   internally. Pinning was abandoned.
+
+5. **cuSPARSE-internal allocations (false positive).** Suspected that
+   `cusparseSpMV` and `cusparseSpSV` allocate workspace at call time,
+   making them un-capturable. Verified false: the cuSPARSE 12.x descriptor
+   API takes externally-managed workspace buffers at `bufferSize`/`analysis`
+   time, so the call itself is allocation-free and captures cleanly.
+
+6. **Fused `#[cube]` kernels — the real solution.** Replaced the SP-9
+   per-step Tensor-op sequence with three fused cubecl kernels:
+   - **K1** (S1..S23): geometry + Muskingum coefficients. Takes
+     `(p, n_man, q_t)` tensors and the cached `(top_width, slope, ...)`
+     attributes; emits `(a, c, q_prime)` in a single grid launch.
+     All intermediates (alpha_1, alpha_2, hydraulic radius, etc.) stay
+     in GPU registers — zero cubecl-pool slots inside the captured
+     region.
+   - **K2** (S25 b_rhs): builds the RHS vector `b = q_t + c * q_prime`
+     for the triangular solve. Again single-launch, register-resident.
+   - **K3** (S28 q_clamp): post-solve clamp `max(q_new, 0.0)` writing
+     into the timestep output handle.
+
+   The captured region becomes:
+   ```
+   K1  →  cuSPARSE SpMV (y = N·q_t)  →  K2  →  assemble_kernel  →
+   cuSPARSE SpSV (solve L·q_new = b)  →  K3
+   ```
+   Six kernel launches per timestep, captured once, replayed via
+   `cuGraphLaunch` as a single host call.
+
+7. **Per-batch pool fragmentation.** First multi-batch run grew the
+   cubecl persistent pool monotonically across batches until OOM at
+   batch 4 (each batch's gradient buffers leaked into the pool, since
+   the graph reserved handle slots and the pool refused to reclaim them
+   while a handle existed). Fixed by calling
+   `client.memory_cleanup()` after the optimizer step at end-of-batch,
+   which forces a hard pool reset between batches. CONUS-scale runs
+   additionally needed a pre-capture warm-up + double-flush to ensure
+   the fused-kernel JIT cache is hot before the captured launch
+   (otherwise the first replay segfaulted on a buffer that the warm-up
+   path had recycled).
+
+**cubecl fork patches:** `flush_no_sync` (commit `d562ab99` on
+`taddyb/cubecl` `ddrs-sp7-stream-accessor`). The patched flush is what
+allows step 1 above to work.
+
+**Outcome:**
+- V9 (graph vs no-graph bit-match): **GREEN.** `DDRS_FORCE_GRAPHS=1`
+  forces the capture path on `compare_ddr_sandbox`; result is ABSOLUTE
+  MATCH at the f32 precision floor (max abs 1.5e-5 m³/s, identical to
+  the no-graph default).
+- V10 (cuLaunchKernel drop ≥ 40%): **PARTIAL — 29.2%** (5,442,735 vs
+  SP-9's 7,684,365). Below target because the backward path still uses
+  SP-9's direct-launch kernels — roughly half the per-step launches
+  are not yet captured.
+- V7a (cuda/cpu wall-time ratio ≤ 0.7): **GREEN — 0.385.** CUDA-with-graphs
+  finishes the smoke train in 1.96 min vs CPU's 5.09 min on 3 mini-batches
+  × 5 epochs. 2.4× improvement over SP-9's 0.919.
+
+**Not yet done — SP-11 candidate:** backward graph capture. The
+bit-equivalent backward path would need its own fused kernels for the
+gradient versions of K1/K2/K3 (the autograd tape currently dispatches
+each as individual `kernel_binop_*` ops). Closing this would push V10
+above 50% and likely V7a below 0.3.
+
 ## Deferred from the Python original
 
 These exist in DDR but are not load-bearing for the MC solver itself and were
