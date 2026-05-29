@@ -1457,3 +1457,68 @@ where
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
 }
+
+/// SP-10 Phase 1: BURN-chain reference for the K1 fused kernel bit-match
+/// test. Runs `forward_chain_inner` and returns the 19 saved-state
+/// intermediates that K1 produces (everything in the saved-state array except
+/// indices 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
+///
+/// Returns each output as `Vec<f32>` via `into_data`, which forces a host
+/// sync so all kernels have completed before comparison.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn __spike_forward_chain_k1_outputs<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+) -> Vec<Vec<f32>>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let (_q_next, saved) = forward_chain_inner::<I>(
+        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in,
+    );
+
+    // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
+    let k1_indices: [usize; 19] = [
+        forward_saved_idx::DEPTH,
+        forward_saved_idx::TOP_WIDTH,
+        forward_saved_idx::SIDE_SLOPE,
+        forward_saved_idx::BOTTOM_WIDTH,
+        forward_saved_idx::HYDRAULIC_RADIUS,
+        forward_saved_idx::VELOCITY_UNCLAMPED,
+        forward_saved_idx::VELOCITY_CLAMPED,
+        forward_saved_idx::CELERITY,
+        forward_saved_idx::K_MUSKINGUM,
+        forward_saved_idx::DENOM,
+        forward_saved_idx::C1,
+        forward_saved_idx::C2,
+        forward_saved_idx::C3,
+        forward_saved_idx::C4,
+        forward_saved_idx::RATIO,
+        forward_saved_idx::DENOMINATOR,
+        forward_saved_idx::Q_EPS,
+        forward_saved_idx::SIDE_SLOPE_RAW,
+        forward_saved_idx::BW_RAW,
+    ];
+
+    k1_indices
+        .iter()
+        .map(|&idx| {
+            let prim = saved[idx].clone();
+            let t = Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(prim));
+            t.into_data()
+                .convert::<f32>()
+                .into_vec::<f32>()
+                .expect("convert saved-state to Vec<f32>")
+        })
+        .collect()
+}
