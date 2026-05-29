@@ -344,3 +344,53 @@ pub fn forward_k1_kernel<F: Float + cubecl::CubeElement>(
     // happens in S25, K2's domain).
     let _ = area;
 }
+
+// ===========================================================================
+// SP-10 Phase 2 production kernels: K2 (S25 b_rhs) + K3 (S28 q_clamp).
+// ===========================================================================
+
+/// SP-10 Phase 2 K2: fused S25 of `forward_chain_inner`.
+///
+///     b_rhs = c2 * i_t + c3 * q_t + c4 * q_prime_t
+///
+/// Single elementwise linear combination over `[n_segments]`. `c2`, `c3`, `c4`
+/// come from K1; `i_t` is the cuSPARSE SpMV output; `qt`, `qpt` are per-step
+/// inputs. Mirrors `mmc_op.rs:633-635`.
+#[cube(launch)]
+#[allow(clippy::too_many_arguments)]
+pub fn b_rhs_kernel<F: Float + cubecl::CubeElement>(
+    c2_input: &Tensor<F>,
+    c3_input: &Tensor<F>,
+    c4_input: &Tensor<F>,
+    i_t_input: &Tensor<F>,   // cuSPARSE SpMV output
+    qt_input: &Tensor<F>,
+    qpt_input: &Tensor<F>,
+    o_b_rhs: &mut Tensor<F>,
+) {
+    if ABSOLUTE_POS >= o_b_rhs.len() {
+        terminate!();
+    }
+    let i = ABSOLUTE_POS;
+    o_b_rhs[i] =
+        c2_input[i] * i_t_input[i] + c3_input[i] * qt_input[i] + c4_input[i] * qpt_input[i];
+}
+
+/// SP-10 Phase 2 K3: fused S28 of `forward_chain_inner`.
+///
+///     q_next = max(x_sol, discharge_lb)
+///
+/// Single elementwise lower-clamp over `[n_segments]`. `x_sol` is the
+/// cuSPARSE SpSV solve output. Mirrors `mmc_op.rs:653-654`
+/// (`q_next = x_sol.clamp_min(discharge_lb)`).
+#[cube(launch)]
+pub fn q_clamp_kernel<F: Float + cubecl::CubeElement>(
+    x_sol_input: &Tensor<F>,
+    o_q_next: &mut Tensor<F>,
+    discharge_lb: F,
+) {
+    if ABSOLUTE_POS >= o_q_next.len() {
+        terminate!();
+    }
+    let i = ABSOLUTE_POS;
+    o_q_next[i] = x_sol_input[i].max(discharge_lb);
+}

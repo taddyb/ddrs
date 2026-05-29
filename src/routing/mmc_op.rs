@@ -1522,3 +1522,45 @@ where
         })
         .collect()
 }
+
+/// SP-10 Phase 2: BURN-chain reference for the K2 + K3 fused kernel bit-match
+/// tests. Runs `forward_chain_inner` and returns `(b_rhs, i_t, x_sol, q_next)`
+/// as host `Vec<f32>`. K2 consumes `i_t` and produces `b_rhs`; K3 consumes
+/// `x_sol` and produces `q_next`.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn __spike_forward_chain_k23_outputs<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    n_in: Tensor<I, 1>,
+    qsp_in: Tensor<I, 1>,
+    psp_in: Tensor<I, 1>,
+    qt_in: Tensor<I, 1>,
+    qpt_in: Tensor<I, 1>,
+    length_in: Tensor<I, 1>,
+    slope_in: Tensor<I, 1>,
+    xst_in: Tensor<I, 1>,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let (q_next_prim, saved) = forward_chain_inner::<I>(
+        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in,
+    );
+
+    let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {
+        let t = Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(prim));
+        t.into_data()
+            .convert::<f32>()
+            .into_vec::<f32>()
+            .expect("convert primitive to Vec<f32>")
+    };
+
+    let b_rhs = to_vec(saved[forward_saved_idx::B_RHS].clone());
+    let i_t = to_vec(saved[forward_saved_idx::I_T].clone());
+    let x_sol = to_vec(saved[forward_saved_idx::X_SOL].clone());
+    let q_next = to_vec(q_next_prim);
+
+    (b_rhs, i_t, x_sol, q_next)
+}
