@@ -27,7 +27,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 4. **Don't replace the hand-written sparse backward** in `src/sparse.rs`
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
-   `.claude/skills/burn_custom_backward.md` for the BURN-0.21 recipe it uses.
+   `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
 
 ## Commands
 
@@ -107,7 +107,7 @@ and mirrors `~/projects/ddr/config/merit_training_config.yaml` verbatim.
 
 ## When in doubt
 
-- Sparse / autograd questions → `.claude/skills/burn_custom_backward.md`
+- Sparse / autograd questions → `.claude/skills/ddrs-burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`
