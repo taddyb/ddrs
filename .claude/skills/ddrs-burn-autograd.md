@@ -9,9 +9,18 @@ sources:
 
 # BURN 0.21 — registering a custom Backward op from a downstream crate
 
+## What to know
+
+BURN 0.21 exposes most of the autograd plumbing publicly, but
+`NodeRef` is `pub(crate)`. You cannot *name* it, but you can *pass values*
+of that type by type-inference (via `AutodiffTensor.node`) — that's enough
+to register a custom `Backward<B, N>` from a downstream crate like ddrs.
+ddrs uses this for `CsrSolveOp` (in `src/sparse/mod.rs`) and `TimestepOp`
+(in `src/routing/mmc_op.rs`).
+
 Verified by `spike_backward/visibility_check.rs` (square op; dy/dx = 2x).
 
-## Visibility map
+### Visibility map
 
 ```
 burn::backend::autodiff::
@@ -104,3 +113,13 @@ are not tensors, just Vecs we clone into State. The backward will:
 4. Register `gradA_values` → A_values parent, `gradb` → b parent.
 
 This mirrors `~/projects/ddr/src/ddr/routing/utils.py:515` (`TriangularSparseSolver`) 1:1.
+
+## Verification
+
+```bash
+cargo test --test sparse_gradcheck
+```
+
+Validates that the hand-written custom `Backward` for `CsrSolveOp`
+produces correct gradients. The `spike_backward/visibility_check.rs`
+file also exercises the recipe directly.
