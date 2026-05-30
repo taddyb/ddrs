@@ -1,1 +1,13 @@
-{}
+{
+  "ddrs-setup": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-architecture": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-algorithm": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-running-the-code": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-reading-inputs": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-formatting-inputs": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-graph-objects": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-reading-outputs": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-comparing-to-ddr": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-perf-and-cuda-graphs": "7512fcc28a010c669c0267f02d82d2e8bbdb763d",
+  "ddrs-burn-autograd": "7512fcc28a010c669c0267f02d82d2e8bbdb763d"
+}

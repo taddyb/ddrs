@@ -21,6 +21,7 @@ preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/taddyb/ddrs"
 edit-url-template = "https://github.com/taddyb/ddrs/edit/master/docs/{path}"
 mathjax-support = false
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.search]
 enable = true
