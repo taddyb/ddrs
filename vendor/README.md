@@ -10,33 +10,48 @@ accessors that are `pub(crate)` on crates.io today:
 
 ## Forks
 
-The fork branches live on github.com/taddyb but ddrs patches against
-**local clones** for the local development workflow:
+ddrs's `Cargo.toml` `[patch.crates-io]` points at fork branches on
+github.com/taddyb so anyone can `git clone ddrs && cargo build` without
+needing local checkouts of cubecl or burn:
 
-- cubecl: `~/projects/cubecl` (origin = `taddyb/cubecl`, on branch
-  `ddrs-sp7-stream-accessor`, based on upstream commit
-  `7cf203735e095e640a2c03b2400d0faa03196bb4` = tag `v0.10.0`).
-- burn: `~/projects/burn` (origin = `taddyb/burn`, on branch
-  `ddrs-sp7-primitive-ctor`, based on upstream commit
-  `546cacb55fe00168854d19bdf0a5d79bd8060e03` = tag `v0.21.0`).
+- `cubecl`: <https://github.com/taddyb/cubecl> branch `ddrs-release`
+  (based on upstream `v0.10.0` tag).
+- `burn`: <https://github.com/taddyb/burn> branch `ddrs-sp7-primitive-ctor`
+  (based on upstream `v0.21.0` tag).
 
-Keep the local clones on their SP-7 patch branches. If you need to push
-new commits, do so on the local branch and push to origin; ddrs's
-`Cargo.toml` `[patch.crates-io]` points at the local paths so changes
-take effect on next `cargo build` without a `cargo update`.
+## Local fork development
+
+If you're iterating on the fork branches:
+
+1. Make your changes on the appropriate branch in `~/projects/cubecl` or
+   `~/projects/burn`.
+2. `git push --force-with-lease origin <branch>` to publish the new commit.
+3. In ddrs: `cargo update -p cubecl` (or whichever crate you changed) to
+   pull the new commit into ddrs's `Cargo.lock`.
+
+This is slightly more friction than the old "patch points at local path,
+edits take effect on next `cargo build`" setup, but it's the cost of
+having ddrs be buildable for anyone else who clones the repo.
+
+If you want the local-path workflow back temporarily, edit
+`Cargo.toml`'s `[patch.crates-io]` block to use `path = "..."` instead
+of `git = ...`. Just don't commit that change — it breaks the public
+build.
 
 ## Diffs
 
-Both patches are ≤ 50 lines. The single commit on each branch shows the
-exact diff.
+Both patches are ≤ 50 lines. The single commit on each fork branch shows
+the exact diff.
 
 ## Upgrading
 
 When upgrading `burn` / `cubecl` major versions in ddrs:
+
 1. On the fork: `git fetch upstream && git rebase upstream/<new-tag>`.
 2. Re-apply the patch (small risk of merge conflict if touched files moved).
 3. `git push --force-with-lease origin <branch>`.
 4. In ddrs `Cargo.toml`, bump the upstream version constraint if needed.
+5. `cargo update -p cubecl -p burn-cubecl` (etc.) to pin the new commits.
 
 ## Upstream PR (SP-8 cleanup)
 

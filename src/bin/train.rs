@@ -22,13 +22,12 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::BackendTypes;
 use burn_cuda::Cuda;
 use clap::Parser;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
-use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
-use ddrs::training::driver::{train, TrainState};
+use ddrs::nn::kan_head::KanHead;
+use ddrs::training::bootstrap::bootstrap_head_and_state;
+use ddrs::training::driver::train;
 use ddrs::training::optimizer::build_adam;
 
 #[derive(Parser, Debug)]
@@ -48,6 +47,10 @@ struct Cli {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!(
+        "warning: `train` is deprecated and will be removed in 0.4. \
+         use `ddrs run --workflow train` instead."
+    );
     let cli = Cli::parse();
     std::fs::create_dir_all(&cli.checkpoint_dir)?;
 
@@ -71,29 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.params.sparse_solver, cfg.params.use_cuda_graphs,
     );
 
-    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
-    let head_cfg = KanHeadConfig::new(
-        head_section.input_var_names.clone(),
-        head_section.learnable_parameters.clone(),
-        cfg.seed,
-    )
-    .with_hidden_size(head_section.hidden_size)
-    .with_num_hidden_layers(head_section.num_hidden_layers)
-    .with_grid(head_section.grid)
-    .with_k(head_section.k);
-
-    // Seed backend RNG before head init for deterministic Linear Kaiming/Xavier
-    // draws. KanLayer init uses its own seeded StdRng (CPU) and is independent
-    // of the backend RNG.
-    <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
-
-    let head: KanHead<AB> = head_cfg.init::<AB>(&device);
-    let mut state = TrainState::<I> {
-        head,
-        epoch: 1,
-        mini_batch: 0,
-        rng: StdRng::seed_from_u64(cfg.seed),
-    };
+    let (_, mut state) = bootstrap_head_and_state::<I>(&cfg, &device);
     let mut optimizer = build_adam::<KanHead<AB>, AB>();
 
     train::<I>(

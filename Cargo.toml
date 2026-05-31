@@ -48,48 +48,54 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 ndarray = "0.16"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+os_pipe = "1"
+humantime = "2"
 
 [dev-dependencies]
 approx = "0.5"
+tempfile = "3"
 which = "6"
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 
-# Vendored forks of cubecl-cuda + burn-cubecl with `pub` accessors needed
-# by SP-7's cuSPARSE GPU solve. See vendor/README.md for rationale +
-# upstream PR plan (SP-8).
+# Vendored forks of cubecl + burn with `pub` accessors needed by SP-7's
+# cuSPARSE GPU solve. See vendor/README.md for rationale + upstream PR
+# plan (SP-8).
 #
-# Local clones of the SP-7 fork branches. Each clone must be on its
-# ddrs-sp7-* branch (origin: github.com/taddyb). See vendor/README.md
-# for upstream commit hashes + SP-8 upstream PR plan.
+# Pinned to branches on github.com/taddyb so anyone can `git clone &&
+# cargo build` without having local clones of cubecl + burn. For local
+# fork development: push your changes to the fork branch and run
+# `cargo update -p cubecl -p burn-core` (or whichever crate(s) you
+# changed) to pull the new commits.
 #
 # All burn-* crates must come from the same source to avoid duplicate
 # trait-object conflicts (burn_std::device::Device must be unified).
 # The cubecl monorepo cascades similarly; patch the full set.
 [patch.crates-io]
-cubecl         = { path = "/home/tbindas/projects/cubecl/crates/cubecl" }
-cubecl-cuda    = { path = "/home/tbindas/projects/cubecl/crates/cubecl-cuda" }
-cubecl-common  = { path = "/home/tbindas/projects/cubecl/crates/cubecl-common" }
-cubecl-core    = { path = "/home/tbindas/projects/cubecl/crates/cubecl-core" }
-cubecl-cpp     = { path = "/home/tbindas/projects/cubecl/crates/cubecl-cpp" }
-cubecl-ir      = { path = "/home/tbindas/projects/cubecl/crates/cubecl-ir" }
-cubecl-macros  = { path = "/home/tbindas/projects/cubecl/crates/cubecl-macros" }
-cubecl-opt     = { path = "/home/tbindas/projects/cubecl/crates/cubecl-opt" }
-cubecl-runtime = { path = "/home/tbindas/projects/cubecl/crates/cubecl-runtime" }
-cubecl-std     = { path = "/home/tbindas/projects/cubecl/crates/cubecl-std" }
-cubecl-zspace  = { path = "/home/tbindas/projects/cubecl/crates/cubecl-zspace" }
-burn-cubecl    = { path = "/home/tbindas/projects/burn/crates/burn-cubecl" }
-burn-autodiff  = { path = "/home/tbindas/projects/burn/crates/burn-autodiff" }
-burn-backend   = { path = "/home/tbindas/projects/burn/crates/burn-backend" }
-burn-core      = { path = "/home/tbindas/projects/burn/crates/burn-core" }
-burn-cuda      = { path = "/home/tbindas/projects/burn/crates/burn-cuda" }
-burn-derive    = { path = "/home/tbindas/projects/burn/crates/burn-derive" }
-burn-ir        = { path = "/home/tbindas/projects/burn/crates/burn-ir" }
-burn-ndarray   = { path = "/home/tbindas/projects/burn/crates/burn-ndarray" }
-burn-nn        = { path = "/home/tbindas/projects/burn/crates/burn-nn" }
-burn-optim     = { path = "/home/tbindas/projects/burn/crates/burn-optim" }
-burn-std       = { path = "/home/tbindas/projects/burn/crates/burn-std" }
-burn-tensor    = { path = "/home/tbindas/projects/burn/crates/burn-tensor" }
-burn-fusion    = { path = "/home/tbindas/projects/burn/crates/burn-fusion" }
+cubecl         = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-cuda    = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-common  = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-core    = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-cpp     = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-ir      = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-macros  = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-opt     = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-runtime = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-std     = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+cubecl-zspace  = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+burn-cubecl    = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-autodiff  = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-backend   = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-core      = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-cuda      = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-derive    = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-ir        = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-ndarray   = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-nn        = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-optim     = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-std       = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-tensor    = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }
+burn-fusion    = { git = "https://github.com/taddyb/burn.git",   branch = "ddrs-sp7-primitive-ctor" }

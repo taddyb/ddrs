@@ -258,3 +258,28 @@ left out of the harness:
 * `tau` boundary trimming
 * KAN parameterization (separate module — out of scope here)
 * CUDA backend (drop in `Wgpu`/`CudaJit` later by swapping the backend generic)
+
+## CLI lifecycle (added by Spec A)
+
+The `ddrs` binary at `src/bin/ddrs.rs` is the single user entrypoint. It
+dispatches to subcommands under `src/cli/` (init, plan, run, show, status,
+gc). First-run flow is `init → plan → init → run`:
+
+* `init` — compile (source-checkout only), GPU probe, workspace creation,
+  smoke test on the bundled sandbox fixture. Writes `sources.lock` if a
+  `ddrs.yaml` is present.
+* `plan` — dry-run validation: parse config, stat data sources, read
+  lockfile, compute drift, print summary. Bootstraps `ddrs.yaml` via
+  `$EDITOR` if missing.
+* `run` — calls `plan` as a library function (no re-parse), creates a run
+  directory under `.ddrs/runs/<timestamp>-<workflow>/`, dispatches the
+  workflow, writes a manifest with config + source fingerprints + git SHA
+  + outputs. `--plot` chains `dump_parameters::dump`.
+
+Full design at `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+Implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+
+The `dispatch()` inside `cli::run::run` is a v1 stub (always returns
+`RunStatus::Failed`); real workflow execution is wired in a follow-up
+commit since it requires live merit data + GPU access. The full manifest
+write path IS exercised end-to-end by the v1 stub.
