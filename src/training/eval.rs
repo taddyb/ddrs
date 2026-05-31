@@ -75,6 +75,7 @@ pub fn evaluate<I: Backend>(
 
     // Iterate chunks. First chunk is cold-start (carry_state=false); all
     // subsequent chunks carry the engine state.
+    let n_chunks_total = n_days_total.div_ceil(batch_size_days);
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
     while day_offset < n_days_total {
@@ -84,6 +85,14 @@ pub fn evaluate<I: Backend>(
         let h_start = day_offset * 24;
         let h_end = h_start + win.n_hourly();
         predictions_full.slice_mut(s![.., h_start..h_end]).assign(&pred_arr);
+        eprintln!(
+            "  chunk {}/{}: days {}..{} ({} days)",
+            chunk_idx + 1,
+            n_chunks_total,
+            day_offset,
+            day_offset + chunk_n,
+            chunk_n,
+        );
         day_offset += chunk_n;
         chunk_idx += 1;
     }

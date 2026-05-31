@@ -63,6 +63,7 @@ pub fn train<I: Backend>(
     for epoch in state.epoch..=exp.epochs {
         sampler.reshuffle(&mut state.rng);
         let lr = resolve_lr(&exp.learning_rate, epoch);
+        eprintln!("epoch {epoch} lr={lr}");
 
         let mut mb_done = 0usize;
         while let Some(idx) = sampler.next_batch() {
@@ -120,6 +121,7 @@ pub fn train<I: Backend>(
 
             // L1 loss = mean(|p - o|); autograd alive on `p_post`.
             let loss = (p_post - o_post).abs().mean();
+            let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
             let grads = GradientsParams::from_grads(loss.backward(), &state.mlp);
             let grads = clip_grad_norm(grads, &state.mlp, grad_clip);
@@ -142,6 +144,7 @@ pub fn train<I: Backend>(
             // the full diagnosis.
             crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
 
+            eprintln!("  mb={} loss={:.6}", state.mini_batch, loss_f32);
             state.mini_batch += 1;
             mb_done += 1;
             if let Some(limit) = max_mini_batches {

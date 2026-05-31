@@ -94,6 +94,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         train_cfg.experiment.as_ref().unwrap().start_time,
         train_cfg.experiment.as_ref().unwrap().end_time
     );
+    println!(
+        "sparse_solver={:?} use_cuda_graphs={}",
+        train_cfg.params.sparse_solver, train_cfg.params.use_cuda_graphs,
+    );
 
     let mlp_section = train_cfg.mlp.as_ref().expect("mlp config required");
     let mlp_cfg = MlpConfig::new(
@@ -156,6 +160,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         test_dataset.len(),
         test_cfg.experiment.as_ref().unwrap().start_time,
         test_cfg.experiment.as_ref().unwrap().end_time
+    );
+    println!(
+        "sparse_solver={:?} use_cuda_graphs={}",
+        test_cfg.params.sparse_solver, test_cfg.params.use_cuda_graphs,
     );
 
     let latest_ckpt = find_latest_mpk(&cli.checkpoint_dir)?;

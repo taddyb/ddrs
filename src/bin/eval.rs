@@ -65,6 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
     let dataset = MeritGagesDataset::open(&cfg)?;
+    println!(
+        "sparse_solver={:?} use_cuda_graphs={}",
+        cfg.params.sparse_solver, cfg.params.use_cuda_graphs,
+    );
 
     type I = Cuda<f32, i32>;
     let device = <I as BackendTypes>::Device::default();
