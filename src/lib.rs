@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod cuda_graph;
 pub mod data;
+pub mod dump_parameters;
 pub mod error;
 pub mod geometry;
 pub mod nn;
