@@ -16,6 +16,15 @@ pub fn run_gc(ws: &Workspace, input: GcInput) -> Result<Vec<PathBuf>, CliError> 
     let runs_dir = ws.runs_dir();
     if !runs_dir.is_dir() { return Ok(vec![]); }
 
+    // Without any filter, gc is a no-op — both for actual deletion and for
+    // the returned "what would be deleted" list. Avoids the CLI printing
+    // "would delete" for every existing run when the user passes no flags.
+    let has_filter =
+        input.keep.is_some() || input.keep_successful || input.older_than.is_some();
+    if !has_filter {
+        return Ok(vec![]);
+    }
+
     let mut entries: Vec<PathBuf> = fs::read_dir(&runs_dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())

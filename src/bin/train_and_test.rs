@@ -70,11 +70,11 @@ struct Cli {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
     eprintln!(
         "warning: `train_and_test` is deprecated and will be removed in 0.4. \
          use `ddrs run --workflow train-and-test` instead."
     );
+    let cli = Cli::parse();
     std::fs::create_dir_all(&cli.checkpoint_dir)?;
     if let Some(parent) = cli.output.parent() {
         std::fs::create_dir_all(parent)?;
