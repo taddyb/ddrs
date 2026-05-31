@@ -48,6 +48,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 ndarray = "0.16"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+os_pipe = "1"
+humantime = "2"
 
 [dev-dependencies]
 approx = "0.5"
