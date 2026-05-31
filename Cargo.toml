@@ -54,6 +54,7 @@ humantime = "2"
 
 [dev-dependencies]
 approx = "0.5"
+tempfile = "3"
 which = "6"
 
 [profile.release]
