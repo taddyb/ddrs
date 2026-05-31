@@ -486,7 +486,7 @@ fn v3_train_one_epoch_runs_end_to_end() {
     use burn::backend::{Autodiff, NdArray};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
-    use ddrs::nn::mlp::MlpConfig;
+    use ddrs::nn::kan_head::KanHeadConfig;
     use ddrs::training::{TrainState, train, build_adam};
 
     type I = NdArray<f32>;
@@ -519,22 +519,25 @@ fn v3_train_one_epoch_runs_end_to_end() {
     let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
     let dataset = MeritGagesDataset::open(&cfg).expect("open dataset");
 
-    let mlp_section = cfg.mlp.as_ref().expect("mlp config");
-    let mlp_cfg = MlpConfig::new(
-        mlp_section.input_var_names.clone(),
-        mlp_section.learnable_parameters.clone(),
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config");
+    let head_cfg = KanHeadConfig::new(
+        head_section.input_var_names.clone(),
+        head_section.learnable_parameters.clone(),
+        cfg.seed,
     )
-    .with_hidden_size(mlp_section.hidden_size)
-    .with_num_hidden_layers(mlp_section.num_hidden_layers);
-    let mlp = mlp_cfg.init::<AB>(&device);
+    .with_hidden_size(head_section.hidden_size)
+    .with_num_hidden_layers(head_section.num_hidden_layers)
+    .with_grid(head_section.grid)
+    .with_k(head_section.k);
+    let head = head_cfg.init::<AB>(&device);
 
     let mut state = TrainState::<I> {
-        mlp,
+        head,
         epoch: 1,
         mini_batch: 0,
         rng: StdRng::seed_from_u64(42),
     };
-    let mut optimizer = build_adam::<ddrs::nn::mlp::Mlp<AB>, AB>();
+    let mut optimizer = build_adam::<ddrs::nn::kan_head::KanHead<AB>, AB>();
 
     let ckpt_dir = std::path::PathBuf::from("/tmp/ddrs_v3_ckpts");
     let _ = std::fs::remove_dir_all(&ckpt_dir);

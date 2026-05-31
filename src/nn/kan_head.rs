@@ -1,59 +1,78 @@
-//! Feed-forward MLP head that produces routing parameters.
+//! KAN-based routing-parameter head.
 //!
-//! Drop-in replacement for `~/projects/ddr/src/ddr/nn/kan.py`'s `kan` module.
-//! Same external I/O contract:
+//! Matches DDR-Python's `~/projects/ddr/src/ddr/nn/kan.py` architecture exactly:
+//! a `Linear(F, H)` input projection feeds a stack of `rskan::KanLayer(H, H)`
+//! blocks (no inter-block ReLU — see migration spec §8.2), followed by
+//! `Linear(H, P) → Sigmoid` and a per-parameter HashMap split. Replaces the
+//! prior MLP placeholder.
 //!
 //! - Input: `Tensor<B, 2>` of shape `[N, F]` (N = num reaches, F = num attributes).
 //! - Architecture:
-//!   `Linear(F, H) → ReLU → (Linear(H, H) → ReLU) × num_hidden_layers → Linear(H, P) → Sigmoid`
+//!   `Linear(F, H) → KanLayer(H, H) × num_hidden_layers → Linear(H, P) → Sigmoid`
 //! - Output: `HashMap<String, Tensor<B, 1>>` of length `P`, with `output[key].shape == [N]`,
 //!   keyed by the entries of `learnable_parameters` in order.
 //!
-//! Init recipe is copied from `kan.__init__` (lines 45-48 of `nn/kan.py`):
-//! - input weight: `kaiming_normal_(nonlinearity="relu")`
-//! - output weight: `xavier_normal_(gain=0.1)`
-//! - hidden weights: same as input (matches the spirit of `nonlinearity="relu"`
-//!   for a plain MLP; DDR's KAN layers had their own init that we don't need
-//!   to mirror here)
-//! - all biases: zero
+//! Init recipe (per migration spec §8.3 and §8.4):
+//! - input Linear: `kaiming_normal_(nonlinearity="relu")`, zero bias.
+//! - hidden KanLayers: `rskan::KanLayerConfig::new(H, H, seed)` with `num=grid`,
+//!   `k=k`, `noise_scale=0.3` (MultKAN default). **The same `seed` is passed to
+//!   every inner KanLayer** to match DDR-Python's `kan.py:24-34` quirk. This
+//!   overrides `rskan::KanConfig`'s own per-layer sub-seed derivation.
+//! - output Linear: `xavier_normal_(gain=0.1)`, zero bias.
 //!
-//! Defaults (`hidden_size=21`, `num_hidden_layers=2`) match `merit_training_config.yaml`.
+//! Defaults (`hidden_size=21`, `num_hidden_layers=2`, `grid=5`, `k=3`) match
+//! `config/merit_training.yaml`.
 
 use std::collections::HashMap;
 
 use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::nn::{Initializer, Linear, LinearConfig};
-use burn::tensor::activation::{relu, sigmoid};
+use burn::tensor::activation::sigmoid;
 use burn::tensor::{backend::Backend, Tensor};
+use rskan::{KanLayer, KanLayerConfig};
 
 /// Kaiming normal gain for ReLU nonlinearity: `sqrt(2)`.
 const KAIMING_GAIN_RELU: f64 = std::f64::consts::SQRT_2;
 /// Xavier gain applied to the output layer (matches DDR `kan.py:46`).
 const XAVIER_GAIN_OUTPUT: f64 = 0.1;
+/// pykan MultKAN default; matches DDR's `KAN([H, H], ...)` noise_scale default.
+const KAN_NOISE_SCALE: f64 = 0.3;
 
-/// Configuration for the MLP head.
+/// Configuration for the KAN head.
 #[derive(Config, Debug)]
-pub struct MlpConfig {
-    /// Names of input attributes. The MLP only uses the length to size the
-    /// input layer; names are stored for traceability and to match the DDR
+pub struct KanHeadConfig {
+    /// Names of input attributes. The head only uses the length to size the
+    /// input layer; names are stored for traceability and to mirror the DDR
     /// `kan` constructor signature.
     pub input_var_names: Vec<String>,
     /// Names of output parameters, e.g. `["n", "q_spatial", "p_spatial"]`.
     /// The forward pass returns a `HashMap` keyed by these names.
     pub learnable_parameters: Vec<String>,
-    /// Hidden layer width. `21` per `merit_training_config.yaml`.
+    /// Seed for KanLayer initialization. REQUIRED — no default. Passed to
+    /// **every** inner KanLayer (DDR-Python quirk: same seed all blocks,
+    /// `kan.py:24-34`).
+    pub seed: u64,
+
+    /// Hidden layer width. `21` per `config/merit_training.yaml`.
     #[config(default = 21)]
     pub hidden_size: usize,
-    /// Number of `Linear(H, H) → ReLU` blocks between input and output. `2`
-    /// per `merit_training_config.yaml`. Set to `0` for a 1-hidden-layer MLP.
+    /// Number of `KanLayer(H, H)` blocks between input and output. `2`
+    /// per `config/merit_training.yaml`.
     #[config(default = 2)]
     pub num_hidden_layers: usize,
+    /// B-spline grid intervals (`num` in pykan). pykan MultKAN default = 3;
+    /// `config/merit_training.yaml` overrides to 5 to match DDR.
+    #[config(default = 5)]
+    pub grid: usize,
+    /// B-spline order. `3` per cubic-spline default.
+    #[config(default = 3)]
+    pub k: usize,
 }
 
-impl MlpConfig {
-    /// Build the MLP, initializing parameters per the DDR `kan` recipe.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> Mlp<B> {
+impl KanHeadConfig {
+    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe.
+    pub fn init<B: Backend>(&self, device: &B::Device) -> KanHead<B> {
         assert!(
             !self.input_var_names.is_empty(),
             "input_var_names must be non-empty"
@@ -72,13 +91,18 @@ impl MlpConfig {
         };
 
         let input = LinearConfig::new(self.input_var_names.len(), self.hidden_size)
-            .with_initializer(kaiming.clone())
+            .with_initializer(kaiming)
             .init(device);
 
-        let hidden: Vec<Linear<B>> = (0..self.num_hidden_layers)
+        // DDR-Python quirk: same `seed` passed to every inner `KAN([H, H])`
+        // constructor. We mirror that here rather than using rskan's own
+        // per-layer sub-seed derivation. See migration spec §8.3.
+        let hidden: Vec<KanLayer<B>> = (0..self.num_hidden_layers)
             .map(|_| {
-                LinearConfig::new(self.hidden_size, self.hidden_size)
-                    .with_initializer(kaiming.clone())
+                KanLayerConfig::new(self.hidden_size, self.hidden_size, self.seed)
+                    .with_num(self.grid)
+                    .with_k(self.k)
+                    .with_noise_scale(KAN_NOISE_SCALE)
                     .init(device)
             })
             .collect();
@@ -87,17 +111,12 @@ impl MlpConfig {
             .with_initializer(xavier)
             .init(device);
 
-        // Zero all biases (matches `torch.nn.init.zeros_(self.input.bias)` and
-        // `zeros_(self.output.bias)` in DDR's kan.py:47-48; hidden biases too
-        // for consistency).
+        // Zero biases (matches `torch.nn.init.zeros_(self.input.bias)` /
+        // `zeros_(self.output.bias)` in DDR's `kan.py:47-48`).
         let input = zero_bias(input, device);
-        let hidden = hidden
-            .into_iter()
-            .map(|l| zero_bias(l, device))
-            .collect::<Vec<_>>();
         let output = zero_bias(output, device);
 
-        Mlp {
+        KanHead {
             input,
             hidden,
             output,
@@ -106,28 +125,33 @@ impl MlpConfig {
     }
 }
 
-/// Feed-forward MLP producing routing parameters from per-reach attributes.
+/// KAN-based head producing routing parameters from per-reach attributes.
 #[derive(Module, Debug)]
-pub struct Mlp<B: Backend> {
+pub struct KanHead<B: Backend> {
     pub input: Linear<B>,
-    pub hidden: Vec<Linear<B>>,
+    pub hidden: Vec<KanLayer<B>>,
     pub output: Linear<B>,
     /// Names of output parameters in column order — used to build the output
-    /// HashMap. Carried as state so `Mlp` round-trips through a record without
-    /// requiring callers to re-supply the keys.
+    /// HashMap. Carried as state so the head round-trips through a record
+    /// without requiring callers to re-supply the keys.
     learnable_parameters: Vec<String>,
 }
 
-impl<B: Backend> Mlp<B> {
+impl<B: Backend> KanHead<B> {
     /// Forward pass.
     ///
-    /// Mirrors `kan.forward` in DDR (`nn/kan.py:50-62`): produces a sigmoid
-    /// output of shape `[N, P]`, transposes to `[P, N]`, and splits row-by-row
-    /// into the `learnable_parameters` slots of the returned HashMap.
+    /// Mirrors `kan.forward` in DDR (`nn/kan.py:50-62`): chains the input
+    /// `Linear`, the KAN blocks (each block applies SiLU+spline edge
+    /// activations internally), then the output `Linear` and a sigmoid;
+    /// transposes to `[P, N]` and splits row-by-row into the
+    /// `learnable_parameters` slots of the returned HashMap.
+    ///
+    /// **No inter-block ReLU**, matching DDR's `kan.py:53` direct chaining
+    /// of `KAN([H, H])` modules.
     pub fn forward(&self, inputs: Tensor<B, 2>) -> HashMap<String, Tensor<B, 1>> {
-        let mut x = relu(self.input.forward(inputs));
+        let mut x = self.input.forward(inputs);
         for layer in &self.hidden {
-            x = relu(layer.forward(x));
+            x = layer.forward(x);
         }
         let logits = self.output.forward(x); // [N, P]
         let probs = sigmoid(logits); // [N, P] ∈ (0, 1)

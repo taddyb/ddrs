@@ -150,7 +150,7 @@ pub fn forward_with_frozen_params<I: Backend>(
 // MLP-integrated production forward
 // ---------------------------------------------------------------------------
 
-use crate::nn::mlp::Mlp;
+use crate::nn::kan_head::KanHead;
 
 /// One training-step forward pass. Computes MLP outputs from normalized
 /// attributes, denormalizes through the engine's `setup_inputs`, runs MC,
@@ -161,11 +161,11 @@ use crate::nn::mlp::Mlp;
 pub fn forward<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<Autodiff<I>>,
-    mlp: &Mlp<Autodiff<I>>,
+    head: &KanHead<Autodiff<I>>,
     device: &I::Device,
     carry_state: bool,
 ) -> Tensor<Autodiff<I>, 2> {
-    let params_map = mlp.forward(tensors.spatial_attributes.clone());
+    let params_map = head.forward(tensors.spatial_attributes.clone());
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
     let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
@@ -194,19 +194,19 @@ pub fn forward<I: Backend>(
 }
 
 /// MLP inference forward — no autograd anywhere. Used by `bin/eval` and
-/// the Mlp arm of `EvalParams`.
+/// the KanHead arm of `EvalParams`.
 ///
 /// Mirrors `forward` (production training path) but operates on the inner
-/// backend `I` throughout. Caller passes an `Mlp<I>` loaded via
-/// `checkpoint::load_mlp`.
+/// backend `I` throughout. Caller passes an `KanHead<I>` loaded via
+/// `checkpoint::load_kan_head`.
 pub fn forward_eval<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
-    mlp: &Mlp<I>,
+    head: &KanHead<I>,
     device: &I::Device,
     carry_state: bool,
 ) -> Tensor<I, 2> {
-    let params_map = mlp.forward(tensors.spatial_attributes.clone());
+    let params_map = head.forward(tensors.spatial_attributes.clone());
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
     let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();

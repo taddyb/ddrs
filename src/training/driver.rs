@@ -3,14 +3,14 @@
 //! Per-mini-batch flow:
 //!   1. Sample a batch (gauges + rho-window).
 //!   2. Collate → RoutingBatch → RoutingTensors<Autodiff<I>>.
-//!   3. forward() — MLP + MC engine + scatter-add to per-gauge.
+//!   3. forward() — KAN head  MC engine + scatter-add to per-gauge.
 //!   4. tau-trim + daily downsample → (G, T_days) BURN tensor.
 //!   5. L1 loss in BURN-tensor space (autograd alive).
 //!      ⚠ V3 path drops the NaN-gauge filter; observations with NaN
 //!      contribute zero to the diff (handled by `obs_for_loss`
 //!      construction). Refine in SP-5 if convergence is poor.
 //!   6. loss.backward() → clip_grad_norm → optimizer.step.
-//!   7. save_mlp to checkpoint_dir.
+//!   7. save_kan_head to checkpoint_dir.
 
 use std::path::Path;
 
@@ -26,16 +26,16 @@ use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
 use crate::data::error::Result;
 use crate::data::sampler::RandomSampler;
-use crate::nn::mlp::Mlp;
+use crate::nn::kan_head::KanHead;
 use crate::training::forward::forward;
-use crate::training::{clip_grad_norm, resolve_lr, save_mlp, tau_trim_and_downsample};
+use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
 
 /// Mutable state threaded through the training loop.
 ///
 /// Parameterized on the inner backend `I` so the autodiff type
 /// (`Autodiff<I>`) is always explicit and matches the `forward` signature.
 pub struct TrainState<I: Backend> {
-    pub mlp: Mlp<Autodiff<I>>,
+    pub head: KanHead<Autodiff<I>>,
     pub epoch: usize,
     pub mini_batch: usize,
     pub rng: StdRng,
@@ -49,7 +49,7 @@ pub fn train<I: Backend>(
     cfg: &Config,
     dataset: &MeritGagesDataset,
     state: &mut TrainState<I>,
-    optimizer: &mut impl Optimizer<Mlp<Autodiff<I>>, Autodiff<I>>,
+    optimizer: &mut impl Optimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
     device: &I::Device,
     checkpoint_dir: &Path,
     max_mini_batches: Option<usize>,
@@ -63,6 +63,7 @@ pub fn train<I: Backend>(
     for epoch in state.epoch..=exp.epochs {
         sampler.reshuffle(&mut state.rng);
         let lr = resolve_lr(&exp.learning_rate, epoch);
+        eprintln!("epoch {epoch} lr={lr}");
 
         let mut mb_done = 0usize;
         while let Some(idx) = sampler.next_batch() {
@@ -79,7 +80,7 @@ pub fn train<I: Backend>(
 
             // to_tensors::<Autodiff<I>> lifts plain ndarray buffers to the device.
             let tensors = batch.to_tensors::<Autodiff<I>>(device);
-            let pred_hourly = forward::<I>(cfg, &tensors, &state.mlp, device, false);
+            let pred_hourly = forward::<I>(cfg, &tensors, &state.head, device, false);
             let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
             let dims = daily.dims();
             let (g, t_days) = (dims[0], dims[1]);
@@ -120,15 +121,16 @@ pub fn train<I: Backend>(
 
             // L1 loss = mean(|p - o|); autograd alive on `p_post`.
             let loss = (p_post - o_post).abs().mean();
+            let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
-            let grads = GradientsParams::from_grads(loss.backward(), &state.mlp);
-            let grads = clip_grad_norm(grads, &state.mlp, grad_clip);
-            state.mlp = optimizer.step(lr as f64, state.mlp.clone(), grads);
+            let grads = GradientsParams::from_grads(loss.backward(), &state.head);
+            let grads = clip_grad_norm(grads, &state.head, grad_clip);
+            state.head = optimizer.step(lr as f64, state.head.clone(), grads);
 
-            // Checkpoint: .valid() strips autodiff; save_mlp<I> writes to disk.
+            // Checkpoint: .valid() strips autodiff; save_kan_head<I> writes to disk.
             let ckpt_path =
                 checkpoint_dir.join(format!("epoch_{epoch}_mb_{}", state.mini_batch));
-            save_mlp(&ckpt_path, &state.mlp.clone().valid())?;
+            save_kan_head(&ckpt_path, &state.head.clone().valid())?;
 
             // SP-10 multi-batch OOM fix: every per-timestep call to
             // `fresh_primitive_from_scratch` (~24 per t on the CUDA-graph
@@ -142,6 +144,7 @@ pub fn train<I: Backend>(
             // the full diagnosis.
             crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
 
+            eprintln!("  mb={} loss={:.6}", state.mini_batch, loss_f32);
             state.mini_batch += 1;
             mb_done += 1;
             if let Some(limit) = max_mini_batches {

@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
 use crate::data::error::Result;
 use crate::data::TestWindow;
-use crate::nn::mlp::Mlp;
+use crate::nn::kan_head::KanHead;
 use crate::training::{
     forward_eval, forward_with_frozen_params, tau_trim_and_downsample, FrozenParams, Metrics,
 };
@@ -21,7 +21,7 @@ use crate::training::{
 /// Source of MC parameters at eval time.
 pub enum EvalParams<'a, I: Backend> {
     Frozen(&'a FrozenParams),
-    Mlp(&'a Mlp<I>),
+    KanHead(&'a KanHead<I>),
 }
 
 pub struct EvalOutput {
@@ -62,8 +62,8 @@ pub fn evaluate<I: Backend>(
             EvalParams::Frozen(frozen) => {
                 forward_with_frozen_params::<I>(cfg, &tensors, frozen, device, carry_state)
             }
-            EvalParams::Mlp(mlp) => {
-                forward_eval::<I>(cfg, &tensors, mlp, device, carry_state)
+            EvalParams::KanHead(head) => {
+                forward_eval::<I>(cfg, &tensors, head, device, carry_state)
             }
         };
         let dims = pred.dims();
@@ -75,6 +75,7 @@ pub fn evaluate<I: Backend>(
 
     // Iterate chunks. First chunk is cold-start (carry_state=false); all
     // subsequent chunks carry the engine state.
+    let n_chunks_total = n_days_total.div_ceil(batch_size_days);
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
     while day_offset < n_days_total {
@@ -84,6 +85,14 @@ pub fn evaluate<I: Backend>(
         let h_start = day_offset * 24;
         let h_end = h_start + win.n_hourly();
         predictions_full.slice_mut(s![.., h_start..h_end]).assign(&pred_arr);
+        eprintln!(
+            "  chunk {}/{}: days {}..{} ({} days)",
+            chunk_idx + 1,
+            n_chunks_total,
+            day_offset,
+            day_offset + chunk_n,
+            chunk_n,
+        );
         day_offset += chunk_n;
         chunk_idx += 1;
     }

@@ -28,13 +28,23 @@ overview is in `~/projects/ddr/CLAUDE.md`.
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
    `.claude/skills/burn_custom_backward.md` for the BURN-0.21 recipe it uses.
+5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`.** Do NOT
+   reintroduce the prior MLP placeholder. The KAN head matches DDR-Python's
+   `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) × num_hidden_layers →
+   Linear(H, P) → Sigmoid`. No inter-block ReLU (DDR doesn't have one). All
+   `num_hidden_layers` inner KanLayers receive the SAME seed (DDR's `kan.py`
+   `:24-34` quirk — preserved for parity).
+6. **rskan is a git dependency pinned to a tag.** When updating `rskan`, bump
+   the tag in `Cargo.toml`'s `rskan = { git = ..., tag = ... }`, then re-run
+   `tests/kan_head.rs` and the full parity sweep before merging.
 
 ## Commands
 
 ```bash
 cargo build                                    # debug build
 cargo build --release                          # release build (LTO=thin)
-cargo test                                     # all tests (~54 total across 7 files + lib units)
+cargo test                                     # all tests (~60 total across 8 files + lib units)
+cargo test --test kan_head                     # head shape/init/gradient tests
 cargo test --test sparse_gradcheck             # one integration test file
 cargo test --test mmc mc_routes_linear_chain   # one specific test
 
@@ -61,7 +71,9 @@ src/
 ├── sparse.rs             CSR pattern + triangular solve + custom Backward
 ├── geometry.rs           Trapezoidal channel geometry (Leopold & Maddock)
 ├── config.rs             Parameter ranges, attribute minimums, log-space flags
-├── nn/mlp.rs             MLP head replacing DDR's KAN (same I/O contract)
+├── nn/kan_head.rs        KAN head via rskan v0.1.0 — Linear→KanLayer×N→Linear
+│                         →Sigmoid, no inter-block ReLU (matches DDR `kan.py`).
+│                         Same I/O contract as the prior MLP placeholder.
 └── data/                 Live readers for DDR's training data (no export step)
     ├── ids.rs            Comid, Staid newtypes; IdIndex<T>
     ├── error.rs          DataError with source-path context
