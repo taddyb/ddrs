@@ -57,6 +57,10 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    eprintln!(
+        "warning: `eval` is deprecated and will be removed in 0.4. \
+         use `ddrs run --workflow eval` instead."
+    );
 
     if !cli.frozen && cli.checkpoint.is_none() {
         eprintln!("--checkpoint is required unless --frozen is set");
