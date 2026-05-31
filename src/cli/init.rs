@@ -28,6 +28,15 @@ pub struct InitOutput {
 
 pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     if input.force && input.workspace.exists() {
+        if input.workspace.file_name().and_then(|n| n.to_str()) != Some(".ddrs") {
+            return Err(CliError::Other(
+                format!(
+                    "refusing to --force-remove workspace {:?}: directory name must be `.ddrs` for safety",
+                    input.workspace,
+                )
+                .into(),
+            ));
+        }
         fs::remove_dir_all(&input.workspace)?;
     }
     let ws = Workspace::with_root(&input.workspace);
@@ -56,7 +65,8 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
         .map(|s| s.key == key)
         .unwrap_or(false);
     let (smoke_passed, smoke_reused) = if input.skip_smoke {
-        (true, true)
+        // Don't claim "reused" if there's no prior record — just "passed".
+        (true, cached_passing)
     } else if cached_passing && !input.force {
         (true, true)
     } else {
@@ -100,7 +110,7 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     ];
     // Parallel reachability + fingerprint. std::thread::scope is fine — these
     // are I/O-bound and the count is small.
-    let results: Vec<(String, Result<_, CliError>)> = std::thread::scope(|s| {
+    let results: Result<Vec<(String, Result<_, CliError>)>, CliError> = std::thread::scope(|s| {
         let handles: Vec<_> = pairs
             .iter()
             .map(|(k, p)| {
@@ -109,8 +119,15 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
                 s.spawn(move || (k, fingerprint_path(&p)))
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .map_err(|_| CliError::Runtime("fingerprint thread panicked".into()))
+            })
+            .collect()
     });
+    let results = results?;
     let mut sources = BTreeMap::new();
     for (k, r) in results {
         sources.insert(k, r?);
