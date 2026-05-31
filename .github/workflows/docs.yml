@@ -23,10 +23,14 @@ jobs:
         with:
           shared-key: docs-mdbook
       - name: Install mdbook + preprocessors
+        # Pinned: mdbook 0.5.x ships a new preprocessor protocol that breaks
+        # both mdbook-katex (0.9.x) and mdbook-mermaid (0.16.x). Hold the
+        # whole stack at the last 0.4-compatible versions until the
+        # preprocessor ecosystem catches up.
         run: |
-          cargo install --locked mdbook
-          cargo install --locked mdbook-katex
-          cargo install --locked mdbook-mermaid
+          cargo install --locked --version 0.4.52 mdbook
+          cargo install --locked --version 0.9.4 mdbook-katex
+          cargo install --locked --version 0.16.0 mdbook-mermaid
       - name: Build
         run: mdbook build
       - uses: actions/upload-pages-artifact@v3
