@@ -66,6 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.experiment.as_ref().unwrap().end_time,
         cfg.experiment.as_ref().unwrap().epochs,
     );
+    println!(
+        "sparse_solver={:?} use_cuda_graphs={}",
+        cfg.params.sparse_solver, cfg.params.use_cuda_graphs,
+    );
 
     let mlp_section = cfg.mlp.as_ref().expect("mlp config required");
     let mlp_cfg = MlpConfig::new(
