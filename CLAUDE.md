@@ -44,7 +44,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 ```bash
 cargo build                                    # debug build
 cargo build --release                          # release build (LTO=thin)
-cargo test                                     # all tests (~60 total across 8 files + lib units)
+cargo test                                     # all tests
 cargo test --test kan_head                     # head shape/init/gradient tests
 cargo test --test sparse_gradcheck             # one integration test file
 cargo test --test mmc mc_routes_linear_chain   # one specific test
@@ -60,6 +60,37 @@ cargo run --release --example benchmark_hydrograph
 # Regenerate the DDR sandbox fixture (only when DDR's solver changes):
 cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 ```
+
+### `ddrs` CLI (preferred entrypoint)
+
+The `ddrs` binary replaces the four legacy single-purpose binaries with a
+terraform-style lifecycle. First-time flow is `init → plan → init → run`.
+
+```bash
+ddrs init                                      # compile + GPU probe + workspace + smoke
+ddrs plan                                      # dry-run validation (bootstraps ddrs.yaml if missing)
+ddrs run --workflow train                      # equivalent to legacy `train`
+ddrs run --workflow eval                       # equivalent to legacy `eval`
+ddrs run --workflow train-and-test --plot      # full sweep + parameter NetCDF dump
+ddrs show <run-id>                             # inspect a past run's manifest
+ddrs status                                    # workspace summary + disk usage
+ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
+```
+
+The full design lives at
+`docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
+implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+
+### Legacy binaries (deprecated, removed in 0.4)
+
+```bash
+cargo run --release --bin train -- ...
+cargo run --release --bin eval -- ...
+cargo run --release --bin train_and_test -- ...
+```
+
+Each prints a deprecation warning on entry pointing at the equivalent
+`ddrs run` invocation.
 
 ## Architecture in one screen
 
@@ -125,3 +156,6 @@ and mirrors `~/projects/ddr/config/merit_training_config.yaml` verbatim.
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`
   (which is verbatim from DDR's `merit_training_config.yaml`)
+- CLI behavior / lifecycle / manifest schema → `docs/superpowers/specs/`
+  (specs from `/superpowers brainstorming` runs) and `docs/superpowers/plans/`
+  (corresponding implementation plans).
