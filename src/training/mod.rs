@@ -9,6 +9,7 @@
 //!   V2 — all filtered gauges in one batch, same frozen params.
 //!   V3 — full training loop runs end-to-end without divergence.
 
+pub mod bootstrap;
 pub mod checkpoint;
 pub mod driver;
 pub mod eval;
@@ -18,6 +19,7 @@ pub mod metrics;
 pub mod optimizer;
 pub mod zarr_io;
 
+pub use bootstrap::bootstrap_head_and_state;
 pub use checkpoint::{load_kan_head, save_kan_head};
 pub use forward::{
     scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams,

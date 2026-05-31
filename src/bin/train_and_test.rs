@@ -32,14 +32,13 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::BackendTypes;
 use burn_cuda::Cuda;
 use clap::Parser;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
 
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
+use ddrs::training::bootstrap::bootstrap_head_and_state;
 use ddrs::training::checkpoint::load_kan_head;
-use ddrs::training::driver::{train, TrainState};
+use ddrs::training::driver::train;
 use ddrs::training::optimizer::build_adam;
 use ddrs::training::{
     evaluate, write_predictions_zarr, EvalParams, ZarrAttrs,
@@ -110,23 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_grid(head_section.grid)
     .with_k(head_section.k);
 
-    // Seed the backend RNG BEFORE head init so Linear Kaiming/Xavier weight
-    // init is deterministic across runs (per BURN 0.21 docs at
-    // burn-backend-0.21.0/src/backend/base.rs:141, single-threaded determinism).
-    // KanLayer init uses its own seeded StdRng (CPU) and is independent of
-    // the backend RNG. CUDA atomic-add in scatter_add stays non-deterministic
-    // (real engine work for later), but at least the optimization starts
-    // from the same head weights every run.
-    <I as burn::tensor::backend::Backend>::seed(&device, train_cfg.seed);
-
-    let head: KanHead<AB> = head_cfg.init::<AB>(&device);
-
-    let mut state = TrainState::<I> {
-        head,
-        epoch: 1,
-        mini_batch: 0,
-        rng: StdRng::seed_from_u64(train_cfg.seed),
-    };
+    let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
     let mut optimizer = build_adam::<KanHead<AB>, AB>();
 
     train::<I>(
