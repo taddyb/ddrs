@@ -20,8 +20,8 @@ use burn::backend::{Autodiff, NdArray};
 use burn::tensor::Tensor;
 use plotters::prelude::*;
 
-use ddrs::config::Config;
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
+use ddrs::sandbox::{self, SandboxInputs, N_REACHES};
 use ddrs::sparse::SparseAdjacency;
 
 // Default inner backend = NdArray (CPU, deterministic). The graph-replay path
@@ -31,8 +31,6 @@ type InnerCpu = NdArray<f32>;
 type DCpu = <InnerCpu as burn::tensor::backend::BackendTypes>::Device;
 type InnerGpu = burn_cuda::Cuda<f32, i32>;
 type DGpu = <InnerGpu as burn::tensor::backend::BackendTypes>::Device;
-
-const N_REACHES: usize = 5;
 
 fn read_matrix_csv(path: &Path, expect_rows: usize, expect_cols: usize) -> Vec<f32> {
     let s = std::fs::read_to_string(path).expect("read csv");
@@ -52,46 +50,12 @@ fn read_matrix_csv(path: &Path, expect_rows: usize, expect_cols: usize) -> Vec<f
     data
 }
 
-fn read_int_csv(path: &Path) -> Vec<i32> {
-    std::fs::read_to_string(path)
-        .expect("read int csv")
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.parse().unwrap())
-        .collect()
-}
-
-fn ddr_config() -> Config {
-    let mut cfg = Config::default();
-    cfg.params.parameter_ranges.n = [0.015, 0.25];
-    cfg.params.parameter_ranges.q_spatial = [0.0, 1.0];
-    cfg.params.parameter_ranges.p_spatial = [1.0, 200.0];
-    cfg.params.attribute_minimums.discharge = 1e-4;
-    cfg.params.attribute_minimums.slope = 1e-3;
-    cfg.params.attribute_minimums.velocity = 0.01;
-    cfg.params.attribute_minimums.depth = 0.01;
-    cfg.params.attribute_minimums.bottom_width = 0.1; // matches DDR sandbox config
-    cfg.params.log_space_parameters = vec!["n".to_string()]; // DDR sandbox: n is log-space
-    cfg.params.defaults.insert("p_spatial".to_string(), 21.0);
-    // SP-10: opt-in CUDA graphs for V1 sanity check. Setting this also forces
-    // the CUDA sparse solver since graphs only apply on that path.
-    if std::env::var("DDRS_FORCE_GRAPHS").is_ok() {
-        cfg.params.use_cuda_graphs = true;
-        cfg.params.sparse_solver = ddrs::config::SparseSolver::Cuda;
-        eprintln!("DDRS_FORCE_GRAPHS=1: use_cuda_graphs=true, sparse_solver=Cuda");
-    }
-    cfg
-}
-
 /// Run the MuskingumCunge forward over the sandbox inputs and return the
 /// output in topological order, shape `[N_REACHES * n_timesteps]`. Generic
 /// over the inner backend so we can dispatch CPU / GPU at runtime.
 fn run_mc<Inner>(
     device: &<Inner as burn::tensor::backend::BackendTypes>::Device,
-    qprime_flat: &[f32],
-    adjacency_flat: &[f32],
-    n_timesteps: usize,
+    inputs: &SandboxInputs,
 ) -> Vec<f32>
 where
     Inner: burn::tensor::backend::Backend,
@@ -100,15 +64,16 @@ where
 {
     type Bv<I> = Autodiff<I>;
     let qprime: Tensor<Bv<Inner>, 2> =
-        Tensor::<Bv<Inner>, 1>::from_floats(qprime_flat, device).reshape([n_timesteps, N_REACHES]);
+        Tensor::<Bv<Inner>, 1>::from_floats(inputs.qprime_flat.as_slice(), device)
+            .reshape([inputs.n_timesteps, N_REACHES]);
 
     let adjacency = SparseAdjacency::from_dense(
         N_REACHES,
-        adjacency_flat,
+        &inputs.adjacency_flat,
         vec![5000.0; N_REACHES],
         vec![0.001; N_REACHES],
     );
-    let inputs = RoutingInputs::<Inner> {
+    let routing_inputs = RoutingInputs::<Inner> {
         adjacency,
         x_storage: Tensor::ones([N_REACHES], device) * 0.25,
     };
@@ -118,8 +83,8 @@ where
         p_spatial: None,
     };
 
-    let mut mc = MuskingumCunge::<Inner>::new(ddr_config(), device.clone());
-    mc.setup_inputs(inputs, qprime, params, false);
+    let mut mc = MuskingumCunge::<Inner>::new(inputs.config.clone(), device.clone());
+    mc.setup_inputs(routing_inputs, qprime, params, false);
     let out = mc.forward();
     out.into_data().to_vec().unwrap()
 }
@@ -127,51 +92,33 @@ where
 fn main() -> std::io::Result<()> {
     let fixtures = Path::new("fixtures/sandbox");
 
-    // ---- load fixtures ----
-    let topo_order = read_int_csv(&fixtures.join("topo_order.csv"));
-    let rapid2_order = read_int_csv(&fixtures.join("rapid2_order.csv"));
-    assert_eq!(topo_order.len(), N_REACHES);
-    assert_eq!(rapid2_order.len(), N_REACHES);
+    // ---- load fixtures via shared loader ----
+    let inputs = sandbox::load_from_dir(fixtures)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-    // qprime_topo.csv has shape (T, N) — must read in row order.
-    let qprime_raw = std::fs::read_to_string(fixtures.join("qprime_topo.csv")).expect("read q'");
-    let qprime_rows: Vec<Vec<f32>> = qprime_raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| l.split(',').map(|x| x.parse().unwrap()).collect())
-        .collect();
-    let n_timesteps = qprime_rows.len();
-    assert!(qprime_rows.iter().all(|r| r.len() == N_REACHES));
-    let qprime_flat: Vec<f32> = qprime_rows.into_iter().flatten().collect();
-
-    let adjacency_flat = read_matrix_csv(&fixtures.join("adjacency_topo.csv"), N_REACHES, N_REACHES);
+    let n_timesteps = inputs.n_timesteps;
 
     // ddr_discharge_rapid2.csv has shape (N, T)
-    let ddr_rapid2_flat = read_matrix_csv(&fixtures.join("ddr_discharge_rapid2.csv"), N_REACHES, n_timesteps);
+    let ddr_rapid2_flat = read_matrix_csv(
+        &fixtures.join("ddr_discharge_rapid2.csv"),
+        N_REACHES,
+        n_timesteps,
+    );
 
     // ---- run MuskingumCunge: dispatch on backend per DDRS_FORCE_GRAPHS env var ----
     let topo_data: Vec<f32> = if std::env::var("DDRS_FORCE_GRAPHS").is_ok() {
-        run_mc::<InnerGpu>(
-            &DGpu::default(),
-            &qprime_flat,
-            &adjacency_flat,
-            n_timesteps,
-        )
+        run_mc::<InnerGpu>(&DGpu::default(), &inputs)
     } else {
-        run_mc::<InnerCpu>(
-            &DCpu::default(),
-            &qprime_flat,
-            &adjacency_flat,
-            n_timesteps,
-        )
+        run_mc::<InnerCpu>(&DCpu::default(), &inputs)
     };
 
     // ---- reorder topo -> RAPID2 ----
-    let rapid2_idx_in_topo: Vec<usize> = rapid2_order
+    let rapid2_idx_in_topo: Vec<usize> = inputs
+        .rapid2_order
         .iter()
         .map(|rid| {
-            topo_order
+            inputs
+                .topo_order
                 .iter()
                 .position(|t| t == rid)
                 .expect("RAPID2 id missing from topo")
@@ -186,7 +133,10 @@ fn main() -> std::io::Result<()> {
 
     // ---- numerical comparison ----
     println!("Sandbox benchmark comparison: ddrs (Rust/BURN) vs DDR (PyTorch)");
-    println!("  reaches:    {} (RAPID2 order: {:?})", N_REACHES, rapid2_order);
+    println!(
+        "  reaches:    {} (RAPID2 order: {:?})",
+        N_REACHES, inputs.rapid2_order
+    );
     println!("  timesteps:  {}", n_timesteps);
     println!();
     println!(
@@ -196,8 +146,11 @@ fn main() -> std::io::Result<()> {
     let mut overall_max_abs: f32 = 0.0;
     let mut overall_max_rel: f32 = 0.0;
     let mut detail = BufWriter::new(File::create("output/ddrs_vs_ddr.csv")?);
-    writeln!(detail, "reach_id,max_abs_diff,mean_abs_diff,max_rel_diff,ddr_mean,ddrs_mean,corr")?;
-    for (r2_pos, &rid) in rapid2_order.iter().enumerate() {
+    writeln!(
+        detail,
+        "reach_id,max_abs_diff,mean_abs_diff,max_rel_diff,ddr_mean,ddrs_mean,corr"
+    )?;
+    for (r2_pos, &rid) in inputs.rapid2_order.iter().enumerate() {
         let row_ddr = &ddr_rapid2_flat[r2_pos * n_timesteps..(r2_pos + 1) * n_timesteps];
         let row_rs = &ddrs_rapid2[r2_pos * n_timesteps..(r2_pos + 1) * n_timesteps];
 
@@ -264,7 +217,13 @@ fn main() -> std::io::Result<()> {
 
     // ---- side-by-side PNG ----
     let png_path = Path::new("output/ddrs_vs_ddr.png");
-    draw_comparison_png(png_path, &ddr_rapid2_flat, &ddrs_rapid2, n_timesteps, &rapid2_order)?;
+    draw_comparison_png(
+        png_path,
+        &ddr_rapid2_flat,
+        &ddrs_rapid2,
+        n_timesteps,
+        &inputs.rapid2_order,
+    )?;
     println!();
     println!("  csv diff:  output/ddrs_vs_ddr.csv");
     println!("  png:       {}", png_path.display());
@@ -287,10 +246,12 @@ fn draw_comparison_png(
     let root = BitMapBackend::new(path, (w, h)).into_drawing_area();
     root.fill(&WHITE)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    let title_area = root.titled(
-        "DDR (solid) vs ddrs (dashed) — Sandbox Hydrograph",
-        ("sans-serif", 22).into_font(),
-    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let title_area = root
+        .titled(
+            "DDR (solid) vs ddrs (dashed) — Sandbox Hydrograph",
+            ("sans-serif", 22).into_font(),
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     let panels = title_area.split_evenly((n, 1));
     let palette: [RGBColor; 5] = [
@@ -303,8 +264,17 @@ fn draw_comparison_png(
     for (i, area) in panels.into_iter().enumerate() {
         let row_ddr = &ddr[i * n_timesteps..(i + 1) * n_timesteps];
         let row_rs = &ddrs[i * n_timesteps..(i + 1) * n_timesteps];
-        let y_max = row_ddr.iter().chain(row_rs.iter()).cloned().fold(f32::NEG_INFINITY, f32::max);
-        let y_min = row_ddr.iter().chain(row_rs.iter()).cloned().fold(f32::INFINITY, f32::min).min(0.0);
+        let y_max = row_ddr
+            .iter()
+            .chain(row_rs.iter())
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let y_min = row_ddr
+            .iter()
+            .chain(row_rs.iter())
+            .cloned()
+            .fold(f32::INFINITY, f32::min)
+            .min(0.0);
         let y_hi = y_max + 0.05 * (y_max - y_min).abs().max(1.0);
 
         let color = palette[i % palette.len()];
@@ -329,14 +299,24 @@ fn draw_comparison_png(
             .draw()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-        let ddr_series: Vec<(f32, f32)> = row_ddr.iter().enumerate().map(|(t, v)| (t as f32, *v)).collect();
-        let rs_series: Vec<(f32, f32)> = row_rs.iter().enumerate().map(|(t, v)| (t as f32, *v)).collect();
+        let ddr_series: Vec<(f32, f32)> = row_ddr
+            .iter()
+            .enumerate()
+            .map(|(t, v)| (t as f32, *v))
+            .collect();
+        let rs_series: Vec<(f32, f32)> = row_rs
+            .iter()
+            .enumerate()
+            .map(|(t, v)| (t as f32, *v))
+            .collect();
 
         chart
             .draw_series(LineSeries::new(ddr_series, color.stroke_width(2)))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
             .label("DDR (PyTorch)")
-            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2)));
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
+            });
 
         // Dashed: render as short line segments.
         let dashed_color = BLACK.mix(0.65);
@@ -363,7 +343,9 @@ fn draw_comparison_png(
             .draw_series(std::iter::empty::<Circle<(f32, f32), i32>>())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
             .label("ddrs (Rust/BURN)")
-            .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 18, y)], dashed_color.stroke_width(1)));
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 18, y)], dashed_color.stroke_width(1))
+            });
 
         chart
             .configure_series_labels()
