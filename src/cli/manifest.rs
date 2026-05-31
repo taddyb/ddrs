@@ -48,10 +48,12 @@ pub struct SourceLockRef {
     pub drift: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RunOutputs {
     pub checkpoints: Vec<PathBuf>,
     pub plot: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_zarr: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,12 @@
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
+
+use burn::backend::Autodiff;
+use burn::tensor::backend::BackendTypes;
+use burn_cuda::Cuda;
 
 use crate::cli::{
     manifest::{GitInfo, Manifest, RunOutputs, SourceLockRef},
@@ -8,7 +14,15 @@ use crate::cli::{
     types::{RunStatus, Workflow},
     workspace::Workspace,
 };
+use crate::config::{Config, ConfigMode};
+use crate::data::dataset::MeritGagesDataset;
 use crate::error::CliError;
+use crate::nn::kan_head::{KanHead, KanHeadConfig};
+use crate::training::bootstrap::bootstrap_head_and_state;
+use crate::training::checkpoint::load_kan_head;
+use crate::training::driver::train as training_train;
+use crate::training::optimizer::build_adam;
+use crate::training::{evaluate, write_predictions_zarr, EvalParams, ZarrAttrs};
 
 pub struct RunInput {
     pub workspace: Workspace,
@@ -143,39 +157,244 @@ fn capture_git() -> GitInfo {
     }
 }
 
-/// Run the actual workflow. For v1 this is a stub: it returns
-/// `(RunStatus::Failed, exit_reason)` with a clear message that real
-/// dispatch is not wired in yet, so the integration test pattern is
-/// established without needing GPU access. Task 22 (`cli_run_drift` and
-/// friends) will exercise the failure path; real workflow execution lands
-/// when an integration host with merit data validates the end-to-end flow.
+/// Execute the requested workflow in-process.
 ///
-/// The shape of this function — `(status, exit_reason, metrics, outputs)`
-/// — is the contract for that future replacement. Don't change it without
-/// updating the manifest schema.
+/// Wraps the body in `catch_unwind` so a thread panic (e.g. CUDA init
+/// failure) produces `RunStatus::Failed` with a populated `exit_reason`
+/// rather than crashing before the manifest is written.
 fn dispatch(
-    _input: &RunInput,
-    _pr: &PlanResult,
-    _run_dir: &Path,
+    input: &RunInput,
+    pr: &PlanResult,
+    run_dir: &Path,
 ) -> (RunStatus, Option<String>, serde_json::Value, RunOutputs) {
-    // v1 stub. Real dispatch:
-    //   type I = burn_cuda::Cuda<f32, i32>;
-    //   let device = <I as BackendTypes>::Device::default();
-    //   let dataset = MeritGagesDataset::open(&pr.config)?;
-    //   let boot = bootstrap_head_and_state::<I>(&pr.config, &device);
-    //   match pr.workflow {
-    //     Workflow::Train | Workflow::TrainAndTest =>
-    //       training::driver::train(&pr.config, &dataset, &mut boot.1, &mut opt,
-    //                               &device, &_run_dir.join("checkpoints"),
-    //                               _input.max_mini_batches),
-    //     Workflow::Eval => training::eval::eval(...),
-    //   }
-    // Returning Failed here so the manifest still writes (with status="failed",
-    // exit_reason populated) and `cli_runtime_failure` tests can exercise it.
-    (
-        RunStatus::Failed,
-        Some("dispatch stub — real workflow execution lands in a follow-up commit".into()),
-        serde_json::json!({}),
-        RunOutputs { checkpoints: vec![], plot: None },
-    )
+    type I = Cuda<f32, i32>;
+    type AB = Autodiff<I>;
+
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(serde_json::Value, RunOutputs), CliError> {
+        match pr.workflow {
+            Workflow::Eval => {
+                return Err(CliError::Runtime(
+                    "standalone --workflow eval needs a --from-run <run-id> flag; \
+                     use --workflow train-and-test for now"
+                        .into(),
+                ));
+            }
+            Workflow::Train => {
+                let device = <I as BackendTypes>::Device::default();
+                let phase1_start = Instant::now();
+
+                let train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+                let train_dataset = MeritGagesDataset::open(&train_cfg)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let head_section = train_cfg.kan_head.as_ref().expect("kan_head config required");
+                let _head_cfg = KanHeadConfig::new(
+                    head_section.input_var_names.clone(),
+                    head_section.learnable_parameters.clone(),
+                    train_cfg.seed,
+                )
+                .with_hidden_size(head_section.hidden_size)
+                .with_num_hidden_layers(head_section.num_hidden_layers)
+                .with_grid(head_section.grid)
+                .with_k(head_section.k);
+
+                let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
+                let mut optimizer = build_adam::<KanHead<AB>, AB>();
+
+                let ckpt_dir = run_dir.join("checkpoints");
+                training_train::<I>(
+                    &train_cfg,
+                    &train_dataset,
+                    &mut state,
+                    &mut optimizer,
+                    &device,
+                    &ckpt_dir,
+                    input.max_mini_batches,
+                )
+                .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let phase1_elapsed = phase1_start.elapsed();
+                let epochs_completed = state.epoch.saturating_sub(1);
+                let final_mini_batch = state.mini_batch;
+
+                drop(optimizer);
+                drop(state);
+                drop(train_dataset);
+
+                let metrics = serde_json::json!({
+                    "epochs_completed": epochs_completed,
+                    "final_mini_batch": final_mini_batch,
+                    "phase1_seconds": phase1_elapsed.as_secs_f32(),
+                });
+                let outputs = RunOutputs {
+                    checkpoints: list_mpk_files(&ckpt_dir),
+                    plot: None,
+                    eval_zarr: None,
+                };
+                Ok((metrics, outputs))
+            }
+            Workflow::TrainAndTest => {
+                let device = <I as BackendTypes>::Device::default();
+
+                // --- Phase 1: training ---
+                let phase1_start = Instant::now();
+                let train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+                let train_dataset = MeritGagesDataset::open(&train_cfg)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let head_section = train_cfg.kan_head.as_ref().expect("kan_head config required");
+                let head_cfg = KanHeadConfig::new(
+                    head_section.input_var_names.clone(),
+                    head_section.learnable_parameters.clone(),
+                    train_cfg.seed,
+                )
+                .with_hidden_size(head_section.hidden_size)
+                .with_num_hidden_layers(head_section.num_hidden_layers)
+                .with_grid(head_section.grid)
+                .with_k(head_section.k);
+
+                let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
+                let mut optimizer = build_adam::<KanHead<AB>, AB>();
+
+                let ckpt_dir = run_dir.join("checkpoints");
+                training_train::<I>(
+                    &train_cfg,
+                    &train_dataset,
+                    &mut state,
+                    &mut optimizer,
+                    &device,
+                    &ckpt_dir,
+                    input.max_mini_batches,
+                )
+                .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let phase1_elapsed = phase1_start.elapsed();
+                let epochs_completed = state.epoch.saturating_sub(1);
+                let final_mini_batch = state.mini_batch;
+
+                drop(optimizer);
+                drop(state);
+                drop(train_dataset);
+
+                // --- Phase 2: testing ---
+                let phase2_start = Instant::now();
+                let test_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Testing)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+                let test_dataset = MeritGagesDataset::open(&test_cfg)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let latest = latest_checkpoint_base(&ckpt_dir)
+                    .ok_or_else(|| CliError::Runtime("no .mpk checkpoints found after Phase 1".into()))?;
+
+                let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+                let head = load_kan_head::<I>(&latest, head_template, &device)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                // In Testing mode, experiment.batch_size carries DAYS (not gauges)
+                // because the testing: overlay sets `batch_size: 15`.
+                let batch_size_days = test_cfg
+                    .experiment
+                    .as_ref()
+                    .map(|e| e.batch_size)
+                    .unwrap_or(15);
+
+                let output = evaluate::<I>(
+                    &test_cfg,
+                    &test_dataset,
+                    EvalParams::KanHead(&head),
+                    &device,
+                    batch_size_days,
+                )
+                .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let phase2_elapsed = phase2_start.elapsed();
+
+                let eval_dir = run_dir.join("eval");
+                fs::create_dir_all(&eval_dir)?;
+                let zarr_path = eval_dir.join("predictions.zarr");
+
+                let exp = test_cfg.experiment.as_ref().unwrap();
+                let gages_csv_path = test_cfg.data_sources.as_ref().unwrap().gages.clone();
+                write_predictions_zarr(
+                    &zarr_path,
+                    &output,
+                    ZarrAttrs {
+                        start_time: &exp.start_time,
+                        end_time: &exp.end_time,
+                        version: env!("CARGO_PKG_VERSION"),
+                        evaluation_basins_file: &gages_csv_path,
+                        model_label: &latest.display().to_string(),
+                    },
+                )
+                .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                let nse_clean: Vec<f32> = output
+                    .metrics
+                    .nse
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .collect();
+                let mean_nse = nse_clean.iter().sum::<f32>() / (nse_clean.len() as f32).max(1.0);
+                let median_nse = {
+                    let mut sorted = nse_clean.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    if sorted.is_empty() { f32::NAN } else { sorted[sorted.len() / 2] }
+                };
+
+                let metrics = serde_json::json!({
+                    "epochs_completed": epochs_completed,
+                    "final_mini_batch": final_mini_batch,
+                    "phase1_seconds": phase1_elapsed.as_secs_f32(),
+                    "phase2_seconds": phase2_elapsed.as_secs_f32(),
+                    "n_gauges_finite_nse": nse_clean.len(),
+                    "n_gauges_total": output.metrics.nse.len(),
+                    "mean_nse_finite": mean_nse,
+                    "median_nse_finite": median_nse,
+                });
+                let outputs = RunOutputs {
+                    checkpoints: list_mpk_files(&ckpt_dir),
+                    plot: None,
+                    eval_zarr: Some(PathBuf::from("eval/predictions.zarr")),
+                };
+                Ok((metrics, outputs))
+            }
+        }
+    }));
+
+    match result {
+        Ok(Ok((metrics, outputs))) => (RunStatus::Ok, None, metrics, outputs),
+        Ok(Err(e)) => (
+            RunStatus::Failed,
+            Some(e.to_string()),
+            serde_json::json!({}),
+            RunOutputs::default(),
+        ),
+        Err(_) => (
+            RunStatus::Failed,
+            Some("workflow panicked".into()),
+            serde_json::json!({}),
+            RunOutputs::default(),
+        ),
+    }
+}
+
+/// Returns paths to all `.mpk` files in `dir`, relative to `dir`'s parent
+/// (i.e. `checkpoints/epoch_5_mb_0.mpk`).
+fn list_mpk_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else { return vec![] };
+    let dir_name = dir.file_name().unwrap_or_default();
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|e| e == "mpk").unwrap_or(false))
+        .map(|p| {
+            let fname = p.file_name().unwrap_or_default();
+            PathBuf::from(dir_name).join(fname)
+        })
+        .collect();
+    paths.sort();
+    paths
 }

@@ -21,7 +21,7 @@ fn manifest_round_trips_via_serde_json() {
             matched: true,
             drift: vec![],
         },
-        outputs: RunOutputs { checkpoints: vec![], plot: None },
+        outputs: RunOutputs { checkpoints: vec![], plot: None, eval_zarr: None },
         metrics: serde_json::json!({"final_loss": 0.385}),
         max_mini_batches: None,
     };

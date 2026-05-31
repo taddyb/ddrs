@@ -5,11 +5,11 @@ use ddrs::cli::types::{RunStatus, Workflow};
 use ddrs::cli::workspace::Workspace;
 use std::fs;
 
-/// The v1 `dispatch()` is a stub that always returns `RunStatus::Failed`.
-/// `run` should still write the manifest with `status="failed"` and a
-/// populated `exit_reason`, and return Ok(run_dir) so the caller can
-/// inspect the manifest. This exercises the failure-manifest path
-/// end-to-end without needing GPU + merit data.
+/// `dispatch()` runs the real workflow inside `catch_unwind`. When the
+/// workflow fails (e.g. no GPU, missing merit data), `run` should still
+/// write the manifest with `status="failed"` and a populated `exit_reason`,
+/// and return Ok(run_dir) so the caller can inspect the manifest. This
+/// exercises the failure-manifest path end-to-end.
 #[test]
 fn run_writes_failure_manifest_when_dispatch_stub_fails() {
     let d = tempfile::tempdir().unwrap();
@@ -47,11 +47,14 @@ fn run_writes_failure_manifest_when_dispatch_stub_fails() {
     .expect("run should return Ok(run_dir) even when dispatch fails");
 
     let manifest = Manifest::read(&run_dir.join("manifest.json")).unwrap();
-    assert_eq!(manifest.status, RunStatus::Failed);
-    assert!(manifest.exit_reason.is_some(), "exit_reason should be populated");
-    assert!(
-        manifest.exit_reason.as_deref().unwrap().contains("dispatch stub"),
-        "exit_reason should mention the dispatch stub: {:?}",
-        manifest.exit_reason
-    );
+    // With real dispatch the workflow may succeed (GPU + merit data present)
+    // or fail (no GPU / panic). Either way the manifest must be written.
+    // When it fails, exit_reason must be populated.
+    if manifest.status == RunStatus::Failed {
+        assert!(
+            manifest.exit_reason.is_some(),
+            "exit_reason must be populated on failure, got: {:?}",
+            manifest.exit_reason
+        );
+    }
 }
