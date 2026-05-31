@@ -1,1 +1,143 @@
-//! Stub. Filled in by a later task.
+//! Dry-run validation. Returns a PlanResult that `run` consumes directly
+//! to avoid duplicated I/O.
+
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::cli::fingerprint::{Fingerprint, fingerprint_path, reuse_if_unchanged};
+use crate::cli::lockfile::{Lockfile, diff_against_live};
+use crate::cli::types::Workflow;
+use crate::cli::workspace::Workspace;
+use crate::config::{Config, ConfigMode};
+use crate::error::CliError;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanResult {
+    #[serde(skip)]
+    pub config: Config,
+    pub config_path: PathBuf,
+    pub workflow: Workflow,
+    pub sources: BTreeMap<String, Fingerprint>,
+    pub drift: Vec<String>,
+    pub summary: PlanSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanSummary {
+    pub workflow: Workflow,
+    pub n_gauges: Option<usize>,
+    pub batches_per_epoch: Option<usize>,
+    pub epochs: Option<usize>,
+    pub est_timesteps: Option<usize>,
+    pub n_days: Option<usize>,
+    pub chunks: Option<usize>,
+    pub gpu_mem_gb_upper_bound: Option<f32>,
+}
+
+pub fn plan(
+    config_path: &Path,
+    workflow_override: Option<Workflow>,
+    workspace: &Workspace,
+) -> Result<PlanResult, CliError> {
+    // Step 1: resolve workflow.
+    let workflow = workflow_override.ok_or_else(|| CliError::ConfigInvalid {
+        path: config_path.into(),
+        source: "neither --workflow nor `workflow:` key set".into(),
+    })?;
+
+    // Step 2: parse config in the appropriate mode.
+    let mode = match workflow {
+        Workflow::Train | Workflow::TrainAndTest => ConfigMode::Training,
+        Workflow::Eval => ConfigMode::Testing,
+    };
+    let config = Config::from_yaml_file_with_mode(config_path, mode)
+        .map_err(|e| CliError::ConfigInvalid {
+            path: config_path.into(),
+            source: Box::new(e),
+        })?;
+
+    // Step 3: read lockfile (required; init must have produced it).
+    let lock_path = workspace.lockfile();
+    if !lock_path.is_file() {
+        return Err(CliError::WorkspaceNotInitialized { path: workspace.root().into() });
+    }
+    let lock = Lockfile::read(&lock_path)?;
+
+    // Step 4: compute live fingerprints (reusing locked fp when stat matches).
+    let data_sources = config.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: config_path.into(),
+        source: "data_sources: missing".into(),
+    })?;
+    let pairs: Vec<(String, PathBuf)> = vec![
+        ("attributes".into(),      data_sources.attributes.clone()),
+        ("conus_adjacency".into(), data_sources.conus_adjacency.clone()),
+        ("gages_adjacency".into(), data_sources.gages_adjacency.clone()),
+        ("streamflow".into(),      data_sources.streamflow.clone()),
+        ("observations".into(),    data_sources.observations.clone()),
+        ("gages".into(),           data_sources.gages.clone()),
+    ];
+    let mut sources = BTreeMap::new();
+    for (key, path) in pairs {
+        let live = match lock.sources.get(&key) {
+            Some(locked) => {
+                let r = reuse_if_unchanged(&path, locked)?;
+                Fingerprint {
+                    path: path.clone(),
+                    mtime: r.mtime,
+                    size: r.size,
+                    fp: r.fp,
+                }
+            }
+            None => fingerprint_path(&path)?,
+        };
+        sources.insert(key, live);
+    }
+    let drift = diff_against_live(&lock, &sources);
+
+    // Step 5: zarr/icechunk metadata-only validation. v1 stub — the
+    // existing ConusAdjacencyStore::open is the only "open" that's both
+    // cheap and present today. The time-window check against the
+    // streamflow store is deferred to a follow-up; not a blocker for
+    // shipping plan validation today (the integration test in Task 21
+    // exercises the lockfile + fingerprint paths, which are the bulk of
+    // plan's value).
+
+    // Step 6: compute summary.
+    let summary = compute_summary(&config, workflow)?;
+
+    Ok(PlanResult {
+        config,
+        config_path: config_path.into(),
+        workflow,
+        sources,
+        drift,
+        summary,
+    })
+}
+
+fn compute_summary(cfg: &Config, workflow: Workflow) -> Result<PlanSummary, CliError> {
+    let exp = cfg.experiment.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "experiment".into(),
+        source: "experiment: missing".into(),
+    })?;
+    // n_gauges + max_subgraph_size require opening adjacency stores; left
+    // as Option<None> for v1. Tasks 16/22 can tighten by counting gauges
+    // from the gages CSV.
+    let n_gauges: Option<usize> = None;
+    let batches_per_epoch = n_gauges.map(|n| n.div_ceil(exp.batch_size));
+    let rho = exp.rho.unwrap_or(0);
+    let est_timesteps = batches_per_epoch.map(|b| rho * b * exp.epochs);
+    let gpu_mem_gb_upper_bound: Option<f32> = None;
+
+    Ok(PlanSummary {
+        workflow,
+        n_gauges,
+        batches_per_epoch,
+        epochs: Some(exp.epochs),
+        est_timesteps,
+        n_days: None,
+        chunks: None,
+        gpu_mem_gb_upper_bound,
+    })
+}
