@@ -9,7 +9,7 @@ use std::path::Path;
 use burn::backend::Autodiff;
 use burn::tensor::{backend::Backend, Tensor};
 
-use crate::cli::CliError;
+use crate::error::CliError;
 use crate::config::Config;
 use crate::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use crate::sparse::SparseAdjacency;
