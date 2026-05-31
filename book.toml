@@ -1,0 +1,29 @@
+[book]
+title = "ddrs"
+authors = ["Tadd Bindas"]
+description = "BURN-based differentiable Muskingum-Cunge routing in Rust"
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[preprocessor.katex]
+no-css = false
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/taddyb/ddrs"
+edit-url-template = "https://github.com/taddyb/ddrs/edit/master/docs/{path}"
+mathjax-support = false
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true

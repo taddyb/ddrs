@@ -8,7 +8,7 @@
 //! is fixed for a given network adjacency — we build [`CsrPattern`] once at
 //! `setup_inputs` time and reuse it across timesteps.
 //!
-//! See `.claude/skills/burn_custom_backward.md` for the BURN-0.21 custom-backward
+//! See `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 custom-backward
 //! recipe this module uses.
 
 pub mod cusparse;
