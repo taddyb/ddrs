@@ -35,9 +35,13 @@ experiment:
     3: 0.0005
   grad_clip_max_norm: 1.0
 
-mlp:
+kan_head:
   hidden_size: 21
   num_hidden_layers: 2
+  # B-spline grid intervals (`num` in pykan). Match DDR's default.
+  grid: 5
+  # B-spline order. Cubic.
+  k: 3
   input_var_names:
     - SoilGrids1km_clay
     - aridity

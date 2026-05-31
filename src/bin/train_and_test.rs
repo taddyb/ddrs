@@ -20,7 +20,7 @@
 //!     batch_size=15 days, rho=null).
 //!   - Auto-discover the latest .mpk in --checkpoint-dir.
 //!   - Load MLP from that checkpoint (now contains learned weights).
-//!   - Run evaluate() with EvalParams::Mlp, write zarr, log NSE summary.
+//!   - Run evaluate() with EvalParams::KanHead, write zarr, log NSE summary.
 //!
 //! Optional --max-mini-batches caps Phase 1 for smoke testing (default: full
 //! training).
@@ -37,8 +37,8 @@ use rand::rngs::StdRng;
 
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
-use ddrs::nn::mlp::{Mlp, MlpConfig};
-use ddrs::training::checkpoint::load_mlp;
+use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
+use ddrs::training::checkpoint::load_kan_head;
 use ddrs::training::driver::{train, TrainState};
 use ddrs::training::optimizer::build_adam;
 use ddrs::training::{
@@ -99,31 +99,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         train_cfg.params.sparse_solver, train_cfg.params.use_cuda_graphs,
     );
 
-    let mlp_section = train_cfg.mlp.as_ref().expect("mlp config required");
-    let mlp_cfg = MlpConfig::new(
-        mlp_section.input_var_names.clone(),
-        mlp_section.learnable_parameters.clone(),
+    let head_section = train_cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = KanHeadConfig::new(
+        head_section.input_var_names.clone(),
+        head_section.learnable_parameters.clone(),
+        train_cfg.seed,
     )
-    .with_hidden_size(mlp_section.hidden_size)
-    .with_num_hidden_layers(mlp_section.num_hidden_layers);
+    .with_hidden_size(head_section.hidden_size)
+    .with_num_hidden_layers(head_section.num_hidden_layers)
+    .with_grid(head_section.grid)
+    .with_k(head_section.k);
 
-    // Seed the backend RNG BEFORE MLP init so Kaiming/Xavier weight init is
-    // deterministic across runs. Per BURN 0.21 docs at
-    // burn-backend-0.21.0/src/backend/base.rs:141 — ensures single-threaded
-    // determinism. CUDA atomic-add in scatter_add stays non-deterministic
+    // Seed the backend RNG BEFORE head init so Linear Kaiming/Xavier weight
+    // init is deterministic across runs (per BURN 0.21 docs at
+    // burn-backend-0.21.0/src/backend/base.rs:141, single-threaded determinism).
+    // KanLayer init uses its own seeded StdRng (CPU) and is independent of
+    // the backend RNG. CUDA atomic-add in scatter_add stays non-deterministic
     // (real engine work for later), but at least the optimization starts
-    // from the same MLP weights every run.
+    // from the same head weights every run.
     <I as burn::tensor::backend::Backend>::seed(&device, train_cfg.seed);
 
-    let mlp: Mlp<AB> = mlp_cfg.init::<AB>(&device);
+    let head: KanHead<AB> = head_cfg.init::<AB>(&device);
 
     let mut state = TrainState::<I> {
-        mlp,
+        head,
         epoch: 1,
         mini_batch: 0,
         rng: StdRng::seed_from_u64(train_cfg.seed),
     };
-    let mut optimizer = build_adam::<Mlp<AB>, AB>();
+    let mut optimizer = build_adam::<KanHead<AB>, AB>();
 
     train::<I>(
         &train_cfg,
@@ -169,13 +173,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let latest_ckpt = find_latest_mpk(&cli.checkpoint_dir)?;
     println!("loading checkpoint: {}", latest_ckpt.display());
 
-    let mlp_template: Mlp<I> = mlp_cfg.init::<I>(&device);
-    let mlp = load_mlp::<I>(&latest_ckpt, mlp_template, &device)?;
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&latest_ckpt, head_template, &device)?;
 
     let output = evaluate::<I>(
         &test_cfg,
         &test_dataset,
-        EvalParams::Mlp(&mlp),
+        EvalParams::KanHead(&head),
         &device,
         cli.batch_size_days,
     )?;
@@ -228,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Find the most-recently-modified `.mpk` file under `dir`. Returns the path
-/// WITHOUT the `.mpk` suffix so it can be passed straight to `load_mlp` (which
+/// WITHOUT the `.mpk` suffix so it can be passed straight to `load_kan_head` (which
 /// re-appends `.mpk` via `CompactRecorder::set_extension`).
 fn find_latest_mpk(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;

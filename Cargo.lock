@@ -2496,6 +2496,7 @@ dependencies = [
  "netcdf",
  "plotters",
  "rand 0.8.6",
+ "rskan",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5941,6 +5942,17 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "rskan"
+version = "0.1.0"
+source = "git+https://github.com/taddyb/rskan.git?tag=v0.1.0#dd49a34646dc617e773ac25b16f99022613cf697"
+dependencies = [
+ "burn",
+ "ndarray 0.16.1",
+ "rand 0.8.6",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

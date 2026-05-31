@@ -17,20 +17,25 @@ use burn::backend::{Autodiff, NdArray};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Tensor};
 
-use ddrs::nn::{Mlp, MlpConfig};
+use ddrs::nn::{KanHead, KanHeadConfig};
 
 use common::{InnerBackend, TestBackend, TestDevice};
 
-fn make_mlp<B: Backend>(
+/// Default seed for `KanHead` test factories. Made explicit so any future
+/// gradient/parity regression has a stable RNG fingerprint to compare against.
+const HEAD_TEST_SEED: u64 = 42;
+
+fn make_head<B: Backend>(
     input_size: usize,
     hidden_size: usize,
     num_hidden_layers: usize,
     learnable: &[&str],
     device: &B::Device,
-) -> Mlp<B> {
-    let cfg = MlpConfig::new(
+) -> KanHead<B> {
+    let cfg = KanHeadConfig::new(
         (0..input_size).map(|i| format!("attr_{i}")).collect(),
         learnable.iter().map(|s| s.to_string()).collect(),
+        HEAD_TEST_SEED,
     )
     .with_hidden_size(hidden_size)
     .with_num_hidden_layers(num_hidden_layers);
@@ -39,9 +44,9 @@ fn make_mlp<B: Backend>(
 
 /// Port of `test_kan_output_shape`.
 #[test]
-fn mlp_output_shape() {
+fn kan_head_output_shape() {
     let device = TestDevice::default();
-    let model = make_mlp::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
+    let model = make_head::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
     let inputs: Tensor<TestBackend, 2> = Tensor::random([10, 5], Distribution::Default, &device);
     let output = model.forward(inputs);
 
@@ -53,9 +58,9 @@ fn mlp_output_shape() {
 
 /// Port of `test_kan_sigmoid_bounds`.
 #[test]
-fn mlp_sigmoid_bounds() {
+fn kan_head_sigmoid_bounds() {
     let device = TestDevice::default();
-    let model = make_mlp::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
+    let model = make_head::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
     let inputs: Tensor<TestBackend, 2> = Tensor::random([20, 5], Distribution::Default, &device);
     let output = model.forward(inputs);
 
@@ -73,9 +78,9 @@ fn mlp_sigmoid_bounds() {
 /// Port of `test_kan_deterministic`. The forward pass has no internal RNG —
 /// calling twice on the same input yields bit-identical output.
 #[test]
-fn mlp_deterministic() {
+fn kan_head_deterministic() {
     let device = TestDevice::default();
-    let model = make_mlp::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
+    let model = make_head::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
     let inputs: Tensor<TestBackend, 2> = Tensor::random([5, 5], Distribution::Default, &device);
 
     let out1 = model.forward(inputs.clone());
@@ -91,10 +96,10 @@ fn mlp_deterministic() {
 /// Port of `test_kan_gradient_flow`. Verify that backward from a scalar formed
 /// out of the MLP outputs reaches at least one parameter of the module.
 #[test]
-fn mlp_gradient_flow() {
+fn kan_head_gradient_flow() {
     use burn::module::AutodiffModule;
     let device = TestDevice::default();
-    let model_ad = make_mlp::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
+    let model_ad = make_head::<TestBackend>(5, 11, 1, &["n", "q_spatial"], &device);
 
     let inputs: Tensor<TestBackend, 2> = Tensor::random([5, 5], Distribution::Default, &device);
     let output = model_ad.forward(inputs);
@@ -115,9 +120,9 @@ fn mlp_gradient_flow() {
 /// Port of `test_kan_multiple_hidden_layers`. Three hidden layers still
 /// produces the correct output shape.
 #[test]
-fn mlp_multiple_hidden_layers() {
+fn kan_head_multiple_hidden_layers() {
     let device = TestDevice::default();
-    let model = make_mlp::<TestBackend>(5, 11, 3, &["n", "q_spatial"], &device);
+    let model = make_head::<TestBackend>(5, 11, 3, &["n", "q_spatial"], &device);
     let inputs: Tensor<TestBackend, 2> = Tensor::random([5, 5], Distribution::Default, &device);
     let output = model.forward(inputs);
 
@@ -125,19 +130,16 @@ fn mlp_multiple_hidden_layers() {
     assert_eq!(output["q_spatial"].dims(), [5]);
 }
 
-/// DDR-specific: confirm the init recipe zeros all biases (matches
-/// `torch.nn.init.zeros_(self.{input,output}.bias)` in `nn/kan.py:47-48`,
-/// extended to hidden biases for consistency).
+/// DDR-specific: confirm the init recipe zeros the input + output Linear
+/// biases (matches `torch.nn.init.zeros_(self.{input,output}.bias)` in
+/// `nn/kan.py:47-48`). Hidden KanLayers carry no bias — their per-edge
+/// `scale_base` and `scale_sp` Params replace the per-neuron bias term.
 #[test]
-fn mlp_biases_zero_at_init() {
+fn kan_head_biases_zero_at_init() {
     let device = TestDevice::default();
-    let model = make_mlp::<TestBackend>(10, 21, 2, &["n", "q_spatial", "p_spatial"], &device);
+    let model = make_head::<TestBackend>(10, 21, 2, &["n", "q_spatial", "p_spatial"], &device);
 
-    let layers = [&model.input, &model.output]
-        .into_iter()
-        .chain(model.hidden.iter());
-
-    for (idx, layer) in layers.enumerate() {
+    for (idx, layer) in [&model.input, &model.output].into_iter().enumerate() {
         let b = layer
             .bias
             .as_ref()
@@ -145,15 +147,16 @@ fn mlp_biases_zero_at_init() {
             .val();
         let data: Vec<f32> = b.into_data().to_vec().unwrap();
         for v in data {
-            assert_eq!(v, 0.0, "layer {idx} bias not zero at init");
+            assert_eq!(v, 0.0, "Linear {idx} bias not zero at init");
         }
     }
 }
 
-/// End-to-end: MLP emits SpatialParameters, MuskingumCunge routes, sum of
-/// output is differentiable w.r.t. MLP parameters.
+/// End-to-end: KanHead emits SpatialParameters, MuskingumCunge routes, sum
+/// of output is differentiable w.r.t. head parameters AND through the inner
+/// KanLayer's spline coefficients.
 #[test]
-fn mlp_to_muskingum_cunge_gradient_flow() {
+fn kan_head_to_muskingum_cunge_gradient_flow() {
     use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 
     let device = TestDevice::default();
@@ -161,14 +164,14 @@ fn mlp_to_muskingum_cunge_gradient_flow() {
     let n_timesteps = 6usize;
     let n_attrs = 4usize;
 
-    // Random per-reach attributes feed the MLP.
+    // Random per-reach attributes feed the head.
     let attrs: Tensor<TestBackend, 2> =
         Tensor::random([n_segments, n_attrs], Distribution::Default, &device);
 
     // Three learnable routing parameters → matches DDR's merit config.
     let learnable = ["n", "q_spatial", "p_spatial"];
-    let mlp = make_mlp::<TestBackend>(n_attrs, 8, 1, &learnable, &device);
-    let params_map = mlp.forward(attrs);
+    let head = make_head::<TestBackend>(n_attrs, 8, 1, &learnable, &device);
+    let params_map = head.forward(attrs);
 
     let params = SpatialParameters::<InnerBackend> {
         n: params_map["n"].clone(),
@@ -188,17 +191,36 @@ fn mlp_to_muskingum_cunge_gradient_flow() {
     let loss = out.sum();
     let grads = loss.backward();
 
-    // Gradient must reach the MLP's input weight (the deepest param in the chain).
-    let g = mlp.input.weight.val().grad(&grads);
+    // Gradient must reach (a) the head's input Linear weight (the deepest
+    // standard Param), and (b) the spline coefficients of the first inner
+    // KanLayer (the v1 differentiability claim end-to-end).
+    let g_in = head.input.weight.val().grad(&grads);
     assert!(
-        g.is_some(),
-        "no gradient reached MLP input weight — end-to-end backward broken"
+        g_in.is_some(),
+        "no gradient reached head input weight — end-to-end backward broken"
     );
-    let g_data: Vec<f32> = g.unwrap().into_data().to_vec().unwrap();
-    let any_nonzero = g_data.iter().any(|&v| v != 0.0);
-    let all_finite = g_data.iter().all(|v| v.is_finite());
-    assert!(all_finite, "MLP input weight grad has non-finite values");
-    assert!(any_nonzero, "MLP input weight grad is all zeros");
+    let g_data: Vec<f32> = g_in.unwrap().into_data().to_vec().unwrap();
+    let any_nonzero = g_data.iter().any(|&v: &f32| v != 0.0);
+    let all_finite = g_data.iter().all(|v: &f32| v.is_finite());
+    assert!(all_finite, "head input weight grad has non-finite values");
+    assert!(any_nonzero, "head input weight grad is all zeros");
+
+    let g_coef = head
+        .hidden
+        .first()
+        .expect("test uses num_hidden_layers=1")
+        .coef
+        .val()
+        .grad(&grads);
+    assert!(
+        g_coef.is_some(),
+        "no gradient reached the inner KanLayer's coef Param — rskan autodiff broken at FFI"
+    );
+    let g_coef_data: Vec<f32> = g_coef.unwrap().into_data().to_vec().unwrap();
+    let coef_finite = g_coef_data.iter().all(|v: &f32| v.is_finite());
+    let coef_nonzero = g_coef_data.iter().any(|&v: &f32| v != 0.0);
+    assert!(coef_finite, "KanLayer coef grad has non-finite values");
+    assert!(coef_nonzero, "KanLayer coef grad is all zeros");
 }
 
 // Silence the unused-Autodiff/NdArray import warnings — keeping the imports

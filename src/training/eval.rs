@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
 use crate::data::error::Result;
 use crate::data::TestWindow;
-use crate::nn::mlp::Mlp;
+use crate::nn::kan_head::KanHead;
 use crate::training::{
     forward_eval, forward_with_frozen_params, tau_trim_and_downsample, FrozenParams, Metrics,
 };
@@ -21,7 +21,7 @@ use crate::training::{
 /// Source of MC parameters at eval time.
 pub enum EvalParams<'a, I: Backend> {
     Frozen(&'a FrozenParams),
-    Mlp(&'a Mlp<I>),
+    KanHead(&'a KanHead<I>),
 }
 
 pub struct EvalOutput {
@@ -62,8 +62,8 @@ pub fn evaluate<I: Backend>(
             EvalParams::Frozen(frozen) => {
                 forward_with_frozen_params::<I>(cfg, &tensors, frozen, device, carry_state)
             }
-            EvalParams::Mlp(mlp) => {
-                forward_eval::<I>(cfg, &tensors, mlp, device, carry_state)
+            EvalParams::KanHead(head) => {
+                forward_eval::<I>(cfg, &tensors, head, device, carry_state)
             }
         };
         let dims = pred.dims();

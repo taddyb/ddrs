@@ -27,7 +27,7 @@ use rand::rngs::StdRng;
 
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
-use ddrs::nn::mlp::{Mlp, MlpConfig};
+use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
 use ddrs::training::driver::{train, TrainState};
 use ddrs::training::optimizer::build_adam;
 
@@ -71,25 +71,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.params.sparse_solver, cfg.params.use_cuda_graphs,
     );
 
-    let mlp_section = cfg.mlp.as_ref().expect("mlp config required");
-    let mlp_cfg = MlpConfig::new(
-        mlp_section.input_var_names.clone(),
-        mlp_section.learnable_parameters.clone(),
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = KanHeadConfig::new(
+        head_section.input_var_names.clone(),
+        head_section.learnable_parameters.clone(),
+        cfg.seed,
     )
-    .with_hidden_size(mlp_section.hidden_size)
-    .with_num_hidden_layers(mlp_section.num_hidden_layers);
+    .with_hidden_size(head_section.hidden_size)
+    .with_num_hidden_layers(head_section.num_hidden_layers)
+    .with_grid(head_section.grid)
+    .with_k(head_section.k);
 
-    // Seed backend RNG before MLP init for deterministic Kaiming/Xavier draws.
+    // Seed backend RNG before head init for deterministic Linear Kaiming/Xavier
+    // draws. KanLayer init uses its own seeded StdRng (CPU) and is independent
+    // of the backend RNG.
     <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
 
-    let mlp: Mlp<AB> = mlp_cfg.init::<AB>(&device);
+    let head: KanHead<AB> = head_cfg.init::<AB>(&device);
     let mut state = TrainState::<I> {
-        mlp,
+        head,
         epoch: 1,
         mini_batch: 0,
         rng: StdRng::seed_from_u64(cfg.seed),
     };
-    let mut optimizer = build_adam::<Mlp<AB>, AB>();
+    let mut optimizer = build_adam::<KanHead<AB>, AB>();
 
     train::<I>(
         &cfg,

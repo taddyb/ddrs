@@ -28,8 +28,8 @@ use clap::Parser;
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::data::TestWindow;
-use ddrs::nn::mlp::{Mlp, MlpConfig};
-use ddrs::training::checkpoint::load_mlp;
+use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
+use ddrs::training::checkpoint::load_kan_head;
 use ddrs::training::{evaluate, write_predictions_zarr, EvalParams, FrozenParams, ZarrAttrs};
 
 #[derive(Parser, Debug)]
@@ -89,16 +89,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let frozen = FrozenParams::constant(probe.adjacency.n);
         evaluate::<I>(&cfg, &dataset, EvalParams::Frozen(&frozen), &device, cli.batch_size_days)?
     } else {
-        let mlp_section = cfg.mlp.as_ref().expect("mlp config required for MLP eval");
-        let mlp_cfg = MlpConfig::new(
-            mlp_section.input_var_names.clone(),
-            mlp_section.learnable_parameters.clone(),
+        let head_section = cfg
+            .kan_head
+            .as_ref()
+            .expect("kan_head config required for KAN-head eval");
+        let head_cfg = KanHeadConfig::new(
+            head_section.input_var_names.clone(),
+            head_section.learnable_parameters.clone(),
+            cfg.seed,
         )
-        .with_hidden_size(mlp_section.hidden_size)
-        .with_num_hidden_layers(mlp_section.num_hidden_layers);
-        let mlp_template: Mlp<I> = mlp_cfg.init::<I>(&device);
-        let mlp = load_mlp::<I>(cli.checkpoint.as_ref().unwrap(), mlp_template, &device)?;
-        evaluate::<I>(&cfg, &dataset, EvalParams::Mlp(&mlp), &device, cli.batch_size_days)?
+        .with_hidden_size(head_section.hidden_size)
+        .with_num_hidden_layers(head_section.num_hidden_layers)
+        .with_grid(head_section.grid)
+        .with_k(head_section.k);
+        let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+        let head = load_kan_head::<I>(cli.checkpoint.as_ref().unwrap(), head_template, &device)?;
+        evaluate::<I>(&cfg, &dataset, EvalParams::KanHead(&head), &device, cli.batch_size_days)?
     };
 
     // Write the zarr.

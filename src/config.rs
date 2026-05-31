@@ -55,11 +55,24 @@ pub struct Experiment {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct MlpConfigSection {
+pub struct KanHeadConfigSection {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
+    /// B-spline grid intervals (`num` in pykan). Default 5 matches DDR.
+    #[serde(default = "default_grid")]
+    pub grid: usize,
+    /// B-spline order. Default 3 (cubic).
+    #[serde(default = "default_k")]
+    pub k: usize,
     pub input_var_names: Vec<String>,
     pub learnable_parameters: Vec<String>,
+}
+
+fn default_grid() -> usize {
+    5
+}
+fn default_k() -> usize {
+    3
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +236,7 @@ pub struct Config {
     pub params: Params,
     pub data_sources: Option<DataSources>,
     pub experiment: Option<Experiment>,
-    pub mlp: Option<MlpConfigSection>,
+    pub kan_head: Option<KanHeadConfigSection>,
     pub mode: String,
     pub geodataset: String,
     pub seed: u64,
@@ -268,7 +281,10 @@ struct ConfigRaw {
     params: ParamsRaw,
     data_sources: Option<DataSources>,
     experiment: Option<Experiment>,
-    mlp: Option<MlpConfigSection>,
+    /// `kan_head:` is the v1 YAML key; `mlp:` is accepted as a backward-compat
+    /// alias so existing YAML configs still parse during the migration.
+    #[serde(alias = "mlp")]
+    kan_head: Option<KanHeadConfigSection>,
     testing: TestingOverridesRaw,
 }
 
@@ -278,7 +294,7 @@ impl From<ConfigRaw> for Config {
             params: r.params.into(),
             data_sources: r.data_sources,
             experiment: r.experiment,
-            mlp: r.mlp,
+            kan_head: r.kan_head,
             mode: r.mode.unwrap_or_else(|| "training".to_string()),
             geodataset: r.geodataset.unwrap_or_else(|| "merit".to_string()),
             seed: r.seed.unwrap_or(42),
@@ -352,10 +368,10 @@ mod tests {
         assert!((pr.p_spatial[1] - 200.0).abs() < 1e-9);
         // log_space_parameters from YAML overrides default.
         assert_eq!(cfg.params.log_space_parameters, vec!["n".to_string()]);
-        // mlp section.
-        let mlp = cfg.mlp.as_ref().unwrap();
-        assert_eq!(mlp.hidden_size, 21);
-        assert_eq!(mlp.input_var_names.len(), 10);
+        // kan_head section.
+        let kan_head = cfg.kan_head.as_ref().unwrap();
+        assert_eq!(kan_head.hidden_size, 21);
+        assert_eq!(kan_head.input_var_names.len(), 10);
         // tau defaults to 3 when not set in YAML.
         assert_eq!(cfg.params.tau, 3);
         // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).

@@ -18,32 +18,32 @@ use burn::record::{CompactRecorder, Recorder};
 use burn::tensor::backend::Backend;
 
 use crate::data::error::{DataError, Result};
-use crate::nn::mlp::Mlp;
+use crate::nn::kan_head::KanHead;
 
-/// Save MLP weights to `path` (`.mpk` extension appended by the recorder).
-pub fn save_mlp<B: Backend>(path: &Path, mlp: &Mlp<B>) -> Result<()> {
+/// Save KAN head weights to `path` (`.mpk` extension appended by the recorder).
+pub fn save_kan_head<B: Backend>(path: &Path, head: &KanHead<B>) -> Result<()> {
     CompactRecorder::new()
-        .record(mlp.clone().into_record(), path.to_path_buf())
+        .record(head.clone().into_record(), path.to_path_buf())
         .map_err(|e| DataError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
         })
 }
 
-/// Load MLP weights from `path` (`.mpk` extension appended by the recorder).
+/// Load KAN head weights from `path` (`.mpk` extension appended by the recorder).
 ///
-/// `mlp_template` must be constructed with the same architecture as the
+/// `head_template` must be constructed with the same architecture as the
 /// saved checkpoint; its parameter values are discarded.
-pub fn load_mlp<B: Backend>(
+pub fn load_kan_head<B: Backend>(
     path: &Path,
-    mlp_template: Mlp<B>,
+    head_template: KanHead<B>,
     device: &B::Device,
-) -> Result<Mlp<B>> {
+) -> Result<KanHead<B>> {
     let record = CompactRecorder::new()
         .load(path.to_path_buf(), device)
         .map_err(|e| DataError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
         })?;
-    Ok(mlp_template.load_record(record))
+    Ok(head_template.load_record(record))
 }

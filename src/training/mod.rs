@@ -18,7 +18,7 @@ pub mod metrics;
 pub mod optimizer;
 pub mod zarr_io;
 
-pub use checkpoint::{load_mlp, save_mlp};
+pub use checkpoint::{load_kan_head, save_kan_head};
 pub use forward::{
     scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams,
     FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,

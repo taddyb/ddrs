@@ -29,7 +29,7 @@ use crate::sparse::SparseAdjacency;
 pub struct RoutingBatch {
     pub adjacency: SparseAdjacency,
     /// Normalized attributes, shape `(N, F)`. Caller-major to match the
-    /// MLP head input contract (`src/nn/mlp.rs::Mlp::forward`).
+    /// KAN head input contract (`src/nn/kan_head.rs::KanHead::forward`).
     pub spatial_attributes_normalized: Array2<f32>,
     /// q' streamflow forcing, shape `(T_hours, N)`. Already multiplied by
     /// `flow_scale` per column.
@@ -192,9 +192,9 @@ impl MeritGagesDataset {
             path: std::path::PathBuf::from("<config>"),
             message: "experiment section missing".into(),
         })?;
-        let mlp = cfg.mlp.as_ref().ok_or_else(|| DataError::Malformed {
+        let head_cfg = cfg.kan_head.as_ref().ok_or_else(|| DataError::Malformed {
             path: std::path::PathBuf::from("<config>"),
-            message: "mlp section missing".into(),
+            message: "kan_head section missing".into(),
         })?;
 
         // ---------- 1. Adjacency + gage CSV ----------
@@ -241,7 +241,7 @@ impl MeritGagesDataset {
         );
 
         // ---------- 2. Attributes + statistics ----------
-        let attr_names: Vec<String> = mlp.input_var_names.clone();
+        let attr_names: Vec<String> = head_cfg.input_var_names.clone();
         let attrs = Arc::new(AttributesStore::open(
             &ds.attributes,
             &attr_names,
