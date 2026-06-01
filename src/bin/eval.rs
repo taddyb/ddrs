@@ -130,22 +130,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    // Metrics summary.
-    let nse_clean: Vec<f32> = output
-        .metrics
-        .nse
-        .iter()
-        .copied()
-        .filter(|v| v.is_finite())
-        .collect();
-    let mean_nse = nse_clean.iter().sum::<f32>() / (nse_clean.len() as f32).max(1.0);
+    // Metrics summary. Per-gauge mean is misleading on right-skewed NSE
+    // distributions (a few bad gauges drag the mean); only median is reported.
+    let median = |xs: &[f32]| -> f32 {
+        let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if v.is_empty() { f32::NAN } else { v[v.len() / 2] }
+    };
+    let median_nse = median(&output.metrics.nse);
+    let median_kge = median(&output.metrics.kge);
+    let n_finite_nse = output.metrics.nse.iter().filter(|v| v.is_finite()).count();
     println!("wrote {}", cli.output.display());
     println!(
         "gauges with finite NSE: {} / {}",
-        nse_clean.len(),
+        n_finite_nse,
         output.metrics.nse.len()
     );
-    println!("mean NSE (finite only): {mean_nse:.4}");
+    println!("median NSE (finite only): {median_nse:.4}");
+    println!("median KGE (finite only): {median_kge:.4}");
 
     Ok(())
 }
