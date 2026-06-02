@@ -23,6 +23,20 @@ pub enum ConfigMode {
 }
 
 // ---------------------------------------------------------------------------
+// Workflow
+// ---------------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum,
+    serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+pub enum Workflow {
+    Train,
+    Eval,
+    TrainAndTest,
+}
+
+// ---------------------------------------------------------------------------
 // New top-level sections (SP-3)
 // ---------------------------------------------------------------------------
 
