@@ -40,22 +40,40 @@ pub fn plan(
     workflow_override: Option<Workflow>,
     workspace: &Workspace,
 ) -> Result<PlanResult, CliError> {
-    // Step 1: resolve workflow.
-    let workflow = workflow_override.ok_or_else(|| CliError::ConfigInvalid {
-        path: config_path.into(),
-        source: "neither --workflow nor `workflow:` key set".into(),
-    })?;
-
-    // Step 2: parse config in the appropriate mode.
-    let mode = match workflow {
-        Workflow::Train | Workflow::TrainAndTest => ConfigMode::Training,
-        Workflow::Eval => ConfigMode::Testing,
-    };
-    let config = Config::from_yaml_file_with_mode(config_path, mode)
+    // Step 1: load config once (preview in Training mode — we'll re-parse
+    // if the resolved workflow says testing).
+    let preview = Config::from_yaml_file_with_mode(config_path, ConfigMode::Training)
         .map_err(|e| CliError::ConfigInvalid {
             path: config_path.into(),
             source: Box::new(e),
         })?;
+
+    // Step 2: resolve workflow — CLI flag wins, then YAML, then error.
+    let workflow = workflow_override.or(preview.workflow).ok_or_else(|| {
+        CliError::ConfigInvalid {
+            path: config_path.into(),
+            source: format!(
+                "no `workflow:` key in {}. Add `workflow: train-and-test` \
+                 (or `train` / `eval`), or pass `--workflow <name>`.",
+                config_path.display()
+            ).into(),
+        }
+    })?;
+
+    // Step 3: re-parse if the resolved workflow needs Testing overlay.
+    let mode = match workflow {
+        Workflow::Train | Workflow::TrainAndTest => ConfigMode::Training,
+        Workflow::Eval => ConfigMode::Testing,
+    };
+    let config = if mode == ConfigMode::Training {
+        preview
+    } else {
+        Config::from_yaml_file_with_mode(config_path, mode)
+            .map_err(|e| CliError::ConfigInvalid {
+                path: config_path.into(),
+                source: Box::new(e),
+            })?
+    };
 
     // Step 3: read lockfile (required; init must have produced it).
     let lock_path = workspace.lockfile();
