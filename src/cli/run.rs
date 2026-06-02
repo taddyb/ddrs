@@ -37,6 +37,27 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     // 1. Plan as a library call (reused — not re-parsed in run).
     let pr: PlanResult = plan(&input.config_path, input.workflow, &input.workspace)?;
 
+    // 1b. GPU pre-flight for workflows that need training kernels.
+    if matches!(pr.workflow, Workflow::Train | Workflow::TrainAndTest) {
+        let has_gpu = crate::cli::system::probe()
+            .ok()
+            .flatten()
+            .map(|p| !p.gpu.is_empty())
+            .unwrap_or(false);
+        if !has_gpu {
+            return Err(CliError::Runtime(format!(
+                "run: workflow `{}` requires a CUDA GPU; system probe found none. \
+                 Smoke verified the routing core works on CPU, but production \
+                 training does not.",
+                match pr.workflow {
+                    Workflow::Train => "train",
+                    Workflow::TrainAndTest => "train-and-test",
+                    Workflow::Eval => "eval",
+                }
+            )));
+        }
+    }
+
     // 2. Drift policy.
     if !pr.drift.is_empty() {
         if input.strict {
