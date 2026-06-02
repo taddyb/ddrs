@@ -22,17 +22,26 @@ Visualizing them well requires three families of plots, each with its own data d
 
 The skill produces a Jupyter notebook (and runs it if asked) that:
 1. Loads the appropriate ddrs output artifact(s)
-2. Uses `ddr.validation` helpers from the DDR Python package (already installed in DDR's `uv` venv) — no reimplementation
-3. Saves PNGs into `<checkpoint_parent>/plots/` so plots live with the run
+2. Uses `ddr.validation` helpers (`Metrics`, `plot_*`) — DDR is installed as a
+   dependency in `ddrs-py`'s `plots` extra; the skill does not reimplement these
+3. Saves PNGs into `<RUN_DIR>/plots/` (or `<CKPT_DIR>/plots/` for legacy `output/saved_models*/` layouts) so plots travel with the run
 
-Run the resulting notebook from DDR's venv:
+**All execution happens from `./ddrs-py`** — the Python venv lives there, not under `~/projects/ddr`. First-time setup (idempotent):
 
 ```bash
-cd ~/projects/ddr && uv run jupyter nbconvert --to notebook --execute \
-    ~/projects/ddrs/<notebook_path> --output <notebook_path>
+cd ./ddrs-py && uv sync --extra plots
 ```
 
-Or open interactively: `cd ~/projects/ddr && uv run jupyter notebook <notebook_path>`.
+Run the resulting notebook in place:
+
+```bash
+cd ./ddrs-py && uv run jupyter nbconvert --to notebook --execute \
+    <absolute_notebook_path> --output <basename> --output-dir <PLOT_DIR>
+```
+
+Or open interactively: `cd ./ddrs-py && uv run jupyter notebook <absolute_notebook_path>`.
+
+If `uv sync --extra plots` fails because `ddr` isn't at `file:///home/tbindas/projects/ddr` on this machine, update the `ddr @ file://...` line in `ddrs-py/pyproject.toml` to point at the local DDR checkout. Do NOT shell into `~/projects/ddr` and run from there — that's the old workflow and pollutes the ddrs project boundary.
 
 ## Workflow
 
@@ -102,14 +111,14 @@ This is non-optional. The user needs to know where artifacts land before decidin
 
 ### Step 5 — Offer to run it
 
-After writing, offer to execute the notebook:
+After writing, offer to execute the notebook from `ddrs-py`'s venv:
 
 ```bash
-cd ~/projects/ddr && uv run jupyter nbconvert --to notebook --execute \
-    <full_notebook_path> --output <basename> --output-dir <CKPT_DIR>/plots/
+cd ./ddrs-py && uv run jupyter nbconvert --to notebook --execute \
+    <full_notebook_path> --output <basename> --output-dir <PLOT_DIR>
 ```
 
-Only run if the user agrees — execution can be slow (zarr reads, MERIT shapefile join) and the user may want to tweak the notebook first.
+Only run if the user agrees — execution can be slow (zarr reads, MERIT shapefile join) and the user may want to tweak the notebook first. If the venv hasn't been set up yet, run `cd ./ddrs-py && uv sync --extra plots` first.
 
 **After execution completes, list every PNG written** with absolute paths so the user can open them directly. Use `ls <CKPT_DIR>/plots/*.png` and quote each path verbatim — don't summarize as "plots are in `<dir>`". Format:
 

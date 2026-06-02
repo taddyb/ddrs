@@ -27,7 +27,7 @@ m = Metrics(pred=ds.predictions.values, target=ds.observations.values)
 #         nse, flv, fhv, pbias, pbias_mid, kge   (all shape (G,))
 ```
 
-Reuse it — don't roll metrics by hand. The notebook runs in DDR's `uv` venv so the import is free.
+Reuse it — don't roll metrics by hand. The notebook runs in **ddrs-py's** `uv` venv (after `cd ./ddrs-py && uv sync --extra plots`), which installs DDR as a local-path dependency so `from ddr.validation import ...` works without leaving the ddrs project.
 
 ## Notebook template
 

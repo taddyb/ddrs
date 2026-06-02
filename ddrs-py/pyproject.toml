@@ -11,6 +11,21 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+# Plotting / evaluation notebooks. Activate with `uv sync --extra plots`.
+# Pulls in DDR for `ddr.validation.{Metrics, plot_*}` — used by the
+# ddrs-eval-plots skill. ddr is referenced by local path so updates flow
+# automatically; if DDR moves, update `ddr @ file://...` accordingly.
+plots = [
+    "matplotlib>=3.8",
+    "xarray>=2024.6",
+    "zarr>=3",
+    "pandas>=2.2",
+    "pyyaml>=6",
+    "jupyter>=1",
+    "nbconvert>=7",
+    "ipykernel>=6",
+    "ddr @ file:///home/tbindas/projects/ddr",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
