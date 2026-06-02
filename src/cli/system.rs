@@ -89,5 +89,6 @@ pub fn record_smoke(probe: &mut SystemProbe, key: String) {
         key,
         passed_at: chrono::Utc::now()
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        backend: None,
     });
 }

@@ -32,6 +32,8 @@ pub struct SystemProbe {
 pub struct SmokeTestRecord {
     pub key: String,
     pub passed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
