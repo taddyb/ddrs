@@ -110,14 +110,16 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 path: ".".into(),
                 source: "no ddrs.yaml found".into(),
             })?;
-            ddrs::cli::run::run(ddrs::cli::run::RunInput {
+            let run_dir = ddrs::cli::run::run(ddrs::cli::run::RunInput {
                 workspace: Workspace::with_root(ws.root()),
                 config_path: cfg,
                 workflow,
                 plot,
                 strict,
                 max_mini_batches,
-            }).map(|_| ())
+            })?;
+            eprintln!("run complete → {}", run_dir.display());
+            Ok(())
         }
         Cmd::Show { run_id, json } => ddrs::cli::show::run_show(&ws, &run_id, json),
         Cmd::Status { json } => ddrs::cli::status::run_status(&ws, json),

@@ -52,6 +52,7 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     fs::create_dir_all(run_dir.join("checkpoints"))?;
     fs::copy(&input.config_path, run_dir.join("config.yaml"))?;
     let _ = copy_cargo_lock_if_reachable(&run_dir);
+    eprintln!("run output → {}", run_dir.display());
 
     // 4. Dispatch to the workflow (in-process, v1 — no stdout/stderr tee
     // beyond what training::driver already prints to terminal). Tee'd
