@@ -249,6 +249,9 @@ fn dispatch(
                     checkpoints: list_mpk_files(&ckpt_dir),
                     plot: None,
                     eval_zarr: None,
+                    baseline_predictions: None,
+                    baseline_observations: None,
+                    baseline_manifest: None,
                 };
                 Ok((metrics, outputs))
             }
@@ -370,6 +373,13 @@ fn dispatch(
                 println!("median NSE (finite only): {median_nse:.4}");
                 println!("median KGE (finite only): {median_kge:.4}");
 
+                // Summed Q' baseline: load (or compute) the cached entry,
+                // copy into <run_dir>/baseline/ so artifacts travel with
+                // the manifest. Non-fatal on failure — training+eval
+                // already succeeded.
+                let (baseline_predictions, baseline_observations, baseline_manifest) =
+                    copy_baseline_into_run_dir(&test_cfg, &input.workspace, run_dir);
+
                 let metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
@@ -385,6 +395,9 @@ fn dispatch(
                     checkpoints: list_mpk_files(&ckpt_dir),
                     plot: None,
                     eval_zarr: Some(PathBuf::from("eval/predictions.zarr")),
+                    baseline_predictions,
+                    baseline_observations,
+                    baseline_manifest,
                 };
                 Ok((metrics, outputs))
             }
@@ -406,6 +419,49 @@ fn dispatch(
             RunOutputs::default(),
         ),
     }
+}
+
+/// Load (or compute) the summed Q' baseline and copy its cache files into
+/// `<run_dir>/baseline/`. Returns the three relative paths to populate in
+/// `RunOutputs`, or `(None, None, None)` if anything fails — the baseline
+/// is informational, never blocking.
+fn copy_baseline_into_run_dir(
+    test_cfg: &Config,
+    workspace: &Workspace,
+    run_dir: &Path,
+) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    let (_q, key, _hit) = match crate::baseline::compute_or_load_cached(test_cfg, workspace.root())
+    {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("warning: baseline copy skipped: {e}");
+            return (None, None, None);
+        }
+    };
+    let cache_dir = crate::baseline::cache_dir(workspace.root(), &key);
+    let baseline_dir = run_dir.join("baseline");
+    if let Err(e) = fs::create_dir_all(&baseline_dir) {
+        eprintln!("warning: baseline mkdir failed: {e}");
+        return (None, None, None);
+    }
+    let copy_one = |name: &str| -> Option<PathBuf> {
+        let src = cache_dir.join(name);
+        let dst = baseline_dir.join(name);
+        match fs::copy(&src, &dst) {
+            Ok(_) => Some(PathBuf::from("baseline").join(name)),
+            Err(e) => {
+                eprintln!("warning: baseline copy of {name} failed: {e}");
+                None
+            }
+        }
+    };
+    let predictions = copy_one("predictions.f32");
+    let observations = copy_one("observations.f32");
+    let manifest = copy_one("manifest.json");
+    if predictions.is_some() {
+        eprintln!("baseline → {}", baseline_dir.display());
+    }
+    (predictions, observations, manifest)
 }
 
 /// Returns paths to all `.mpk` files in `dir`, relative to `dir`'s parent

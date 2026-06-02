@@ -56,6 +56,12 @@ pub struct RunOutputs {
     pub plot: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_zarr: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_predictions: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_observations: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_manifest: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
