@@ -77,24 +77,11 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             }).map(|_| ())
         }
         Cmd::Plan { workflow, json } => {
-            let cfg_path = match cfg_path {
-                Some(p) => p,
-                None => {
-                    // No config — enter bootstrap.
-                    let target = std::env::current_dir()?.join("ddrs.yaml");
-                    let bundled = std::path::PathBuf::from("config/merit_training.yaml");
-                    ddrs::cli::plan_bootstrap::bootstrap(
-                        ddrs::cli::plan_bootstrap::BootstrapInput {
-                            target: target.clone(),
-                            runs_dir: ws.runs_dir(),
-                            bundled_template: bundled,
-                            editor_cmd: None,
-                            interactive: true,
-                        },
-                    )?;
-                    target
-                }
-            };
+            let cfg_path = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
+                path: ".".into(),
+                source: "no ddrs.yaml found in current directory. \
+                         Run `ddrs init` first.".into(),
+            })?;
             let pr = ddrs::cli::plan::plan(&cfg_path, workflow, &ws)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&pr)

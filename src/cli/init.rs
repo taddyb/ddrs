@@ -20,6 +20,7 @@ pub struct InitInput {
     pub skip_smoke: bool,
 }
 
+#[derive(Debug)]
 pub struct InitOutput {
     pub smoke_passed: bool,
     pub smoke_reused: bool,
@@ -79,17 +80,43 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     }
     probe.write_atomic(&ws.system_json())?;
 
-    // ── Phase B: data-source lock (requires ddrs.yaml) ─────────────────
+    // ── Phase D: bootstrap ddrs.yaml if missing (interactive) ─────────
     let config_path = input.config_path.or_else(|| {
         crate::cli::workspace::discover_config(Path::new("."))
     });
-    let Some(cfg_path) = config_path else {
-        eprintln!(
-            "no ddrs.yaml found — run `ddrs plan` to bootstrap one, \
-             then re-run `ddrs init` to lock data sources."
-        );
-        return Ok(InitOutput { smoke_passed, smoke_reused, phase_b_skipped: true });
+    let cfg_path = match config_path {
+        Some(p) => p,
+        None => {
+            let target = std::env::current_dir()
+                .map_err(CliError::from)?
+                .join("ddrs.yaml");
+            let bundled = PathBuf::from("config/merit_training.yaml");
+            crate::cli::plan_bootstrap::bootstrap(
+                crate::cli::plan_bootstrap::BootstrapInput {
+                    target: target.clone(),
+                    runs_dir: ws.runs_dir(),
+                    bundled_template: bundled,
+                    editor_cmd: None,
+                    interactive: true,
+                },
+            ).map_err(|e| {
+                let msg = format!("{e}");
+                if msg.contains("not a TTY") || msg.contains("run interactively") {
+                    CliError::ConfigInvalid {
+                        path: target.clone(),
+                        source: "no ddrs.yaml found and stdin is not a TTY. \
+                                 Write ddrs.yaml manually, then re-run `ddrs init`."
+                                .into(),
+                    }
+                } else {
+                    e
+                }
+            })?;
+            target
+        }
     };
+
+    // ── Phase E: lock data sources from the (now-present) yaml ─────────
     let cfg = Config::from_yaml_file_with_mode(&cfg_path, ConfigMode::Training)
         .map_err(|e| CliError::ConfigInvalid { path: cfg_path.clone(), source: Box::new(e) })?;
     let ds = cfg.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
