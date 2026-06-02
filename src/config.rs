@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use serde::de::Error as _;
 use serde::Deserialize;
 
 use crate::data::error::{DataError, Result};
@@ -344,11 +345,35 @@ impl Config {
         })?;
         let testing_raw = raw.testing.clone();
         let mut cfg: Self = raw.into();
+        validate_mode_workflow(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
         Ok(cfg)
     }
+}
+
+fn validate_mode_workflow(cfg: &Config) -> std::result::Result<(), String> {
+    use Workflow::*;
+    let Some(wf) = cfg.workflow else { return Ok(()); };
+    let ok = match (cfg.mode.as_str(), wf) {
+        ("training", Train | TrainAndTest) => true,
+        ("testing", Eval) => true,
+        _ => false,
+    };
+    if !ok {
+        return Err(format!(
+            "conflicting top-level keys — mode: {} but workflow: {} \
+             (mode=training implies workflow ∈ {{train, train-and-test}}; \
+              mode=testing implies workflow=eval)",
+            cfg.mode,
+            match wf { Train => "train", Eval => "eval", TrainAndTest => "train-and-test" },
+        ));
+    }
+    Ok(())
 }
 
 fn apply_testing_overlay(cfg: &mut Config, overrides: TestingOverridesRaw) {
@@ -444,6 +469,40 @@ workflow: train-and-test
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("load yaml");
         assert_eq!(cfg.workflow, None);
+    }
+
+    #[test]
+    fn mode_workflow_conflict_rejected() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: eval
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_conflict_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("conflicting") && msg.contains("mode: training") && msg.contains("workflow: eval"),
+            "expected conflict message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mode_testing_with_train_workflow_rejected() {
+        let yaml = r#"
+mode: testing
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: train
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_conflict2_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        assert!(format!("{}", err).contains("conflicting"));
     }
 
     #[test]
