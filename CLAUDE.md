@@ -64,7 +64,7 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 ### `ddrs` CLI (preferred entrypoint)
 
 The `ddrs` binary replaces the four legacy single-purpose binaries with a
-terraform-style lifecycle. First-time flow is `init → plan → init → run`.
+terraform-style lifecycle. First-time flow is `init → plan → run`.
 
 ```bash
 ddrs init                                      # compile + GPU probe + workspace + smoke
