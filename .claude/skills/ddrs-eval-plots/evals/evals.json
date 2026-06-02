@@ -1,0 +1,23 @@
+{
+  "skill_name": "ddrs-eval-plots",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "i just finished training run number 1 (its in output/saved_models_1, latest checkpoint is epoch_5_mb_35). can you plot the predicted hydrograph vs USGS observations for gage 01013500 over calendar year 2000? save it to wherever makes sense.",
+      "expected_output": "A jupyter notebook at output/saved_models_1/plots/hydrograph_01013500_2000.ipynb that loads predictions_latest.zarr, slices gage_ids='01013500' and time='2000-01-01' to '2000-12-31', drops warmup=3, computes per-window NSE, and saves a PNG to the same plots dir.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "I want to see manning's roughness over the Pacific Northwest from my latest ddrs training run. Use MERIT basins as polygons with a positron basemap.",
+      "expected_output": "A notebook that loads kan_parameters_latest.nc, joins to the MERIT shapefile under ~/projects/ddr/data/merit/, filters to a PNW bbox (~-125,42,-110,49), plots `n` with plasma_r and CartoDB.Positron basemap, saves PNG to output/saved_models_*/plots/parameter_map_n_pacific_northwest.png. The user is vague about which checkpoint — pick the highest-numbered saved_models_* by mtime.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "make me the standard evaluation plot bundle for my trained model — boxplots for NSE/KGE/bias/RMSE/FHV/FLV, the NSE CDF, and a gauge map. compare to summed q prime if you can find a baseline zarr.",
+      "expected_output": "A notebook that uses ddr.validation.Metrics + plot_box_fig + plot_cdf + plot_gauge_map + plot_drainage_area_boxplots, against output/predictions_latest.zarr. Loads gauges CSV from training YAML's data_sources.gages. NSE/KGE clipped to [-1,1] for boxplot, [0,inf) for CDF. If no baseline zarr is findable, the notebook should work with just the ddrs run (single label).",
+      "files": []
+    }
+  ]
+}

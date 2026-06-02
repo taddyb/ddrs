@@ -26,8 +26,10 @@ output/
 # Not source — regenerate with `uv run python scripts/export_ddr_sandbox.py`.
 fixtures/
 
-# Local agent memory and architecture notes
-.claude/
+# Agent notes are tracked (ARCHITECTURE.md, skills/, specs/) — only ignore transient state
+.claude/worktrees/
+.claude/**/.regenerate-state.json
+.claude/settings.local.json
 
 # Throwaway BURN API exploration directory
 spike_backward/
