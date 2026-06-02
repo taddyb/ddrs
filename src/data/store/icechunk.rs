@@ -284,24 +284,34 @@ fn daily_to_hourly_trim(daily: &Array2<f32>, n_hourly: usize) -> Array2<f32> {
 }
 
 impl StreamflowStore {
-    /// Read `Qr` for `window` and `comids`. Returns `(n_hourly, N)` f32
-    /// matrix; missing COMIDs (not in the store) are filled with `0.001`
-    /// (discharge minimum, mirrors DDR's `torch.full(..., fill_value=0.001)`
-    /// in `readers.py:464-468`).
-    pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
+    /// Read `Qr` daily for `[window_start, window_start + n_days)` and
+    /// `comids`. Returns `(n_days, N)` f32 matrix; missing COMIDs are
+    /// filled with `0.001` (discharge minimum, mirrors DDR's
+    /// `torch.full(..., fill_value=0.001)` in `readers.py:464-468`).
+    ///
+    /// Used directly by the summed Q' baseline (which needs daily output
+    /// over a 15-yr window where the hourly form would be ~8.5 GB).
+    /// `read_window` and `read_test_window` wrap this and add the
+    /// daily → hourly repeat.
+    pub fn read_window_daily(
+        &self,
+        window_start: NaiveDate,
+        n_days: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
         // 1. Resolve time window to store-local day indices.
-        let store_start_day_i64 = (window.window_start - self.time_start).num_days();
+        let store_start_day_i64 = (window_start - self.time_start).num_days();
         if store_start_day_i64 < 0 {
             return Err(DataError::Malformed {
                 path: self.path.clone(),
                 message: format!(
                     "window starts {} before store start {}",
-                    window.window_start, self.time_start
+                    window_start, self.time_start
                 ),
             });
         }
         let store_start_day = store_start_day_i64 as usize;
-        let end_day = store_start_day + window.rho_days;
+        let end_day = store_start_day + n_days;
         if end_day > self.n_time {
             return Err(DataError::Malformed {
                 path: self.path.clone(),
@@ -321,16 +331,16 @@ impl StreamflowStore {
         let n_out = comids.len();
 
         // Pre-fill with the discharge minimum; missing COMIDs keep this value.
-        let mut daily = Array2::<f32>::from_elem((window.rho_days, n_out), 0.001);
+        let mut daily = Array2::<f32>::from_elem((n_days, n_out), 0.001);
 
         if positions.is_empty() {
-            // All COMIDs missing — return filled result immediately.
-            return Ok(daily_to_hourly_trim(&daily, window.n_hourly()));
+            // All COMIDs missing — return filled daily result.
+            return Ok(daily);
         }
 
         // 3. Contiguous divide-axis read covering [min_pos, max_pos].
-        // Transient memory: (max_pos - min_pos + 1) * rho_days * 8 bytes.
-        // For 50 COMIDs spanning ~100K positions × 90 days = ~72 MB — acceptable
+        // Transient memory: (max_pos - min_pos + 1) * n_days * 4 bytes.
+        // For 50 COMIDs spanning ~100K positions × 90 days = ~36 MB — acceptable
         // for SP-2. SP-3 may revisit with gather-style reads.
         let min_pos = *positions.iter().min().unwrap();
         let max_pos = *positions.iter().max().unwrap();
@@ -346,9 +356,9 @@ impl StreamflowStore {
             .qr
             .retrieve_array_subset(&subset)
             .map_err(|e| ic_err(&self.path, e))?;
-        // raw_f32 is row-major: shape (div_count, rho_days).
-        // Element at (i, t) is at index i * rho_days + t.
-        debug_assert_eq!(raw_f32.len(), div_count * window.rho_days);
+        // raw_f32 is row-major: shape (div_count, n_days).
+        // Element at (i, t) is at index i * n_days + t.
+        debug_assert_eq!(raw_f32.len(), div_count * n_days);
 
         // 4. Scatter into the output. Walk `comids` in order; for each
         // non-missing entry consume the next element of `positions`.
@@ -361,8 +371,8 @@ impl StreamflowStore {
             let div_pos = positions[next_present];
             next_present += 1;
             let local_div = div_pos - min_pos;
-            for d in 0..window.rho_days {
-                let raw_idx = local_div * window.rho_days + d;
+            for d in 0..n_days {
+                let raw_idx = local_div * n_days + d;
                 daily[(d, out_col)] = raw_f32[raw_idx];
             }
         }
@@ -373,93 +383,27 @@ impl StreamflowStore {
             "scatter walked past `positions` — IdIndex::positions_of invariant broken"
         );
 
-        // 5. Daily → hourly transform: repeat each day 24×, trim to n_hourly.
+        Ok(daily)
+    }
+
+    /// Read `Qr` for `window` and `comids`. Returns `(n_hourly, N)` f32
+    /// matrix; missing COMIDs (not in the store) are filled with `0.001`
+    /// (discharge minimum, mirrors DDR's `torch.full(..., fill_value=0.001)`
+    /// in `readers.py:464-468`).
+    pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
+        let daily = self.read_window_daily(window.window_start, window.rho_days, comids)?;
         Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
     }
 
     /// Same as `read_window` but for `TestWindow` — returns `n_days * 24`
     /// hours (no trailing-day trim) so chunks tile cleanly. Used by SP-5
-    /// `evaluate()`. Mirrors `read_window` with `window.n_days` replacing
-    /// `window.rho_days` and `n_hourly = n_days * 24` (no trim).
+    /// `evaluate()`.
     pub fn read_test_window(
         &self,
         window: &crate::data::TestWindow,
         comids: &[Comid],
     ) -> Result<Array2<f32>> {
-        // 1. Resolve time window to store-local day indices.
-        let store_start_day_i64 = (window.window_start - self.time_start).num_days();
-        if store_start_day_i64 < 0 {
-            return Err(DataError::Malformed {
-                path: self.path.clone(),
-                message: format!(
-                    "test window starts {} before store start {}",
-                    window.window_start, self.time_start
-                ),
-            });
-        }
-        let store_start_day = store_start_day_i64 as usize;
-        let end_day = store_start_day + window.n_days;
-        if end_day > self.n_time {
-            return Err(DataError::Malformed {
-                path: self.path.clone(),
-                message: format!(
-                    "test window extends to store day {end_day} but n_time={}",
-                    self.n_time
-                ),
-            });
-        }
-
-        // 2. Resolve COMIDs → divide-axis positions.
-        let (positions, missing_indices) = self.index.positions_of(comids);
-        let missing_set: std::collections::HashSet<usize> =
-            missing_indices.iter().copied().collect();
-        let n_out = comids.len();
-
-        // Pre-fill with the discharge minimum; missing COMIDs keep this value.
-        let mut daily = Array2::<f32>::from_elem((window.n_days, n_out), 0.001);
-
-        if positions.is_empty() {
-            return Ok(daily_to_hourly_trim(&daily, window.n_hourly()));
-        }
-
-        // 3. Contiguous divide-axis read.
-        let min_pos = *positions.iter().min().unwrap();
-        let max_pos = *positions.iter().max().unwrap();
-        let div_range_end = max_pos + 1;
-        let div_count = div_range_end - min_pos;
-
-        let subset = zarrs::array::ArraySubset::new_with_ranges(&[
-            (min_pos as u64)..(div_range_end as u64),
-            (store_start_day as u64)..(end_day as u64),
-        ]);
-        let raw_f32: Vec<f32> = self
-            .qr
-            .retrieve_array_subset(&subset)
-            .map_err(|e| ic_err(&self.path, e))?;
-        debug_assert_eq!(raw_f32.len(), div_count * window.n_days);
-
-        // 4. Scatter into the output.
-        let mut next_present = 0usize;
-        for (out_col, _) in comids.iter().enumerate() {
-            if missing_set.contains(&out_col) {
-                continue;
-            }
-            let div_pos = positions[next_present];
-            next_present += 1;
-            let local_div = div_pos - min_pos;
-            for d in 0..window.n_days {
-                let raw_idx = local_div * window.n_days + d;
-                daily[(d, out_col)] = raw_f32[raw_idx];
-            }
-        }
-
-        debug_assert_eq!(
-            next_present,
-            positions.len(),
-            "scatter walked past `positions` — IdIndex::positions_of invariant broken"
-        );
-
-        // 5. Daily → hourly: repeat each day 24×. n_hourly = n_days * 24 (no trim).
+        let daily = self.read_window_daily(window.window_start, window.n_days, comids)?;
         Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
     }
 }
@@ -532,27 +476,33 @@ impl UsgsObservationsStore {
         })
     }
 
-    /// Read `streamflow` observations for `window` and `staids`. Returns
-    /// `(rho_days, G)` f32 matrix. Missing STAIDs trigger
+    /// Read `streamflow` observations daily for
+    /// `[window_start, window_start + n_days)` and `staids`. Returns
+    /// `(n_days, G)` f32 matrix. Missing STAIDs trigger
     /// `DataError::MissingIds` — observation misses are configuration bugs.
-    pub fn read_window(
+    ///
+    /// Used directly by the summed Q' baseline. `read_window` wraps this
+    /// for `RhoWindow`-shaped callers; the body is identical because
+    /// observations are already daily (no hourly transform).
+    pub fn read_window_daily(
         &self,
-        window: &RhoWindow,
+        window_start: NaiveDate,
+        n_days: usize,
         staids: &[Staid],
     ) -> Result<Array2<f32>> {
         // 1. Time window validation (same pattern as StreamflowStore).
-        let store_start_day_i64 = (window.window_start - self.time_start).num_days();
+        let store_start_day_i64 = (window_start - self.time_start).num_days();
         if store_start_day_i64 < 0 {
             return Err(DataError::Malformed {
                 path: self.path.clone(),
                 message: format!(
                     "window starts {} before store start {}",
-                    window.window_start, self.time_start
+                    window_start, self.time_start
                 ),
             });
         }
         let store_start_day = store_start_day_i64 as usize;
-        let end_day = store_start_day + window.rho_days;
+        let end_day = store_start_day + n_days;
         if end_day > self.n_time {
             return Err(DataError::Malformed {
                 path: self.path.clone(),
@@ -576,7 +526,7 @@ impl UsgsObservationsStore {
         debug_assert_eq!(positions.len(), staids.len());
 
         if positions.is_empty() {
-            return Ok(Array2::<f32>::zeros((window.rho_days, 0)));
+            return Ok(Array2::<f32>::zeros((n_days, 0)));
         }
 
         // 3. Read contiguous gage-axis range covering [min_pos, max_pos].
@@ -595,22 +545,33 @@ impl UsgsObservationsStore {
             .streamflow
             .retrieve_array_subset(&subset)
             .map_err(|e| ic_err(&self.path, e))?;
-        debug_assert_eq!(raw_f64.len(), gage_count * window.rho_days);
+        debug_assert_eq!(raw_f64.len(), gage_count * n_days);
 
         // 4. Scatter to output preserving input order. `positions[i]`
         // corresponds to `staids[i]` because all inputs are present (no
         // missing_indices path taken above).
         debug_assert_eq!(positions.len(), staids.len());
-        let mut out = Array2::<f32>::zeros((window.rho_days, staids.len()));
+        let mut out = Array2::<f32>::zeros((n_days, staids.len()));
         for (out_col, _) in staids.iter().enumerate() {
             let pos = positions[out_col];
             let local_gage = pos - min_pos;
-            for d in 0..window.rho_days {
-                let raw_idx = local_gage * window.rho_days + d;
+            for d in 0..n_days {
+                let raw_idx = local_gage * n_days + d;
                 out[(d, out_col)] = raw_f64[raw_idx] as f32;
             }
         }
         Ok(out)
+    }
+
+    /// `RhoWindow`-shaped wrapper for `read_window_daily`. Returns
+    /// `(rho_days, G)` f32; observations are already daily so no
+    /// hourly transform.
+    pub fn read_window(
+        &self,
+        window: &RhoWindow,
+        staids: &[Staid],
+    ) -> Result<Array2<f32>> {
+        self.read_window_daily(window.window_start, window.rho_days, staids)
     }
 }
 
