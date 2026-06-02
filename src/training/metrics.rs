@@ -10,6 +10,9 @@ pub struct Metrics {
     pub nse: Vec<f32>,
     pub rmse: Vec<f32>,
     pub kge: Vec<f32>,
+    pub bias: Vec<f32>,
+    pub fhv: Vec<f32>,
+    pub flv: Vec<f32>,
 }
 
 impl Metrics {
@@ -22,6 +25,9 @@ impl Metrics {
         let mut nse = Vec::with_capacity(g);
         let mut rmse = Vec::with_capacity(g);
         let mut kge = Vec::with_capacity(g);
+        let mut bias = Vec::with_capacity(g);
+        let mut fhv = Vec::with_capacity(g);
+        let mut flv = Vec::with_capacity(g);
         for j in 0..g {
             let p = pred.row(j);
             let o = target.row(j);
@@ -40,6 +46,9 @@ impl Metrics {
                 nse.push(f32::NAN);
                 rmse.push(f32::NAN);
                 kge.push(f32::NAN);
+                bias.push(f32::NAN);
+                fhv.push(f32::NAN);
+                flv.push(f32::NAN);
                 continue;
             }
             let n = pairs.len() as f32;
@@ -95,8 +104,33 @@ impl Metrics {
             let kge_val = 1.0
                 - ((r - 1.0).powi(2) + (alpha - 1.0).powi(2) + (beta - 1.0).powi(2)).sqrt();
             kge.push(kge_val);
+
+            // Mirrors DDR validation/metrics.py:46,92-95.
+            // bias: mean(pred - obs). FHV/FLV: FDC-volume biases — sort each
+            // series independently, take top 2% / bottom 30% slices,
+            // 100 * sum(p-o)/sum(o) over each slice. NOT timestep-paired.
+            bias.push(pairs.iter().map(|(p, o)| p - o).sum::<f32>() / n);
+
+            let mut p_sorted: Vec<f32> = pairs.iter().map(|x| x.0).collect();
+            let mut o_sorted: Vec<f32> = pairs.iter().map(|x| x.1).collect();
+            p_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            o_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let n_us = pairs.len();
+            let idx_low = (0.3 * n_us as f32).round() as usize;
+            let idx_high = (0.98 * n_us as f32).round() as usize;
+
+            let p_bias = |p: &[f32], o: &[f32]| -> f32 {
+                let so: f32 = o.iter().sum();
+                if so.abs() > 0.0 {
+                    100.0 * p.iter().zip(o).map(|(a, b)| a - b).sum::<f32>() / so
+                } else {
+                    f32::NAN
+                }
+            };
+            flv.push(p_bias(&p_sorted[..idx_low], &o_sorted[..idx_low]));
+            fhv.push(p_bias(&p_sorted[idx_high..], &o_sorted[idx_high..]));
         }
-        Self { nse, rmse, kge }
+        Self { nse, rmse, kge, bias, fhv, flv }
     }
 }
 
@@ -107,10 +141,24 @@ mod tests {
 
     #[test]
     fn nse_one_for_perfect_match() {
-        let p = array![[1.0_f32, 2.0, 3.0, 4.0]];
-        let o = array![[1.0_f32, 2.0, 3.0, 4.0]];
+        // n>=50 so the FHV slice (top 2% = round(0.98*N)..N) is non-empty.
+        let row: Vec<f32> = (1..=100).map(|i| i as f32).collect();
+        let p = Array2::from_shape_vec((1, 100), row.clone()).unwrap();
+        let o = Array2::from_shape_vec((1, 100), row).unwrap();
         let m = Metrics::compute(&p, &o);
         assert!((m.nse[0] - 1.0).abs() < 1e-6);
         assert!(m.rmse[0] < 1e-6);
+        assert!(m.bias[0].abs() < 1e-6);
+        assert!(m.fhv[0].abs() < 1e-3);
+        assert!(m.flv[0].abs() < 1e-3);
+    }
+
+    #[test]
+    fn bias_matches_mean_diff() {
+        let p = array![[2.0_f32, 4.0, 6.0, 8.0]];
+        let o = array![[1.0_f32, 2.0, 3.0, 4.0]];
+        let m = Metrics::compute(&p, &o);
+        // mean(p - o) = mean(1,2,3,4) = 2.5
+        assert!((m.bias[0] - 2.5).abs() < 1e-6);
     }
 }
