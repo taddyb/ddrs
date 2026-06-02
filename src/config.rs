@@ -255,6 +255,7 @@ pub struct Config {
     pub geodataset: String,
     pub seed: u64,
     pub np_seed: u64,
+    pub workflow: Option<Workflow>,
 }
 
 /// Overlay section from `testing:` in the YAML.
@@ -292,6 +293,7 @@ struct ConfigRaw {
     geodataset: Option<String>,
     seed: Option<u64>,
     np_seed: Option<u64>,
+    workflow: Option<Workflow>,
     params: ParamsRaw,
     data_sources: Option<DataSources>,
     experiment: Option<Experiment>,
@@ -313,6 +315,7 @@ impl From<ConfigRaw> for Config {
             geodataset: r.geodataset.unwrap_or_else(|| "merit".to_string()),
             seed: r.seed.unwrap_or(42),
             np_seed: r.np_seed.unwrap_or(42),
+            workflow: r.workflow,
         }
     }
 }
@@ -417,6 +420,30 @@ mod tests {
         assert_eq!(exp.start_time, "1995/10/01");
         assert_eq!(exp.end_time, "2010/09/30");
         assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn loads_workflow_from_yaml() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: train-and-test
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_workflow_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert_eq!(cfg.workflow, Some(Workflow::TrainAndTest));
+    }
+
+    #[test]
+    fn workflow_absent_is_none() {
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n";
+        let path = std::env::temp_dir().join("ddrs_config_no_workflow_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert_eq!(cfg.workflow, None);
     }
 
     #[test]
