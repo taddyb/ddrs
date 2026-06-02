@@ -348,29 +348,38 @@ fn dispatch(
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
-                let nse_clean: Vec<f32> = output
-                    .metrics
-                    .nse
-                    .iter()
-                    .copied()
-                    .filter(|v| v.is_finite())
-                    .collect();
-                let mean_nse = nse_clean.iter().sum::<f32>() / (nse_clean.len() as f32).max(1.0);
-                let median_nse = {
-                    let mut sorted = nse_clean.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    if sorted.is_empty() { f32::NAN } else { sorted[sorted.len() / 2] }
+                let median = |xs: &[f32]| -> f32 {
+                    let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
+                    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    if v.is_empty() { f32::NAN } else { v[v.len() / 2] }
                 };
+                let median_nse = median(&output.metrics.nse);
+                let median_kge = median(&output.metrics.kge);
+                let n_finite_nse = output.metrics.nse.iter().filter(|v| v.is_finite()).count();
+                let mean_nse = {
+                    let nse_clean: Vec<f32> = output.metrics.nse.iter().copied()
+                        .filter(|v| v.is_finite()).collect();
+                    nse_clean.iter().sum::<f32>() / (nse_clean.len() as f32).max(1.0)
+                };
+
+                println!(
+                    "gauges with finite NSE: {} / {}",
+                    n_finite_nse,
+                    output.metrics.nse.len()
+                );
+                println!("median NSE (finite only): {median_nse:.4}");
+                println!("median KGE (finite only): {median_kge:.4}");
 
                 let metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
                     "phase1_seconds": phase1_elapsed.as_secs_f32(),
                     "phase2_seconds": phase2_elapsed.as_secs_f32(),
-                    "n_gauges_finite_nse": nse_clean.len(),
+                    "n_gauges_finite_nse": n_finite_nse,
                     "n_gauges_total": output.metrics.nse.len(),
                     "mean_nse_finite": mean_nse,
                     "median_nse_finite": median_nse,
+                    "median_kge_finite": median_kge,
                 });
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
