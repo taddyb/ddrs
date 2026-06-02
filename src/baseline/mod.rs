@@ -8,7 +8,9 @@
 //! sparse solver.
 
 pub mod cache;
+pub mod print;
 pub mod summed_q_prime;
 
 pub use cache::{cache_dir, cache_key, compute_or_load_cached, load_cached, save_cached};
+pub use print::{print_metrics_summary, write_metrics_summary};
 pub use summed_q_prime::{compute, BaselineError, SummedQPrime};
