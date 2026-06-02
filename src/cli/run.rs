@@ -49,11 +49,7 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
                 "run: workflow `{}` requires a CUDA GPU; system probe found none. \
                  Smoke verified the routing core works on CPU, but production \
                  training does not.",
-                match pr.workflow {
-                    Workflow::Train => "train",
-                    Workflow::TrainAndTest => "train-and-test",
-                    Workflow::Eval => "eval",
-                }
+                workflow_slug(pr.workflow)
             )));
         }
     }

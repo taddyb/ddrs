@@ -75,14 +75,14 @@ pub fn plan(
             })?
     };
 
-    // Step 3: read lockfile (required; init must have produced it).
+    // Step 4: read lockfile (required; init must have produced it).
     let lock_path = workspace.lockfile();
     if !lock_path.is_file() {
         return Err(CliError::WorkspaceNotInitialized { path: workspace.root().into() });
     }
     let lock = Lockfile::read(&lock_path)?;
 
-    // Step 4: compute live fingerprints (reusing locked fp when stat matches).
+    // Step 5: compute live fingerprints (reusing locked fp when stat matches).
     let data_sources = config.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
         path: config_path.into(),
         source: "data_sources: missing".into(),
@@ -113,7 +113,7 @@ pub fn plan(
     }
     let drift = diff_against_live(&lock, &sources);
 
-    // Step 5: zarr/icechunk metadata-only validation. v1 stub — the
+    // Step 6: zarr/icechunk metadata-only validation. v1 stub — the
     // existing ConusAdjacencyStore::open is the only "open" that's both
     // cheap and present today. The time-window check against the
     // streamflow store is deferred to a follow-up; not a blocker for
@@ -121,7 +121,7 @@ pub fn plan(
     // exercises the lockfile + fingerprint paths, which are the bulk of
     // plan's value).
 
-    // Step 6: compute summary.
+    // Step 7: compute summary.
     let summary = compute_summary(&config, workflow)?;
 
     Ok(PlanResult {

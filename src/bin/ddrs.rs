@@ -95,7 +95,8 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
         Cmd::Run { workflow, plot, strict, max_mini_batches, json: _ } => {
             let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
                 path: ".".into(),
-                source: "no ddrs.yaml found".into(),
+                source: "no ddrs.yaml found in current directory. \
+                         Run `ddrs init` first.".into(),
             })?;
             let run_dir = ddrs::cli::run::run(ddrs::cli::run::RunInput {
                 workspace: Workspace::with_root(ws.root()),

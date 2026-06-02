@@ -24,7 +24,6 @@ pub struct InitInput {
 pub struct InitOutput {
     pub smoke_passed: bool,
     pub smoke_reused: bool,
-    pub phase_b_skipped: bool,
 }
 
 pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
@@ -162,7 +161,7 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
         sources,
     };
     lock.write_atomic(&ws.lockfile())?;
-    Ok(InitOutput { smoke_passed, smoke_reused, phase_b_skipped: false })
+    Ok(InitOutput { smoke_passed, smoke_reused })
 }
 
 fn run_smoke(probe: &crate::cli::manifest::SystemProbe)

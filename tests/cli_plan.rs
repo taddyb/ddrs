@@ -39,13 +39,13 @@ data_sources:
     };
     lock.write_atomic(&ws_root.join("sources.lock")).unwrap();
     let ws = ddrs::cli::workspace::Workspace::with_root(&ws_root);
-    let err = ddrs::cli::plan::plan(&cfg_path, None, &ws);
-    match err {
+    let res = ddrs::cli::plan::plan(&cfg_path, None, &ws);
+    match res {
+        Ok(pr) => assert_eq!(pr.workflow, ddrs::cli::Workflow::TrainAndTest),
         Err(e) => {
             let msg = format!("{e}");
             assert!(!msg.contains("workflow"), "expected non-workflow error, got: {msg}");
         }
-        Ok(_) => {}
     }
 }
 

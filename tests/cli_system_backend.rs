@@ -36,8 +36,8 @@ fn smoke_key_includes_backend() {
         free_gpu_gb_at_probe: 1.0,
         smoke_test: None,
     };
-    let k_cuda = ddrs::cli::system::smoke_key_for(&probe, "cuda");
-    let k_cpu  = ddrs::cli::system::smoke_key_for(&probe, "cpu");
+    let k_cuda = ddrs::cli::system::smoke_key(&probe, "cuda");
+    let k_cpu  = ddrs::cli::system::smoke_key(&probe, "cpu");
     assert_ne!(k_cuda, k_cpu);
     assert!(k_cuda.contains("backend=cuda"));
     assert!(k_cpu.contains("backend=cpu"));

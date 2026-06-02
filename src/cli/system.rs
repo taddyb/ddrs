@@ -85,11 +85,6 @@ pub fn smoke_key(probe: &SystemProbe, backend: &str) -> String {
     )
 }
 
-/// Shim kept for the regression test only.
-pub fn smoke_key_for(probe: &SystemProbe, backend: &str) -> String {
-    smoke_key(probe, backend)
-}
-
 pub fn record_smoke(probe: &mut SystemProbe, key: String, backend: &str) {
     probe.smoke_test = Some(SmokeTestRecord {
         key,
