@@ -11,6 +11,7 @@ use crate::cli::types::Workflow;
 use crate::cli::workspace::Workspace;
 use crate::config::{Config, ConfigMode};
 use crate::error::CliError;
+use crate::training::metrics::Metrics;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlanResult {
@@ -21,6 +22,21 @@ pub struct PlanResult {
     pub sources: BTreeMap<String, Fingerprint>,
     pub drift: Vec<String>,
     pub summary: PlanSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<BaselineInfo>,
+}
+
+/// Summed Q' baseline result attached to `PlanResult`. The full `Metrics`
+/// vector is held in-memory but skipped from JSON output (NaN handling +
+/// size); the JSON view exposes only the small identifying triple.
+#[derive(Debug, Clone, Serialize)]
+pub struct BaselineInfo {
+    pub key: String,
+    pub cache_hit: bool,
+    pub n_gauges: usize,
+    pub cache_dir: PathBuf,
+    #[serde(skip)]
+    pub metrics: Metrics,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +140,13 @@ pub fn plan(
     // Step 7: compute summary.
     let summary = compute_summary(&config, workflow)?;
 
+    // Step 8: summed Q' baseline. Always uses the testing-mode overlay
+    // (the eval window the trained model is judged against), even when
+    // workflow=Train, so the user sees the same reference number across
+    // workflows. Failures here are non-fatal — they shouldn't block the
+    // plan validation, which is the user's primary signal.
+    let baseline = compute_baseline(config_path, workspace);
+
     Ok(PlanResult {
         config,
         config_path: config_path.into(),
@@ -131,7 +154,31 @@ pub fn plan(
         sources,
         drift,
         summary,
+        baseline,
     })
+}
+
+fn compute_baseline(config_path: &Path, workspace: &Workspace) -> Option<BaselineInfo> {
+    let test_cfg = match Config::from_yaml_file_with_mode(config_path, ConfigMode::Testing) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: summed Q' baseline skipped (testing config: {e})");
+            return None;
+        }
+    };
+    match crate::baseline::compute_or_load_cached(&test_cfg, workspace.root()) {
+        Ok((q, key, cache_hit)) => Some(BaselineInfo {
+            cache_dir: crate::baseline::cache_dir(workspace.root(), &key),
+            key,
+            cache_hit,
+            n_gauges: q.gage_ids.len(),
+            metrics: q.metrics,
+        }),
+        Err(e) => {
+            eprintln!("warning: summed Q' baseline failed: {e}");
+            None
+        }
+    }
 }
 
 fn compute_summary(cfg: &Config, workflow: Workflow) -> Result<PlanSummary, CliError> {

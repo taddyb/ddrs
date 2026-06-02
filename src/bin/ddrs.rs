@@ -89,6 +89,14 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             } else {
                 println!("workflow {:?}", pr.workflow);
                 println!("drift    {:?}", pr.drift);
+                if let Some(ref b) = pr.baseline {
+                    ddrs::baseline::print_metrics_summary(&b.metrics, b.n_gauges);
+                    eprintln!(
+                        "baseline {} → {}",
+                        if b.cache_hit { "cached" } else { "computed" },
+                        b.cache_dir.display(),
+                    );
+                }
             }
             Ok(())
         }
