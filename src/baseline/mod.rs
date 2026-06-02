@@ -7,6 +7,8 @@
 //! keep — check loss curves and KAN-head gradient stats first, not the
 //! sparse solver.
 
+pub mod cache;
 pub mod summed_q_prime;
 
+pub use cache::{cache_dir, cache_key, compute_or_load_cached, load_cached, save_cached};
 pub use summed_q_prime::{compute, BaselineError, SummedQPrime};

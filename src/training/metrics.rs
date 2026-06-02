@@ -5,7 +5,9 @@
 //! either pred or target are masked out of the accumulators.
 
 use ndarray::Array2;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
     pub nse: Vec<f32>,
     pub rmse: Vec<f32>,
