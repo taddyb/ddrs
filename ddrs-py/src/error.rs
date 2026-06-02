@@ -12,9 +12,9 @@ pub enum BridgeError {
         #[source]
         source: ddrs::data::error::DataError,
     },
-    #[error("config is missing the `mlp:` section ({path:?})")]
-    MissingMlpSection { path: String },
-    #[error("attrs shape ({rows}, {cols}) mismatches mlp.input_var_names.len() = {expected_cols}")]
+    #[error("config is missing the `kan_head:` section ({path:?})")]
+    MissingKanHeadSection { path: String },
+    #[error("attrs shape ({rows}, {cols}) mismatches kan_head.input_var_names.len() = {expected_cols}")]
     AttrShapeMismatch { rows: usize, cols: usize, expected_cols: usize },
     #[error("checkpoint load failed at {path:?}: {source}")]
     Checkpoint {
@@ -35,7 +35,8 @@ impl From<BridgeError> for PyErr {
             | BridgeError::Checkpoint { .. }
             | BridgeError::Netcdf(_)
             | BridgeError::Zarr(_) => PyIOError::new_err(e.to_string()),
-            BridgeError::MissingMlpSection { .. } | BridgeError::AttrShapeMismatch { .. } => {
+            BridgeError::MissingKanHeadSection { .. }
+            | BridgeError::AttrShapeMismatch { .. } => {
                 PyValueError::new_err(e.to_string())
             }
         }

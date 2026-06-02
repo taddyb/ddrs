@@ -1,9 +1,9 @@
-//! Config helpers exposed to Python and used internally to build MLP templates.
+//! Config helpers exposed to Python and used internally to build KAN-head templates.
 
 use std::path::Path;
 
-use ddrs::config::{Config, MlpConfigSection};
-use ddrs::nn::mlp::MlpConfig;
+use ddrs::config::{Config, KanHeadConfigSection};
+use ddrs::nn::kan_head::KanHeadConfig;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -17,22 +17,35 @@ pub(crate) fn load_config(path: &str) -> Result<Config, BridgeError> {
     })
 }
 
-/// Pull `cfg.mlp` or return a typed error if absent.
-pub(crate) fn require_mlp_section<'a>(
+/// Pull `cfg.kan_head` or return a typed error if absent.
+pub(crate) fn require_kan_head_section<'a>(
     cfg: &'a Config,
     path: &str,
-) -> Result<&'a MlpConfigSection, BridgeError> {
-    cfg.mlp.as_ref().ok_or_else(|| BridgeError::MissingMlpSection {
-        path: path.to_string(),
-    })
+) -> Result<&'a KanHeadConfigSection, BridgeError> {
+    cfg.kan_head
+        .as_ref()
+        .ok_or_else(|| BridgeError::MissingKanHeadSection {
+            path: path.to_string(),
+        })
 }
 
-/// Convert a ddrs YAML `MlpConfigSection` into the ddrs `MlpConfig` used to
-/// build an `Mlp<B>` template.
-pub(crate) fn mlp_config_from_section(section: &MlpConfigSection) -> MlpConfig {
-    MlpConfig::new(section.input_var_names.clone(), section.learnable_parameters.clone())
-        .with_hidden_size(section.hidden_size)
-        .with_num_hidden_layers(section.num_hidden_layers)
+/// Convert a ddrs YAML `KanHeadConfigSection` into the ddrs `KanHeadConfig`
+/// used to build a `KanHead<B>` template. `seed` is the top-level `cfg.seed`
+/// — KanHeadConfig requires it because every inner KanLayer init draws from
+/// it (DDR-Python `kan.py:24-34` quirk).
+pub(crate) fn kan_head_config_from_section(
+    section: &KanHeadConfigSection,
+    seed: u64,
+) -> KanHeadConfig {
+    KanHeadConfig::new(
+        section.input_var_names.clone(),
+        section.learnable_parameters.clone(),
+        seed,
+    )
+    .with_hidden_size(section.hidden_size)
+    .with_num_hidden_layers(section.num_hidden_layers)
+    .with_grid(section.grid)
+    .with_k(section.k)
 }
 
 /// Python entry point.
