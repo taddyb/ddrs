@@ -41,14 +41,8 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     }
     let ws = Workspace::with_root(&input.workspace);
 
-    // ── Phase A: install-level checks (no config required) ─────────────
+    // ── Phase A: install-level probes (no config required) ─────────────
     let mut probe = system::probe()?.unwrap_or_default();
-    if probe.gpu.is_empty() {
-        eprintln!(
-            "warning: no CUDA device found; install nvidia driver \
-             ≥ 530 or build with `--features cpu`"
-        );
-    }
     if probe.free_gpu_gb_at_probe < input.min_free_gpu_gb && probe.free_gpu_gb_at_probe > 0.0 {
         eprintln!(
             "warning: free GPU memory {:.1} GB is below floor {} GB",
@@ -58,7 +52,9 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     fs::create_dir_all(ws.runs_dir())?;
     fs::write(ws.version_file(), env!("CARGO_PKG_VERSION"))?;
 
-    let key = system::smoke_key(&probe, "cuda");
+    // Pick backend up-front so the cache key matches the work we'd do.
+    let backend = if probe.gpu.is_empty() { "cpu" } else { "cuda" };
+    let key = system::smoke_key(&probe, backend);
     let cached_passing = SystemProbe::read(&ws.system_json())
         .ok()
         .and_then(|p| p.smoke_test)
@@ -70,10 +66,11 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     } else if cached_passing && !input.force {
         (true, true)
     } else {
-        (run_smoke()?, false)
+        let (ok, _b) = run_smoke(&probe)?;
+        (ok, false)
     };
     if smoke_passed && !smoke_reused {
-        system::record_smoke(&mut probe, key, "cuda");
+        system::record_smoke(&mut probe, key, backend);
     } else if smoke_reused {
         // Preserve the prior smoke_test record.
         if let Ok(prior) = SystemProbe::read(&ws.system_json()) {
@@ -141,11 +138,29 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     Ok(InitOutput { smoke_passed, smoke_reused, phase_b_skipped: false })
 }
 
-fn run_smoke() -> Result<bool, CliError> {
+fn run_smoke(probe: &crate::cli::manifest::SystemProbe)
+    -> Result<(bool, &'static str), CliError>
+{
     let inputs = crate::sandbox::load_embedded()
         .or_else(|_| crate::sandbox::load_from_dir(Path::new("fixtures/sandbox")))?;
-    type I = burn_cuda::Cuda<f32, i32>;
-    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
-    let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
-    Ok(r.passed)
+    if probe.gpu.is_empty() {
+        eprintln!("no CUDA detected — running CPU smoke (slower but functionally equivalent)");
+        type I = burn::backend::NdArray<f32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
+        Ok((r.passed, "cpu"))
+    } else {
+        type I = burn_cuda::Cuda<f32, i32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
+        Ok((r.passed, "cuda"))
+    }
+}
+
+/// Test-only re-export so integration tests can drive the backend selection.
+#[doc(hidden)]
+pub fn run_smoke_for_test(probe: &crate::cli::manifest::SystemProbe)
+    -> Result<(bool, &'static str), CliError>
+{
+    run_smoke(probe)
 }

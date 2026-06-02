@@ -19,3 +19,13 @@ fn init_phase_a_creates_workspace_and_runs_smoke() {
     assert!(!ws.lockfile().is_file(), "no config → no lockfile");
     assert!(r.phase_b_skipped);
 }
+
+#[test]
+fn run_smoke_returns_cpu_when_no_cuda() {
+    use ddrs::cli::manifest::SystemProbe;
+    let mut probe = SystemProbe::default();
+    probe.gpu = String::new();
+    let (passed, backend) = ddrs::cli::init::run_smoke_for_test(&probe).unwrap();
+    assert!(passed, "CPU smoke must pass on the bundled sandbox fixture");
+    assert_eq!(backend, "cpu");
+}
