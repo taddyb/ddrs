@@ -138,8 +138,42 @@ if GAUGES_CSV is not None and GAUGES_CSV.exists():
         g[col] = np.clip(dict(results[i])["nse"][positions], 0, 1)
     metric_cols = [f"{l}_NSE".replace(" ", "_") for l in labels]
 
-    fig = plot_drainage_area_boxplots(gages=g, metrics=metric_cols, model_names=labels,
-                                      path=PLOT_DIR / "metrics_drainage_area.png")
+    DRAINAGE_BINS = np.array([0, 1000, 5000, 10000, 30000, 50000])
+    fig = plot_drainage_area_boxplots(
+        gages=g, metrics=metric_cols, model_names=labels,
+        bins=DRAINAGE_BINS,
+        path=None,  # save after we annotate per-panel medians
+    )
+    # Annotate each bin with its median NSE in the top-right corner of the
+    # panel. DDR's plot_drainage_area_boxplots draws all bins on a SINGLE
+    # Axes (plots.py:465), so we place text in data coordinates at each
+    # bin's right edge.
+    n_bins  = len(DRAINAGE_BINS) - 1
+    bin_w   = 5      # matches plots.py:471 (`bin_width`)
+    y_upper = 1.0    # matches default `y_limits=(0.0, 1.0)`
+    ax = fig.axes[0]
+    bin_assignment = pd.cut(g["DRAIN_SQKM"], DRAINAGE_BINS, labels=False)
+    for bi in range(n_bins):
+        in_bin = bin_assignment == bi
+        if not in_bin.any():
+            continue
+        if len(metric_cols) == 1:
+            med  = float(np.nanmedian(g.loc[in_bin, metric_cols[0]].values))
+            text = f"median = {med:.3f}"
+        else:
+            text = "\n".join(
+                f"{lbl}: {float(np.nanmedian(g.loc[in_bin, col].values)):.3f}"
+                for col, lbl in zip(metric_cols, labels)
+            )
+        ax.text(
+            (bi + 1) * bin_w - 0.25, y_upper - 0.02, text,
+            ha="right", va="top", fontsize=14,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="#666", alpha=0.9),
+        )
+    fig.savefig(PLOT_DIR / "metrics_drainage_area.png",
+                dpi=200, bbox_inches="tight")
+
     fig = plot_gauge_map(gages=g, metric_column=metric_cols[-1],
                          title=RUN_LABEL, colormap="plasma",
                          figsize=(16, 8), point_size=30,
@@ -159,3 +193,4 @@ print(f"saved metrics plots to {PLOT_DIR}")
 - **`GAUGES_CSV` comes from the training YAML.** The path lives at `data_sources.gages` and tracks whatever the model was actually trained on. Hardcoding `camels_670.csv` or `gages_3000.csv` breaks the moment training switches to a different gauge set.
 - **Positional reindex when joining metrics to a smaller gauges DataFrame.** `Metrics(...).nse` is shape `(G_ds,)` keyed positionally by `ds.gage_ids`. If you then intersect with a gauges CSV that lacks some of those gauges, you have `G_csv < G_ds`. Writing `g[col] = m.nse` either errors (length mismatch) or — worse, in some pandas versions — silently broadcasts and writes the wrong gauge's NSE to each row. Always reindex with a `gid_to_idx` lookup before the join. This was iter-2's silent bug.
 - **The gauge map uses the last (rightmost) result in `labels`.** If you want to map the baseline instead, swap the index.
+- **Drainage-area panel medians are positioned in data coordinates, not axes coordinates.** DDR's `plot_drainage_area_boxplots` draws all bins on a single Axes with bin centers at `bin_positions[i] + bin_width/2` (data x in `[0, 25]` for the default 5 bins × `bin_width=5`). Iterating `fig.axes[:n_bins]` returns ONE axis and puts every annotation on top of itself — use `ax.text(right_edge_x, y_upper - eps, ...)` in data coords instead. If DDR's defaults change (different bin count or `bin_width`), update both numbers — they're encoded in `plots.py:471` and `plots.py:485-491`.
