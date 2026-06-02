@@ -423,6 +423,7 @@ mod tests {
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");
+        assert_eq!(cfg.workflow, Some(Workflow::TrainAndTest));
     }
 
     #[test]
