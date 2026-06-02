@@ -135,6 +135,30 @@ CONUS MERIT is 346,321 reaches × 338,814 edges (not millions — the port can
 target consumer GPUs). Training config lives at `config/merit_training.yaml`
 and mirrors `~/projects/ddr/config/merit_training_config.yaml` verbatim.
 
+## Baseline
+
+`ddrs plan` and `ddrs run --workflow train-and-test` compute a **summed Q'**
+reference: per-gauge sum of upstream divide Qr over the testing eval window,
+compared against USGS daily observations. No routing, no learned parameters
+— it's a sanity check. If the trained KAN's median NSE doesn't beat this
+number, the routing isn't earning its keep; check training loss curves and
+the KAN head's gradient stats first, not the sparse solver.
+
+Cache layout: `<workspace_root>/baselines/<key>/` where `key` is
+blake3(`streamflow ∥ observations ∥ gages ∥ gages_adjacency ∥
+conus_adjacency ∥ start_time ∥ end_time`). Training-only fields (seed,
+KAN config, lr) do **not** invalidate. Contents:
+`predictions.f32` + `observations.f32` (raw f32 row-major) + `manifest.json`
+(gage_ids, time_range, metrics, provenance). `ddrs run --workflow
+train-and-test` copies these into `<run_dir>/baseline/`.
+
+Note: `ddrs plan` is therefore no longer side-effect-free — first run
+opens icechunk and reads ~370 MB of daily Qr. Subsequent plans on the same
+input set are cache hits and instant.
+
+Implementation: `src/baseline/`. Mirrors
+`~/projects/ddr/scripts/summed_q_prime.py`.
+
 ## Conventions specific to this repo
 
 - **Read DDR first when porting.** Cite line numbers in comments
