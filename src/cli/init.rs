@@ -58,7 +58,7 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     fs::create_dir_all(ws.runs_dir())?;
     fs::write(ws.version_file(), env!("CARGO_PKG_VERSION"))?;
 
-    let key = system::smoke_key(&probe);
+    let key = system::smoke_key(&probe, "cuda");
     let cached_passing = SystemProbe::read(&ws.system_json())
         .ok()
         .and_then(|p| p.smoke_test)
@@ -73,7 +73,7 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
         (run_smoke()?, false)
     };
     if smoke_passed && !smoke_reused {
-        system::record_smoke(&mut probe, key);
+        system::record_smoke(&mut probe, key, "cuda");
     } else if smoke_reused {
         // Preserve the prior smoke_test record.
         if let Ok(prior) = SystemProbe::read(&ws.system_json()) {

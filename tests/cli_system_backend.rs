@@ -23,3 +23,22 @@ fn smoke_record_old_format_deserializes_with_none_backend() {
 // Suppress unused import warning if needed.
 #[allow(dead_code)]
 fn _use_probe(_: SystemProbe) {}
+
+#[test]
+fn smoke_key_includes_backend() {
+    let probe = SystemProbe {
+        ddrs_version: "1".into(),
+        probed_at: "t".into(),
+        gpu: "g".into(),
+        cuda_runtime: "12.4".into(),
+        driver: "530".into(),
+        sm: "8.0".into(),
+        free_gpu_gb_at_probe: 1.0,
+        smoke_test: None,
+    };
+    let k_cuda = ddrs::cli::system::smoke_key_for(&probe, "cuda");
+    let k_cpu  = ddrs::cli::system::smoke_key_for(&probe, "cpu");
+    assert_ne!(k_cuda, k_cpu);
+    assert!(k_cuda.contains("backend=cuda"));
+    assert!(k_cpu.contains("backend=cpu"));
+}
