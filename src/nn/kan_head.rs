@@ -35,6 +35,11 @@ use burn::tensor::{backend::Backend, Tensor};
 use rand::SeedableRng;
 use rskan::{KanLayer, KanLayerConfig};
 
+#[cfg(feature = "fixtures")]
+use burn::module::Param;
+#[cfg(feature = "fixtures")]
+use burn::tensor::TensorData;
+
 /// Xavier gain applied to the output layer (matches DDR `kan.py:46`).
 const XAVIER_GAIN_OUTPUT: f64 = 0.1;
 /// pykan MultKAN default; matches DDR's `KAN([H, H], ...)` noise_scale default.
@@ -190,5 +195,139 @@ impl<B: Backend> KanHead<B> {
     /// that need to iterate consistently.
     pub fn learnable_parameters(&self) -> &[String] {
         &self.learnable_parameters
+    }
+}
+
+#[cfg(feature = "fixtures")]
+mod fixture {
+    use super::*;
+    use ndarray::{Array1, Array2, Array3};
+    use ndarray_npy::NpzReader;
+    use std::fs::File;
+    use std::io;
+    use std::path::Path;
+
+    fn err_other(msg: impl Into<String>) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, msg.into())
+    }
+
+    /// Build a `Linear<B>` from DDR-layout weight `[out, in]` and bias `[out]`.
+    ///
+    /// DDR (PyTorch) stores weight as `[out_features, in_features]`. Burn stores
+    /// it as `[in_features, out_features]`. Transpose before wrapping.
+    fn linear_from_parts<B: Backend>(
+        weight_oi: Array2<f32>, // DDR-side shape [out, in]
+        bias: Array1<f32>,
+        device: &B::Device,
+    ) -> Linear<B> {
+        // Transpose to burn's [in, out] layout. `reversed_axes()` returns a
+        // non-contiguous view; `to_param_weight` materialises a row-major copy
+        // via `as_standard_layout()`.
+        let weight_io: Array2<f32> = weight_oi.reversed_axes();
+        let weight_param = crate::nn::init::to_param_weight::<B>(weight_io, device);
+
+        let bias_dim = bias.shape()[0];
+        let b_data = TensorData::new(bias.to_vec(), [bias_dim]);
+        let bias_param = Param::from_tensor(Tensor::from_data(b_data, device));
+
+        Linear {
+            weight: weight_param,
+            bias: Some(bias_param),
+        }
+    }
+
+    impl<B: Backend> KanHead<B> {
+        /// Build a `KanHead` from a `.npz` fixture (Python-side dump). All
+        /// initializers are bypassed — every tensor is loaded byte-for-byte
+        /// from the fixture file, with weight matrices transposed from DDR's
+        /// `[out, in]` (PyTorch) to burn's `[in, out]` layout.
+        ///
+        /// Enables bitwise forward + backward parity assertions vs DDR-Python
+        /// in Tasks 9 + 10.
+        pub fn from_npz(
+            path: &Path,
+            device: &B::Device,
+            cfg: &KanHeadConfig,
+        ) -> io::Result<Self> {
+            let file = File::open(path)?;
+            let mut npz = NpzReader::new(file).map_err(|e| err_other(e.to_string()))?;
+
+            let read_dyn = |npz: &mut NpzReader<File>, k: &str| -> io::Result<ndarray::ArrayD<f32>> {
+                let arr: ndarray::ArrayD<f32> = npz
+                    .by_name(k)
+                    .map_err(|e| err_other(format!("read {k}: {e}")))?;
+                Ok(arr)
+            };
+            let read_2 = |npz: &mut NpzReader<File>, k: &str| -> io::Result<Array2<f32>> {
+                read_dyn(npz, k).and_then(|a| {
+                    a.into_dimensionality::<ndarray::Ix2>()
+                        .map_err(|e| err_other(format!("{k}: not 2D: {e}")))
+                })
+            };
+            let read_1 = |npz: &mut NpzReader<File>, k: &str| -> io::Result<Array1<f32>> {
+                read_dyn(npz, k).and_then(|a| {
+                    a.into_dimensionality::<ndarray::Ix1>()
+                        .map_err(|e| err_other(format!("{k}: not 1D: {e}")))
+                })
+            };
+            let read_3 = |npz: &mut NpzReader<File>, k: &str| -> io::Result<Array3<f32>> {
+                read_dyn(npz, k).and_then(|a| {
+                    a.into_dimensionality::<ndarray::Ix3>()
+                        .map_err(|e| err_other(format!("{k}: not 3D: {e}")))
+                })
+            };
+
+            let input = linear_from_parts::<B>(
+                read_2(&mut npz, "input_weight")?,
+                read_1(&mut npz, "input_bias")?,
+                device,
+            );
+            let output = linear_from_parts::<B>(
+                read_2(&mut npz, "output_weight")?,
+                read_1(&mut npz, "output_bias")?,
+                device,
+            );
+
+            let mut hidden = Vec::with_capacity(cfg.num_hidden_layers);
+            for b in 0..cfg.num_hidden_layers {
+                let grid = read_2(&mut npz, &format!("block_{b}_grid"))?;
+                let coef = read_3(&mut npz, &format!("block_{b}_coef"))?;
+                let scale_base = read_2(&mut npz, &format!("block_{b}_scale_base"))?;
+                let scale_sp = read_2(&mut npz, &format!("block_{b}_scale_sp"))?;
+                let mask = read_2(&mut npz, &format!("block_{b}_mask"))?;
+
+                let to_t2 = |a: Array2<f32>| {
+                    let (r, c) = (a.shape()[0], a.shape()[1]);
+                    let vec = a.as_standard_layout().to_owned().into_raw_vec_and_offset().0;
+                    Tensor::<B, 2>::from_data(TensorData::new(vec, [r, c]), device)
+                };
+                let to_t3 = |a: Array3<f32>| {
+                    let (d0, d1, d2) = (a.shape()[0], a.shape()[1], a.shape()[2]);
+                    let vec = a.as_standard_layout().to_owned().into_raw_vec_and_offset().0;
+                    Tensor::<B, 3>::from_data(TensorData::new(vec, [d0, d1, d2]), device)
+                };
+
+                let layer = KanLayerConfig::new(cfg.hidden_size, cfg.hidden_size, cfg.seed)
+                    .with_num(cfg.grid)
+                    .with_k(cfg.k)
+                    .with_noise_scale(KAN_NOISE_SCALE)
+                    .init_from_parts::<B>(
+                        device,
+                        to_t2(grid),
+                        to_t3(coef),
+                        to_t2(scale_base),
+                        to_t2(scale_sp),
+                        to_t2(mask),
+                    );
+                hidden.push(layer);
+            }
+
+            Ok(KanHead {
+                input,
+                hidden,
+                output,
+                learnable_parameters: cfg.learnable_parameters.clone(),
+            })
+        }
     }
 }
