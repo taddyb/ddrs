@@ -7,7 +7,7 @@
 //!       removing one cross-module RNG source as a parity-test variable.
 //!
 //! Formulas mirror PyTorch (`torch/nn/init.py:578` for Kaiming,
-//! `torch/nn/init.py:469` for Xavier) so the distributions match DDR's
+//! `torch/nn/init.py:471` for Xavier) so the distributions match DDR's
 //! `nn/kan.py:45-46` calls element-for-element (modulo RNG bytes, per
 //! spec C4).
 
@@ -31,6 +31,10 @@ pub fn sample_kaiming_normal_relu(
     out_dim: usize,
 ) -> Array2<f32> {
     let std = (2.0_f32 / in_dim as f32).sqrt();
+    // Sample as f64 then cast to f32 — rand_distr 0.4's Distribution<f32>
+    // for StandardNormal internally does the same (its f32 impl is a thin
+    // delegate over the f64 Ziggurat). Pinning the type here makes that
+    // contract explicit and immune to upstream rand_distr changes.
     Array2::from_shape_fn((in_dim, out_dim), |_| {
         let v: f64 = rng.sample(rand_distr::StandardNormal);
         v as f32 * std
@@ -51,6 +55,10 @@ pub fn sample_xavier_normal(
     gain: f32,
 ) -> Array2<f32> {
     let std = gain * (2.0_f32 / (in_dim + out_dim) as f32).sqrt();
+    // Sample as f64 then cast to f32 — rand_distr 0.4's Distribution<f32>
+    // for StandardNormal internally does the same (its f32 impl is a thin
+    // delegate over the f64 Ziggurat). Pinning the type here makes that
+    // contract explicit and immune to upstream rand_distr changes.
     Array2::from_shape_fn((in_dim, out_dim), |_| {
         let v: f64 = rng.sample(rand_distr::StandardNormal);
         v as f32 * std
@@ -63,7 +71,8 @@ pub fn to_param_weight<B: Backend>(
     device: &B::Device,
 ) -> Param<Tensor<B, 2>> {
     let (rows, cols) = (arr.shape()[0], arr.shape()[1]);
-    let data = TensorData::new(arr.as_slice().unwrap().to_vec(), [rows, cols]);
+    let owned = arr.as_standard_layout().to_owned();
+    let data = TensorData::new(owned.as_slice().unwrap().to_vec(), [rows, cols]);
     Param::from_tensor(Tensor::from_data(data, device))
 }
 
@@ -124,5 +133,26 @@ mod tests {
             (std - expected).abs() < 1e-4,
             "std={std}, expected≈{expected}"
         );
+    }
+
+    #[test]
+    fn to_param_weight_handles_noncontiguous_input() {
+        use burn::backend::NdArray;
+        type B = NdArray<f32>;
+
+        // arr_3x2.reversed_axes() returns a non-contiguous 2x3 Array2.
+        let arr_3x2 = ndarray::array![[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0]];
+        let non_contig: ndarray::Array2<f32> = arr_3x2.reversed_axes();
+        assert!(
+            !non_contig.is_standard_layout(),
+            "reversed_axes should yield a non-contiguous view"
+        );
+
+        let device = Default::default();
+        let p = to_param_weight::<B>(non_contig.clone(), &device);
+        let bytes: Vec<f32> = p.val().into_data().to_vec().unwrap();
+        // The Param holds a standard-layout copy: row-major iteration order.
+        let expected: Vec<f32> = non_contig.iter().copied().collect();
+        assert_eq!(bytes, expected, "to_param_weight must materialize a row-major copy");
     }
 }
