@@ -39,10 +39,12 @@ experiment:
 kan_head:
   hidden_size: 21
   num_hidden_layers: 2
-  # B-spline grid intervals (`num` in pykan). Match DDR's default.
-  grid: 5
-  # B-spline order. Cubic.
-  k: 3
+  # B-spline grid intervals (`num` in pykan). Matches DDR's
+  # ~/projects/ddr/config/merit_training_config.yaml::kan.grid.
+  grid: 50
+  # B-spline order. Matches DDR's ::kan.k. (pykan's KANLayer default is 3,
+  # but DDR overrides to 2 for production.)
+  k: 2
   input_var_names:
     - SoilGrids1km_clay
     - aridity
