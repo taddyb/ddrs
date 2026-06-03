@@ -85,33 +85,29 @@ but not bit-equivalent across the two RNGs — acceptable per A5 / C4).
 
 | Field | DDR source | DDRS source | DDR value | DDRS value | Match? |
 |-------|------------|-------------|-----------|------------|--------|
-| `input_size` (F) | `kan.py:26` (from `len(input_var_names)`) | `kan_head.rs:48`, sized from `input_var_names.len()` | `len(merit_training_config.yaml::kan.input_var_names) = 10` | `len(merit_training.yaml::kan_head.input_var_names) = 10` | (verify) |
-| `hidden_size` (H) | `kan.py:27` | `kan_head.rs:58` | `21` | `21` | (verify) |
-| `num_hidden_layers` | `kan.py:33` (loop bound) | `kan_head.rs:62` | `2` | `2` | (verify) |
-| `output_size` (P) | `kan.py:29` (from `len(learnable_parameters)`) | `kan_head.rs:50` | `len(["n","q_spatial","p_spatial"]) = 3` | `3` | (verify) |
-| `input_var_names` (ordered) | YAML | YAML | (10 names) | (10 names) | (verify by zip-equal) |
-| `learnable_parameters` (ordered) | YAML | YAML | `["n","q_spatial","p_spatial"]` | `["n","q_spatial","p_spatial"]` | (verify) |
+| `input_size` (F) | `kan.py:26` (from `len(input_var_names)`) | `kan_head.rs:48`, sized from `input_var_names.len()` | `len(merit_training_config.yaml::kan.input_var_names) = 10` | `len(merit_training.yaml::kan_head.input_var_names) = 10` | ✓ |
+| `hidden_size` (H) | `kan.py:27` | `kan_head.rs:58` | `21` | `21` | ✓ |
+| `num_hidden_layers` | `kan.py:33` (loop bound) | `kan_head.rs:62` | `2` | `2` | ✓ |
+| `output_size` (P) | `kan.py:29` (from `len(learnable_parameters)`) | `kan_head.rs:50` | `len(["n","q_spatial","p_spatial"]) = 3` | `3` | ✓ |
+| `input_var_names` (ordered) | YAML | YAML | (10 names) | (10 names) | ✓ — `diff <(yq '.kan.input_var_names[]' …) <(yq '.kan_head.input_var_names[]' …)` is empty; both lists are identical in content and order |
+| `learnable_parameters` (ordered) | YAML | YAML | `["n","q_spatial","p_spatial"]` | `["n","q_spatial","p_spatial"]` | ✓ |
 
 #### 0.2 — Embedding (`input: Linear(F, H)`)
 
 | Field | DDR value (with src) | DDRS value (with src) | Match? |
 |-------|----------------------|-----------------------|--------|
-| Weight shape | `[H, F] = [21, 10]` | `[H, F] = [21, 10]` | (verify) |
+| Weight shape | `[H, F] = [21, 10]` | `[H, F] = [21, 10]` | ✓ |
 | Weight initializer | `kaiming_normal_(weight, nonlinearity="relu")` (`kan.py:45`) | `Initializer::KaimingNormal { gain: sqrt(2), fan_out_only: false }` (`kan_head.rs:85-88`) | STAT only |
 | Kaiming `mode` | `fan_in` (torch default at `nn/init.py:581`) | `fan_in` (burn `fan_out_only: false`) | ✓ |
 | Kaiming `gain` (effective) | `sqrt(2)` from `nonlinearity="relu"` (`nn/init.py:calculate_gain`) | `KAIMING_GAIN_RELU = sqrt(2)` (`kan_head.rs:36`) | ✓ |
 | Resulting weight std | `sqrt(2) / sqrt(F) = sqrt(2/10) ≈ 0.447` | same formula | ✓ analytically |
-| Weight RNG source | PyTorch Mersenne-Twister (global), seeded by … | (rskan-style? no — burn's `Initializer::init` uses burn's RNG) | **investigate before fixture run** |
-| Bias shape | `[H] = [21]` | `[H] = [21]` | (verify) |
+| Weight RNG source | PyTorch Mersenne-Twister (global), seeded by `torch.manual_seed(seed)` inside `MultKAN.__init__` (`MultKAN.py:158`) | burn's `Initializer::KaimingNormal` calls `rand::thread_rng()` internally — **not** seeded by `KanHeadConfig.seed`; confirmed non-reproducible by empirical probe (Task 2, 2026-06-03) | ✗ STAT only — formulas agree, but DDRS's Linear weights are non-deterministic across runs even at fixed seed. Tracked as C7; fix in Task 3. |
+| Bias shape | `[H] = [21]` | `[H] = [21]` | ✓ |
 | Bias initializer (pre-zero) | torch default `Linear` bias = `U(-1/sqrt(F), 1/sqrt(F))` (`nn/modules/linear.py`) | `LinearConfig::init` re-uses the weight initializer for bias unless overridden — so KaimingNormal(sqrt(2)) | irrelevant — overwritten |
 | Bias post-init | `torch.nn.init.zeros_(self.input.bias)` (`kan.py:47`) | `zero_bias(input, device)` (`kan_head.rs:116`) | ✓ |
 
 **Action items extracted from 0.2:**
-- Determine which RNG burn 0.21 uses when sampling `KaimingNormal` (global
-  `rand::thread_rng`? a per-init `StdRng`?). The Layer 1 statistical test
-  is unaffected (we only assert moments), but Layer 2 fixture loading must
-  bypass the initializer entirely — it sets the weight tensor by
-  `Param::from_tensor(...)` directly from the dumped fixture.
+- ~~Determine which RNG burn 0.21 uses when sampling `KaimingNormal`.~~ **RESOLVED (Task 2, 2026-06-03):** burn's `Initializer` uses `rand::thread_rng()` — not seeded by `KanHeadConfig.seed`. The Layer 1 statistical test is unaffected (we only assert moments), but Layer 2 fixture loading bypasses the initializer entirely via `Param::from_tensor(...)`. The reproducibility fix is Task 3 (project-controlled `StdRng`).
 
 #### 0.3 — KAN stack (`hidden: Vec<KanLayer(H, H)> × num_hidden_layers`)
 
@@ -126,8 +122,8 @@ pykan's `KANLayer` defaults (via `MultKAN`'s call path) and rskan's
 |-------|--------------------|---------------------|-----------|------------|--------|
 | `in_dim` | `MultKAN.py:214` (`width_in[l]`) | `kan_head.rs:102` | `H = 21` | `H = 21` | ✓ |
 | `out_dim` | `MultKAN.py:214` (`width_out[l+1]`) | `kan_head.rs:102` | `H = 21` | `H = 21` | ✓ |
-| `num` / `grid` | YAML `kan.grid` → `MultKAN.__init__(grid=…)` → KANLayer | YAML `kan_head.grid` → `KanLayerConfig.with_num` | **50** | **5** ❌ | **resolve in §5** |
-| `k` | YAML `kan.k` → KANLayer | YAML `kan_head.k` → `with_k` | **2** | **3** ❌ | **resolve in §5** |
+| `num` / `grid` | YAML `kan.grid` → `MultKAN.__init__(grid=…)` → KANLayer | YAML `kan_head.grid` → `KanLayerConfig.with_num` | **50** | **50** | ✓ — fixed in Task 1; `config/merit_training.yaml` updated to `grid: 50` |
+| `k` | YAML `kan.k` → KANLayer | YAML `kan_head.k` → `with_k` | **2** | **2** | ✓ — fixed in Task 1; `config/merit_training.yaml` updated to `k: 2` |
 | `noise_scale` | `MultKAN.__init__` default 0.3 (`MultKAN.py:96`) passed to `KANLayer(noise_scale=0.3)` (`MultKAN.py:214`) | `KAN_NOISE_SCALE = 0.3` (`kan_head.rs:40`) → `with_noise_scale(0.3)` | 0.3 | 0.3 | ✓ |
 | `scale_base_mu` | `MultKAN.__init__` default `0.0` (`MultKAN.py:96`) → KANLayer | rskan default `0.0` (`layer.rs:43`) — **DDRS does not override** | 0.0 | 0.0 | ✓ |
 | `scale_base_sigma` | `MultKAN.__init__` default `1.0` (`MultKAN.py:96`) → KANLayer | rskan default `1.0` (`layer.rs:44`) — **DDRS does not override** | 1.0 | 1.0 | ✓ |
@@ -149,10 +145,10 @@ pykan's `KANLayer` defaults (via `MultKAN`'s call path) and rskan's
 
 | Field | DDR value (with src) | DDRS value (with src) | Match? |
 |-------|----------------------|-----------------------|--------|
-| Weight shape | `[P, H] = [3, 21]` | `[P, H] = [3, 21]` | (verify) |
+| Weight shape | `[P, H] = [3, 21]` | `[P, H] = [3, 21]` | ✓ |
 | Weight initializer | `xavier_normal_(weight, gain=0.1)` (`kan.py:46`) | `Initializer::XavierNormal { gain: 0.1 }` (`kan_head.rs:89-91`) | STAT only |
 | Xavier formula | `std = gain * sqrt(2 / (fan_in + fan_out)) = 0.1 * sqrt(2/24) ≈ 0.0289` | same formula | ✓ analytically |
-| Bias shape | `[P] = [3]` | `[P] = [3]` | (verify) |
+| Bias shape | `[P] = [3]` | `[P] = [3]` | ✓ |
 | Bias post-init | `torch.nn.init.zeros_(self.output.bias)` (`kan.py:48`) | `zero_bias(output, device)` (`kan_head.rs:117`) | ✓ |
 | Post-Linear nonlinearity | `F.sigmoid(_x)` (`kan.py:58`) | `sigmoid(logits)` (`kan_head.rs:157`) | ✓ |
 | Output reshape | `_x.transpose(0, 1)` then index `x_transpose[idx]` per key (`kan.py:59-61`) | `probs.swap_dims(0, 1)` then `slice([idx..idx+1, 0..n]).reshape([n])` per key (`kan_head.rs:170-178`) | ✓ (verify by Layer 2) |
@@ -162,16 +158,17 @@ pykan's `KANLayer` defaults (via `MultKAN`'s call path) and rskan's
 | Field | DDR | DDRS | Match? |
 |-------|-----|------|--------|
 | Order of sub-module construction | `Linear input → loop(KAN blocks) → Linear output → init.kaiming_normal_ → init.xavier_normal_ → init.zeros_(input.bias) → init.zeros_(output.bias)` (`kan.py:31-48`) | `Linear input → loop(KanLayer blocks) → Linear output → zero_bias(input) → zero_bias(output)` (`kan_head.rs:93-117`) | ✓ for module order; **DDR's** seed-reset side effect from `MultKAN(seed=)` (`MultKAN.py:158-160`) re-seeds Torch / NumPy globals so the Linears initialised **after** the KAN loop draw from `seed`-derived state, while DDRS's `Initializer::KaimingNormal` and `XavierNormal` use burn-internal RNG independent of the KAN seed. **STAT only**, but flag it. |
-| Are `input.weight` and `output.weight` reproducible given just `seed=42`? | Yes (after `MultKAN` re-seeds globals; the *order* of layer construction matters) | No — burn's initializers depend on whatever RNG burn picks; need to control that to make DDRS init repro across runs | Investigate; if burn's initializer uses `thread_rng`, DDRS init is non-deterministic even at fixed seed, which would itself be a bug. |
+| Are `input.weight` and `output.weight` reproducible given just `seed=42`? | Yes (after `MultKAN` re-seeds globals; the *order* of layer construction matters) | No — burn's initializers depend on whatever RNG burn picks; need to control that to make DDRS init repro across runs | ✗ — empirical probe shows different bytes across two consecutive `cfg.init()` calls at fixed seed=42 (Task 2 verification, 2026-06-03). `h1.input.weight[0..5] = [-0.5793, 0.0344, 0.2894, -0.5388, -0.6762]` vs `h2.input.weight[0..5] = [0.3699, 0.1127, -0.2515, -0.4630, -0.0366]`. burn 0.21 `Initializer::KaimingNormal` / `XavierNormal` call `rand::thread_rng()` — not a seedable per-init RNG. Task 3 must replace burn's Initializer with a project-controlled `StdRng` seeded from `KanHeadConfig.seed` for both Linear layers. |
 
-**Pass criterion:** Every row in tables 0.1 – 0.5 is ✓ or STAT-only. Fields
-marked ❌ in 0.3 must be resolved in §5 before Layer 1 runs.
+**Pass criterion:** Every row in tables 0.1 – 0.5 is ✓ or STAT-only. The ❌
+in 0.3 (`grid`, `k`) were resolved in Task 1. The ❌ in 0.5 (C7, Linear RNG
+reproducibility) is tracked; it does not block Layer 1 (moments-only) but
+must be fixed (Task 3) before Layer 2 fixture loading can assert bit parity.
 
 **Failure routing:**
 - Any row in 0.1, 0.2, 0.4, or 0.5 column "Match?" comes back ❌ that isn't
-  already in §5 → file a bug, fix before Layer 1.
-- Any "investigate" row → resolve before Layer 2 (Layer 1 doesn't depend on
-  RNG plumbing, only on distributions).
+  already tracked → file a bug, fix before Layer 1.
+- ~~Any "investigate" row~~ All "investigate" rows resolved in Task 2 (2026-06-03).
 
 ### Layer 1 — Statistical init parity (~1 day)
 
