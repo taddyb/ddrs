@@ -24,7 +24,7 @@ plotters = { version = "0.3", default-features = false, features = ["bitmap_back
 # KAN head — pure-Rust port of pykan.KANLayer. Provides Burn-tensor B-spline edge
 # activations with forward+backward parity vs pykan 0.2.x. Replaces the MLP
 # placeholder in src/nn/ to match DDR-Python's actual head architecture.
-rskan = { git = "https://github.com/taddyb/rskan.git", tag = "v0.1.0" }
+rskan = { git = "https://github.com/taddyb/rskan.git", tag = "v0.1.1" }
 
 # Data layer — read DDR's live training sources in place, no export step.
 #   zarrs    : merit_conus_adjacency.zarr + merit_gages_conus_adjacency.zarr
