@@ -12,13 +12,15 @@
 //! - Output: `HashMap<String, Tensor<B, 1>>` of length `P`, with `output[key].shape == [N]`,
 //!   keyed by the entries of `learnable_parameters` in order.
 //!
-//! Init recipe (per migration spec §8.3 and §8.4):
-//! - input Linear: `kaiming_normal_(nonlinearity="relu")`, zero bias.
-//! - hidden KanLayers: `rskan::KanLayerConfig::new(H, H, seed)` with `num=grid`,
-//!   `k=k`, `noise_scale=0.3` (MultKAN default). **The same `seed` is passed to
-//!   every inner KanLayer** to match DDR-Python's `kan.py:24-34` quirk. This
-//!   overrides `rskan::KanConfig`'s own per-layer sub-seed derivation.
-//! - output Linear: `xavier_normal_(gain=0.1)`, zero bias.
+//! Init recipe (matches DDR `kan.py:45-48` element-for-element, with
+//! `StdRng`-based sampling instead of PyTorch global MT — see C4):
+//! - input Linear weight:  Kaiming-normal, `std = sqrt(2)/sqrt(F)`.
+//! - output Linear weight: Xavier-normal, `std = 0.1 * sqrt(2/(H+P))`.
+//! - both biases:          zero.
+//! - hidden KanLayers:     `rskan::KanLayerConfig::new(H, H, seed)` with
+//!                         `num=grid`, `k=k`, `noise_scale=0.3`. Same
+//!                         `seed` for every inner KanLayer.
+//! See `src/nn/init.rs` for the actual sampling code.
 //!
 //! Defaults (`hidden_size=21`, `num_hidden_layers=2`, `grid=5`, `k=3`) match
 //! `config/merit_training.yaml`.
@@ -26,14 +28,18 @@
 use std::collections::HashMap;
 
 use burn::config::Config;
-use burn::module::{Module, Param};
-use burn::nn::{Initializer, Linear, LinearConfig};
+use burn::module::Module;
+use burn::nn::Linear;
 use burn::tensor::activation::sigmoid;
 use burn::tensor::{backend::Backend, Tensor};
+use rand::SeedableRng;
 use rskan::{KanLayer, KanLayerConfig};
 
-/// Kaiming normal gain for ReLU nonlinearity: `sqrt(2)`.
-const KAIMING_GAIN_RELU: f64 = std::f64::consts::SQRT_2;
+#[cfg(feature = "fixtures")]
+use burn::module::Param;
+#[cfg(feature = "fixtures")]
+use burn::tensor::TensorData;
+
 /// Xavier gain applied to the output layer (matches DDR `kan.py:46`).
 const XAVIER_GAIN_OUTPUT: f64 = 0.1;
 /// pykan MultKAN default; matches DDR's `KAN([H, H], ...)` noise_scale default.
@@ -71,7 +77,12 @@ pub struct KanHeadConfig {
 }
 
 impl KanHeadConfig {
-    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe.
+    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe
+    /// using a project-controlled `StdRng` seeded from `self.seed`. See
+    /// `src/nn/init.rs` for the sampling formulas.
+    ///
+    /// The same `self.seed` is also passed to every inner `KanLayer` — see
+    /// the module-level docstring for why.
     pub fn init<B: Backend>(&self, device: &B::Device) -> KanHead<B> {
         assert!(
             !self.input_var_names.is_empty(),
@@ -82,21 +93,31 @@ impl KanHeadConfig {
             "learnable_parameters must be non-empty"
         );
 
-        let kaiming = Initializer::KaimingNormal {
-            gain: KAIMING_GAIN_RELU,
-            fan_out_only: false,
-        };
-        let xavier = Initializer::XavierNormal {
-            gain: XAVIER_GAIN_OUTPUT,
-        };
+        let f = self.input_var_names.len();
+        let h = self.hidden_size;
+        let p = self.learnable_parameters.len();
 
-        let input = LinearConfig::new(self.input_var_names.len(), self.hidden_size)
-            .with_initializer(kaiming)
-            .init(device);
+        // Single StdRng controls both Linears so their bytes are reproducible
+        // at fixed `seed`. The inner KanLayers each get the same `seed`
+        // directly (rskan reseeds internally) — they do NOT consume from this
+        // RNG.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
+
+        let input_weight = crate::nn::init::sample_kaiming_normal_relu(&mut rng, f, h);
+        let output_weight =
+            crate::nn::init::sample_xavier_normal(&mut rng, h, p, XAVIER_GAIN_OUTPUT as f32);
+
+        let input = burn::nn::Linear {
+            weight: crate::nn::init::to_param_weight::<B>(input_weight, device),
+            bias: Some(crate::nn::init::zero_bias_tensor::<B>(h, device)),
+        };
+        let output = burn::nn::Linear {
+            weight: crate::nn::init::to_param_weight::<B>(output_weight, device),
+            bias: Some(crate::nn::init::zero_bias_tensor::<B>(p, device)),
+        };
 
         // DDR-Python quirk: same `seed` passed to every inner `KAN([H, H])`
-        // constructor. We mirror that here rather than using rskan's own
-        // per-layer sub-seed derivation. See migration spec §8.3.
+        // constructor. See migration spec §8.3.
         let hidden: Vec<KanLayer<B>> = (0..self.num_hidden_layers)
             .map(|_| {
                 KanLayerConfig::new(self.hidden_size, self.hidden_size, self.seed)
@@ -106,15 +127,6 @@ impl KanHeadConfig {
                     .init(device)
             })
             .collect();
-
-        let output = LinearConfig::new(self.hidden_size, self.learnable_parameters.len())
-            .with_initializer(xavier)
-            .init(device);
-
-        // Zero biases (matches `torch.nn.init.zeros_(self.input.bias)` /
-        // `zeros_(self.output.bias)` in DDR's `kan.py:47-48`).
-        let input = zero_bias(input, device);
-        let output = zero_bias(output, device);
 
         KanHead {
             input,
@@ -186,17 +198,136 @@ impl<B: Backend> KanHead<B> {
     }
 }
 
-/// Replace a `Linear`'s bias with a zero tensor of the same shape.
-///
-/// `LinearConfig::init` uses the *same* `Initializer` for both weight and bias,
-/// so a `KaimingNormal` or `XavierNormal` config produces a random bias. DDR's
-/// recipe zeros all biases explicitly; we do the same here.
-fn zero_bias<B: Backend>(layer: Linear<B>, device: &B::Device) -> Linear<B> {
-    let Linear { weight, bias } = layer;
-    let bias = bias.map(|b| {
-        let shape = b.shape();
-        let zero: Tensor<B, 1> = Tensor::zeros(shape, device);
-        Param::initialized(b.id, zero)
-    });
-    Linear { weight, bias }
+#[cfg(feature = "fixtures")]
+mod fixture {
+    use super::*;
+    use ndarray::{Array1, Array2, Array3};
+    use ndarray_npy::NpzReader;
+    use std::fs::File;
+    use std::io;
+    use std::path::Path;
+
+    fn err_other(msg: impl Into<String>) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, msg.into())
+    }
+
+    /// Build a `Linear<B>` from DDR-layout weight `[out, in]` and bias `[out]`.
+    ///
+    /// DDR (PyTorch) stores weight as `[out_features, in_features]`. Burn stores
+    /// it as `[in_features, out_features]`. Transpose before wrapping.
+    fn linear_from_parts<B: Backend>(
+        weight_oi: Array2<f32>, // DDR-side shape [out, in]
+        bias: Array1<f32>,
+        device: &B::Device,
+    ) -> Linear<B> {
+        // Transpose to burn's [in, out] layout. `reversed_axes()` returns a
+        // non-contiguous view; `to_param_weight` materialises a row-major copy
+        // via `as_standard_layout()`.
+        let weight_io: Array2<f32> = weight_oi.reversed_axes();
+        let weight_param = crate::nn::init::to_param_weight::<B>(weight_io, device);
+
+        let bias_dim = bias.shape()[0];
+        let b_data = TensorData::new(bias.to_vec(), [bias_dim]);
+        let bias_param = Param::from_tensor(Tensor::from_data(b_data, device));
+
+        Linear {
+            weight: weight_param,
+            bias: Some(bias_param),
+        }
+    }
+
+    impl<B: Backend> KanHead<B> {
+        /// Build a `KanHead` from a `.npz` fixture (Python-side dump). All
+        /// initializers are bypassed — every tensor is loaded byte-for-byte
+        /// from the fixture file, with weight matrices transposed from DDR's
+        /// `[out, in]` (PyTorch) to burn's `[in, out]` layout.
+        ///
+        /// Enables bitwise forward + backward parity assertions vs DDR-Python
+        /// in Tasks 9 + 10.
+        pub fn from_npz(
+            path: &Path,
+            device: &B::Device,
+            cfg: &KanHeadConfig,
+        ) -> io::Result<Self> {
+            let file = File::open(path)?;
+            let mut npz = NpzReader::new(file).map_err(|e| err_other(e.to_string()))?;
+
+            let read_dyn = |npz: &mut NpzReader<File>, k: &str| -> io::Result<ndarray::ArrayD<f32>> {
+                let arr: ndarray::ArrayD<f32> = npz
+                    .by_name(k)
+                    .map_err(|e| err_other(format!("read {k}: {e}")))?;
+                Ok(arr)
+            };
+            let read_2 = |npz: &mut NpzReader<File>, k: &str| -> io::Result<Array2<f32>> {
+                read_dyn(npz, k).and_then(|a| {
+                    a.into_dimensionality::<ndarray::Ix2>()
+                        .map_err(|e| err_other(format!("{k}: not 2D: {e}")))
+                })
+            };
+            let read_1 = |npz: &mut NpzReader<File>, k: &str| -> io::Result<Array1<f32>> {
+                read_dyn(npz, k).and_then(|a| {
+                    a.into_dimensionality::<ndarray::Ix1>()
+                        .map_err(|e| err_other(format!("{k}: not 1D: {e}")))
+                })
+            };
+            let read_3 = |npz: &mut NpzReader<File>, k: &str| -> io::Result<Array3<f32>> {
+                read_dyn(npz, k).and_then(|a| {
+                    a.into_dimensionality::<ndarray::Ix3>()
+                        .map_err(|e| err_other(format!("{k}: not 3D: {e}")))
+                })
+            };
+
+            let input = linear_from_parts::<B>(
+                read_2(&mut npz, "input_weight")?,
+                read_1(&mut npz, "input_bias")?,
+                device,
+            );
+            let output = linear_from_parts::<B>(
+                read_2(&mut npz, "output_weight")?,
+                read_1(&mut npz, "output_bias")?,
+                device,
+            );
+
+            let mut hidden = Vec::with_capacity(cfg.num_hidden_layers);
+            for b in 0..cfg.num_hidden_layers {
+                let grid = read_2(&mut npz, &format!("block_{b}_grid"))?;
+                let coef = read_3(&mut npz, &format!("block_{b}_coef"))?;
+                let scale_base = read_2(&mut npz, &format!("block_{b}_scale_base"))?;
+                let scale_sp = read_2(&mut npz, &format!("block_{b}_scale_sp"))?;
+                let mask = read_2(&mut npz, &format!("block_{b}_mask"))?;
+
+                let to_t2 = |a: Array2<f32>| {
+                    let (r, c) = (a.shape()[0], a.shape()[1]);
+                    let vec = a.as_standard_layout().to_owned().into_raw_vec_and_offset().0;
+                    Tensor::<B, 2>::from_data(TensorData::new(vec, [r, c]), device)
+                };
+                let to_t3 = |a: Array3<f32>| {
+                    let (d0, d1, d2) = (a.shape()[0], a.shape()[1], a.shape()[2]);
+                    let vec = a.as_standard_layout().to_owned().into_raw_vec_and_offset().0;
+                    Tensor::<B, 3>::from_data(TensorData::new(vec, [d0, d1, d2]), device)
+                };
+
+                let layer = KanLayerConfig::new(cfg.hidden_size, cfg.hidden_size, cfg.seed)
+                    .with_num(cfg.grid)
+                    .with_k(cfg.k)
+                    .with_noise_scale(KAN_NOISE_SCALE)
+                    .init_from_parts::<B>(
+                        device,
+                        to_t2(grid),
+                        to_t3(coef),
+                        to_t2(scale_base),
+                        to_t2(scale_sp),
+                        to_t2(mask),
+                    );
+                hidden.push(layer);
+            }
+
+            Ok(KanHead {
+                input,
+                hidden,
+                output,
+                learnable_parameters: cfg.learnable_parameters.clone(),
+            })
+        }
+    }
 }
