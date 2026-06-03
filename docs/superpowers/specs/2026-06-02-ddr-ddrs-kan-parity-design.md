@@ -43,6 +43,7 @@ drift in the routing pass.
 | C4 | rskan's own docs (`layer.rs:113-115`) state RNG bit-parity with pykan is impossible (`StdRng` vs Mersenne-Twister). | All parity at the *random sampling* layer is statistical, not bitwise. Any test that demands bitwise parity must source the parameters from a fixture, not from a seed. Plan reflects this — bitwise tests use fixtures; seed-based tests assert moments + KS statistics within tolerance. |
 | C5 | The pykan code path has un-documented side effects from `MultKAN.__init__` (calls `torch.manual_seed`, `np.random.seed`, `random.seed` — `MultKAN.py:158-160`). | DDR's `kan.py:24-43` creates **one `KAN([H,H])` per outer hidden layer**, each call re-seeding global Torch/Numpy RNG to the *same* `seed`. So both inner blocks have **identical** coef / scale_base / scale_sp tensors. DDRS preserves this by reusing the same `seed` per inner `KanLayer`. Tests must explicitly check that `hidden[0].coef == hidden[1].coef` in both ports. |
 | C6 | Forward parity tests assume `silu`, `extend_grid`, `coef2curve`, `curve2coef` match between rskan and pykan elementwise. rskan ships parity tests internally (`tests/parity_forward.rs`, `tests/parity_backward.rs`) but our test layer needs to confirm this is also true on the *backend we actually train on* (CUDA via `burn-cuda`), not just the `NdArray` backend rskan tests use. | Mitigated by running the fixture-forward test on both `NdArray` (CPU) and `LibTorch-CUDA` / `Cuda` backends — same fixture, same expected output. If the CUDA backend diverges and CPU doesn't, the bug is in `burn-cuda` kernels, not in the KAN code. |
+| C7 | Burn 0.21's `Initializer::KaimingNormal` / `XavierNormal` may draw from `rand::thread_rng()` rather than a seedable per-init RNG. If so, DDRS's *Linear* weights are non-reproducible across runs at fixed `seed=42` — independent of any DDR parity question. | Discovered during the 0.5 audit (see "Are `input.weight` and `output.weight` reproducible…" row). If true, the fix is to bypass burn's initializer for `input` and `output` Linears and sample weights via a project-controlled `StdRng` (the same one rskan uses), then `Param::from_tensor(...)`. This would also make the embedding / head initialization use the **same RNG family** as the KAN blocks — eliminating one more source of cross-module drift. |
 
 ---
 
@@ -64,30 +65,113 @@ drift in the routing pass.
 Five layers, ordered cheapest → most expensive. Each layer answers a
 yes/no question; failures route to a specific module to investigate.
 
-### Layer 0 — Config audit (no code; 1 hour)
+### Layer 0 — Exhaustive hyperparameter + initialization audit (no code; 1 hour)
 
-**Question:** Do the DDR and DDRS configs declare the same architecture?
+**Question:** Does *every* declared and inherited hyperparameter — for the
+embedding Linear, the KAN stack, and the head Linear — match between DDR
+and DDRS, including all initializers, their modes / gains / nonlinearities,
+all bias treatments, all rskan / pykan defaults that DDRS overrides, and
+all rskan / pykan defaults that DDRS *doesn't* override (where the two
+libraries pick different defaults)?
 
-**Procedure:**
-1. Diff `~/projects/ddr/config/merit_training_config.yaml` (`kan:` block)
-   against `~/projects/ddrs/config/merit_training.yaml` (`kan_head:` block).
-2. Tabulate every field: `hidden_size`, `num_hidden_layers`, `grid`, `k`,
-   `input_var_names`, `learnable_parameters`, `seed`.
-3. Confirm `kan_noise_scale` (DDRS hard-codes `KAN_NOISE_SCALE = 0.3` in
-   `src/nn/kan_head.rs:40`) matches pykan's MultKAN default
-   (`MultKAN.py:96`). Already confirmed: both 0.3.
+**Procedure:** produce four tables — one per sub-module — auditing every
+field that affects the module's parameter tensors or its forward pass.
+Where DDR's value is "torch default", quote the exact PyTorch source line.
+Where DDRS's value is "burn default", quote the burn 0.21 source line.
+Fill the **Match?** column with ✓ / ✗ / "STAT only" (statistically equivalent
+but not bit-equivalent across the two RNGs — acceptable per A5 / C4).
 
-**Expected divergences (from this spec's pre-investigation):**
+#### 0.1 — Architectural layer counts and widths
 
-| Field | DDR YAML | DDRS YAML | Action |
-|-------|----------|-----------|--------|
-| `grid` | 50 | 5 | Bump DDRS to 50 OR change DDR for the comparison (decide in §5). |
-| `k`    | 2  | 3 | Bump DDRS to 2 OR change DDR. |
+| Field | DDR source | DDRS source | DDR value | DDRS value | Match? |
+|-------|------------|-------------|-----------|------------|--------|
+| `input_size` (F) | `kan.py:26` (from `len(input_var_names)`) | `kan_head.rs:48`, sized from `input_var_names.len()` | `len(merit_training_config.yaml::kan.input_var_names) = 10` | `len(merit_training.yaml::kan_head.input_var_names) = 10` | (verify) |
+| `hidden_size` (H) | `kan.py:27` | `kan_head.rs:58` | `21` | `21` | (verify) |
+| `num_hidden_layers` | `kan.py:33` (loop bound) | `kan_head.rs:62` | `2` | `2` | (verify) |
+| `output_size` (P) | `kan.py:29` (from `len(learnable_parameters)`) | `kan_head.rs:50` | `len(["n","q_spatial","p_spatial"]) = 3` | `3` | (verify) |
+| `input_var_names` (ordered) | YAML | YAML | (10 names) | (10 names) | (verify by zip-equal) |
+| `learnable_parameters` (ordered) | YAML | YAML | `["n","q_spatial","p_spatial"]` | `["n","q_spatial","p_spatial"]` | (verify) |
 
-Failures here are fixed by editing YAML, no code touched.
+#### 0.2 — Embedding (`input: Linear(F, H)`)
 
-**Pass criterion:** Two configs declare identical architecture for the parity
-run (which need not be the production config — see §5).
+| Field | DDR value (with src) | DDRS value (with src) | Match? |
+|-------|----------------------|-----------------------|--------|
+| Weight shape | `[H, F] = [21, 10]` | `[H, F] = [21, 10]` | (verify) |
+| Weight initializer | `kaiming_normal_(weight, nonlinearity="relu")` (`kan.py:45`) | `Initializer::KaimingNormal { gain: sqrt(2), fan_out_only: false }` (`kan_head.rs:85-88`) | STAT only |
+| Kaiming `mode` | `fan_in` (torch default at `nn/init.py:581`) | `fan_in` (burn `fan_out_only: false`) | ✓ |
+| Kaiming `gain` (effective) | `sqrt(2)` from `nonlinearity="relu"` (`nn/init.py:calculate_gain`) | `KAIMING_GAIN_RELU = sqrt(2)` (`kan_head.rs:36`) | ✓ |
+| Resulting weight std | `sqrt(2) / sqrt(F) = sqrt(2/10) ≈ 0.447` | same formula | ✓ analytically |
+| Weight RNG source | PyTorch Mersenne-Twister (global), seeded by … | (rskan-style? no — burn's `Initializer::init` uses burn's RNG) | **investigate before fixture run** |
+| Bias shape | `[H] = [21]` | `[H] = [21]` | (verify) |
+| Bias initializer (pre-zero) | torch default `Linear` bias = `U(-1/sqrt(F), 1/sqrt(F))` (`nn/modules/linear.py`) | `LinearConfig::init` re-uses the weight initializer for bias unless overridden — so KaimingNormal(sqrt(2)) | irrelevant — overwritten |
+| Bias post-init | `torch.nn.init.zeros_(self.input.bias)` (`kan.py:47`) | `zero_bias(input, device)` (`kan_head.rs:116`) | ✓ |
+
+**Action items extracted from 0.2:**
+- Determine which RNG burn 0.21 uses when sampling `KaimingNormal` (global
+  `rand::thread_rng`? a per-init `StdRng`?). The Layer 1 statistical test
+  is unaffected (we only assert moments), but Layer 2 fixture loading must
+  bypass the initializer entirely — it sets the weight tensor by
+  `Param::from_tensor(...)` directly from the dumped fixture.
+
+#### 0.3 — KAN stack (`hidden: Vec<KanLayer(H, H)> × num_hidden_layers`)
+
+DDR side: each block is a `pykan.KAN([H, H], k=k, grid=grid, seed=seed)` —
+i.e. `MultKAN(width=[H, H], ...)`, which internally constructs **one**
+`KANLayer(in_dim=H, out_dim=H, ...)`. DDRS side: each block is one
+`rskan::KanLayer(H, H, seed)`. Field comparison below is therefore between
+pykan's `KANLayer` defaults (via `MultKAN`'s call path) and rskan's
+`KanLayerConfig` defaults.
+
+| Field | DDR / pykan source | DDRS / rskan source | DDR value | DDRS value | Match? |
+|-------|--------------------|---------------------|-----------|------------|--------|
+| `in_dim` | `MultKAN.py:214` (`width_in[l]`) | `kan_head.rs:102` | `H = 21` | `H = 21` | ✓ |
+| `out_dim` | `MultKAN.py:214` (`width_out[l+1]`) | `kan_head.rs:102` | `H = 21` | `H = 21` | ✓ |
+| `num` / `grid` | YAML `kan.grid` → `MultKAN.__init__(grid=…)` → KANLayer | YAML `kan_head.grid` → `KanLayerConfig.with_num` | **50** | **5** ❌ | **resolve in §5** |
+| `k` | YAML `kan.k` → KANLayer | YAML `kan_head.k` → `with_k` | **2** | **3** ❌ | **resolve in §5** |
+| `noise_scale` | `MultKAN.__init__` default 0.3 (`MultKAN.py:96`) passed to `KANLayer(noise_scale=0.3)` (`MultKAN.py:214`) | `KAN_NOISE_SCALE = 0.3` (`kan_head.rs:40`) → `with_noise_scale(0.3)` | 0.3 | 0.3 | ✓ |
+| `scale_base_mu` | `MultKAN.__init__` default `0.0` (`MultKAN.py:96`) → KANLayer | rskan default `0.0` (`layer.rs:43`) — **DDRS does not override** | 0.0 | 0.0 | ✓ |
+| `scale_base_sigma` | `MultKAN.__init__` default `1.0` (`MultKAN.py:96`) → KANLayer | rskan default `1.0` (`layer.rs:44`) — **DDRS does not override** | 1.0 | 1.0 | ✓ |
+| `scale_sp` | KANLayer default `1.0` (MultKAN passes `scale_sp=1.` explicitly, `MultKAN.py:214`) | rskan default `1.0` (`layer.rs:45`) — DDRS does not override | 1.0 | 1.0 | ✓ |
+| `grid_range` | KANLayer default `[-1, 1]` (MultKAN passes `grid_range` from its own default `[-1, 1]`, `MultKAN.py:96`) | rskan default `[-1.0, 1.0]` (`layer.rs:46`) | `[-1, 1]` | `[-1, 1]` | ✓ |
+| `sp_trainable` | KANLayer default `True` (MultKAN passes `True`, `MultKAN.py:96`) | rskan default `true` (`layer.rs:47`) | true | true | ✓ |
+| `sb_trainable` | KANLayer default `True` (MultKAN passes `True`, `MultKAN.py:96`) | rskan default `true` (`layer.rs:48`) | true | true | ✓ |
+| `grid_eps` | KANLayer default `0.02` (`KANLayer.py:44`) | **rskan does not expose** — `extend_grid` always uniform | 0.02 (irrelevant; only used by `update_grid_from_samples`) | N/A (we never call grid-update) | ✓ by exclusion |
+| `base_fun` | KANLayer default `nn.SiLU()` (`KANLayer.py:44`) | rskan hard-codes `silu` (`layer.rs:192`) | SiLU | SiLU | ✓ |
+| `sparse_init` | MultKAN default `False` (`MultKAN.py:96`) | rskan does not expose (mask = ones, `layer.rs:143`) | False → mask=ones | mask=ones | ✓ |
+| `mask` | `torch.ones(in_dim, out_dim)` (`KANLayer.py:108`) | `NdArray2::<f32>::ones(...)` (`layer.rs:143`) | ones | ones | ✓ |
+| `seed` (per-block) | `MultKAN.__init__(seed=seed)` re-seeds **all global RNGs** to `seed` (`MultKAN.py:158-160`) — DDR loops the KAN constructor in `kan.py:33-42` with the same `seed` for every block → both blocks initialised from identical RNG state | DDRS reuses `self.seed` for every inner `KanLayer` (`kan_head.rs:97-108`) — both blocks initialised from identical seed | both blocks identical | both blocks identical | ✓ (validate via `assert hidden[0].coef == hidden[1].coef` per port) |
+| RNG used | torch / numpy / python global Mersenne-Twister | `rand::rngs::StdRng` (`init.rs:11`) | MT19937 | StdRng | STAT only (per C4) |
+
+**Items that need follow-up before Layer 1 runs:**
+- (none — every value is either ✓ or STAT-only).
+
+#### 0.4 — Head (`output: Linear(H, P)`)
+
+| Field | DDR value (with src) | DDRS value (with src) | Match? |
+|-------|----------------------|-----------------------|--------|
+| Weight shape | `[P, H] = [3, 21]` | `[P, H] = [3, 21]` | (verify) |
+| Weight initializer | `xavier_normal_(weight, gain=0.1)` (`kan.py:46`) | `Initializer::XavierNormal { gain: 0.1 }` (`kan_head.rs:89-91`) | STAT only |
+| Xavier formula | `std = gain * sqrt(2 / (fan_in + fan_out)) = 0.1 * sqrt(2/24) ≈ 0.0289` | same formula | ✓ analytically |
+| Bias shape | `[P] = [3]` | `[P] = [3]` | (verify) |
+| Bias post-init | `torch.nn.init.zeros_(self.output.bias)` (`kan.py:48`) | `zero_bias(output, device)` (`kan_head.rs:117`) | ✓ |
+| Post-Linear nonlinearity | `F.sigmoid(_x)` (`kan.py:58`) | `sigmoid(logits)` (`kan_head.rs:157`) | ✓ |
+| Output reshape | `_x.transpose(0, 1)` then index `x_transpose[idx]` per key (`kan.py:59-61`) | `probs.swap_dims(0, 1)` then `slice([idx..idx+1, 0..n]).reshape([n])` per key (`kan_head.rs:170-178`) | ✓ (verify by Layer 2) |
+
+#### 0.5 — Top-level construction order and seed handling
+
+| Field | DDR | DDRS | Match? |
+|-------|-----|------|--------|
+| Order of sub-module construction | `Linear input → loop(KAN blocks) → Linear output → init.kaiming_normal_ → init.xavier_normal_ → init.zeros_(input.bias) → init.zeros_(output.bias)` (`kan.py:31-48`) | `Linear input → loop(KanLayer blocks) → Linear output → zero_bias(input) → zero_bias(output)` (`kan_head.rs:93-117`) | ✓ for module order; **DDR's** seed-reset side effect from `MultKAN(seed=)` (`MultKAN.py:158-160`) re-seeds Torch / NumPy globals so the Linears initialised **after** the KAN loop draw from `seed`-derived state, while DDRS's `Initializer::KaimingNormal` and `XavierNormal` use burn-internal RNG independent of the KAN seed. **STAT only**, but flag it. |
+| Are `input.weight` and `output.weight` reproducible given just `seed=42`? | Yes (after `MultKAN` re-seeds globals; the *order* of layer construction matters) | No — burn's initializers depend on whatever RNG burn picks; need to control that to make DDRS init repro across runs | Investigate; if burn's initializer uses `thread_rng`, DDRS init is non-deterministic even at fixed seed, which would itself be a bug. |
+
+**Pass criterion:** Every row in tables 0.1 – 0.5 is ✓ or STAT-only. Fields
+marked ❌ in 0.3 must be resolved in §5 before Layer 1 runs.
+
+**Failure routing:**
+- Any row in 0.1, 0.2, 0.4, or 0.5 column "Match?" comes back ❌ that isn't
+  already in §5 → file a bug, fix before Layer 1.
+- Any "investigate" row → resolve before Layer 2 (Layer 1 doesn't depend on
+  RNG plumbing, only on distributions).
 
 ### Layer 1 — Statistical init parity (~1 day)
 
