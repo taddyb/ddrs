@@ -82,22 +82,31 @@ DDRS file. Fill in the "Match?" column with ✓ or ✗ (actual: …, want: …).
 
 | Field | DDR source | DDRS source | Match? |
 |-------|------------|-------------|--------|
-| Loss function | `~/projects/ddr/src/ddr/training/loss.py` (or wherever the trainer imports from) | `src/training/loss.rs` (if present) or wherever `driver.rs` computes loss | (audit) |
-| Optimizer | DDR's train.py `torch.optim.*` construction | `src/training/driver.rs` `Optimizer::*` construction | (audit) |
-| LR schedule | DDR YAML's `experiment.learning_rate` mapping | DDRS YAML's `experiment.learning_rate` mapping | already audited as equal in previous plan; re-confirm |
-| Adam betas / eps / weight_decay | torch defaults: `betas=(0.9, 0.999), eps=1e-8, weight_decay=0` | burn's `AdamConfig::new()` defaults — confirm match | (audit) |
-| Batch size (training) | DDR YAML `experiment.batch_size: 64` | DDRS YAML `experiment.batch_size: 64` | already ✓ |
-| Batch construction (per epoch) | `RandomSampler` over gauge IDs, seeded by `np_seed` | `src/data/dataset.rs::shuffle_*` — confirm equivalent sampler logic | (audit; expected STAT only per spec C5 of previous plan) |
-| Shuffle PRNG | `numpy.random.default_rng(np_seed)` | Rust `rand::SeedableRng::seed_from_u64(np_seed)` | STAT only — different sequences |
-| `grad_clip_max_norm` | DDR YAML `experiment.grad_clip_max_norm: 1.0` | DDRS YAML same | already ✓ |
-| Warmup | DDR YAML `experiment.warmup: 5` | DDRS YAML same | already ✓ |
-| Rho (training window length) | DDR YAML `experiment.rho: 90` | DDRS YAML same | already ✓ |
-| Epoch count | DDR YAML `experiment.epochs: 5` | DDRS YAML same | already ✓ |
-| Start / end time | DDR YAML | DDRS YAML | already ✓ |
-| Gauge list | `references/gage_info/gages_3000.csv` | same path | already ✓ |
-| Streamflow source | `merit_dhbv2_UH_retrospective.ic` | same | already ✓ |
-| Observations source | `usgs_daily_observations` | same | already ✓ |
-| Routing engine f32 throughput | DDR f32-by-construction | DDRS f32-by-construction | already ✓ |
+| Loss function (formula) | `~/projects/ddr/scripts/train.py:94-99` — `torch.nn.functional.l1_loss` over NaN-filtered gauge set | `src/training/driver.rs:123` — `(p_post - o_post).abs().mean()` over all gauges (NaN→0) | ✗ (actual: DDR drops NaN gauges entirely; DDRS substitutes 0.0 and retains them — see note below) |
+| NaN-gauge handling | `train.py:75-89`: per-gauge `nan_mask = observations.isnull().any(dim="time")`; rows with any NaN are excluded from predictions AND observations before loss | `driver.rs:9,92-106`: "V3 path drops the NaN-gauge filter"; NaN obs replaced with 0.0, all gauges included | ✗ (actual: DDRS includes NaN gauges with 0-substituted targets; DDR excludes them — biases DDRS loss downward for gauges with missing data) |
+| Optimizer | `~/projects/ddr/scripts/train.py:40` — `torch.optim.Adam(params=nn.parameters(), lr=lr)` | `src/training/optimizer.rs:41-44` — `AdamConfig::new().with_beta_1(0.9).with_beta_2(0.999).with_epsilon(1e-8)` | ✓ |
+| LR schedule | `~/projects/ddr/config/merit_training_config.yaml` `experiment.learning_rate: {1: 0.001, 3: 0.0005}` — applied at epoch start via `param_groups` (`train.py:54-56`) | `config/merit_training.yaml` same mapping; resolved per-batch via `resolve_lr` (`src/training/optimizer.rs:18-24`) — largest key ≤ epoch wins | ✓ (semantics identical: same LR within an epoch regardless of apply-point) |
+| Adam betas / eps / weight_decay | torch defaults: `betas=(0.9, 0.999), eps=1e-8, weight_decay=0` | `src/training/optimizer.rs:41-44` explicitly sets `beta_1=0.9, beta_2=0.999, eps=1e-8`; no weight_decay | ✓ |
+| Batch size (training) | DDR YAML `experiment.batch_size: 64` | DDRS YAML `experiment.batch_size: 64` | ✓ |
+| Batch construction (per epoch) | `train.py:41-52`: `torch.utils.data.RandomSampler` seeded by `data_generator` (torch Generator seeded at `cfg.seed`), `drop_last=True` | `src/data/sampler.rs`: `RandomSampler::new(n, batch_size, drop_last=true)` + `reshuffle(&mut StdRng)` at epoch start (`driver.rs:64`) | STAT only — drop_last and batch_size match; index ordering differs (torch Generator vs Rust StdRng — different PRNG families, same distribution) |
+| Shuffle PRNG | `torch.Generator().manual_seed(cfg.seed)` — PyTorch Mersenne-Twister variant | `rand::rngs::StdRng::seed_from_u64(seed)` — ChaCha20 | STAT only — different byte sequences, same uniform distribution over permutations |
+| `grad_clip_max_norm` | `train.py:102`: `torch.nn.utils.clip_grad_norm_(nn.parameters(), max_norm=1.0)` (hardcoded; not in DDR YAML) | `config/merit_training.yaml` `experiment.grad_clip_max_norm: 1.0`; applied at `driver.rs:59,127` | ✓ |
+| Warmup | DDR YAML `experiment.warmup: 5` | DDRS YAML same | ✓ |
+| Rho (training window length) | DDR YAML `experiment.rho: 90` | DDRS YAML same | ✓ |
+| Epoch count | DDR YAML `experiment.epochs: 5` | DDRS YAML same | ✓ |
+| Start / end time | DDR YAML | DDRS YAML | ✓ |
+| Gauge list | `references/gage_info/gages_3000.csv` | same path | ✓ |
+| Streamflow source | `merit_dhbv2_UH_retrospective.ic` | same | ✓ |
+| Observations source | `usgs_daily_observations` | same | ✓ |
+| Routing engine f32 throughput | DDR f32-by-construction | DDRS f32-by-construction | ✓ |
+
+> **NaN-handling ✗ — impact assessment:**
+> DDR's `nan_mask = observations.isnull().any(dim="time")` drops an entire gauge from the batch if *any* timestep in the rho window is NaN. DDRS's "Option A" instead keeps every gauge and substitutes `0.0` for NaN observations. The effect depends on the fraction of gauges with partial NaN windows:
+> - If many gauges have gaps (common in USGS daily records), DDRS's loss denominator is larger (more gauge×timestep pairs) and the per-pair gradient signal is diluted.
+> - More critically, DDRS trains the model to predict `0.0` at NaN timesteps, introducing a spurious low-flow attractor. This is a plausible contributor to the `n ≈ 0.030` saturation: the KAN is nudged toward parameters that produce near-zero flow, which maps to low Manning's `n` in the sigmoid→denormalize space.
+> - The fix is to implement DDR's gauge-level NaN filter in `driver.rs` before computing loss (see `src/training/loss.rs::filter_nan_gauges` which already implements this logic but is not called from `driver.rs`).
+>
+> **`filter_nan_gauges` already exists at `src/training/loss.rs:45-72` — it is just not wired into `driver.rs`.** This is the primary ✗ to resolve before Layer 1.
 
 **Pass criterion:** every row ✓ or STAT-only (a deliberate, documented
 divergence with known statistical equivalence). Any unexpected ✗ → STOP and
