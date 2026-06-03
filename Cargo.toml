@@ -47,6 +47,7 @@ csv = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 ndarray = "0.16"
 rand = "0.8"
+rand_distr = "0.4"
 clap = { version = "4", features = ["derive"] }
 blake3 = "1"
 os_pipe = "1"

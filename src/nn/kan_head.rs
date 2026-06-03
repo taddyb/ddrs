@@ -12,13 +12,15 @@
 //! - Output: `HashMap<String, Tensor<B, 1>>` of length `P`, with `output[key].shape == [N]`,
 //!   keyed by the entries of `learnable_parameters` in order.
 //!
-//! Init recipe (per migration spec §8.3 and §8.4):
-//! - input Linear: `kaiming_normal_(nonlinearity="relu")`, zero bias.
-//! - hidden KanLayers: `rskan::KanLayerConfig::new(H, H, seed)` with `num=grid`,
-//!   `k=k`, `noise_scale=0.3` (MultKAN default). **The same `seed` is passed to
-//!   every inner KanLayer** to match DDR-Python's `kan.py:24-34` quirk. This
-//!   overrides `rskan::KanConfig`'s own per-layer sub-seed derivation.
-//! - output Linear: `xavier_normal_(gain=0.1)`, zero bias.
+//! Init recipe (matches DDR `kan.py:45-48` element-for-element, with
+//! `StdRng`-based sampling instead of PyTorch global MT — see C4):
+//! - input Linear weight:  Kaiming-normal, `std = sqrt(2)/sqrt(F)`.
+//! - output Linear weight: Xavier-normal, `std = 0.1 * sqrt(2/(H+P))`.
+//! - both biases:          zero.
+//! - hidden KanLayers:     `rskan::KanLayerConfig::new(H, H, seed)` with
+//!                         `num=grid`, `k=k`, `noise_scale=0.3`. Same
+//!                         `seed` for every inner KanLayer.
+//! See `src/nn/init.rs` for the actual sampling code.
 //!
 //! Defaults (`hidden_size=21`, `num_hidden_layers=2`, `grid=5`, `k=3`) match
 //! `config/merit_training.yaml`.
@@ -26,14 +28,13 @@
 use std::collections::HashMap;
 
 use burn::config::Config;
-use burn::module::{Module, Param};
-use burn::nn::{Initializer, Linear, LinearConfig};
+use burn::module::Module;
+use burn::nn::Linear;
 use burn::tensor::activation::sigmoid;
 use burn::tensor::{backend::Backend, Tensor};
+use rand::SeedableRng;
 use rskan::{KanLayer, KanLayerConfig};
 
-/// Kaiming normal gain for ReLU nonlinearity: `sqrt(2)`.
-const KAIMING_GAIN_RELU: f64 = std::f64::consts::SQRT_2;
 /// Xavier gain applied to the output layer (matches DDR `kan.py:46`).
 const XAVIER_GAIN_OUTPUT: f64 = 0.1;
 /// pykan MultKAN default; matches DDR's `KAN([H, H], ...)` noise_scale default.
@@ -71,7 +72,12 @@ pub struct KanHeadConfig {
 }
 
 impl KanHeadConfig {
-    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe.
+    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe
+    /// using a project-controlled `StdRng` seeded from `self.seed`. See
+    /// `src/nn/init.rs` for the sampling formulas.
+    ///
+    /// The same `self.seed` is also passed to every inner `KanLayer` — see
+    /// the module-level docstring for why.
     pub fn init<B: Backend>(&self, device: &B::Device) -> KanHead<B> {
         assert!(
             !self.input_var_names.is_empty(),
@@ -82,21 +88,31 @@ impl KanHeadConfig {
             "learnable_parameters must be non-empty"
         );
 
-        let kaiming = Initializer::KaimingNormal {
-            gain: KAIMING_GAIN_RELU,
-            fan_out_only: false,
-        };
-        let xavier = Initializer::XavierNormal {
-            gain: XAVIER_GAIN_OUTPUT,
-        };
+        let f = self.input_var_names.len();
+        let h = self.hidden_size;
+        let p = self.learnable_parameters.len();
 
-        let input = LinearConfig::new(self.input_var_names.len(), self.hidden_size)
-            .with_initializer(kaiming)
-            .init(device);
+        // Single StdRng controls both Linears so their bytes are reproducible
+        // at fixed `seed`. The inner KanLayers each get the same `seed`
+        // directly (rskan reseeds internally) — they do NOT consume from this
+        // RNG.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
+
+        let input_weight = crate::nn::init::sample_kaiming_normal_relu(&mut rng, f, h);
+        let output_weight =
+            crate::nn::init::sample_xavier_normal(&mut rng, h, p, XAVIER_GAIN_OUTPUT as f32);
+
+        let input = burn::nn::Linear {
+            weight: crate::nn::init::to_param_weight::<B>(input_weight, device),
+            bias: Some(crate::nn::init::zero_bias_tensor::<B>(h, device)),
+        };
+        let output = burn::nn::Linear {
+            weight: crate::nn::init::to_param_weight::<B>(output_weight, device),
+            bias: Some(crate::nn::init::zero_bias_tensor::<B>(p, device)),
+        };
 
         // DDR-Python quirk: same `seed` passed to every inner `KAN([H, H])`
-        // constructor. We mirror that here rather than using rskan's own
-        // per-layer sub-seed derivation. See migration spec §8.3.
+        // constructor. See migration spec §8.3.
         let hidden: Vec<KanLayer<B>> = (0..self.num_hidden_layers)
             .map(|_| {
                 KanLayerConfig::new(self.hidden_size, self.hidden_size, self.seed)
@@ -106,15 +122,6 @@ impl KanHeadConfig {
                     .init(device)
             })
             .collect();
-
-        let output = LinearConfig::new(self.hidden_size, self.learnable_parameters.len())
-            .with_initializer(xavier)
-            .init(device);
-
-        // Zero biases (matches `torch.nn.init.zeros_(self.input.bias)` /
-        // `zeros_(self.output.bias)` in DDR's `kan.py:47-48`).
-        let input = zero_bias(input, device);
-        let output = zero_bias(output, device);
 
         KanHead {
             input,
@@ -184,19 +191,4 @@ impl<B: Backend> KanHead<B> {
     pub fn learnable_parameters(&self) -> &[String] {
         &self.learnable_parameters
     }
-}
-
-/// Replace a `Linear`'s bias with a zero tensor of the same shape.
-///
-/// `LinearConfig::init` uses the *same* `Initializer` for both weight and bias,
-/// so a `KaimingNormal` or `XavierNormal` config produces a random bias. DDR's
-/// recipe zeros all biases explicitly; we do the same here.
-fn zero_bias<B: Backend>(layer: Linear<B>, device: &B::Device) -> Linear<B> {
-    let Linear { weight, bias } = layer;
-    let bias = bias.map(|b| {
-        let shape = b.shape();
-        let zero: Tensor<B, 1> = Tensor::zeros(shape, device);
-        Param::initialized(b.id, zero)
-    });
-    Linear { weight, bias }
 }
