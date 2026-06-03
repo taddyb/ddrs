@@ -3893,7 +3893,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5562,7 +5562,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5600,7 +5600,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6015,8 +6015,8 @@ dependencies = [
 
 [[package]]
 name = "rskan"
-version = "0.1.1"
-source = "git+https://github.com/taddyb/rskan.git?tag=v0.1.1#8bfef8848901f04d391e8e811d1a1d1ca94f1b13"
+version = "0.1.2"
+source = "git+https://github.com/taddyb/rskan.git?tag=v0.1.2#413861057e28812da07f362374528a965ad7c4ec"
 dependencies = [
  "burn",
  "ndarray 0.16.1",
