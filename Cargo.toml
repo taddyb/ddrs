@@ -61,6 +61,7 @@ which = "6"
 
 [features]
 fixtures = ["dep:ndarray-npy"]
+cuda = []  # enables the GPU branch of the fixture tests
 
 [profile.release]
 opt-level = 3
