@@ -418,8 +418,9 @@ mod tests {
         assert_eq!(cfg.params.tau, 3);
         // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
         assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
-        // SP-10: use_cuda_graphs defaults to false when not set in YAML.
-        assert!(!cfg.params.use_cuda_graphs);
+        // SP-10: merit_training.yaml now sets use_cuda_graphs: true
+        // (flipped by commit e35af29 after V7a=0.385 landed).
+        assert!(cfg.params.use_cuda_graphs);
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");
