@@ -38,6 +38,11 @@ overview is in `~/projects/ddr/CLAUDE.md`.
    the tag in `Cargo.toml`'s `rskan = { git = ..., tag = ... }`, then re-run
    `tests/kan_head.rs` and the full parity sweep before merging.
    `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
+7. **KAN head parity vs DDR must pass on every PR that touches `src/nn/`,
+   `Cargo.toml`'s rskan pin, or DDR's `nn/kan.py`.** Run:
+   `cargo test --features fixtures --test kan_head_init_repro --test kan_head_init_parity --test kan_head_fixture_forward --test kan_head_fixture_backward`
+   If a DDR change breaks the fixture, regenerate via
+   `~/projects/ddr/.venv` + `scripts/dump_kan_*.py` and re-validate.
 
 ## Commands
 
