@@ -1,14 +1,6 @@
-use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[clap(rename_all = "kebab-case")]
-pub enum Workflow {
-    Train,
-    Eval,
-    TrainAndTest,
-}
+pub use crate::config::Workflow;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

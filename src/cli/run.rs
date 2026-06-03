@@ -37,6 +37,23 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     // 1. Plan as a library call (reused — not re-parsed in run).
     let pr: PlanResult = plan(&input.config_path, input.workflow, &input.workspace)?;
 
+    // 1b. GPU pre-flight for workflows that need training kernels.
+    if matches!(pr.workflow, Workflow::Train | Workflow::TrainAndTest) {
+        let has_gpu = crate::cli::system::probe()
+            .ok()
+            .flatten()
+            .map(|p| !p.gpu.is_empty())
+            .unwrap_or(false);
+        if !has_gpu {
+            return Err(CliError::Runtime(format!(
+                "run: workflow `{}` requires a CUDA GPU; system probe found none. \
+                 Smoke verified the routing core works on CPU, but production \
+                 training does not.",
+                workflow_slug(pr.workflow)
+            )));
+        }
+    }
+
     // 2. Drift policy.
     if !pr.drift.is_empty() {
         if input.strict {
@@ -52,6 +69,7 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     fs::create_dir_all(run_dir.join("checkpoints"))?;
     fs::copy(&input.config_path, run_dir.join("config.yaml"))?;
     let _ = copy_cargo_lock_if_reachable(&run_dir);
+    eprintln!("run output → {}", run_dir.display());
 
     // 4. Dispatch to the workflow (in-process, v1 — no stdout/stderr tee
     // beyond what training::driver already prints to terminal). Tee'd
@@ -231,6 +249,9 @@ fn dispatch(
                     checkpoints: list_mpk_files(&ckpt_dir),
                     plot: None,
                     eval_zarr: None,
+                    baseline_predictions: None,
+                    baseline_observations: None,
+                    baseline_manifest: None,
                 };
                 Ok((metrics, outputs))
             }
@@ -330,34 +351,53 @@ fn dispatch(
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
-                let nse_clean: Vec<f32> = output
-                    .metrics
-                    .nse
-                    .iter()
-                    .copied()
-                    .filter(|v| v.is_finite())
-                    .collect();
-                let mean_nse = nse_clean.iter().sum::<f32>() / (nse_clean.len() as f32).max(1.0);
-                let median_nse = {
-                    let mut sorted = nse_clean.clone();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    if sorted.is_empty() { f32::NAN } else { sorted[sorted.len() / 2] }
+                let median = |xs: &[f32]| -> f32 {
+                    let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
+                    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    if v.is_empty() { f32::NAN } else { v[v.len() / 2] }
                 };
+                let median_nse = median(&output.metrics.nse);
+                let median_kge = median(&output.metrics.kge);
+                let n_finite_nse = output.metrics.nse.iter().filter(|v| v.is_finite()).count();
+                let mean_nse = {
+                    let nse_clean: Vec<f32> = output.metrics.nse.iter().copied()
+                        .filter(|v| v.is_finite()).collect();
+                    nse_clean.iter().sum::<f32>() / (nse_clean.len() as f32).max(1.0)
+                };
+
+                println!(
+                    "gauges with finite NSE: {} / {}",
+                    n_finite_nse,
+                    output.metrics.nse.len()
+                );
+                println!("median NSE (finite only): {median_nse:.4}");
+                println!("median KGE (finite only): {median_kge:.4}");
+
+                // Summed Q' baseline: load (or compute) the cached entry,
+                // copy into <run_dir>/baseline/ so artifacts travel with
+                // the manifest. Non-fatal on failure — training+eval
+                // already succeeded.
+                let (baseline_predictions, baseline_observations, baseline_manifest) =
+                    copy_baseline_into_run_dir(&test_cfg, &input.workspace, run_dir);
 
                 let metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
                     "phase1_seconds": phase1_elapsed.as_secs_f32(),
                     "phase2_seconds": phase2_elapsed.as_secs_f32(),
-                    "n_gauges_finite_nse": nse_clean.len(),
+                    "n_gauges_finite_nse": n_finite_nse,
                     "n_gauges_total": output.metrics.nse.len(),
                     "mean_nse_finite": mean_nse,
                     "median_nse_finite": median_nse,
+                    "median_kge_finite": median_kge,
                 });
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
                     plot: None,
                     eval_zarr: Some(PathBuf::from("eval/predictions.zarr")),
+                    baseline_predictions,
+                    baseline_observations,
+                    baseline_manifest,
                 };
                 Ok((metrics, outputs))
             }
@@ -379,6 +419,49 @@ fn dispatch(
             RunOutputs::default(),
         ),
     }
+}
+
+/// Load (or compute) the summed Q' baseline and copy its cache files into
+/// `<run_dir>/baseline/`. Returns the three relative paths to populate in
+/// `RunOutputs`, or `(None, None, None)` if anything fails — the baseline
+/// is informational, never blocking.
+fn copy_baseline_into_run_dir(
+    test_cfg: &Config,
+    workspace: &Workspace,
+    run_dir: &Path,
+) -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
+    let (_q, key, _hit) = match crate::baseline::compute_or_load_cached(test_cfg, workspace.root())
+    {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("warning: baseline copy skipped: {e}");
+            return (None, None, None);
+        }
+    };
+    let cache_dir = crate::baseline::cache_dir(workspace.root(), &key);
+    let baseline_dir = run_dir.join("baseline");
+    if let Err(e) = fs::create_dir_all(&baseline_dir) {
+        eprintln!("warning: baseline mkdir failed: {e}");
+        return (None, None, None);
+    }
+    let copy_one = |name: &str| -> Option<PathBuf> {
+        let src = cache_dir.join(name);
+        let dst = baseline_dir.join(name);
+        match fs::copy(&src, &dst) {
+            Ok(_) => Some(PathBuf::from("baseline").join(name)),
+            Err(e) => {
+                eprintln!("warning: baseline copy of {name} failed: {e}");
+                None
+            }
+        }
+    };
+    let predictions = copy_one("predictions.f32");
+    let observations = copy_one("observations.f32");
+    let manifest = copy_one("manifest.json");
+    if predictions.is_some() {
+        eprintln!("baseline → {}", baseline_dir.display());
+    }
+    (predictions, observations, manifest)
 }
 
 /// Returns paths to all `.mpk` files in `dir`, relative to `dir`'s parent

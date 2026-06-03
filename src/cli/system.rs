@@ -76,18 +76,20 @@ pub fn probe() -> Result<Option<SystemProbe>, CliError> {
 }
 
 /// Stable key used to decide whether a cached smoke-test verdict is still
-/// valid. Re-run when this string changes.
-pub fn smoke_key(probe: &SystemProbe) -> String {
+/// valid. Re-run when this string changes. Backend-aware: switching between
+/// CUDA and CPU invalidates the cache.
+pub fn smoke_key(probe: &SystemProbe, backend: &str) -> String {
     format!(
-        "driver={};cuda={};ddrs={};sm={}",
-        probe.driver, probe.cuda_runtime, probe.ddrs_version, probe.sm
+        "driver={};cuda={};ddrs={};sm={};backend={}",
+        probe.driver, probe.cuda_runtime, probe.ddrs_version, probe.sm, backend
     )
 }
 
-pub fn record_smoke(probe: &mut SystemProbe, key: String) {
+pub fn record_smoke(probe: &mut SystemProbe, key: String, backend: &str) {
     probe.smoke_test = Some(SmokeTestRecord {
         key,
         passed_at: chrono::Utc::now()
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        backend: Some(backend.to_string()),
     });
 }

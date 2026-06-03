@@ -27,7 +27,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 4. **Don't replace the hand-written sparse backward** in `src/sparse.rs`
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
-   `.claude/skills/burn_custom_backward.md` for the BURN-0.21 recipe it uses.
+   `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
 5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`.** Do NOT
    reintroduce the prior MLP placeholder. The KAN head matches DDR-Python's
    `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) × num_hidden_layers →
@@ -64,7 +64,7 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 ### `ddrs` CLI (preferred entrypoint)
 
 The `ddrs` binary replaces the four legacy single-purpose binaries with a
-terraform-style lifecycle. First-time flow is `init → plan → init → run`.
+terraform-style lifecycle. First-time flow is `init → plan → run`.
 
 ```bash
 ddrs init                                      # compile + GPU probe + workspace + smoke
@@ -134,6 +134,30 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 CONUS MERIT is 346,321 reaches × 338,814 edges (not millions — the port can
 target consumer GPUs). Training config lives at `config/merit_training.yaml`
 and mirrors `~/projects/ddr/config/merit_training_config.yaml` verbatim.
+
+## Baseline
+
+`ddrs plan` and `ddrs run --workflow train-and-test` compute a **summed Q'**
+reference: per-gauge sum of upstream divide Qr over the testing eval window,
+compared against USGS daily observations. No routing, no learned parameters
+— it's a sanity check. If the trained KAN's median NSE doesn't beat this
+number, the routing isn't earning its keep; check training loss curves and
+the KAN head's gradient stats first, not the sparse solver.
+
+Cache layout: `<workspace_root>/baselines/<key>/` where `key` is
+blake3(`streamflow ∥ observations ∥ gages ∥ gages_adjacency ∥
+conus_adjacency ∥ start_time ∥ end_time`). Training-only fields (seed,
+KAN config, lr) do **not** invalidate. Contents:
+`predictions.f32` + `observations.f32` (raw f32 row-major) + `manifest.json`
+(gage_ids, time_range, metrics, provenance). `ddrs run --workflow
+train-and-test` copies these into `<run_dir>/baseline/`.
+
+Note: `ddrs plan` is therefore no longer side-effect-free — first run
+opens icechunk and reads ~370 MB of daily Qr. Subsequent plans on the same
+input set are cache hits and instant.
+
+Implementation: `src/baseline/`. Mirrors
+`~/projects/ddr/scripts/summed_q_prime.py`.
 
 ## Conventions specific to this repo
 

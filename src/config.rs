@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use serde::de::Error as _;
 use serde::Deserialize;
 
 use crate::data::error::{DataError, Result};
@@ -20,6 +21,20 @@ use crate::data::error::{DataError, Result};
 pub enum ConfigMode {
     Training,
     Testing,
+}
+
+// ---------------------------------------------------------------------------
+// Workflow
+// ---------------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum,
+    serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
+pub enum Workflow {
+    Train,
+    Eval,
+    TrainAndTest,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +256,7 @@ pub struct Config {
     pub geodataset: String,
     pub seed: u64,
     pub np_seed: u64,
+    pub workflow: Option<Workflow>,
 }
 
 /// Overlay section from `testing:` in the YAML.
@@ -278,6 +294,7 @@ struct ConfigRaw {
     geodataset: Option<String>,
     seed: Option<u64>,
     np_seed: Option<u64>,
+    workflow: Option<Workflow>,
     params: ParamsRaw,
     data_sources: Option<DataSources>,
     experiment: Option<Experiment>,
@@ -299,6 +316,7 @@ impl From<ConfigRaw> for Config {
             geodataset: r.geodataset.unwrap_or_else(|| "merit".to_string()),
             seed: r.seed.unwrap_or(42),
             np_seed: r.np_seed.unwrap_or(42),
+            workflow: r.workflow,
         }
     }
 }
@@ -327,11 +345,35 @@ impl Config {
         })?;
         let testing_raw = raw.testing.clone();
         let mut cfg: Self = raw.into();
+        validate_mode_workflow(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
         Ok(cfg)
     }
+}
+
+fn validate_mode_workflow(cfg: &Config) -> std::result::Result<(), String> {
+    use Workflow::*;
+    let Some(wf) = cfg.workflow else { return Ok(()); };
+    let ok = match (cfg.mode.as_str(), wf) {
+        ("training", Train | TrainAndTest) => true,
+        ("testing", Eval) => true,
+        _ => false,
+    };
+    if !ok {
+        return Err(format!(
+            "conflicting top-level keys — mode: {} but workflow: {} \
+             (mode=training implies workflow ∈ {{train, train-and-test}}; \
+              mode=testing implies workflow=eval)",
+            cfg.mode,
+            match wf { Train => "train", Eval => "eval", TrainAndTest => "train-and-test" },
+        ));
+    }
+    Ok(())
 }
 
 fn apply_testing_overlay(cfg: &mut Config, overrides: TestingOverridesRaw) {
@@ -376,11 +418,13 @@ mod tests {
         assert_eq!(cfg.params.tau, 3);
         // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
         assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
-        // SP-10: use_cuda_graphs defaults to false when not set in YAML.
-        assert!(!cfg.params.use_cuda_graphs);
+        // SP-10: merit_training.yaml now sets use_cuda_graphs: true
+        // (flipped by commit e35af29 after V7a=0.385 landed).
+        assert!(cfg.params.use_cuda_graphs);
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");
+        assert_eq!(cfg.workflow, Some(Workflow::TrainAndTest));
     }
 
     #[test]
@@ -403,6 +447,64 @@ mod tests {
         assert_eq!(exp.start_time, "1995/10/01");
         assert_eq!(exp.end_time, "2010/09/30");
         assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn loads_workflow_from_yaml() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: train-and-test
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_workflow_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert_eq!(cfg.workflow, Some(Workflow::TrainAndTest));
+    }
+
+    #[test]
+    fn workflow_absent_is_none() {
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n";
+        let path = std::env::temp_dir().join("ddrs_config_no_workflow_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert_eq!(cfg.workflow, None);
+    }
+
+    #[test]
+    fn mode_workflow_conflict_rejected() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: eval
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_conflict_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("conflicting") && msg.contains("mode: training") && msg.contains("workflow: eval"),
+            "expected conflict message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mode_testing_with_train_workflow_rejected() {
+        let yaml = r#"
+mode: testing
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: train
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_conflict2_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        assert!(format!("{}", err).contains("conflicting"));
     }
 
     #[test]

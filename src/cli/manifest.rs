@@ -32,6 +32,8 @@ pub struct SystemProbe {
 pub struct SmokeTestRecord {
     pub key: String,
     pub passed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +56,12 @@ pub struct RunOutputs {
     pub plot: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_zarr: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_predictions: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_observations: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_manifest: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -115,6 +115,26 @@ pub struct GageSubgraph {
     pub indices_1: Vec<i32>,
 }
 
+impl GageSubgraph {
+    /// Returns the unique COMIDs in this gauge's upstream subgraph,
+    /// sorted by CONUS position (stable across runs).
+    ///
+    /// Mirrors `gages_adjacency[gauge]["order"][:]` from
+    /// `~/projects/ddr/scripts/summed_q_prime.py:198`. The COO indices
+    /// (`indices_0` ∪ `indices_1`) cover exactly the same node set as the
+    /// gauge's `order` array because every node either appears as an edge
+    /// endpoint or would be unreferenced.
+    pub fn upstream_comids(&self, conus: &ConusAdjacencyStore) -> Vec<Comid> {
+        let mut positions: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
+        positions.extend(self.indices_0.iter().copied());
+        positions.extend(self.indices_1.iter().copied());
+        positions
+            .into_iter()
+            .map(|pos| conus.order[pos as usize])
+            .collect()
+    }
+}
+
 /// Per-STAID subgraph store. Loaded eagerly for the chosen-gauge set at
 /// dataset construction (architectural decision: option (b) from the prior
 /// design discussion).
@@ -209,5 +229,56 @@ fn zarr_err<E: std::error::Error + Send + Sync + 'static>(path: &Path, source: E
     DataError::Zarr {
         path: path.to_path_buf(),
         source: Box::new(source),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_conus(comids: Vec<i64>) -> ConusAdjacencyStore {
+        let order: Vec<Comid> = comids.into_iter().map(Comid).collect();
+        let n = order.len();
+        let index = IdIndex::new(order.clone());
+        ConusAdjacencyStore {
+            path: PathBuf::from("/dev/null"),
+            order,
+            index,
+            length_m: Array1::zeros(n),
+            slope: Array1::zeros(n),
+            indices_0: vec![],
+            indices_1: vec![],
+            n,
+            nnz: 0,
+        }
+    }
+
+    #[test]
+    fn upstream_comids_dedupes_and_orders_by_position() {
+        let conus = fake_conus(vec![100, 200, 300, 400]);
+        let sg = GageSubgraph {
+            staid: Staid::from("00000001"),
+            gage_idx: 3,
+            gage_catchment: String::new(),
+            // Mix of duplicates and out-of-order positions
+            indices_0: vec![3, 2, 1, 3],
+            indices_1: vec![2, 1, 0, 0],
+        };
+        let comids = sg.upstream_comids(&conus);
+        // Position order 0,1,2,3 → COMIDs 100, 200, 300, 400.
+        assert_eq!(comids, vec![Comid(100), Comid(200), Comid(300), Comid(400)]);
+    }
+
+    #[test]
+    fn upstream_comids_empty_subgraph_returns_empty() {
+        let conus = fake_conus(vec![100, 200]);
+        let sg = GageSubgraph {
+            staid: Staid::from("00000002"),
+            gage_idx: 0,
+            gage_catchment: String::new(),
+            indices_0: vec![],
+            indices_1: vec![],
+        };
+        assert!(sg.upstream_comids(&conus).is_empty());
     }
 }

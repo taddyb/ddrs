@@ -1,5 +1,5 @@
-//! CONUS-wide inference: load every MERIT COMID's attributes, run the MLP,
-//! denormalize. Mirrors the workflow in DDR's `merit_geometry_config.yaml`.
+//! CONUS-wide inference: load every MERIT COMID's attributes, run the KAN
+//! head, denormalize. Mirrors the workflow in DDR's `merit_geometry_config.yaml`.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -12,12 +12,12 @@ use numpy::PyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::config::{load_config, require_mlp_section};
+use crate::config::{load_config, require_kan_head_section};
 use crate::error::BridgeError;
-use crate::mlp::Backend;
+use crate::kan_head::Backend;
 
-/// Load checkpoint → walk every COMID in the CONUS adjacency → return a
-/// per-COMID dict of physical-unit parameters.
+/// Load KAN-head checkpoint → walk every COMID in the CONUS adjacency →
+/// return a per-COMID dict of physical-unit parameters.
 ///
 /// All arrays returned have length `N` (the number of COMIDs the
 /// attributes file had data for — typically equal to the adjacency's
@@ -33,8 +33,8 @@ pub fn run_inference_over_conus<'py>(
     config_path: &str,
 ) -> PyResult<Bound<'py, PyDict>> {
     let cfg = load_config(config_path)?;
-    let mlp_section = require_mlp_section(&cfg, config_path)?;
-    let attr_names = mlp_section.input_var_names.clone();
+    let head_section = require_kan_head_section(&cfg, config_path)?;
+    let attr_names = head_section.input_var_names.clone();
 
     // 1. Adjacency → ordered COMID list (in topological order).
     let adj = ConusAdjacencyStore::open(Path::new(conus_adjacency_zarr))
@@ -57,15 +57,16 @@ pub fn run_inference_over_conus<'py>(
         attrs_store.attrs.dim(), f, n_reaches);
     let resolved_comids: Vec<i64> = attrs_store.index.ids().iter().map(|c| c.0).collect();
 
-    // 4. Reload the MLP. (We do this here rather than accepting a PyMlp
-    //    parameter so the caller has a single-call API.) Note: this
-    //    re-parses the YAML internally; acceptable for a one-shot
+    // 4. Reload the KAN head. (We do this here rather than accepting a
+    //    PyKanHead parameter so the caller has a single-call API.) Note:
+    //    this re-parses the YAML internally; acceptable for a one-shot
     //    CONUS-wide inference call.
-    let model = crate::mlp::load_mlp(checkpoint, config_path)?;
+    let model = crate::kan_head::load_kan_head(checkpoint, config_path)?;
 
     // 5. Build the BURN input tensor. AttributesStore stores attrs as
-    //    (F, N); MLP wants (N, F). Transpose into a Vec<f32> in row-major.
-    //    Impute NaN/Inf with per-attribute row_means (mirrors DDR's fill_nans).
+    //    (F, N); the KAN head wants (N, F). Transpose into a Vec<f32> in
+    //    row-major. Impute NaN/Inf with per-attribute row_means (mirrors
+    //    DDR's fill_nans).
     //
     // DDR's `fill_nans` in `~/projects/ddr/src/ddr/io/readers.py` uses
     // `torch.isnan`, which catches NaN only. We use `is_finite()` to catch
@@ -73,7 +74,7 @@ pub fn run_inference_over_conus<'py>(
     // so far (9,291 non-finite values across 346k reaches × 10 attributes)
     // all non-finite values were NaN, so this is a no-op divergence. If
     // Inf values ever appear in future attribute files, DDR would pass
-    // them through to the MLP (producing Inf outputs) while ddrs-py would
+    // them through to the head (producing Inf outputs) while ddrs-py would
     // impute them.
     let mut input_buf = vec![0.0_f32; n_reaches * f];
     for row in 0..n_reaches {
@@ -89,7 +90,7 @@ pub fn run_inference_over_conus<'py>(
     let input: Tensor<Backend, 2> =
         Tensor::from_data(TensorData::new(input_buf, [n_reaches, f]), &model.device);
 
-    // 6. MLP forward → raw [0, 1] parameter dict.
+    // 6. KAN head forward → raw [0, 1] parameter dict.
     let raw = model.run(input);
 
     // 7. Denormalize each parameter per params.parameter_ranges.
@@ -116,7 +117,7 @@ pub fn run_inference_over_conus<'py>(
         };
         let raw_t = raw
             .get(name)
-            .expect("MLP returned no entry for declared learnable_parameter");
+            .expect("KanHead returned no entry for declared learnable_parameter");
         let raw_vec: Vec<f32> = raw_t.to_data().to_vec().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "BURN tensor → Vec<f32> failed for `{name}`: {e:?}"

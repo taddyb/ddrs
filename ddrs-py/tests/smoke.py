@@ -77,12 +77,12 @@ def _first_available_checkpoint() -> str | None:
     return f"{CHECKPOINT_DIR}/{mpks[0][:-len('.mpk')]}"
 
 
-def test_load_mlp_returns_pymlp_with_param_names():
+def test_load_kan_head_returns_pykanhead_with_param_names():
     ckpt = _first_available_checkpoint()
     if ckpt is None:
         pytest.skip(f"no checkpoints in {CHECKPOINT_DIR}; train one first")
 
-    model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
+    model = ddrs_py.load_kan_head(checkpoint=ckpt, config_path=CONFIG_PATH)
     assert model.learnable_parameters == ["n", "q_spatial", "p_spatial"]
     assert model.input_var_names_len == 10  # matches merit_training.yaml
 
@@ -91,7 +91,7 @@ def test_forward_returns_param_dict_in_unit_interval():
     ckpt = _first_available_checkpoint()
     if ckpt is None:
         pytest.skip("no checkpoint")
-    model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
+    model = ddrs_py.load_kan_head(checkpoint=ckpt, config_path=CONFIG_PATH)
 
     rng = np.random.default_rng(seed=0)
     attrs = rng.standard_normal((7, model.input_var_names_len)).astype(np.float32)
@@ -108,7 +108,7 @@ def test_forward_rejects_wrong_feature_count():
     ckpt = _first_available_checkpoint()
     if ckpt is None:
         pytest.skip("no checkpoint")
-    model = ddrs_py.load_mlp(checkpoint=ckpt, config_path=CONFIG_PATH)
+    model = ddrs_py.load_kan_head(checkpoint=ckpt, config_path=CONFIG_PATH)
     bad = np.zeros((4, 99), dtype=np.float32)
     with pytest.raises(ValueError, match="mismatches"):
         model.forward(bad)

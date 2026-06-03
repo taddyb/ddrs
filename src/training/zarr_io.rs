@@ -303,6 +303,9 @@ mod tests {
                 nse: vec![0.5, 0.6],
                 rmse: vec![0.1, 0.1],
                 kge: vec![0.4, 0.5],
+                bias: vec![0.0, 0.0],
+                fhv: vec![0.0, 0.0],
+                flv: vec![0.0, 0.0],
             },
         };
 

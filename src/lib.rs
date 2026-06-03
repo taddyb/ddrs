@@ -3,6 +3,7 @@
 //! BURN port of the Muskingum-Cunge solver from `~/projects/ddr` (`src/ddr/`).
 //! See `~/projects/ddr/CLAUDE.md` for the reference algorithm.
 
+pub mod baseline;
 pub mod cli;
 pub mod config;
 pub mod cuda_graph;

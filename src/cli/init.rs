@@ -20,10 +20,10 @@ pub struct InitInput {
     pub skip_smoke: bool,
 }
 
+#[derive(Debug)]
 pub struct InitOutput {
     pub smoke_passed: bool,
     pub smoke_reused: bool,
-    pub phase_b_skipped: bool,
 }
 
 pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
@@ -41,14 +41,8 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     }
     let ws = Workspace::with_root(&input.workspace);
 
-    // ── Phase A: install-level checks (no config required) ─────────────
+    // ── Phase A: install-level probes (no config required) ─────────────
     let mut probe = system::probe()?.unwrap_or_default();
-    if probe.gpu.is_empty() {
-        eprintln!(
-            "warning: no CUDA device found; install nvidia driver \
-             ≥ 530 or build with `--features cpu`"
-        );
-    }
     if probe.free_gpu_gb_at_probe < input.min_free_gpu_gb && probe.free_gpu_gb_at_probe > 0.0 {
         eprintln!(
             "warning: free GPU memory {:.1} GB is below floor {} GB",
@@ -58,7 +52,9 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     fs::create_dir_all(ws.runs_dir())?;
     fs::write(ws.version_file(), env!("CARGO_PKG_VERSION"))?;
 
-    let key = system::smoke_key(&probe);
+    // Pick backend up-front so the cache key matches the work we'd do.
+    let backend = if probe.gpu.is_empty() { "cpu" } else { "cuda" };
+    let key = system::smoke_key(&probe, backend);
     let cached_passing = SystemProbe::read(&ws.system_json())
         .ok()
         .and_then(|p| p.smoke_test)
@@ -70,10 +66,11 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     } else if cached_passing && !input.force {
         (true, true)
     } else {
-        (run_smoke()?, false)
+        let (ok, _b) = run_smoke(&probe)?;
+        (ok, false)
     };
     if smoke_passed && !smoke_reused {
-        system::record_smoke(&mut probe, key);
+        system::record_smoke(&mut probe, key, backend);
     } else if smoke_reused {
         // Preserve the prior smoke_test record.
         if let Ok(prior) = SystemProbe::read(&ws.system_json()) {
@@ -82,17 +79,43 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     }
     probe.write_atomic(&ws.system_json())?;
 
-    // ── Phase B: data-source lock (requires ddrs.yaml) ─────────────────
+    // ── Phase D: bootstrap ddrs.yaml if missing (interactive) ─────────
     let config_path = input.config_path.or_else(|| {
         crate::cli::workspace::discover_config(Path::new("."))
     });
-    let Some(cfg_path) = config_path else {
-        eprintln!(
-            "no ddrs.yaml found — run `ddrs plan` to bootstrap one, \
-             then re-run `ddrs init` to lock data sources."
-        );
-        return Ok(InitOutput { smoke_passed, smoke_reused, phase_b_skipped: true });
+    let cfg_path = match config_path {
+        Some(p) => p,
+        None => {
+            let target = std::env::current_dir()
+                .map_err(CliError::from)?
+                .join("ddrs.yaml");
+            let bundled = PathBuf::from("config/merit_training.yaml");
+            crate::cli::plan_bootstrap::bootstrap(
+                crate::cli::plan_bootstrap::BootstrapInput {
+                    target: target.clone(),
+                    runs_dir: ws.runs_dir(),
+                    bundled_template: bundled,
+                    editor_cmd: None,
+                    interactive: true,
+                },
+            ).map_err(|e| {
+                let msg = format!("{e}");
+                if msg.contains("not a TTY") || msg.contains("run interactively") {
+                    CliError::ConfigInvalid {
+                        path: target.clone(),
+                        source: "no ddrs.yaml found and stdin is not a TTY. \
+                                 Write ddrs.yaml manually, then re-run `ddrs init`."
+                                .into(),
+                    }
+                } else {
+                    e
+                }
+            })?;
+            target
+        }
     };
+
+    // ── Phase E: lock data sources from the (now-present) yaml ─────────
     let cfg = Config::from_yaml_file_with_mode(&cfg_path, ConfigMode::Training)
         .map_err(|e| CliError::ConfigInvalid { path: cfg_path.clone(), source: Box::new(e) })?;
     let ds = cfg.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
@@ -138,14 +161,32 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
         sources,
     };
     lock.write_atomic(&ws.lockfile())?;
-    Ok(InitOutput { smoke_passed, smoke_reused, phase_b_skipped: false })
+    Ok(InitOutput { smoke_passed, smoke_reused })
 }
 
-fn run_smoke() -> Result<bool, CliError> {
+fn run_smoke(probe: &crate::cli::manifest::SystemProbe)
+    -> Result<(bool, &'static str), CliError>
+{
     let inputs = crate::sandbox::load_embedded()
         .or_else(|_| crate::sandbox::load_from_dir(Path::new("fixtures/sandbox")))?;
-    type I = burn_cuda::Cuda<f32, i32>;
-    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
-    let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
-    Ok(r.passed)
+    if probe.gpu.is_empty() {
+        eprintln!("no CUDA detected — running CPU smoke (slower but functionally equivalent)");
+        type I = burn::backend::NdArray<f32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
+        Ok((r.passed, "cpu"))
+    } else {
+        type I = burn_cuda::Cuda<f32, i32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
+        Ok((r.passed, "cuda"))
+    }
+}
+
+/// Test-only re-export so integration tests can drive the backend selection.
+#[doc(hidden)]
+pub fn run_smoke_for_test(probe: &crate::cli::manifest::SystemProbe)
+    -> Result<(bool, &'static str), CliError>
+{
+    run_smoke(probe)
 }
