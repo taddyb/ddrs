@@ -6,13 +6,18 @@
 use burn::tensor::{backend::Backend, Tensor};
 use ndarray::{s, Array2};
 
-/// Tau-trim then mean-pool 24 hourly samples → 1 daily sample.
+/// Tau-trim then daily downsample via area-mode adaptive average pooling.
+///
+/// Mirrors DDR's `~/projects/ddr/src/ddr/io/functions.py:22`:
+/// `F.interpolate(data.unsqueeze(1), size=(rho,), mode="area").squeeze(1)`.
 ///
 /// Input shape `(G, T_hours)`. Slicing convention from DDR
-/// `compute_daily_runoff`: `[13 + tau : -11 + tau]`. After the slice
-/// `T_hours_trimmed` must be a multiple of 24 (asserted).
+/// `compute_daily_runoff`: `[13 + tau : -11 + tau]`. The trimmed length
+/// does NOT need to be a multiple of 24 — fractional boundary hours are
+/// handled by area-mode pooling.
 ///
-/// Returns `(G, T_days)` where `T_days = T_hours_trimmed / 24`.
+/// Returns `(G, T_days)` where `T_days = T_hours_trimmed // 24` (matching
+/// DDR's `num_days` computation at `scripts/train.py:78`).
 pub fn tau_trim_and_downsample<B: Backend>(
     predictions_hourly: Tensor<B, 2>,
     tau: u32,
@@ -20,19 +25,20 @@ pub fn tau_trim_and_downsample<B: Backend>(
     let dims = predictions_hourly.dims();
     let (g, t_hours) = (dims[0], dims[1]);
     let start = 13 + tau as usize;
-    // DDR's Python end index is `-11 + tau`, i.e., position `t_hours + (-11 + tau)`
-    // from the start, which equals `t_hours - 11 + tau`. Use that form to avoid
-    // underflow risk for any tau >= 0.
     let end = t_hours - 11 + tau as usize;
+    assert!(start < end, "tau-trim window degenerate: [{start}, {end})");
     let t_trimmed = end - start;
-    assert!(
-        t_trimmed.is_multiple_of(24),
-        "tau-trim left {t_trimmed} hours, not a multiple of 24 (tau={tau})"
-    );
     let t_days = t_trimmed / 24;
-    let sliced = predictions_hourly.slice([0..g, start..end]);
-    let reshaped = sliced.reshape([g, t_days, 24]);
-    reshaped.mean_dim(2).squeeze::<2>()
+    assert!(
+        t_days > 0,
+        "trimmed window too short: T_trimmed={t_trimmed}, T_days={t_days}"
+    );
+
+    let device = predictions_hourly.device();
+    let sliced = predictions_hourly.slice([0..g, start..end]); // (G, L)
+    let weights = area_pool_weights::<B>(t_trimmed, t_days, &device); // (M, L)
+    // (G, L) @ (L, M) = (G, M)
+    sliced.matmul(weights.transpose())
 }
 
 /// Construct the area-mode pooling weight matrix `W ∈ R^{M × L}` such that
@@ -44,7 +50,6 @@ pub fn tau_trim_and_downsample<B: Backend>(
 /// (L, M) pair and reuse.
 ///
 /// Sparsity: each row has at most `ceil(L/M) + 1` nonzeros for `s > 1`.
-#[allow(dead_code)] // wired into tau_trim_and_downsample in next commit
 fn area_pool_weights<B: Backend>(
     l: usize,
     m: usize,
@@ -216,5 +221,35 @@ mod tests {
         for j in 25..2139 {
             assert!(data[j].abs() < 1e-6, "row 0 col {j} should be 0; got {}", data[j]);
         }
+    }
+
+    #[test]
+    fn n_gauges_one_does_not_panic() {
+        let device = Default::default();
+        // 2160 hourly input → 89 daily output for tau=3.
+        let input: Tensor<Bp, 2> = Tensor::zeros([1, 2160], &device);
+        let out = tau_trim_and_downsample(input, 3);
+        assert_eq!(out.dims(), [1, 89]);
+    }
+
+    #[test]
+    fn tau_trim_matches_old_block_mean_on_divisible_input() {
+        // Verify the new area-pool body reduces to block-mean whenever
+        // the trimmed window IS a multiple of 24. tau=11, T=72 →
+        // trimmed window is hours [24..72] (length 48 = 2 days exactly).
+        let device = Default::default();
+        let v: Vec<f32> = (0..72).map(|x| x as f32).collect();
+        let input: Tensor<Bp, 2> = Tensor::<Bp, 1>::from_data(
+            burn::tensor::TensorData::new(v, [72]),
+            &device,
+        )
+        .reshape([1, 72]);
+        let out = tau_trim_and_downsample(input, 11);
+        let got: Vec<f32> = out.into_data().to_vec().unwrap();
+        // Sliced = hours 24..72 (48 values: 24..=71).
+        // Day 1 = mean(24..=47) = 35.5
+        // Day 2 = mean(48..=71) = 59.5
+        assert!((got[0] - 35.5).abs() < 1e-4, "got {}", got[0]);
+        assert!((got[1] - 59.5).abs() < 1e-4, "got {}", got[1]);
     }
 }
