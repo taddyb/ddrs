@@ -367,6 +367,9 @@ def main() -> None:
         q_spatial_param=q_spatial_np,
         p_spatial_param=p_spatial_np,
         q_prime_full=q_prime_full.detach().numpy().astype(np.float32),
+        # Layer C: normalized KAN input attributes (n_active, F) needed to
+        # replay head.forward() in autograd mode for gradient parity tests.
+        norm_attrs=norm_attrs.detach().numpy().astype(np.float32),
     )
     print(f"  wrote {mc_forward_file}: shape={runoff.shape}, "
           f"{(OUT_DIR / mc_forward_file).stat().st_size} bytes")
