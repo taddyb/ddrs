@@ -136,6 +136,38 @@ even worth a full retrain" check. Whatever the result is, Layer 1 still runs.
   Layer 1 + Layer 2 become more urgent.
 - If no usable existing artifact → skip to Layer 1.
 
+**Empirical finding (2026-06-03):**
+
+DDR existing checkpoint inspected:
+`~/projects/ddr/output/ddr-v0.5.2.dev2+g21a3a96b5-merit-training/2026-03-14_06-03-23/saved_models/_ddr-v0.5.2.dev2+g21a3a96b5-merit-training_epoch_5_mb_35.pt`
+(epoch 5, mb 35 — full 5-epoch run completed in March 2026).
+
+Checkpoint structure: `{"model_state_dict": ..., "epoch": 5, "mini_batch": 35, ...}`.
+Loaded via `full_state["model_state_dict"]`, not directly. 346 321 CONUS reaches
+aligned (0 missing COMIDs vs DDRS reference NC).
+
+| metric | DDR existing ckpt (epoch 5) | DDRS post-fix (2026-06-03T23-38-42Z) |
+|--------|-----------------------------|--------------------------------------|
+| median n | 0.0744 | 0.0209 |
+| mean n | 0.0735 | 0.0234 |
+| p5 / p95 | 0.0387 / 0.1047 | 0.0169 / 0.0389 |
+| frac n∈[0.02,0.03] | 0.014 | 0.464 |
+| frac n<0.035 | 0.031 | 0.924 |
+
+Raw sigmoid output (before denormalize) for CONUS in DDR: median 0.2527,
+frac < 0.1 = 0.049, frac < 0.05 = 0.008. DDR's sigmoid output is well-spread
+across [0, 1] — there is no sigmoid saturation. After denormalize into
+[0.015, 0.25] linear space, median maps to 0.0744.
+
+**Verdict: healthy (DDR does NOT saturate).** DDR's full 5-epoch run produces
+median n = 0.074, with only 3.1 % of CONUS reaches below n = 0.035. This is
+the opposite of DDRS's post-fix run (median 0.021, 92.4 % below 0.035). The
+saturation is a DDRS-specific bug, not a shared property of the model + loss.
+Layer 1 (fresh DDR training at parity config) and Layer 2 (KS/Spearman
+comparison) remain necessary to get a formal verdict on the parity-config
+run, but this Layer 0.5 result strongly implicates a training-loop divergence
+in `src/training/` that was NOT fully resolved by the NaN-gauge filter fix.
+
 ### Layer 1 — Fresh DDR training run + dump (~30-60 min)
 
 **Question:** With DDR's training loop running at the same `seed=42` config on
