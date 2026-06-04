@@ -229,6 +229,7 @@ fn dispatch(
                     &device,
                     &ckpt_dir,
                     input.max_mini_batches,
+                    None,
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -288,6 +289,7 @@ fn dispatch(
                     &device,
                     &ckpt_dir,
                     input.max_mini_batches,
+                    None,
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
