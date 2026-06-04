@@ -40,6 +40,7 @@ data_sources:
         plot: false,
         strict: false,
         max_mini_batches: Some(1),
+        batch_order_from: None,
     }).unwrap_err();
     let msg = format!("{err}");
     assert!(
