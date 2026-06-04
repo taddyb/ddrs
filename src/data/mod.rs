@@ -20,6 +20,7 @@
 //! pieces compose.
 
 pub mod collate;
+pub use collate::{compress, union_subgraphs, CompressedAdj, UnionedCoo};
 pub mod dataset;
 pub mod dates;
 pub mod error;
