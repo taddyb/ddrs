@@ -235,6 +235,98 @@ Three possible outcomes after Layer D:
 
 ---
 
+## §5.1 Empirical verdict (Task 6 of the plan)
+
+**Fixture gauge:** STAID=10336740 (Logan House Ck nr Glenbrook, NV),
+COMID=77006074, DRAIN_SQKM=5.537, 19 reaches.
+**Fixture KAN init:** `tests/fixtures/kan_head_init_seed42.npz` (PR #11).
+**Time window:** 1990/01/01, rho = 2136 hourly steps, tau = 3.
+
+**Layer results:**
+
+| Layer | Sub-test | Tolerance | Actual max-abs-diff | Verdict |
+|-------|----------|-----------|---------------------|---------|
+| A | inner-loop audit (5 rows) | semantic equality | 5 ✓, 1 STAT-only | ✓ |
+| B1 | subgraph adjacency | byte-equal | 0.0 | ✓ |
+| B2 | hot-start discharge | 1e-6 | 4.77e-7 | ✓ |
+| B3 | MC routing forward | 1e-5 | 2.38e-6 | ✓ |
+| B4 | tau-trim + daily Q | 0.1 (STAT-C7) | 5.01e-2 m³/s | ✓ (STAT) |
+| C1 | L1 loss scalar | 1e-5 | 0.0 | ✓ |
+| C2 | per-KAN-param gradients | 1e-3 | 1.76e-5 | ✓ |
+| C3 | pre-clip global L2 norm | 1e-3 | 1.03e-4 | ✓ |
+| D1 | post-Adam-step params | 2e-3 | 1.49e-3 | ✓ |
+| D2 | Adam moment_1 / moment_2 | 1e-5 | 7.16e-6 | ✓ |
+
+**Outcome (from §5 table, row 3):**
+"Layer C / D fails (loss, grads, or Adam) — the training-loop machinery
+itself differs in fine-detail ways: Adam implementation details,
+grad_clip, or NaN-filter edge cases."
+
+Modified by the empirical evidence: the per-step machinery is mostly
+bit-identical, but a small per-step gradient noise from the **daily
+downsample interpolation divergence** compounds via Adam's eps-denominator
+into a load-bearing parameter shift.
+
+**Concrete root cause:**
+
+DDR's `scripts/train.py:78,80` slices hourly Q with `[13 : -11+tau]` and
+applies `F.interpolate(mode="area")` to downsample to daily — an adaptive
+average pooling that handles arbitrary-length slices.
+
+DDRS's `src/training/loss.rs::tau_trim_and_downsample` uses
+`[13+tau : -11+tau]` with reshape-and-mean — strict 24-hour block mean
+that requires the slice to be a multiple of 24.
+
+Both produce 89 daily values, but the per-day values differ subtly:
+- The tau-asymmetry (C7) means DDR and DDRS sample different 89-day
+  windows of the same hourly Q. Documented as intentional (Bindas et
+  al. 2025 WRR).
+- The downsample-mode difference means DDR's daily Q is `F.interpolate`'d
+  while DDRS's is block-meaned — different daily values even on the
+  same window.
+
+These produce a ~1e-6 magnitude gradient difference per step. For KAN
+parameters with very small gradients (`min|g| ≈ 2.89e-8 ≈ eps = 1e-8`),
+Adam's update `lr · m1_hat / (sqrt(m2_hat) + eps)` has its denominator
+dominated by eps. The 1e-6 grad noise then amplifies to a ~1e-3
+parameter-step noise. Over 175 SGD steps (5 epochs × 35 mb/epoch), this
+compounds to the observed ~0.044 median-n divergence (DDR 0.074 vs DDRS
+0.030).
+
+**Diagnosis quality:** load-bearing. The mechanism is documented at
+spec C7 (tau) + Layer C finding (`F.interpolate(mode="area")` vs
+reshape+mean) + Layer D finding (eps-denominator amplification at small-grad
+params). The post-Adam-step diff of 1.49e-3 per step × 175 steps × the
+denormalize Jacobian gives an order-of-magnitude consistent prediction
+of the trained-output shift.
+
+**Next step:** A new spec to port `F.interpolate(mode="area")` semantics
+into `src/training/loss.rs::tau_trim_and_downsample`. The new function
+should:
+- Accept arbitrary-length hourly windows (not require a multiple of 24).
+- Produce N daily outputs where each output is a weighted average of the
+  input hours with fractional weights at the bin boundaries.
+- Match `torch.nn.functional.interpolate(mode="area")` exactly when
+  fed identical inputs.
+
+That fix alone should close most of the remaining n-saturation gap.
+A subsequent retrain + Layer 2 (trained-output) parity comparison from
+the previous plan will confirm.
+
+**Also worth flagging** (out of scope for this spec but documented for the
+next investigator):
+- The C7 tau-asymmetry (DDR `[13:-11+tau]` vs DDRS `[13+tau:-11+tau]`)
+  is intentional per the user's reading of Bindas et al. 2025 WRR, but
+  the resulting hourly-window difference compounds with the downsample
+  fix above. After fixing the downsample, re-check whether the trained-n
+  distribution closes; if not, revisit the tau slice convention.
+- The `tau_trim_and_downsample` `squeeze::<2>()` bug for n_gauges=1 is
+  not a training-time issue (batches always have multi-gauge) but
+  prevented direct API reuse from the Layer B/C tests. Worth fixing as a
+  followup for testability.
+
+---
+
 ## 6. Implementation order
 
 1. Layer A audit (2 hours, no code). Surface any ✗ rows from the 5 untested fields.
