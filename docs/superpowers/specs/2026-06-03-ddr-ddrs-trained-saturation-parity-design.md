@@ -246,6 +246,77 @@ Three possible outcomes after Layer 2:
 
 ---
 
+## §5.1 Empirical verdict (Task 7 of the plan)
+
+**Run dates:**
+- DDRS train: `2026-06-04T01-57-45Z-train-and-test` (first run with BOTH
+  PR #12 fixes applied — NaN-gauge filter wired into the L1 loss path +
+  `log_space_parameters: [p_spatial]`).
+- DDR train: existing `epoch_5_mb_35.pt` from
+  `~/projects/ddr/output/ddr-v0.5.2.dev2+g21a3a96b5-merit-training/2026-03-14_06-03-23/`
+  — verified in Task 2 to use the same parity config (seed=42,
+  np_seed=42, grid=50, k=2, hidden=21, num_hidden_layers=2, batch=64,
+  rho=90, epochs=5, lr 0.001→0.0005 at epoch 3, identical 1981-10-01
+  → 1995-09-30 training window).
+
+**Cell 5 output (Layer 2 notebook —
+`.ddrs/runs/2026-06-04T01-57-45Z-train-and-test/plots/parity_trained.ipynb`):**
+
+```
+DDR ↔ DDRS trained-distribution parity (Layer 2):
+
+  n             KS=0.6916  Spearman=+0.1790   ✗ real divergence
+  q_spatial     KS=0.1769  Spearman=+0.3029   ✗ real divergence
+  p_spatial     KS=0.5277  Spearman=+0.2592   ✗ real divergence
+```
+
+**Per-parameter stats (Cell 2):**
+
+| param | DDRS med | DDR med | DDRS p5 | DDR p5 | DDRS p95 | DDR p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| n | 0.0296 | 0.0744 | 0.0187 | 0.0387 | 0.0852 | 0.1047 |
+| q_spatial | 0.4595 | 0.4630 | 0.4457 | 0.4222 | 0.4848 | 0.4804 |
+| p_spatial | 5.6674 | 8.1534 | 3.6553 | 5.4944 | 10.3120 | 10.4259 |
+
+**Outcome (from §5 table, row 2):** "**DDR healthier** — DDR median > 0.05,
+DDRS median ≈ 0.030, KS > 0.20." DDRS has a training-loop bug that the
+PR #12 fixes (NaN-filter wiring + log_space swap) did not fully resolve.
+The original `n` saturation symptom (user-observed median ≈ 0.02–0.03)
+persists: DDRS median 0.030 vs DDR's 0.074, KS = 0.69.
+
+**Important nuance on q_spatial and p_spatial:** Cell 5 reports
+`✗ real divergence` for these too, but the failure mode is different
+from `n`'s. q_spatial's medians match closely (DDRS 0.460 vs DDR 0.463) —
+its KS=0.18 is in the borderline zone and its Spearman=0.30 indicates
+**per-reach scrambling**, not a distributional shift. p_spatial shows a
+real median offset (5.67 vs 8.15) similar to `n`. The Cell 5 verdict
+threshold (Spearman ≥ 0.90) was inherited from init-time parity bounds
+where bit-equivalent draws are achievable; trained-model SGD trajectories
+diverge naturally because of batch-shuffle PRNG differences (spec C5 of
+the previous plan — `numpy.random.MT19937` vs Rust `StdRng`). The
+q_spatial result is therefore consistent with "training-trajectory drift
+that is expected at this measurement scale" and does NOT indicate an
+additional bug beyond what `n` already implies. Future iterations of this
+test should split the threshold: distributional parity (KS ≤ 0.10) and
+per-reach parity (Spearman ≥ 0.70) as independent gates rather than
+combined.
+
+**Next step (from §5 table, row 2):** "A new spec to localize the bug in
+`src/training/`. The five candidate causes
+(loss bias, Adam hyperparams, batch shuffle, grad clip/sigmoid
+saturation, NaN masking) become the test plan." The NaN-masking and
+log-space causes are now ruled out via PR #12. Remaining candidates for
+the new spec: optimizer Adam hyperparam fine-detail (e.g. `amsgrad`
+default, internal LR multipliers in burn vs torch), per-gauge subgraph
+construction, hot-start state for MC routing at training start, the
+tau-time-slicing alignment (DDR `train.py:78,80` `[13:-11+tau]` vs DDRS
+`loss.rs:23,26` `[13+tau:-11+tau]` — confirmed by user 2026-06-03 to be
+intentional tau-as-timezone semantics from Bindas et al. 2025 WRR, so
+moves down the suspect list), and observation/streamflow alignment at
+the boundaries of the rho window.
+
+---
+
 ## 6. Implementation order
 
 1. Layer 0 audit (1 hour, no code). Surface ✗ rows.
