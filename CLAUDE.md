@@ -69,22 +69,70 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 ### `ddrs` CLI (preferred entrypoint)
 
 The `ddrs` binary replaces the four legacy single-purpose binaries with a
-terraform-style lifecycle. First-time flow is `init → plan → run`.
+terraform-style lifecycle. README §"Getting started" is the user-facing
+reference; this section captures the gotchas worth keeping in head.
+
+Install once:
 
 ```bash
-ddrs init                                      # compile + GPU probe + workspace + smoke
-ddrs plan                                      # dry-run validation (bootstraps ddrs.yaml if missing)
+cargo install --path .   # puts `ddrs` in ~/.cargo/bin/
+```
+
+First-time flow `init → plan → run`:
+
+```bash
+ddrs init                                      # GPU probe + smoke + bootstraps ./ddrs.yaml
+                                               #   (opens $EDITOR) + locks data_sources
+ddrs plan                                      # validates ddrs.yaml against locked sources +
+                                               #   computes summed-Q' baseline (cached)
+ddrs run --workflow train-and-test             # full sweep: train, eval, write manifest
 ddrs run --workflow train                      # equivalent to legacy `train`
 ddrs run --workflow eval                       # equivalent to legacy `eval`
-ddrs run --workflow train-and-test --plot      # full sweep + parameter NetCDF dump
 ddrs show <run-id>                             # inspect a past run's manifest
 ddrs status                                    # workspace summary + disk usage
 ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 ```
 
-The full design lives at
+**The bootstrap-from-last-run gotcha** (`src/cli/plan_bootstrap.rs:58-63`):
+when `ddrs init` materializes `ddrs.yaml`, it prefers
+`.ddrs/runs/<latest successful>/config.yaml` over the bundled
+`config/merit_training.yaml`. So `rm ddrs.yaml && ddrs init` recreates the
+workspace config **from your latest successful run**, NOT from the tracked
+template. If you change `config/merit_training.yaml` (e.g. invariant 7 work,
+parameter-range fixes) and want a clean rebootstrap, either:
+
+- pass `--config config/merit_training.yaml` to **every** subcommand
+  (the top-level flag works on `init`/`plan`/`run`), or
+- nuke `.ddrs/runs/` before rerunning `ddrs init`, or
+- hand-edit `ddrs.yaml` to match the tracked template.
+
+The first option is the cleanest for short-lived experiments:
+
+```bash
+ddrs --config config/merit_training.yaml plan --workflow train-and-test
+ddrs --config config/merit_training.yaml run  --workflow train-and-test
+```
+
+`mode:` and `workflow:` must agree (`mode: training` ↔
+`workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`);
+`ddrs init` rejects contradictions at load time.
+
+Full design at
 `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
 implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+
+### Workspace layout
+
+| Path | Written by | Purpose |
+|---|---|---|
+| `ddrs.yaml` | `ddrs init` (via `$EDITOR`) | Workflow + experiment config (gitignored) |
+| `.ddrs/system.json` | `ddrs init` | GPU/driver/smoke-test record |
+| `.ddrs/sources.lock` | `ddrs init` | Fingerprints of `data_sources` paths |
+| `.ddrs/baselines/<key>/` | `ddrs plan` first time | Cached summed-Q' baseline |
+| `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
+| `.ddrs/runs/<id>/config.yaml` | `ddrs run` | **Snapshot of the config that produced this run** (the `plan_bootstrap` source) |
+| `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*.mpk` | `ddrs run` train phase | KAN checkpoints |
+| `.ddrs/runs/<id>/kan_parameters.nc` | `dump_parameters` | Per-COMID denormalised KAN outputs |
 
 ### Legacy binaries (deprecated, removed in 0.4)
 

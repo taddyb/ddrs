@@ -5,12 +5,13 @@
 //!   2. Collate → RoutingBatch → RoutingTensors<Autodiff<I>>.
 //!   3. forward() — KAN head  MC engine + scatter-add to per-gauge.
 //!   4. tau-trim + daily downsample → (G, T_days) BURN tensor.
-//!   5. L1 loss in BURN-tensor space (autograd alive).
-//!      ⚠ V3 path drops the NaN-gauge filter; observations with NaN
-//!      contribute zero to the diff (handled by `obs_for_loss`
-//!      construction). Refine in SP-5 if convergence is poor.
-//!   6. loss.backward() → clip_grad_norm → optimizer.step.
-//!   7. save_kan_head to checkpoint_dir.
+//!   5. NaN-gauge filter (DDR train.py:75-89): gauges with any NaN in the
+//!      post-warmup obs window are dropped from both predictions and
+//!      observations before the L1 loss. Autograd stays alive on predictions
+//!      via Tensor::select on the kept-gauge index.
+//!   6. L1 loss in BURN-tensor space (autograd alive).
+//!   7. loss.backward() → clip_grad_norm → optimizer.step.
+//!   8. save_kan_head to checkpoint_dir.
 
 use std::path::Path;
 
@@ -86,12 +87,8 @@ pub fn train<I: Backend>(
             let (g, t_days) = (dims[0], dims[1]);
             debug_assert_eq!(g, num_gauges);
 
-            // Build obs_for_loss as Tensor<Autodiff<I>, 2> shape (G, T_days):
-            //   1) trim first/last day along axis 0 of obs_arr (rho_days, G) → (t_days, G)
-            //   2) transpose to (G, T_days) in memory
-            //   3) replace NaN with 0 (Option A — autograd-safe NaN handling;
-            //      NaN obs contribute zero to the diff, i.e. those timesteps are
-            //      treated as zero loss rather than filtered out)
+            // Build obs tensor preserving NaN so the filter can detect them.
+            // Shape: obs_arr is (rho_days, G); trim first/last day → (t_days, G).
             assert!(
                 t_days_full >= 2 + t_days,
                 "obs/pred shape mismatch: obs rows={} pred t_days={}",
@@ -102,8 +99,7 @@ pub fn train<I: Backend>(
             for gi in 0..g {
                 for ti in 0..t_days {
                     // obs row index after trim = ti + 1; column = gi.
-                    let v = obs_arr[(ti + 1, gi)];
-                    obs_buf.push(if v.is_nan() { 0.0 } else { v });
+                    obs_buf.push(obs_arr[(ti + 1, gi)]);
                 }
             }
             let obs_t: Tensor<Autodiff<I>, 2> =
@@ -119,8 +115,48 @@ pub fn train<I: Backend>(
             let p_post = daily.slice([0..g, warmup..t_days]); // (G, post)
             let o_post = obs_t.slice([0..g, warmup..t_days]);
 
-            // L1 loss = mean(|p - o|); autograd alive on `p_post`.
-            let loss = (p_post - o_post).abs().mean();
+            // Filter gauges whose post-warmup obs window contains any NaN.
+            // Mirrors DDR's per-gauge NaN-mask at scripts/train.py:75-89.
+            // Without this, the NaN→0.0 substitution biases the head toward
+            // predicting near-zero flow and saturates Manning's n at the lower
+            // bound (~0.030 in log space).
+            //
+            // Strategy: extract the obs values from `o_post` (no autograd on
+            // obs), build the keep-indices in ndarray space, then apply
+            // Tensor::select to both p_post and o_post so autograd stays alive
+            // on predictions.
+            let o_post_vec: Vec<f32> = o_post.clone().into_data().into_vec().unwrap();
+            let t_post = t_days - warmup;
+            let keep_indices: Vec<i32> = (0..g)
+                .filter(|&gi| {
+                    (0..t_post).all(|ti| !o_post_vec[gi * t_post + ti].is_nan())
+                })
+                .map(|gi| gi as i32)
+                .collect();
+
+            let surviving_g = keep_indices.len();
+            if surviving_g == 0 {
+                eprintln!(
+                    "  mb={} skipped: all {g} gauges have NaN in post-warmup window",
+                    state.mini_batch,
+                );
+                state.mini_batch += 1;
+                mb_done += 1;
+                if let Some(limit) = max_mini_batches {
+                    if mb_done >= limit {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            let keep_t: Tensor<Autodiff<I>, 1, burn::tensor::Int> =
+                Tensor::from_data(TensorData::new(keep_indices, [surviving_g]), device);
+            let p_filt = p_post.select(0, keep_t.clone());
+            let o_filt = o_post.select(0, keep_t);
+
+            // L1 loss = mean(|p - o|); autograd alive on `p_filt`.
+            let loss = (p_filt - o_filt).abs().mean();
             let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
             let grads = GradientsParams::from_grads(loss.backward(), &state.head);

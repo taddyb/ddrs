@@ -38,7 +38,8 @@ PARAM_RANGES = {
     "q_spatial": (0.0, 1.0),
     "p_spatial": (1.0, 200.0),
 }
-LOG_SPACE = {"n"}
+# Match DDR's default in ddr.validation.configs.Params:
+LOG_SPACE = {"p_spatial"}
 ATTRS_NC = Path("~/projects/ddr/data/merit_global_attributes_v2.nc").expanduser()
 STATS_JSON = Path(
     "~/projects/ddr/data/statistics/merit_attribute_statistics_merit_global_attributes_v2.nc.json"
