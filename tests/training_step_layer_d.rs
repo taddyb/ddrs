@@ -18,12 +18,14 @@
 //!
 //! ### Tolerance rationale
 //!
-//! Layer C showed max grad diff ≤ 1.76e-5 (well within 1e-3 tolerance from
-//! the DDR/DDRS interpolation divergence). Adam applies lr=1e-3, so a 1.76e-5
-//! grad diff maps to a ≤ 1.76e-8 param diff for the lr-scaled part — far
-//! below the 1e-4 spec tolerance. The dominant source of post-step param diff
-//! is therefore the interpolation divergence's effect on grad magnitude, not
-//! the Adam formula itself. Tolerance is set to 1e-4 per spec A5.
+//! Layer C showed max grad diff ≤ 7.16e-5 (well within 1e-4 tolerance —
+//! tightened from 1e-3 in Task 4 of the area-pool fix plan). Adam applies
+//! lr=1e-3, so a 7.16e-5 grad diff maps to a ≤ 7.16e-8 param diff for the
+//! lr-scaled part — far below the 2e-3 tolerance here. The dominant source
+//! of post-step param diff is the C7 tau-slicing propagation through the head
+//! + Adam eps-denominator (observed 1.49e-3 on input_weight), not the Adam
+//! formula itself. Tolerance stays at 2e-3 (1.49e-3 / 2e-3 = 75%; tightening
+//! would risk flakiness).
 //!
 //! Build + run:
 //!   cargo test --features fixtures --test training_step_layer_d -- --nocapture
@@ -403,6 +405,11 @@ fn layer_d_step1_post_adam_params_match_ddr() {
     // Tolerance: 2e-3. Spec targeted 1e-4 but the actual worst diff is 1.49e-3
     // (input_weight) due to Adam eps-amplification at near-zero gradients — see
     // the sub-test docstring for the full explanation.
+    // Per Task 3 of the area-pool downsample fix (commit c334f77): the
+    // 1.49e-3 per-param diff is dominated by C7 tau-slicing propagation
+    // through the head + Adam eps-denominator. The PR #14 area-pool fix
+    // preserves the diff magnitude (unchanged from PR #13). Tightening
+    // would risk flakiness at 75% of the tolerance. Stays at 2e-3.
     let tol = 2e-3_f32;
 
     // ---- Linear params ----

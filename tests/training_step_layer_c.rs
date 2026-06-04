@@ -425,10 +425,11 @@ fn layer_c_step1_l1_loss_matches_ddr() {
 /// DDRS uses reshape+mean_dim for hourly→daily, while DDR uses
 /// `F.interpolate(mode="area")`. For the same hourly Q, this causes a
 /// ~2e-4 m³/s difference in daily predictions, which propagates into the
-/// gradients. The tolerance is set to 1e-3 to accommodate this known
-/// structural divergence. If the test fails by more than 1e-3, the bug is
-/// in the autograd path itself (head, MC backward, or grad-clip), not in
-/// the interpolation semantics.
+/// gradients. The tolerance is set to 1e-4 (tightened from 1e-3 in Task 4
+/// of the area-pool fix plan; Task 3 observed worst diff = 7.16e-5). The
+/// dominant residual is the C7 tau-slicing asymmetry, not the downsample
+/// kernel. If the test fails at 1e-4, investigate the autograd path first
+/// (head, MC backward, or grad-clip).
 #[test]
 fn layer_c_step2_gradients_match_ddr() {
     let Some((conus, _gages)) = open_stores() else {
@@ -465,10 +466,14 @@ fn layer_c_step2_gradients_match_ddr() {
 
     let grads = loss.backward();
 
-    // Tolerance: 1e-3 to accommodate DDR vs DDRS interpolation divergence.
-    // If the per-param diff is below 1e-3, the autograd path is correct.
-    // If it exceeds 1e-3, investigate the MC backward or head autograd.
-    let tol = 1e-3_f32;
+    // Tolerance: 1e-4 (tightened from 1e-3 in Task 4 of the area-pool fix plan).
+    // Task 3 observed worst per-param grad diff = 7.16e-5, so 1e-4 gives ~1.4×
+    // headroom. The dominant residual diff is the C7 tau-slicing asymmetry (DDR
+    // pools 2139 hours → 89 days; DDRS pools 2136 hours → 89 days), NOT the
+    // downsample-mode mismatch the spec originally attributed it to. The
+    // area-pool fix (PR #14) is semantically correct but does not close this
+    // gap. If the test fails at 1e-4, investigate tau-trim semantics first.
+    let tol = 1e-4_f32;
 
     // Linear weight gradients: DDR stores [out, in], burn stores [in, out].
     // Transpose DDR's grad before comparing.

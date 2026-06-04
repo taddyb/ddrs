@@ -624,9 +624,12 @@ fn layer_b_step4_daily_q_matches_ddr() {
     //   (days 7-15, Q rising from 2.8 to 3.8 m³/s; steep hydrograph amplifies
     //   the 3-hour shift).  Mean abs diff = ~5e-3 m³/s.
     //
-    // This is a documented, intentional divergence (spec §2 C7).
-    // Tolerance set to 0.1 m³/s to confirm the expected source of divergence
-    // without being so loose it would pass if DDRS had a different bug.
+    // Per Task 3 of the area-pool downsample fix (commit c334f77): the
+    // observed diff after the PR #14 fix is 5.01e-2 m³/s — unchanged from
+    // PR #13. The dominant per-day diff is this C7 tau-slicing asymmetry,
+    // NOT the downsample-mode mismatch the spec originally hypothesized.
+    // The area-pool fix is semantically correct but does NOT close this gap.
+    // Tolerance stays at 0.1 m³/s.
     assert!(
         diff <= 0.1,
         "daily Q max abs diff {diff:.2e} > 0.1 m³/s — exceeds C7 tau-slicing budget.\n\
