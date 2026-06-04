@@ -308,3 +308,78 @@ After the fix lands:
 - The `tau_trim_and_downsample::squeeze::<2>()` bug for n_gauges=1 is
   fixed implicitly by the rewrite (matmul preserves the leading
   axis without need for any squeeze).
+
+---
+
+## §5.1 Empirical verdict (Task 6 of the plan)
+
+**Pre-fix baseline:** `.ddrs/runs/2026-06-04T01-57-45Z-train-and-test`
+(the first DDRS run with NaN-filter + log_space [p_spatial] from PR #12
+applied; the run that produced the §5.1 entry in
+`2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`).
+
+**Post-fix retrain:** `.ddrs/runs/2026-06-04T16-46-58Z-train-and-test`
+(adds the area-mode downsample fix from commits c334f77 + 3b907f1).
+
+**DDR reference:** `epoch_5_mb_35.pt` from
+`~/projects/ddr/output/ddr-v0.5.2.dev2+g21a3a96b5-merit-training/2026-03-14_06-03-23/`
+— verified by PR #13 Task 2 to use the exact parity config.
+COMID alignment confirmed: 346,321 CONUS reaches, order matches exactly.
+
+**n-distribution comparison (346,321 CONUS reaches):**
+
+| metric | DDR ref | DDRS pre-fix | DDRS post-fix | gap closed |
+|---|---:|---:|---:|---:|
+| median n | 0.0744 | 0.0296 | 0.0395 | ~22% |
+| mean n | 0.0735 | 0.0370 | 0.0444 | ~20% |
+| p95 | 0.1047 | 0.0852 | 0.0962 | ~56% |
+| frac n<0.035 | 0.031 | 0.650 | 0.404 | ~40% |
+| frac in [.02, .03] | 0.014 | 0.423 | 0.213 | ~50% |
+
+**Cell 2 output (per-parameter stats):**
+
+```
+           ddrs_med   ddr_med   ddrs_p5    ddr_p5   ddrs_p95    ddr_p95
+param
+n          0.039454  0.074377  0.017567  0.038731   0.096171   0.104686
+q_spatial  0.469512  0.463047  0.444897  0.422190   0.487581   0.480362
+p_spatial  6.634186  8.153398  3.600475  5.494444  10.919070  10.425868
+
+                 KS  Spearman
+param
+n          0.568536  0.347068
+q_spatial  0.206017  0.516933
+p_spatial  0.330272  0.370499
+```
+
+**Cell 5 verdict:**
+
+```
+DDR ↔ DDRS trained-distribution parity (Layer 2):
+
+  n             KS=0.5685  Spearman=+0.3471   ✗ real divergence
+  q_spatial     KS=0.2060  Spearman=+0.5169   ✗ real divergence
+  p_spatial     KS=0.3303  Spearman=+0.3705   ✗ real divergence
+```
+
+**Outcome (from §5 table):** The `n` row returns `✗ real divergence`
+(KS=0.5685, well above the 0.10 pass threshold; Spearman=+0.347, well
+below the 0.70 fail threshold). The fix is a real improvement (~22-56%
+gap closure per metric), but does not close the n-distribution parity.
+Median n moved from 0.030 to 0.040, p95 closed to 0.096 vs DDR's 0.105,
+and the saturation band shrunk by ~50% on fraction-based metrics. But
+median is still ~2× below DDR's 0.074, and the Spearman correlation
+(+0.347) indicates weak per-reach correspondence — reaches that should
+have high n in DDR are not reliably getting high n in DDRS after training.
+
+The remaining gap is dominated by causes beyond the C7 tau-slicing
+asymmetry (tau-slicing closes at most ~3 hours out of 2139). The KS
+statistic (0.57 post-fix vs ~0.69 pre-fix) shows the distribution shape
+moved toward DDR's but did not converge. Further investigation into
+the training dynamics (gradient flow through the KAN head, loss landscape
+differences, epoch/minibatch ordering effects) is warranted in a fresh spec.
+
+**Next step:** Open a fresh spec localizing the remaining trained-n
+divergence. The area-pool downsample fix is confirmed correct and
+beneficial, but does not fully resolve the n-saturation. The saturation
+investigation is NOT closed by this fix alone.
