@@ -99,17 +99,17 @@ rather than the hyperparameter setup. Audit at the granularity of:
 
 | Step | DDR source | DDRS source | Match? |
 |------|------------|-------------|--------|
-| Per-mini-batch gauge selection | `train.py:50-60` | `data/dataset.rs::shuffle_*` | (audit) |
-| Subgraph adjacency load | `dmc.routing.muskingum_cunge` setup | `src/routing/mmc.rs::setup_inputs` | (audit) |
-| Hot-start discharge computation | `dmc.routing.compute_hotstart_discharge` | `src/routing/utils.rs::hotstart_discharge` | (audit) |
+| Per-mini-batch gauge selection | `train.py:27-50` (`RandomSampler` + `torch.Generator(seed)`) | `src/data/sampler.rs:30-51` (`RandomSampler::reshuffle` via `rand::StdRng`) | STAT only — different PRNG (Rust `rand::StdRng` vs `torch.Generator`); both seeded, both uniform permutations; per-batch gauge ordering differs across frameworks |
+| Subgraph adjacency load | `io/builders.py:55-107` (`set()` dedup + `np.unique` sort → ascending active indices) and `geodatazoo/merit.py:197-248` (compress → CSR) | `src/data/collate.rs:31-160` (`BTreeSet` dedup, ascending sort; same compressed mapping) | ✓ — both produce identical sorted active-node sets and the same CSR triplet ordering |
+| Hot-start discharge computation | `routing/mmc.py:24-65` (`compute_hotstart_discharge`; solves `(I−N)·Q_0 = q_prime[0]`; clamps at `discharge_lb`; `carry_state=False` per batch via `train.py:159-160`) | `src/routing/mmc.rs:171-193` (`setup_inputs` hotstart block; `assembler.assemble(ones)` → `triangular_csr_solve`; clamp; `carry_state=false` always from `driver.rs:84`) | ✓ — both solve the same lower-triangular system with `c=1`, use `q_prime[0]` as RHS, clamp at `discharge_lb`, and cold-start every batch |
 | KAN forward | `kan.forward(inputs=...)` | `KanHead::forward` | ✓ (PR #11) |
-| MC routing forward | `muskingum_cunge(...)` per-timestep loop | `MuskingumCunge::forward` | (audit) |
+| MC routing forward | `routing/mmc.py:413-441` (loop `t` in `range(1, T)`: `q_prime[t-1]` → `route_timestep` → `_discharge_t = q_t1`) | `src/routing/mmc.rs:359-367` (loop `t` in `1..T`: `q_prime[t-1]` slice → `route_timestep` → `discharge_t = q_next`) | ✓ — per-timestep `q_prime` index matches (`t-1` in both); carry-over of `_discharge_t` identical; output column 0 = hot-start, columns 1..T-1 = routed discharge |
 | Tau-trim + daily downsample | `[13:-11+tau]` then `.reshape(N, 24).mean(2)` | `tau_trim_and_downsample()` in loss.rs | ✓ + STAT-only (intentional tau divergence per spec C7) |
 | NaN-gauge filter | `train.py:75-89` (per-gauge mask) | `src/training/driver.rs:115-160` (post 30501af) | ✓ (audit ✗ in previous plan; fixed in PR #12) |
 | L1 loss | `F.l1_loss(p_masked, o_masked)` | `(p_filtered - o_filtered).abs().mean()` | ✓ |
 | loss.backward() | `loss.backward()` | `loss.backward()` | ✓ (PR #11 Task 10) |
-| grad_clip | `torch.nn.utils.clip_grad_norm_(..., max_norm=1.0)` | `clip_grad_norm(..., 1.0)` | (audit) |
-| Adam step | `optimizer.step()` (PyTorch Adam) | `optimizer.step()` (burn AdamConfig) | (audit) |
+| grad_clip | `train.py:101` `torch.nn.utils.clip_grad_norm_(nn.parameters(), max_norm=1.0)` — global L2 norm over all `requires_grad=True` params; scale by `max_norm/norm` when `norm > max_norm` | `src/training/optimizer.rs:62-91` `clip_grad_norm` — `ModuleVisitor` collects squared norms for all float params that have a gradient (same set as PyTorch `requires_grad=True`); scale = `max_norm / global_norm`; identical formula | ✓ — same parameter set, same L2-norm formula, same conditional scale |
+| Adam step | `train.py:38` `torch.optim.Adam(lr, beta1=0.9, beta2=0.999, eps=1e-8)` — update rule: `m1_hat / (sqrt(v_hat) + eps)` | `src/training/optimizer.rs:36-46` `AdamConfig::new().with_epsilon(1e-8)…` — BURN computes `m1 * combined_factor / (sqrt(v) + eps * bc2_sqrt)` which reduces to `m1_hat / (sqrt(v_hat) + eps)` (algebraically identical; see `burn-optim-0.21.0/src/optim/adam.rs:199-204`) | ✓ — both apply `m1_hat / (sqrt(v_hat) + eps)`; BURN's `eps * bias_correction2_sqrt` cancels with `combined_factor`'s `sqrt(1-beta2^t)` to yield the standard form |
 
 The 5 (audit) rows are the new investigation. Each should be ✓, STAT-only,
 or ✗ with concrete source citations.
