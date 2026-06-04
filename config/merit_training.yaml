@@ -76,7 +76,7 @@ params:
   defaults:
     p_spatial: 21.0
   log_space_parameters:
-    - n
+    - p_spatial
   sparse_solver: cuda    # opt-in for GPU cuSPARSE solve (requires CUDA backend)
   use_cuda_graphs: true  # SP-10: forward CUDA Graph capture+replay (CUDA backend only; V7a=0.385)
 

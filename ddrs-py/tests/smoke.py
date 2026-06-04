@@ -22,7 +22,7 @@ def test_parameter_bounds_from_merit_training_yaml():
 
     n_bounds, n_log = bounds["n"]
     assert n_bounds == (pytest.approx(0.015), pytest.approx(0.25))
-    assert n_log is True  # log_space_parameters lists "n" in this yaml
+    assert n_log is False  # DDR's default: only p_spatial is log-space
 
     q_bounds, q_log = bounds["q_spatial"]
     assert q_bounds == (pytest.approx(0.0), pytest.approx(1.0))
@@ -30,7 +30,7 @@ def test_parameter_bounds_from_merit_training_yaml():
 
     p_bounds, p_log = bounds["p_spatial"]
     assert p_bounds == (pytest.approx(1.0), pytest.approx(200.0))
-    assert p_log is False
+    assert p_log is True
 
 
 def test_denormalize_linear_matches_formula():

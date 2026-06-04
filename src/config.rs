@@ -409,7 +409,7 @@ mod tests {
         assert!((pr.n[0] - 0.015).abs() < 1e-9);
         assert!((pr.p_spatial[1] - 200.0).abs() < 1e-9);
         // log_space_parameters from YAML overrides default.
-        assert_eq!(cfg.params.log_space_parameters, vec!["n".to_string()]);
+        assert_eq!(cfg.params.log_space_parameters, vec!["p_spatial".to_string()]);
         // kan_head section.
         let kan_head = cfg.kan_head.as_ref().unwrap();
         assert_eq!(kan_head.hidden_size, 21);
