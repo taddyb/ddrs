@@ -498,13 +498,16 @@ fn build_batch_source(
 
     records.sort_by_key(|r| (r.epoch, r.mb));
 
-    let batches: Vec<Vec<crate::data::ids::Staid>> = records
+    let batches: Vec<(u32, Vec<crate::data::ids::Staid>)> = records
         .into_iter()
         .map(|r| {
-            r.staids
-                .into_iter()
-                .map(|s| crate::data::ids::Staid::new(&s))
-                .collect()
+            (
+                r.epoch,
+                r.staids
+                    .into_iter()
+                    .map(|s| crate::data::ids::Staid::new(&s))
+                    .collect(),
+            )
         })
         .collect();
 

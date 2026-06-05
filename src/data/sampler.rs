@@ -63,13 +63,13 @@ pub enum BatchSource {
 }
 
 impl BatchSource {
-    /// Re-shuffle the underlying sampler for a new epoch. No-op for replay
-    /// (the recorded trace IS the full multi-epoch sequence; the replay
-    /// sampler exhausts after the trace ends regardless of the driver's
-    /// outer epoch loop).
+    /// Re-shuffle the underlying sampler for a new epoch. For `Shuffle`,
+    /// permutes the index list. For `Replay`, advances the internal epoch
+    /// counter so `next_batch` yields batches for the new epoch.
     pub fn reshuffle<R: Rng + ?Sized>(&mut self, rng: &mut R) {
-        if let BatchSource::Shuffle(s) = self {
-            s.reshuffle(rng);
+        match self {
+            BatchSource::Shuffle(s) => s.reshuffle(rng),
+            BatchSource::Replay(s) => s.advance_epoch(),
         }
     }
 
@@ -112,28 +112,36 @@ impl SequentialSampler {
     }
 }
 
-/// Yields pre-recorded mini-batches in order. Companion to `RandomSampler`
-/// for the matched-batch replay experiment.
+/// Yields pre-recorded mini-batches in order, respecting per-batch epoch
+/// labels. Companion to `RandomSampler` for the matched-batch replay
+/// experiment.
 pub struct ReplaySampler {
-    /// Each inner Vec is one mini-batch of dataset-row indices.
-    batches: Vec<Vec<usize>>,
+    /// Each entry: (original_epoch, dataset-row indices for the batch).
+    /// Sorted by (epoch, mb_within_epoch) at construction.
+    batches: Vec<(u32, Vec<usize>)>,
+    /// Cursor into `batches`. Monotonically increasing across the whole
+    /// run; never reset.
     cursor: usize,
+    /// Current outer epoch the driver is requesting. 0 = "before any
+    /// outer epoch has started"; `advance_epoch` bumps this on each call.
+    /// `next_batch` returns `Some(...)` iff `batches[cursor].0 == current_epoch`.
+    current_epoch: u32,
 }
 
 impl ReplaySampler {
-    /// Build from a list of mini-batches of STAIDs. Resolves each STAID
-    /// against the dataset's `all_staids` array to recover dataset-row
-    /// indices. Panics if any recorded STAID is not present in `all_staids`.
-    pub fn new(recorded: Vec<Vec<Staid>>, all_staids: &[Staid]) -> Self {
+    /// Build from per-batch records: `(epoch, ordered_staids)`.
+    /// Resolves each STAID against `all_staids` to recover row indices.
+    /// Panics if any recorded STAID is missing from the dataset.
+    pub fn new(recorded: Vec<(u32, Vec<Staid>)>, all_staids: &[Staid]) -> Self {
         let lookup: std::collections::HashMap<&Staid, usize> = all_staids
             .iter()
             .enumerate()
             .map(|(i, s)| (s, i))
             .collect();
-        let batches: Vec<Vec<usize>> = recorded
+        let batches: Vec<(u32, Vec<usize>)> = recorded
             .into_iter()
-            .map(|batch| {
-                batch
+            .map(|(ep, batch_staids)| {
+                let indices: Vec<usize> = batch_staids
                     .into_iter()
                     .map(|s| {
                         *lookup.get(&s).unwrap_or_else(|| {
@@ -144,23 +152,34 @@ impl ReplaySampler {
                             )
                         })
                     })
-                    .collect()
+                    .collect();
+                (ep, indices)
             })
             .collect();
-        Self { batches, cursor: 0 }
+        Self { batches, cursor: 0, current_epoch: 0 }
     }
 
-    /// Yield the next pre-recorded batch's row indices, or `None` if exhausted.
+    /// Yield the next batch if it belongs to the current epoch; else
+    /// return None so the driver moves on to the next epoch.
     pub fn next_batch(&mut self) -> Option<Vec<usize>> {
         if self.cursor >= self.batches.len() {
             return None;
         }
-        let out = self.batches[self.cursor].clone();
+        let (batch_epoch, _) = &self.batches[self.cursor];
+        if *batch_epoch != self.current_epoch {
+            return None;
+        }
+        let indices = self.batches[self.cursor].1.clone();
         self.cursor += 1;
-        Some(out)
+        Some(indices)
     }
 
-    /// Number of mini-batches remaining in the replay queue.
+    /// Advance to the next epoch. Called by `BatchSource::reshuffle`.
+    pub(crate) fn advance_epoch(&mut self) {
+        self.current_epoch += 1;
+    }
+
+    /// Number of mini-batches remaining across all unprocessed epochs.
     pub fn remaining(&self) -> usize {
         self.batches.len().saturating_sub(self.cursor)
     }
@@ -234,36 +253,67 @@ mod tests {
     }
 
     #[test]
-    fn replay_sampler_yields_recorded_batches_in_order() {
-        use crate::data::ids::Staid;
-        // STAIDs as registered with the dataset.
-        let all_staids: Vec<Staid> = (0..10)
-            .map(|i| Staid::new(&format!("STAID_{i:02}")))
+    fn replay_sampler_yields_recorded_batches_in_epoch_order() {
+        let all_staids: Vec<crate::data::ids::Staid> = (0..10)
+            .map(|i| crate::data::ids::Staid::new(&format!("STAID_{i:02}")))
             .collect();
-        // Record: 3 mini-batches of 2 STAIDs each.
-        let recorded: Vec<Vec<Staid>> = vec![
-            vec![all_staids[3].clone(), all_staids[1].clone()],
-            vec![all_staids[7].clone(), all_staids[2].clone()],
-            vec![all_staids[5].clone(), all_staids[8].clone()],
+        // Trace: epoch 1 has 2 batches, epoch 2 has 1 batch.
+        let recorded: Vec<(u32, Vec<crate::data::ids::Staid>)> = vec![
+            (1, vec![all_staids[3].clone(), all_staids[1].clone()]),
+            (1, vec![all_staids[7].clone(), all_staids[2].clone()]),
+            (2, vec![all_staids[5].clone(), all_staids[8].clone()]),
         ];
 
         let mut replay = ReplaySampler::new(recorded, &all_staids);
 
-        let b1 = replay.next_batch().expect("batch 1");
-        assert_eq!(b1, vec![3, 1]);
-        let b2 = replay.next_batch().expect("batch 2");
-        assert_eq!(b2, vec![7, 2]);
-        let b3 = replay.next_batch().expect("batch 3");
-        assert_eq!(b3, vec![5, 8]);
-        assert!(replay.next_batch().is_none(),
-            "ReplaySampler should exhaust after the recorded batches");
+        // Driver: epoch 1 starts.
+        replay.advance_epoch(); // current_epoch = 1
+        assert_eq!(replay.next_batch(), Some(vec![3, 1]));
+        assert_eq!(replay.next_batch(), Some(vec![7, 2]));
+        // Next batch is epoch 2; should stop yielding for epoch 1.
+        assert_eq!(replay.next_batch(), None);
+
+        // Driver: epoch 2 starts.
+        replay.advance_epoch(); // current_epoch = 2
+        assert_eq!(replay.next_batch(), Some(vec![5, 8]));
+        // Trace exhausted.
+        assert_eq!(replay.next_batch(), None);
+
+        // Driver: epoch 3 starts (DDRS may iterate more outer epochs than
+        // the trace covers — should just yield None forever).
+        replay.advance_epoch();
+        assert_eq!(replay.next_batch(), None);
+    }
+
+    #[test]
+    fn replay_sampler_via_batch_source_reshuffle_advances_epoch() {
+        let all_staids = vec![
+            crate::data::ids::Staid::new("A"),
+            crate::data::ids::Staid::new("B"),
+        ];
+        let recorded = vec![
+            (1, vec![all_staids[0].clone()]),
+            (2, vec![all_staids[1].clone()]),
+        ];
+        let mut source = BatchSource::Replay(ReplaySampler::new(recorded, &all_staids));
+
+        use rand::SeedableRng;
+        let mut rng = StdRng::seed_from_u64(0);
+
+        // Epoch 1.
+        source.reshuffle(&mut rng);
+        assert_eq!(source.next_batch(), Some(vec![0]));
+        assert_eq!(source.next_batch(), None);
+        // Epoch 2.
+        source.reshuffle(&mut rng);
+        assert_eq!(source.next_batch(), Some(vec![1]));
+        assert_eq!(source.next_batch(), None);
     }
 
     #[test]
     fn replay_sampler_rejects_unknown_staid() {
-        use crate::data::ids::Staid;
-        let all_staids = vec![Staid::new("KNOWN")];
-        let recorded = vec![vec![Staid::new("UNKNOWN")]];
+        let all_staids = vec![crate::data::ids::Staid::new("KNOWN")];
+        let recorded = vec![(1, vec![crate::data::ids::Staid::new("UNKNOWN")])];
         let result = std::panic::catch_unwind(|| {
             let _ = ReplaySampler::new(recorded, &all_staids);
         });
