@@ -137,3 +137,104 @@ resulting NetCDFs. The Cell 5 verdict is the test:
 - DDRS retrain (with replay): ~45 min.
 - Layer-2 notebook + verdict: 30 min.
 - Total: ~5 hours wall-clock, ~3 hours active.
+
+---
+
+## §5.1 Empirical verdict (Task 5 of the plan)
+
+**DDR-side capture (Task 1, commit `92d8077`):**
+- Wrapper script: `scripts/dump_ddr_batch_order_and_train.py`
+- Captured trace: 180 mini-batches across 5 epochs in
+  `/tmp/ddr_batch_order.json` (218 KB)
+- DDR checkpoint: `/home/tbindas/projects/ddr/output/ddr-vdev-merit-training/2026-06-04_18-22-48/saved_models/_ddr-vdev-merit-training_epoch_5_mb_35.pt`
+
+**Epoch-aware replay fix (commit `6588b9f`):**
+The initial Task 4 replay run revealed `BatchSource::Replay` was
+collapsing all 180 batches into 1 outer epoch (constant `lr=0.001`,
+losing DDR's `lr=0.001 → 0.0005 at epoch 3` schedule). `6588b9f`
+made `ReplaySampler` epoch-aware so the LR schedule fires correctly.
+
+**Final DDRS replay run:** `2026-06-05T01-41-16Z-train-and-test`
+- 5 proper epochs, `epoch 3 lr=0.0005` banner confirmed in log
+- Median NSE 0.7004
+
+**n-distribution comparison (346,321 CONUS reaches):**
+
+| metric | DDR ref (matched) | DDRS replay (THIS) | DDRS shuffle (PR#13 areapool) |
+|---|---:|---:|---:|
+| median n | 0.0388 | 0.0396 | 0.0395 |
+| mean n | 0.0425 | 0.0444 | 0.0444 |
+| p5 | 0.0198 | 0.0180 | 0.0176 |
+| p95 | 0.0778 | 0.0921 | 0.0962 |
+| frac n<0.035 | 0.421 | 0.389 | 0.404 |
+
+**Cell 2 output (per-parameter stats):**
+
+```
+           ddrs_med   ddr_med   ddrs_p5    ddr_p5   ddrs_p95   ddr_p95        KS  Spearman
+param
+n          0.039605  0.038846  0.017987  0.019804   0.092055  0.077817  0.047213  0.569178
+q_spatial  0.474879  0.464698  0.458890  0.418594   0.489171  0.480429  0.361477  0.363490
+p_spatial  5.974792  5.689743  3.033784  3.312146  10.446642  8.691596  0.086896  0.540211
+```
+
+**Cell 5 verdict:**
+
+```
+DDR ↔ DDRS trained-distribution parity (Layer 2):
+
+  n             KS=0.0472  Spearman=+0.5692   ✗ real divergence
+  q_spatial     KS=0.3615  Spearman=+0.3635   ✗ real divergence
+  p_spatial     KS=0.0869  Spearman=+0.5402   ✗ real divergence
+```
+
+**Headline finding:**
+
+The matched-batch DDRS run produces a trained-n distribution
+**statistically indistinguishable from the shuffle run.** Spearman vs
+DDR is +0.5692 (was +0.347 before area-pool fix, now +0.569 with
+matched batches vs +0.347 without — a marginal improvement, but still
+well below the 0.70 threshold). KS(`n`) = 0.0472 (well under 0.20),
+but Spearman(`n`) = 0.5692 < 0.70. **This kills the hypothesis that
+batch-shuffle PRNG drift (PyTorch MT19937 vs Rust StdRng at the same
+seed) was the source of the remaining trained-n divergence.**
+
+**Outcome (from §6 table):**
+
+> Spearman(`n`) < 0.70: matched batches didn't help. The bug is in a
+> path the existing parity scaffold hasn't covered.
+
+**Next-step candidates** (out of scope for this spec):
+
+The remaining per-reach Spearman ~0.57 and median DDRS n (0.040) vs
+DDR n (0.039) are now attributable to something OTHER than batch
+ordering. Note: the distributions are actually very close at the
+global level (median 0.040 vs 0.039), but per-reach correspondence is
+weak — different gauges are converging to different local minima. The
+remaining suspects:
+
+1. **Tau-slicing asymmetry (C7).** DDR `train.py:78,80` pools 2139
+   hours (`[13 : -11+tau]`); DDRS `loss.rs` pools 2136 hours
+   (`[13+tau : -11+tau]`). Different daily Q windows produce different
+   gradients each step; over 180 SGD steps, this compounds. User has
+   confirmed tau-asymmetry is intentional (Bindas et al. 2025 WRR),
+   so this would require re-opening that decision.
+
+2. **GPU non-determinism in cuBLAS / cuSPARSE atomic-accumulation
+   orders.** PR #11/#13 showed ~1e-4 per-op noise on CUDA; over 180
+   SGD steps, this could compound to per-reach scrambling. To
+   distinguish from tau-asymmetry, run DDRS twice on CPU (NdArray
+   backend) and check if the two CPU runs agree better with each
+   other than either does with the GPU run.
+
+3. **Unaudited data path.** Attribute normalization, hot-start
+   computation per batch, q_prime forcing interpolation. The PR #13
+   audit (Layer A) verified loss + optimizer + grad-clip + Adam are
+   semantically identical; the audit did NOT cover the data-loading
+   side comprehensively. A focused audit on `src/data/dataset.rs` vs
+   DDR's dataset class would close this.
+
+**Recommendation:** open a new spec to investigate suspect (1) — the
+tau-asymmetry — first. It's the most concrete and the only one with
+known empirical magnitude (PR #13 Layer B4 found 5e-2 m³/s per-day
+diff). If it doesn't account for the gap, move to (2) and (3).
