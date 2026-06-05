@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "fixture_kan_seed": 42,
+  "fixture_kan_source": "tests/fixtures/kan_head_init_seed42.npz",
+  "gauge": {
+    "staid": "10336740",
+    "comid": 77006074,
+    "drain_sqkm": 5.537,
+    "n_reaches": 19,
+    "gage_idx_compressed": 18
+  },
+  "time_window": {
+    "start": "1990/01/01",
+    "rho_hours_actual": 2136,
+    "rho_days": 90,
+    "warmup_days": 5,
+    "tau": 3,
+    "n_days_post_trim": 88,
+    "n_days_post_warmup": 83
+  },
+  "files": [
+    "subgraph_77006074.npz",
+    "hotstart_77006074.npz",
+    "mc_forward_77006074.npz",
+    "daily_q_77006074.npz",
+    "loss_and_grads_77006074.npz",
+    "adam_step_77006074.npz"
+  ],
+  "ddr_git_commit": "c9a02425728f4af5baa9f4530ef66ee9d099477b",
+  "ddr_version": "0.5.3.dev3+gc9a024257"
+}

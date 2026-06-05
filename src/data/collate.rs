@@ -16,7 +16,7 @@ use crate::data::store::{GageMetadata, GageSubgraph, GagesAdjacencyStore};
 /// Output of the per-batch subgraph union. Edges are deduplicated and
 /// returned in CONUS-position coordinates, sorted lex by `(row, col)`.
 #[derive(Debug)]
-pub(crate) struct UnionedCoo {
+pub struct UnionedCoo {
     pub edges: Vec<(usize, usize)>,
     /// One entry per gauge that was present in `gages_adj`:
     /// `(staid, gage_idx, gage_catchment)`. Carrying the STAID here lets
@@ -28,7 +28,7 @@ pub(crate) struct UnionedCoo {
 ///
 /// Mirrors `construct_network_matrix`. Missing gauges (not in `gages_adj`)
 /// are silently skipped — matches DDR's `try / except KeyError` behavior.
-pub(crate) fn union_subgraphs(
+pub fn union_subgraphs(
     staids: &[Staid],
     gages_adj: &GagesAdjacencyStore,
 ) -> UnionedCoo {
@@ -55,7 +55,7 @@ use crate::data::ids::Comid;
 
 /// Compressed adjacency built from a unioned COO.
 #[derive(Debug)]
-pub(crate) struct CompressedAdj {
+pub struct CompressedAdj {
     /// Compressed COMIDs in topological order, length `N_active`.
     pub divide_comids: Vec<Comid>,
     /// Compressed-position rows (i32 for `SparseAdjacency`).
@@ -75,7 +75,7 @@ pub(crate) struct CompressedAdj {
 ///
 /// Hard-asserts the lower-triangular invariant (`rows >= cols`); fails
 /// with `DataError::Malformed` if violated.
-pub(crate) fn compress(
+pub fn compress(
     unioned: &UnionedCoo,
     conus_order: &[Comid],
 ) -> Result<CompressedAdj> {

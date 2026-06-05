@@ -26,7 +26,7 @@ use burn::tensor::{backend::Backend, Tensor, TensorData};
 use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
 use crate::data::error::Result;
-use crate::data::sampler::RandomSampler;
+use crate::data::sampler::{BatchSource, RandomSampler};
 use crate::nn::kan_head::KanHead;
 use crate::training::forward::forward;
 use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
@@ -54,12 +54,15 @@ pub fn train<I: Backend>(
     device: &I::Device,
     checkpoint_dir: &Path,
     max_mini_batches: Option<usize>,
+    batch_source: Option<BatchSource>,
 ) -> Result<()> {
     let exp = cfg.experiment.as_ref().expect("experiment");
     let rho = exp.rho.expect("training requires rho");
     let grad_clip = exp.grad_clip_max_norm.unwrap_or(1.0);
 
-    let mut sampler = RandomSampler::new(dataset.len(), exp.batch_size, true);
+    let mut sampler = batch_source.unwrap_or_else(|| {
+        BatchSource::Shuffle(RandomSampler::new(dataset.len(), exp.batch_size, true))
+    });
 
     for epoch in state.epoch..=exp.epochs {
         sampler.reshuffle(&mut state.rng);

@@ -85,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &device,
         &cli.checkpoint_dir,
         cli.max_mini_batches,
+        None,
     )?;
     let elapsed = start.elapsed();
     println!(

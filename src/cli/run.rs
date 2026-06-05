@@ -31,6 +31,10 @@ pub struct RunInput {
     pub plot: bool,
     pub strict: bool,
     pub max_mini_batches: Option<usize>,
+    /// Path to a captured mini-batch order JSON for the matched-batch parity
+    /// experiment. When `Some`, builds a `BatchSource::Replay` and passes it
+    /// to `train(...)`, overriding the default per-epoch shuffle.
+    pub batch_order_from: Option<PathBuf>,
 }
 
 pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
@@ -220,6 +224,7 @@ fn dispatch(
                 let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
                 let mut optimizer = build_adam::<KanHead<AB>, AB>();
 
+                let batch_source = build_batch_source(&input.batch_order_from, &train_dataset);
                 let ckpt_dir = run_dir.join("checkpoints");
                 training_train::<I>(
                     &train_cfg,
@@ -229,6 +234,7 @@ fn dispatch(
                     &device,
                     &ckpt_dir,
                     input.max_mini_batches,
+                    batch_source,
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -279,6 +285,7 @@ fn dispatch(
                 let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
                 let mut optimizer = build_adam::<KanHead<AB>, AB>();
 
+                let batch_source = build_batch_source(&input.batch_order_from, &train_dataset);
                 let ckpt_dir = run_dir.join("checkpoints");
                 training_train::<I>(
                     &train_cfg,
@@ -288,6 +295,7 @@ fn dispatch(
                     &device,
                     &ckpt_dir,
                     input.max_mini_batches,
+                    batch_source,
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -462,6 +470,57 @@ fn copy_baseline_into_run_dir(
         eprintln!("baseline → {}", baseline_dir.display());
     }
     (predictions, observations, manifest)
+}
+
+/// Parse the optional `--batch-order-from` JSON and build a `BatchSource`.
+///
+/// Returns `None` if `path` is `None` (default shuffle). Panics on missing
+/// file or malformed JSON — these are operator errors for a parity experiment,
+/// not recoverable runtime failures.
+fn build_batch_source(
+    path: &Option<PathBuf>,
+    dataset: &MeritGagesDataset,
+) -> Option<crate::data::sampler::BatchSource> {
+    let path = path.as_ref()?;
+
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("could not read --batch-order-from {path:?}: {e}"));
+
+    #[derive(serde::Deserialize)]
+    struct Record {
+        epoch: u32,
+        mb: u32,
+        staids: Vec<String>,
+    }
+
+    let mut records: Vec<Record> = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("malformed --batch-order-from JSON at {path:?}: {e}"));
+
+    records.sort_by_key(|r| (r.epoch, r.mb));
+
+    let batches: Vec<(u32, Vec<crate::data::ids::Staid>)> = records
+        .into_iter()
+        .map(|r| {
+            (
+                r.epoch,
+                r.staids
+                    .into_iter()
+                    .map(|s| crate::data::ids::Staid::new(&s))
+                    .collect(),
+            )
+        })
+        .collect();
+
+    eprintln!(
+        "replaying {} mini-batches from {}",
+        batches.len(),
+        path.display()
+    );
+
+    let all_staids = dataset.staids().to_vec();
+    Some(crate::data::sampler::BatchSource::Replay(
+        crate::data::sampler::ReplaySampler::new(batches, &all_staids),
+    ))
 }
 
 /// Returns paths to all `.mpk` files in `dir`, relative to `dir`'s parent

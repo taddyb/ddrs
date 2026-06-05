@@ -35,6 +35,10 @@ enum Cmd {
         #[arg(long)] plot: bool,
         #[arg(long)] strict: bool,
         #[arg(long)] max_mini_batches: Option<usize>,
+        /// Replay a captured mini-batch order from JSON (matched-batch parity
+        /// experiment). When set, overrides the default per-epoch shuffle.
+        /// JSON schema: array of {"epoch": int, "mb": int, "staids": [str, ...]}.
+        #[arg(long, value_name = "PATH")] batch_order_from: Option<PathBuf>,
         #[arg(long)] json: bool,
     },
     Show { run_id: String, #[arg(long)] json: bool },
@@ -100,7 +104,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Cmd::Run { workflow, plot, strict, max_mini_batches, json: _ } => {
+        Cmd::Run { workflow, plot, strict, max_mini_batches, batch_order_from, json: _ } => {
             let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
                 path: ".".into(),
                 source: "no ddrs.yaml found in current directory. \
@@ -113,6 +117,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 plot,
                 strict,
                 max_mini_batches,
+                batch_order_from,
             })?;
             eprintln!("run complete → {}", run_dir.display());
             Ok(())

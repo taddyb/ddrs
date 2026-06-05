@@ -58,6 +58,7 @@ fn run_warns_on_drift_strict_fails_on_drift() {
         plot: false,
         strict: true,
         max_mini_batches: Some(1),
+        batch_order_from: None,
     })
     .unwrap_err();
     assert!(
