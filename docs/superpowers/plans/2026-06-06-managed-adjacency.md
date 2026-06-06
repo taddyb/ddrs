@@ -115,13 +115,13 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 2: dbf reader
 
-- [ ] Add `dbase` to `Cargo.toml`.
-- [ ] `src/adjacency/dbf.rs`: read the `.dbf` sibling of the configured `.shp`
+- [x] Add `dbase` to `Cargo.toml`.
+- [x] `src/adjacency/dbf.rs`: read the `.dbf` sibling of the configured `.shp`
       (or the `.dbf` directly if configured as such). Extract
       `FlowpathRecord { comid: i64, lengthkm: f64, slope: f64, next_down_id: i64, up: [i64; 4] }`.
       Missing/null numeric → NaN (matches geopandas semantics so fills match DDR).
-- [ ] `DataError`-style error with `PathBuf` context per repo convention.
-- [ ] Test: header-only fixture or synthetic dbf; assert column extraction + NaN handling.
+- [x] `DataError`-style error with `PathBuf` context per repo convention.
+- [x] Test: header-only fixture or synthetic dbf; assert column extraction + NaN handling.
 
 ## Task 3: CONUS builder
 
