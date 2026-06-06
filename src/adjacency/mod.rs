@@ -17,7 +17,7 @@
 //!              gauges::build_gauge_subgraphs()
 //!                       │
 //!          (Task 5)     ▼
-//!              zarr_write::write_adjacency_zarr()
+//!              zarr_write::write_conus_store() / write_gauges_store()
 //! ```
 
 /// Bump on any algorithm change that would invalidate previously-cached
@@ -27,3 +27,4 @@ pub const BUILDER_VERSION: u32 = 1;
 pub mod build;
 pub mod dbf;
 pub mod gauges;
+pub mod zarr_write;
