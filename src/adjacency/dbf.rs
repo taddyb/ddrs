@@ -49,13 +49,12 @@ pub fn read_flowpath_records(path: &Path) -> crate::data::error::Result<Vec<Flow
             message: format!("failed to open dbf: {e}"),
         })?;
 
-    let raw_records = reader.read().map_err(|e| DataError::Malformed {
-        path: dbf_path.clone(),
-        message: format!("failed to read dbf records: {e}"),
-    })?;
-
-    let mut records = Vec::with_capacity(raw_records.len());
-    for (row, rec) in raw_records.into_iter().enumerate() {
+    let mut records = Vec::with_capacity(reader.header().num_records as usize);
+    for (row, rec) in reader.iter_records().enumerate() {
+        let rec = rec.map_err(|e| DataError::Malformed {
+            path: dbf_path.clone(),
+            message: format!("failed to read dbf record at row {row}: {e}"),
+        })?;
         records.push(parse_record(&dbf_path, row, rec)?);
     }
     Ok(records)
