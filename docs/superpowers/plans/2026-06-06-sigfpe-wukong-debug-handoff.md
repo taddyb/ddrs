@@ -1,5 +1,10 @@
 # Handoff: SIGFPE debug for `tests/device_selection.rs` — run on wukong
 
+> **RESOLVED 2026-06-06 (wukong session).** Root cause + fix in commit
+> `2bba409`; full findings at the bottom of this doc (§Outcome). The parity
+> gate and end-to-end items are BLOCKED by wukong data/DDR-repo state, not by
+> code — see §Outcome before doing anything else.
+
 **Date:** 2026-06-06
 **Supersedes:** the SIGFPE section of `2026-06-06-gpu-device-config-handoff.md`
 (everything else in that doc still stands).
@@ -132,3 +137,59 @@ EOF
 - `cargo test --test mmc`: 13 passed.
 - `cargo test --test device_selection`: passes via the skip path (1 GPU) —
   the <2-device guard works.
+
+## Outcome (2026-06-06 wukong session)
+
+### SIGFPE: root-caused and fixed (commit `2bba409`)
+
+- Step 1: `mmc` passed → not process startup. Step 2: libtest header printed,
+  kernel trap log named **libcusparse** (`trap divide error ... in
+  libcusparse.so.12.1.3.153`), thread `sandbox_smoke_p…` = the test fn.
+- Crashed identically with cusparse 12.1.3 (CUDA 12.3 module) AND 12.5.4
+  (cuda-12.6) → not a library-version bug.
+- gdb works on wukong with `LD_LIBRARY_PATH= gdb …` (the module path breaks
+  it; system gdb is fine). Backtrace: `cusparseSpSV_solve` ← `cusparse_forward`
+  ← hotstart solve in `setup_inputs`, **stage 2 on cuda:1** right after cuda:0
+  passed. At the fault, `cuCtxGetDevice()` returned **0** while solving with
+  device-1 buffers/stream.
+- Root cause: cuSPARSE dispatches into the thread-current CUDA context;
+  cubecl only sets the calling thread's context at client **creation**
+  (cubecl-cuda `runtime.rs`), so after a second device's client exists the
+  thread can be left on the wrong device. Device 0 only ever worked by
+  accident.
+- Fix: `bind_primary_context` called from `ensure_cuda_cache` (the choke
+  point all raw-cuSPARSE entries pass through). `tests/device_selection.rs`
+  now passes all 3 stages on wukong (8 GPUs), and the single-device GPU
+  tests (`sparse_cusparse_v8`, `sp10_*`) still pass.
+
+### Remaining checklist status
+
+- [x] `device_selection` green on wukong, actually running (3 stages).
+- [x] Full `cargo test`: green EXCEPT `data_static ::
+      attributes_store_opens_against_conus_subset` — environmental, see below.
+- [BLOCKED] Parity gate: **DIVERGENCE (~1% rel, max abs 0.55 m³/s)** — but
+  NOT caused by any ddrs commit: the original port commit `6083226` diverges
+  identically against a fixture regenerated on wukong. Root cause: **the
+  desktop's `~/projects/ddr` contains unpushed/uncommitted work** that the
+  port mirrors:
+  - `src/geometry.rs` cites `ddr/src/ddr/geometry/trapezoidal.py` — that file
+    does not exist at ANY commit in wukong's DDR clone (checked `--all`).
+  - DDR-at-HEAD's sandbox learns `top_width`/`side_slope` (denorm 0.5 →
+    √5000 ≈ 70.7 m, √25 = 5.0); ddrs derives them Leopold-Maddock-style
+    (`top_width = p·depth^q`). Different geometry → ~1% wave-shape diff.
+  - Bisect: wukong-DDR sandbox output is byte-identical from `ebba510`
+    (Feb 7) through HEAD `c68a937`; no commit in history matches ddrs.
+  - Resolution needs the desktop: push/commit the DDR-side geometry work
+    (or copy the desktop's `fixtures/sandbox/` to wukong) and re-run.
+- [BLOCKED] End-to-end `device: 1` train: fails before training —
+  `merit_conus_adjacency.zarr` on wukong (both `~/projects/ddr/data` and
+  `/projects/mhpi/tbindas/ddr/data`, written Feb 7) **lacks the `length_m`
+  and `slope` arrays** ddrs's `ConusAdjacencyStore` reads. Same root cause:
+  desktop DDR's `build_merit_adjacency` writes those arrays; wukong's zarr
+  predates that. Regenerate the zarr with the desktop's DDR code on wukong.
+  (`ddrs.yaml` is left at `device: 1`, ready for the retry; binary
+  reinstalled with the fix via `cargo install --path .`.)
+- [x] README: `device:` key documented under "Override workflow".
+- The `data_static` failure and `sparse_cusparse_v5 end_to_end` /
+  `sparse_cusparse_v6` ignored-test failures are all the same broken-zarr
+  environment issue.

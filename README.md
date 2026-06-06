@@ -59,6 +59,10 @@ ddrs run --workflow train
 
 `mode:` and `workflow:` must agree (`mode: training` ↔ `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`). `ddrs init` will reject contradictions at load time.
 
+The top-level `device:` key in `ddrs.yaml` selects the CUDA device ordinal
+(default `0`, mirrors DDR's `device:` key) — on multi-GPU hosts set e.g.
+`device: 1` to keep training off the display/shared GPU.
+
 ### Advanced
 
 - `ddrs show <run_id>` — inspect a past run's manifest
