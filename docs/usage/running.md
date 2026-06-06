@@ -184,6 +184,16 @@ The unit tests under `cargo test` exercise the CPU path
 assumes the cuSPARSE path; the CPU sparse solver has nothing to
 capture.
 
+A third, top-level key selects the GPU on multi-GPU hosts:
+
+```yaml
+device: 0              # CUDA device ordinal (mirrors DDR's `device:` key)
+```
+
+`device: 1` runs the entire training (tensors, cuSPARSE cache, graph
+capture/replay) on the second GPU. Validated by
+`tests/device_selection.rs` (skips on hosts with fewer than 2 GPUs).
+
 See [Formatting inputs](inputs-formatting.md) for the complete list
 of toggles and how to add new ones, and
 [Performance & CUDA Graphs](../reference/perf.md) for the capture

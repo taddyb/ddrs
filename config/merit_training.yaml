@@ -9,6 +9,7 @@
 mode: training
 workflow: train-and-test    # ddrs plan/run picks this up; override with --workflow X
 geodataset: merit
+device: 0                   # CUDA device ordinal (mirrors DDR's `device:` key)
 seed: 42
 np_seed: 42
 

@@ -1228,8 +1228,11 @@ where
 
     // SAFETY: route_timestep is the training thread's entry; no other thread
     // accesses this pattern's cuda cache. The borrow lives only for the
-    // duration of this call.
-    let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+    // duration of this call. Autodiff<I>::Device == I::Device, so the
+    // tensor's device is the inner-backend device the cache must live on.
+    let cache_device = q_t_at.device();
+    let cache =
+        unsafe { crate::sparse::cusparse::ensure_cuda_cache::<I>(pattern, &cache_device) };
 
     // If no graph was installed (capture failed), fall through to direct launch.
     if cache.graph_fwd.is_none() || cache.scratch.is_none() {
@@ -1304,13 +1307,15 @@ where
     // cubecl's primary CUDA context to this thread, then drive all CUDA APIs
     // directly. Mirror that here so replay sees the same context.
     //
-    // SAFETY: retain+set_current is harmless if already bound. Primary
-    // context for device 0 matches cubecl's (cubecl uses CudaDevice::default()
-    // → ordinal 0). cubecl's ComputeClient::empty (used by
-    // fresh_primitive_from_scratch) tolerates being called from this thread.
+    // SAFETY: retain+set_current is harmless if already bound. The primary
+    // context is retained for the SAME ordinal cubecl is using (read from
+    // the tensors' device — config-selected, no longer hardcoded 0).
+    // cubecl's ComputeClient::empty (used by fresh_primitive_from_scratch)
+    // tolerates being called from this thread.
+    let cuda_ordinal = crate::sparse::cusparse::cuda_device_index::<I>(&device) as i32;
     unsafe {
-        let cu_dev = cudarc::driver::result::device::get(0)
-            .expect("graph-replay: cuDeviceGet(0) failed");
+        let cu_dev = cudarc::driver::result::device::get(cuda_ordinal)
+            .expect("graph-replay: cuDeviceGet failed");
         let ctx = cudarc::driver::result::primary_ctx::retain(cu_dev)
             .expect("graph-replay: primary_ctx::retain failed");
         cudarc::driver::result::ctx::set_current(ctx)

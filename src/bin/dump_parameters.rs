@@ -5,7 +5,6 @@
 
 use std::path::PathBuf;
 
-use burn::tensor::backend::BackendTypes;
 use burn_cuda::Cuda;
 use clap::Parser;
 
@@ -37,7 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
     type I = Cuda<f32, i32>;
-    let device = <I as BackendTypes>::Device::default();
+    // Config-selected CUDA ordinal (top-level `device:` key).
+    let device = cubecl::cuda::CudaDevice::new(cfg.device);
     let n = ddrs::dump_parameters::dump::<I>(&cfg, &cli.checkpoint, &cli.output, cli.batch_size, &device)?;
     println!("wrote {n} reaches → {}", cli.output.display());
     Ok(())

@@ -112,13 +112,24 @@ fixture is unavailable.
 
 ## CPU vs CUDA toggles
 
-Two YAML keys under `experiment:` in `config/merit_training.yaml` switch the
+Two YAML keys under `params:` in `config/merit_training.yaml` switch the
 sparse path:
 
 ```yaml
-sparse_solver: cuda    # cpu | cuda — selects ndarray vs cuSPARSE SpMV
-use_cuda_graphs: true  # CUDA backend only; forward-only graph capture+replay
+params:
+  sparse_solver: cuda    # cpu | cuda — selects ndarray vs cuSPARSE SpMV
+  use_cuda_graphs: true  # CUDA backend only; forward-only graph capture+replay
 ```
+
+A third, top-level key selects the GPU on multi-GPU hosts:
+
+```yaml
+device: 0              # CUDA device ordinal (mirrors DDR's `device:` key)
+```
+
+`device: 1` runs the entire training (tensors, cuSPARSE cache, graph
+capture/replay) on the second GPU. Validated by
+`tests/device_selection.rs` (skips on hosts with fewer than 2 GPUs).
 
 Current shipped defaults are `cuda` + `true` (per SP-9 and SP-10 close
 commits). On CPU-only machines, override by editing the YAML or by passing a

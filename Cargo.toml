@@ -38,7 +38,10 @@ rskan = { git = "https://github.com/taddyb/rskan.git", tag = "v0.1.2" }
 #   rand     : seeded RandomSampler-equivalent + random rho-day window
 zarrs = "0.23"
 icechunk = "2"
-netcdf = "0.12"
+# "static" builds bundled HDF5 + netcdf-c from source (needs cmake): the HPC
+# host has no netcdf/hdf5 dev packages, and the module-provided ones are
+# Intel-MPI-flavored shared libs that would break `ddrs` outside `module load`.
+netcdf = { version = "0.12", features = ["static"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

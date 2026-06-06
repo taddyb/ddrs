@@ -45,3 +45,7 @@ spike_backward/
 
 # Python bytecode cache from scripts/*.py run under DDR's uv venv
 __pycache__/
+
+.cargo/
+.ddrs/
+ddrs.yaml

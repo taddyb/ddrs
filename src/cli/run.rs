@@ -5,7 +5,6 @@ use std::process::Command;
 use std::time::Instant;
 
 use burn::backend::Autodiff;
-use burn::tensor::backend::BackendTypes;
 use burn_cuda::Cuda;
 
 use crate::cli::{
@@ -92,7 +91,7 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
             fs::create_dir_all(&plot_dir).ok();
             let nc = plot_dir.join("kan_parameters.nc");
             type I = burn_cuda::Cuda<f32, i32>;
-            let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+            let device = cubecl::cuda::CudaDevice::new(pr.config.device);
             let res = crate::dump_parameters::dump::<I>(&pr.config, &ck_base, &nc, 50_000, &device);
             if let Err(e) = res {
                 eprintln!("warning: --plot post-step failed: {e}");
@@ -202,7 +201,8 @@ fn dispatch(
                 ));
             }
             Workflow::Train => {
-                let device = <I as BackendTypes>::Device::default();
+                // Config-selected CUDA ordinal (top-level `device:` key).
+                let device = cubecl::cuda::CudaDevice::new(pr.config.device);
                 let phase1_start = Instant::now();
 
                 let train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
@@ -262,7 +262,8 @@ fn dispatch(
                 Ok((metrics, outputs))
             }
             Workflow::TrainAndTest => {
-                let device = <I as BackendTypes>::Device::default();
+                // Config-selected CUDA ordinal (top-level `device:` key).
+                let device = cubecl::cuda::CudaDevice::new(pr.config.device);
 
                 // --- Phase 1: training ---
                 let phase1_start = Instant::now();

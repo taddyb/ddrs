@@ -155,7 +155,7 @@ where
     I::Device: 'static,
 {
     if effective_use_cuda::<I>(use_cuda) {
-        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache::<I>(pattern, device) };
         crate::sparse::cusparse::cusparse_spmv_forward::<I>(cache, q_prim, device)
     } else {
         crate::sparse::cpu_spmv_forward::<I>(pattern, q_prim, device)
@@ -174,7 +174,7 @@ where
     I::Device: 'static,
 {
     if effective_use_cuda::<I>(use_cuda) {
-        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache::<I>(pattern, device) };
         crate::sparse::cusparse::cusparse_spmv_backward::<I>(cache, gi_prim, device)
     } else {
         crate::sparse::cpu_spmv_backward::<I>(pattern, gi_prim, device)
@@ -193,7 +193,7 @@ where
     I::Device: 'static,
 {
     if effective_use_cuda::<I>(use_cuda) {
-        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache(pattern) };
+        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache::<I>(pattern, device) };
         crate::sparse::cusparse::cusparse_assemble_backward::<I>(cache, g_a_prim, device)
     } else {
         crate::sparse::cpu_assemble_backward::<I>(pattern, g_a_prim, device)
