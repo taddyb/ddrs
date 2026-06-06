@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use burn::backend::Autodiff;
-use burn::tensor::backend::BackendTypes;
 use burn_cuda::Cuda;
 use clap::Parser;
 
@@ -56,11 +55,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     type I = Cuda<f32, i32>;
     type AB = Autodiff<I>;
-    let device = <I as BackendTypes>::Device::default();
 
     let start = Instant::now();
     println!("=== Training ===");
     let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Training)?;
+    // Config-selected CUDA ordinal (top-level `device:` key).
+    let device = cubecl::cuda::CudaDevice::new(cfg.device);
     let dataset = MeritGagesDataset::open(&cfg)?;
     println!(
         "training: {} gauges, dates {} .. {}, epochs={}",

@@ -257,6 +257,9 @@ pub struct Config {
     pub seed: u64,
     pub np_seed: u64,
     pub workflow: Option<Workflow>,
+    /// CUDA device ordinal (mirrors DDR's top-level `device:` key,
+    /// e.g. `device: 2` → `cuda:2`). Defaults to 0.
+    pub device: usize,
 }
 
 /// Overlay section from `testing:` in the YAML.
@@ -295,6 +298,7 @@ struct ConfigRaw {
     seed: Option<u64>,
     np_seed: Option<u64>,
     workflow: Option<Workflow>,
+    device: Option<usize>,
     params: ParamsRaw,
     data_sources: Option<DataSources>,
     experiment: Option<Experiment>,
@@ -317,6 +321,7 @@ impl From<ConfigRaw> for Config {
             seed: r.seed.unwrap_or(42),
             np_seed: r.np_seed.unwrap_or(42),
             workflow: r.workflow,
+            device: r.device.unwrap_or(0),
         }
     }
 }
@@ -425,6 +430,25 @@ mod tests {
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");
         assert_eq!(cfg.workflow, Some(Workflow::TrainAndTest));
+        assert_eq!(cfg.device, 0);
+    }
+
+    #[test]
+    fn device_parses_and_defaults_to_zero() {
+        // Explicit `device:` key parses (mirrors DDR's top-level `device: 2`).
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\ndevice: 3\n";
+        let path = std::env::temp_dir().join("ddrs_config_device_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert_eq!(cfg.device, 3);
+
+        // Absent key defaults to device 0.
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n";
+        let path = std::env::temp_dir().join("ddrs_config_no_device_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert_eq!(cfg.device, 0);
+        assert_eq!(Config::default().device, 0);
     }
 
     #[test]

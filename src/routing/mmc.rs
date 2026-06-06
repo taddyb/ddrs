@@ -224,7 +224,8 @@ impl<I: Backend> MuskingumCunge<I> {
         // SAFETY: setup_inputs is the training thread's entry point; no
         // other thread has access to this pattern's cuda cache. The
         // returned &mut is valid for the duration of try_capture_forward.
-        let cache = unsafe { crate::sparse::cusparse::ensure_cuda_cache_mut(pattern) };
+        let cache =
+            unsafe { crate::sparse::cusparse::ensure_cuda_cache_mut::<I>(pattern, &self.device) };
         let n_seg = self.n_segments.expect("n_segments set");
         crate::sparse::cusparse::try_capture_forward::<I>(
             cache,

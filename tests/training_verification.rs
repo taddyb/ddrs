@@ -545,7 +545,8 @@ fn v3_train_one_epoch_runs_end_to_end() {
 
     // Run only 3 mini-batches so the test finishes in seconds rather than hours.
     const MAX_MB_FOR_V3: usize = 3;
-    train::<I>(&cfg, &dataset, &mut state, &mut optimizer, &device, &ckpt_dir, Some(MAX_MB_FOR_V3))
+    // `None` batch source → default per-epoch shuffle (matches the CLI default).
+    train::<I>(&cfg, &dataset, &mut state, &mut optimizer, &device, &ckpt_dir, Some(MAX_MB_FOR_V3), None)
         .expect("V3 train run");
 
     // Bar 1: training advanced state past start.

@@ -164,7 +164,7 @@ where
     //    Task 7: build_cuda_pattern_cache now uses cubecl Handles internally;
     // SAFETY: SP-7 single-threaded training contract — no concurrent access to
     // cuda_cache from multiple threads.
-    let cache = unsafe { ensure_cuda_cache(pattern) };
+    let cache = unsafe { ensure_cuda_cache::<B>(pattern, device) };
 
     // 3. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
     //    write a_values + b onto this stream; cuSPARSE will run after them
@@ -890,6 +890,25 @@ pub(crate) fn compute_client<B: Backend + 'static>(
     <CudaRuntime as cubecl::Runtime>::client(cuda_device)
 }
 
+/// Extract the CUDA device ordinal from a generic `B::Device`.
+///
+/// Panics if `B` is not `Cuda<f32, i32>` — same TypeId gate as
+/// [`compute_client`]. Used to keep the pattern cache, graph capture, and
+/// graph replay on the config-selected device instead of hardcoded ordinal 0.
+pub(crate) fn cuda_device_index<B: Backend + 'static>(device: &B::Device) -> usize {
+    use std::any::TypeId;
+    assert_eq!(
+        TypeId::of::<B::Device>(),
+        TypeId::of::<cubecl::cuda::CudaDevice>(),
+        "cuda_device_index requires Cuda<f32, i32> backend",
+    );
+    // SAFETY: TypeId match above guarantees layout compatibility between
+    // B::Device and CudaDevice. Borrow only to read the ordinal.
+    let cuda_device: &cubecl::cuda::CudaDevice =
+        unsafe { &*(device as *const B::Device as *const cubecl::cuda::CudaDevice) };
+    cuda_device.index
+}
+
 /// Returns cubecl-cuda's active CUDA stream for the current logical stream.
 ///
 /// Uses `ComputeClient::exclusive_with_server` (added in the SP-7 cubecl-runtime
@@ -1265,12 +1284,18 @@ impl UnsafeSendCache {
 /// SAFETY: caller must guarantee the current thread has an active CUDA
 /// context and that no other thread concurrently accesses the pattern's
 /// `cuda_cache`. The returned reference is valid for the lifetime of `pattern`.
-pub(crate) unsafe fn ensure_cuda_cache(
-    pattern: &crate::sparse::CsrPattern,
-) -> &CudaPatternCache {
+///
+/// `device` selects the CUDA ordinal the cache is built on (config-driven;
+/// previously hardcoded to device 0). Subsequent calls return the existing
+/// cache regardless of `device` — a `CsrPattern` lives on exactly one GPU.
+pub(crate) unsafe fn ensure_cuda_cache<'a, B: Backend + 'static>(
+    pattern: &'a crate::sparse::CsrPattern,
+    device: &B::Device,
+) -> &'a CudaPatternCache {
+    let device_index = cuda_device_index::<B>(device);
     pattern
         .cuda_cache
-        .get_or_init(|| build_cuda_pattern_cache(pattern))
+        .get_or_init(|| build_cuda_pattern_cache(pattern, device_index))
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,7 +1308,7 @@ pub(crate) unsafe fn ensure_cuda_cache(
 /// via `client.create_from_slice`. No `cuMemAllocAsync`, no `cuMemFreeAsync`.
 ///
 /// This runs once per `CsrPattern` lifetime and performs:
-/// 1. Materialise a cubecl client for `Cuda<f32, i32>` (default device).
+/// 1. Materialise a cubecl client for `Cuda<f32, i32>` on `device_index`.
 /// 2. Upload crow / col / row_for_nnz via `client.create_from_slice`.
 /// 3. `client.flush()` to submit writes onto the shared stream.
 /// 4. Create cuSPARSE handle; bind it to cubecl's active stream.
@@ -1294,7 +1319,10 @@ pub(crate) unsafe fn ensure_cuda_cache(
 /// 9. Allocate workspaces + dummy values via `create_from_slice`.
 /// 10. Run `cusparseSpSV_analysis` for both directions.
 /// 11. Return `CudaPatternCache`; dummy Handles drop and free device memory.
-fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternCache {
+fn build_cuda_pattern_cache(
+    pattern: &crate::sparse::CsrPattern,
+    device_index: usize,
+) -> CudaPatternCache {
     use burn_cubecl::cubecl::server::Handle;
     use cudarc::cusparse::sys::{
         cudaDataType_t::CUDA_R_32F,
@@ -1319,11 +1347,12 @@ fn build_cuda_pattern_cache(pattern: &crate::sparse::CsrPattern) -> CudaPatternC
 
     // --- Step 1: Materialise the cubecl client. ---
     // We are guaranteed to be on Cuda<f32, i32> here (the dispatcher gates the
-    // call). Default device is device index 0.
+    // call). `device_index` is the config-selected CUDA ordinal, threaded in
+    // by `ensure_cuda_cache` from the caller's `B::Device`.
     // Note: burn::backend::Cuda is gated behind the "cuda" feature on the burn
     // umbrella crate (not enabled); use burn_cuda::Cuda directly instead.
     type B = burn_cuda::Cuda<f32, i32>;
-    let device: cubecl::cuda::CudaDevice = Default::default();
+    let device = cubecl::cuda::CudaDevice::new(device_index);
     let client = compute_client::<B>(&device);
 
     // --- Step 2: Upload structural arrays via cubecl. ---
@@ -1842,7 +1871,7 @@ where
     //    Task 7: build_cuda_pattern_cache now uses cubecl Handles internally;
     // SAFETY: SP-7 single-threaded training contract — no concurrent access to
     // cuda_cache from multiple threads.
-    let cache = unsafe { ensure_cuda_cache(pattern) };
+    let cache = unsafe { ensure_cuda_cache::<B>(pattern, device) };
 
     // 2. Bind cuSPARSE to cubecl's active stream. cubecl queues kernels that
     //    write a_values + b onto this stream; cuSPARSE will run after them
@@ -2343,13 +2372,14 @@ pub(crate) unsafe fn fresh_primitive_from_scratch<B: Backend + 'static>(
 // contract as `ensure_cuda_cache`. The `UnsafeSendCache` wrapper
 // (cusparse.rs:1158) enforces single-threaded use via the marker.
 #[allow(clippy::mut_from_ref)]
-pub(crate) unsafe fn ensure_cuda_cache_mut(
-    pattern: &crate::sparse::CsrPattern,
-) -> &mut CudaPatternCache {
+pub(crate) unsafe fn ensure_cuda_cache_mut<'a, B: Backend + 'static>(
+    pattern: &'a crate::sparse::CsrPattern,
+    device: &B::Device,
+) -> &'a mut CudaPatternCache {
     // Initialize through the existing `get_or_init` if needed (so the
     // build_cuda_pattern_cache work isn't duplicated).
     // SAFETY: caller guarantees single-threaded access.
-    let _ = unsafe { ensure_cuda_cache(pattern) };
+    let _ = unsafe { ensure_cuda_cache::<B>(pattern, device) };
     // Now grab `&mut` through the UnsafeCell. The OnceLock-style guard on
     // initialization is already satisfied by the line above; here we just
     // hand out a `&mut` to the inner `CudaPatternCache`.
@@ -2448,16 +2478,20 @@ pub(crate) fn try_capture_forward<I: Backend + 'static>(
     client.flush().expect("client flush #2 before forward capture");
 
     // Bind CUDA primary context on this thread BEFORE any cudarc capture /
-    // launch call. Mirrors the Task 0 spike pattern.
-    let cu_device: cudarc::driver::sys::CUdevice = match unsafe {
-        cudarc::driver::result::device::get(0)
-    } {
+    // launch call. Mirrors the Task 0 spike pattern. Use the config-selected
+    // ordinal (not hardcoded 0) so capture binds the same primary context
+    // cubecl is using for `device`.
+    let cuda_ordinal = cuda_device_index::<I>(device) as i32;
+    let cu_device: cudarc::driver::sys::CUdevice =
+        match cudarc::driver::result::device::get(cuda_ordinal) {
         Ok(d) => d,
         Err(e) => {
-            cache.capture_status =
-                CaptureStatus::FallbackReason(format!("forward: cuDeviceGet(0) failed: {e:?}"));
+            cache.capture_status = CaptureStatus::FallbackReason(format!(
+                "forward: cuDeviceGet({cuda_ordinal}) failed: {e:?}"
+            ));
             eprintln!(
-                "SP-10 forward graph capture FAILED, falling back: cuDeviceGet(0) failed: {e:?}"
+                "SP-10 forward graph capture FAILED, falling back: \
+                 cuDeviceGet({cuda_ordinal}) failed: {e:?}"
             );
             return;
         }

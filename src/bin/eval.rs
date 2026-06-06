@@ -21,7 +21,6 @@
 
 use std::path::PathBuf;
 
-use burn::tensor::backend::BackendTypes;
 use burn_cuda::Cuda;
 use clap::Parser;
 
@@ -75,7 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     type I = Cuda<f32, i32>;
-    let device = <I as BackendTypes>::Device::default();
+    // Config-selected CUDA ordinal (top-level `device:` key).
+    let device = cubecl::cuda::CudaDevice::new(cfg.device);
 
     // Seed the backend RNG so MLP template init is deterministic across runs.
     // (Per BURN 0.21 docs at burn-backend-0.21.0/src/backend/base.rs:141 —
