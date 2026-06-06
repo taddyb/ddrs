@@ -17,7 +17,7 @@ pub enum CliError {
     #[error("runtime failure during workflow: {0}")]
     Runtime(String),
 
-    #[error("workspace not initialized at {path}; run `ddrs init`")]
+    #[error("workspace not initialized at {path}; run `ddrs plan` first")]
     WorkspaceNotInitialized { path: PathBuf },
 
     #[error(transparent)]

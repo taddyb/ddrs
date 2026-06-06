@@ -2,7 +2,7 @@
 //!
 //! 5-reach RAPID sandbox at `fixtures/sandbox/*.csv`. Used by:
 //!   - `examples/compare_ddr_sandbox.rs` (DDR-parity regression)
-//!   - `cli::init` smoke test (does routing work on this machine?)
+//!   - `cli::system` smoke test (does routing work on this machine?)
 
 use std::path::Path;
 

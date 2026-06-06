@@ -22,9 +22,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Deprecated: merged into `ddrs plan`. Stub removed in 0.4.
+    #[command(hide = true)]
     Init {
-        #[arg(long)] force: bool,
-        #[arg(long, default_value_t = 8.0)] min_free_gpu_gb: f32,
+        #[arg(long, hide = true)] force: bool,
+        #[arg(long, default_value_t = 8.0, hide = true)] min_free_gpu_gb: f32,
     },
     Plan {
         #[arg(long, value_enum)] workflow: Option<Workflow>,
@@ -73,14 +75,9 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
     let ws = Workspace::with_root(&ws_root);
 
     match cli.cmd {
-        Cmd::Init { force, min_free_gpu_gb } => {
-            ddrs::cli::init::run_init(ddrs::cli::init::InitInput {
-                workspace: ws_root,
-                config_path: cfg_path,
-                min_free_gpu_gb,
-                force,
-                skip_smoke: false,
-            }).map(|_| ())
+        Cmd::Init { .. } => {
+            eprintln!("ddrs init has been merged into ddrs plan — run `ddrs plan`");
+            ExitCode::ConfigInvalid.exit();
         }
         Cmd::Plan { workflow, json, force, min_free_gpu_gb } => {
             let pr = ddrs::cli::plan::plan(
@@ -128,7 +125,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
                 path: ".".into(),
                 source: "no ddrs.yaml found in current directory. \
-                         Run `ddrs init` first.".into(),
+                         Run `ddrs plan` first.".into(),
             })?;
             let run_dir = ddrs::cli::run::run(ddrs::cli::run::RunInput {
                 workspace: Workspace::with_root(ws.root()),
