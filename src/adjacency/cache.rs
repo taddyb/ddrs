@@ -69,6 +69,9 @@ struct CacheManifest {
     builder_version: u32,
     /// Absolute path of the .dbf (or .shp) input supplied by the caller.
     fabric_path: PathBuf,
+    /// Absolute path of the resolved .dbf file that was hashed.
+    /// May differ from `fabric_path` when the caller supplies a .shp sibling.
+    dbf_path: PathBuf,
     /// blake3 hex of the resolved .dbf file bytes.
     fabric_fingerprint: String,
     /// Absolute path of the gages CSV.
@@ -168,6 +171,7 @@ pub fn resolve_or_build(
         key: key.clone(),
         builder_version: BUILDER_VERSION,
         fabric_path: fabric.to_path_buf(),
+        dbf_path: dbf_path.clone(),
         fabric_fingerprint: dbf_fp,
         gages_path: gages_csv.to_path_buf(),
         gages_fingerprint: gages_fp,
@@ -279,11 +283,17 @@ mod tests {
 
     // ── synthetic helpers ────────────────────────────────────────────────────
 
-    /// Write a tiny synthetic .dbf with two connected reaches.
+    /// Row data for `write_dbf`: (COMID, lengthkm, slope, NextDownID, up1).
     ///
-    /// Topology: reach 1 → reach 2 (outlet). Single edge so the graph is
-    /// valid (lower-triangular after topo sort).
-    fn write_tiny_dbf(path: &Path) {
+    /// up2/up3/up4 are always 0.0; this covers the two-reach topology used by
+    /// all test fixtures.
+    type DbfRow = (f64, f64, f64, f64, f64);
+
+    /// Write a synthetic .dbf at `path` with the given rows.
+    ///
+    /// Schema: COMID, lengthkm, slope, NextDownID, up1, up2, up3, up4.
+    /// up2/up3/up4 are always 0.0.
+    fn write_dbf(path: &Path, rows: &[DbfRow]) {
         let builder = TableWriterBuilder::new()
             .add_numeric_field(FieldName::try_from("COMID").unwrap(), 10, 0)
             .add_numeric_field(FieldName::try_from("lengthkm").unwrap(), 12, 6)
@@ -295,32 +305,30 @@ mod tests {
             .add_numeric_field(FieldName::try_from("up4").unwrap(), 10, 0);
 
         let mut writer = builder.build_with_file_dest(path).expect("create dbf writer");
-
-        // Reach 1: headwater, feeds reach 2.
-        let mut r1 = dbase::Record::default();
-        r1.insert("COMID".to_owned(), dbase::FieldValue::Numeric(Some(1.0)));
-        r1.insert("lengthkm".to_owned(), dbase::FieldValue::Numeric(Some(1.0)));
-        r1.insert("slope".to_owned(), dbase::FieldValue::Numeric(Some(0.001)));
-        r1.insert("NextDownID".to_owned(), dbase::FieldValue::Numeric(Some(2.0)));
-        r1.insert("up1".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        r1.insert("up2".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        r1.insert("up3".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        r1.insert("up4".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        writer.write_record(&r1).expect("write r1");
-
-        // Reach 2: outlet, has reach 1 as upstream.
-        let mut r2 = dbase::Record::default();
-        r2.insert("COMID".to_owned(), dbase::FieldValue::Numeric(Some(2.0)));
-        r2.insert("lengthkm".to_owned(), dbase::FieldValue::Numeric(Some(2.0)));
-        r2.insert("slope".to_owned(), dbase::FieldValue::Numeric(Some(0.002)));
-        r2.insert("NextDownID".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        r2.insert("up1".to_owned(), dbase::FieldValue::Numeric(Some(1.0)));
-        r2.insert("up2".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        r2.insert("up3".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        r2.insert("up4".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-        writer.write_record(&r2).expect("write r2");
-
+        for &(comid, lengthkm, slope, next_down, up1) in rows {
+            let mut rec = dbase::Record::default();
+            rec.insert("COMID".to_owned(), dbase::FieldValue::Numeric(Some(comid)));
+            rec.insert("lengthkm".to_owned(), dbase::FieldValue::Numeric(Some(lengthkm)));
+            rec.insert("slope".to_owned(), dbase::FieldValue::Numeric(Some(slope)));
+            rec.insert("NextDownID".to_owned(), dbase::FieldValue::Numeric(Some(next_down)));
+            rec.insert("up1".to_owned(), dbase::FieldValue::Numeric(Some(up1)));
+            rec.insert("up2".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
+            rec.insert("up3".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
+            rec.insert("up4".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
+            writer.write_record(&rec).expect("write record");
+        }
         writer.finalize().expect("close dbf writer");
+    }
+
+    /// Default two-reach topology: reach 1 (headwater) → reach 2 (outlet).
+    fn write_tiny_dbf(path: &Path) {
+        write_dbf(
+            path,
+            &[
+                (1.0, 1.0, 0.001, 2.0, 0.0), // reach 1: feeds reach 2
+                (2.0, 2.0, 0.002, 0.0, 1.0), // reach 2: outlet
+            ],
+        );
     }
 
     /// Write a tiny gages CSV with one gauge at COMID 2 (the outlet).
@@ -393,6 +401,9 @@ mod tests {
         assert!(m.dropped_comids.is_empty(), "no cycles in tiny network");
         assert!(m.build_duration_secs >= 0.0);
         assert_eq!(m.builder_version, BUILDER_VERSION);
+        // dbf_path and fabric_path must agree (both are .dbf here).
+        assert_eq!(m.fabric_path, dbf_path);
+        assert_eq!(m.dbf_path, dbf_path);
 
         // Second call: cache hit.
         let out2 = resolve_or_build(&ws, &dbf_path, &gages_path)
@@ -403,63 +414,40 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
+    /// Two dbfs with different content must produce different cache keys AND
+    /// each build must land in its own cache directory with a manifest.json.
     #[test]
     fn key_changes_when_dbf_content_changes() {
         let ws = tmp_workspace("key_change");
-        let dbf_path1 = ws.join("v1.dbf");
-        let dbf_path2 = ws.join("v2.dbf");
+        let dbf_v1 = ws.join("v1.dbf");
+        let dbf_v2 = ws.join("v2.dbf");
         let gages_path = ws.join("gages.csv");
 
-        write_tiny_dbf(&dbf_path1);
+        // v1: standard two-reach topology.
+        write_tiny_dbf(&dbf_v1);
+        // v2: same topology but lengthkm of reach 1 changed → different bytes.
+        write_dbf(
+            &dbf_v2,
+            &[
+                (1.0, 99.0, 0.001, 2.0, 0.0), // lengthkm changed to 99
+                (2.0, 2.0, 0.002, 0.0, 1.0),
+            ],
+        );
         write_tiny_gages(&gages_path);
 
-        // Build a second dbf with different data (different lengths).
-        {
-            let builder = TableWriterBuilder::new()
-                .add_numeric_field(FieldName::try_from("COMID").unwrap(), 10, 0)
-                .add_numeric_field(FieldName::try_from("lengthkm").unwrap(), 12, 6)
-                .add_numeric_field(FieldName::try_from("slope").unwrap(), 12, 6)
-                .add_numeric_field(FieldName::try_from("NextDownID").unwrap(), 10, 0)
-                .add_numeric_field(FieldName::try_from("up1").unwrap(), 10, 0)
-                .add_numeric_field(FieldName::try_from("up2").unwrap(), 10, 0)
-                .add_numeric_field(FieldName::try_from("up3").unwrap(), 10, 0)
-                .add_numeric_field(FieldName::try_from("up4").unwrap(), 10, 0);
-            let mut w = builder.build_with_file_dest(&dbf_path2).unwrap();
-            // Same topology but different lengthkm → different bytes.
-            let mut r = dbase::Record::default();
-            r.insert("COMID".to_owned(), dbase::FieldValue::Numeric(Some(1.0)));
-            r.insert("lengthkm".to_owned(), dbase::FieldValue::Numeric(Some(99.0))); // changed
-            r.insert("slope".to_owned(), dbase::FieldValue::Numeric(Some(0.001)));
-            r.insert("NextDownID".to_owned(), dbase::FieldValue::Numeric(Some(2.0)));
-            r.insert("up1".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            r.insert("up2".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            r.insert("up3".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            r.insert("up4".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            w.write_record(&r).unwrap();
-            let mut r2 = dbase::Record::default();
-            r2.insert("COMID".to_owned(), dbase::FieldValue::Numeric(Some(2.0)));
-            r2.insert("lengthkm".to_owned(), dbase::FieldValue::Numeric(Some(2.0)));
-            r2.insert("slope".to_owned(), dbase::FieldValue::Numeric(Some(0.002)));
-            r2.insert("NextDownID".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            r2.insert("up1".to_owned(), dbase::FieldValue::Numeric(Some(1.0)));
-            r2.insert("up2".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            r2.insert("up3".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            r2.insert("up4".to_owned(), dbase::FieldValue::Numeric(Some(0.0)));
-            w.write_record(&r2).unwrap();
-            w.finalize().unwrap();
-        }
+        let out1 = resolve_or_build(&ws, &dbf_v1, &gages_path).expect("build v1");
+        let out2 = resolve_or_build(&ws, &dbf_v2, &gages_path).expect("build v2");
 
-        let k1 = {
-            let fp_dbf = file_fingerprint(&dbf_path1).unwrap();
-            let fp_g = file_fingerprint(&gages_path).unwrap();
-            content_key(&fp_dbf, &fp_g)
-        };
-        let k2 = {
-            let fp_dbf = file_fingerprint(&dbf_path2).unwrap();
-            let fp_g = file_fingerprint(&gages_path).unwrap();
-            content_key(&fp_dbf, &fp_g)
-        };
-        assert_ne!(k1, k2, "key must change when dbf content changes");
+        assert_ne!(out1.key, out2.key, "keys must differ for different dbf content");
+        assert!(!out1.cache_hit);
+        assert!(!out2.cache_hit);
+
+        // Both cache directories must exist and contain a manifest.
+        let dir1 = adjacency_cache_dir(&ws, &out1.key);
+        let dir2 = adjacency_cache_dir(&ws, &out2.key);
+        assert!(dir1.join("manifest.json").exists(), "v1 manifest must exist");
+        assert!(dir2.join("manifest.json").exists(), "v2 manifest must exist");
+        assert_ne!(dir1, dir2, "cache dirs must be distinct");
 
         let _ = fs::remove_dir_all(&ws);
     }
