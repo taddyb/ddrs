@@ -14,7 +14,7 @@
 //!              build::build_conus_adjacency()
 //!                       │
 //!          (Task 4)     ▼
-//!              gauges::build_gages_adjacency()
+//!              gauges::build_gauge_subgraphs()
 //!                       │
 //!          (Task 5)     ▼
 //!              zarr_write::write_adjacency_zarr()

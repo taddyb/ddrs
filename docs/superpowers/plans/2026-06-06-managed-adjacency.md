@@ -143,15 +143,15 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 4: gauge subgraph builder
 
-- [ ] `src/adjacency/gauges.rs`: port `build_gauge_adjacencies`/`subset_upstream`.
+- [x] `src/adjacency/gauges.rs`: port `build_gauge_adjacencies`/`subset_upstream`.
       Read the gages CSV (already a locked source) mirroring DDR's `MERITGauge`
       validation for the STAID → outlet-COMID mapping. Per STAID: BFS upstream
       over the CONUS graph, emit COO in **CONUS position space** (matching
       `GageSubgraph`'s contract in `src/data/store/zarr.rs:102-116`), with
       `gage_idx` (outlet's CONUS position) and `gage_catchment` attrs.
-- [ ] STAIDs whose catchment COMID is missing from the network: skip with a
+- [x] STAIDs whose catchment COMID is missing from the network: skip with a
       warning (mirrors `GagesAdjacencyStore::open`'s silent-drop semantics).
-- [ ] Unit test: synthetic 6-reach network, 2 gauges; assert subgraph node sets
+- [x] Unit test: synthetic 6-reach network, 2 gauges; assert subgraph node sets
       and `gage_idx`.
 
 ## Task 5: zarr writer
