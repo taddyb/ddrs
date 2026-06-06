@@ -39,13 +39,19 @@ pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
 
+    // TODO(managed-adjacency Task 7): when adjacency paths are built by ddrs,
+    // replace these expects with the resolved paths from the adjacency cache.
+    let conus_adj = ds.conus_adjacency.as_ref()
+        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    let gages_adj = ds.gages_adjacency.as_ref()
+        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
     let mut h = blake3::Hasher::new();
     for p in [
         &ds.streamflow,
         &ds.observations,
         &ds.gages,
-        &ds.gages_adjacency,
-        &ds.conus_adjacency,
+        gages_adj,
+        conus_adj,
     ] {
         h.update(canonicalize_or_raw(p).as_bytes());
         h.update(b"\n");
@@ -210,8 +216,11 @@ pub fn save_cached(
             streamflow: ds.streamflow.clone(),
             observations: ds.observations.clone(),
             gages: ds.gages.clone(),
-            gages_adjacency: ds.gages_adjacency.clone(),
-            conus_adjacency: ds.conus_adjacency.clone(),
+            // TODO(managed-adjacency Task 7): replace with resolved paths.
+            gages_adjacency: ds.gages_adjacency.clone()
+                .expect("adjacency paths not yet resolved — managed build lands in Task 7"),
+            conus_adjacency: ds.conus_adjacency.clone()
+                .expect("adjacency paths not yet resolved — managed build lands in Task 7"),
             start_time: exp.start_time.clone(),
             end_time: exp.end_time.clone(),
         },
@@ -323,8 +332,9 @@ mod tests {
         cfg.seed = 0;
         cfg.data_sources = Some(DataSources {
             attributes: PathBuf::from("/dev/null/attrs.nc"),
-            conus_adjacency: PathBuf::from("/dev/null/conus.zarr"),
-            gages_adjacency: PathBuf::from("/dev/null/gages_adj.zarr"),
+            conus_adjacency: Some(PathBuf::from("/dev/null/conus.zarr")),
+            gages_adjacency: Some(PathBuf::from("/dev/null/gages_adj.zarr")),
+            geospatial_fabric: None,
             streamflow: PathBuf::from("/dev/null/sf.ic"),
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),

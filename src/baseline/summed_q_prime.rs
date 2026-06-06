@@ -71,11 +71,17 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
 
     let (start, end, n_days) = parse_window(&exp.start_time, &exp.end_time)?;
 
-    let conus = ConusAdjacencyStore::open(&ds.conus_adjacency)?;
+    // TODO(managed-adjacency Task 7): replace expects with resolved paths from adjacency cache.
+    let conus_path = ds.conus_adjacency.as_ref()
+        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    let gages_adj_path = ds.gages_adjacency.as_ref()
+        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+
+    let conus = ConusAdjacencyStore::open(conus_path)?;
     let gage_meta = GageMetadata::open(&ds.gages)?;
     let all_staids: Vec<Staid> = gage_meta.rows.iter().map(|r| r.staid.clone()).collect();
 
-    let gages_adj = GagesAdjacencyStore::open(&ds.gages_adjacency, &all_staids)?;
+    let gages_adj = GagesAdjacencyStore::open(gages_adj_path, &all_staids)?;
     // Preserve CSV order; drop gauges without a subgraph.
     let valid_staids: Vec<Staid> = all_staids
         .iter()
@@ -85,7 +91,7 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
     if valid_staids.is_empty() {
         return Err(BaselineError::NoGauges {
             gages: ds.gages.clone(),
-            adj: ds.gages_adjacency.clone(),
+            adj: gages_adj_path.clone(),
         });
     }
 

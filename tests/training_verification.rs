@@ -52,16 +52,20 @@ fn all_paths_exist(cfg: &Config) -> bool {
     let Some(ds) = cfg.data_sources.as_ref() else {
         return false;
     };
-    [
-        &ds.attributes,
-        &ds.conus_adjacency,
-        &ds.gages_adjacency,
-        &ds.streamflow,
-        &ds.observations,
-        &ds.gages,
-    ]
-    .iter()
-    .all(|p| p.exists())
+    // Mandatory paths.
+    let mandatory = [&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages];
+    if !mandatory.iter().all(|p: &&std::path::PathBuf| p.exists()) {
+        return false;
+    }
+    // Adjacency zarr required to open MeritGagesDataset; absent = not available yet.
+    for opt in &[&ds.conus_adjacency, &ds.gages_adjacency] {
+        match opt {
+            None => return false, // managed build not yet available (Task 7)
+            Some(p) if !p.exists() => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

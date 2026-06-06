@@ -198,7 +198,10 @@ impl MeritGagesDataset {
         })?;
 
         // ---------- 1. Adjacency + gage CSV ----------
-        let conus = Arc::new(ConusAdjacencyStore::open(&ds.conus_adjacency)?);
+        // TODO(managed-adjacency Task 7): replace expects with resolved paths from adjacency cache.
+        let conus_path = ds.conus_adjacency.as_ref()
+            .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+        let conus = Arc::new(ConusAdjacencyStore::open(conus_path)?);
         let gage_meta = GageMetadata::open(&ds.gages)?;
 
         // Filter 1: DA_VALID drop.
@@ -216,7 +219,9 @@ impl MeritGagesDataset {
         );
 
         // Open the gages adjacency store with the DA_VALID set.
-        let gages_adj = Arc::new(GagesAdjacencyStore::open(&ds.gages_adjacency, &da_valid)?);
+        let gages_adj_path = ds.gages_adjacency.as_ref()
+            .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+        let gages_adj = Arc::new(GagesAdjacencyStore::open(gages_adj_path, &da_valid)?);
 
         // Filter 2 + 3: adjacency presence + headwater drop.
         let mut gauges: Vec<Staid> = Vec::new();
@@ -613,19 +618,27 @@ mod tests {
                 return;
             }
         };
-        // Skip if any data path is absent.
+        // Skip if any required data path is absent.
         if let Some(ds) = cfg.data_sources.as_ref() {
-            for p in &[
-                &ds.attributes,
-                &ds.conus_adjacency,
-                &ds.gages_adjacency,
-                &ds.streamflow,
-                &ds.observations,
-                &ds.gages,
-            ] {
+            for p in &[&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages] {
                 if !p.exists() {
                     eprintln!("skipping: {} not present", p.display());
                     return;
+                }
+            }
+            // Adjacency zarr required to open MeritGagesDataset; skip if not
+            // configured (fabric-only config awaits Task 7 managed build).
+            for opt in &[&ds.conus_adjacency, &ds.gages_adjacency] {
+                match opt {
+                    None => {
+                        eprintln!("skipping: adjacency zarr path not configured (managed build not yet available)");
+                        return;
+                    }
+                    Some(p) if !p.exists() => {
+                        eprintln!("skipping: {} not present", p.display());
+                        return;
+                    }
+                    _ => {}
                 }
             }
         } else {
@@ -650,17 +663,23 @@ mod tests {
             Err(_) => return,
         };
         if let Some(ds) = cfg.data_sources.as_ref() {
-            for p in &[
-                &ds.attributes,
-                &ds.conus_adjacency,
-                &ds.gages_adjacency,
-                &ds.streamflow,
-                &ds.observations,
-                &ds.gages,
-            ] {
+            for p in &[&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages] {
                 if !p.exists() {
                     eprintln!("skipping: {} not present", p.display());
                     return;
+                }
+            }
+            for opt in &[&ds.conus_adjacency, &ds.gages_adjacency] {
+                match opt {
+                    None => {
+                        eprintln!("skipping: adjacency zarr path not configured (managed build not yet available)");
+                        return;
+                    }
+                    Some(p) if !p.exists() => {
+                        eprintln!("skipping: {} not present", p.display());
+                        return;
+                    }
+                    _ => {}
                 }
             }
         } else {
@@ -705,17 +724,23 @@ mod tests {
             Err(_) => return,
         };
         let Some(ds_cfg) = cfg.data_sources.as_ref() else { return };
-        for p in &[
-            &ds_cfg.attributes,
-            &ds_cfg.conus_adjacency,
-            &ds_cfg.gages_adjacency,
-            &ds_cfg.streamflow,
-            &ds_cfg.observations,
-            &ds_cfg.gages,
-        ] {
+        for p in &[&ds_cfg.attributes, &ds_cfg.streamflow, &ds_cfg.observations, &ds_cfg.gages] {
             if !p.exists() {
                 eprintln!("skipping: {} not present", p.display());
                 return;
+            }
+        }
+        for opt in &[&ds_cfg.conus_adjacency, &ds_cfg.gages_adjacency] {
+            match opt {
+                None => {
+                    eprintln!("skipping: adjacency zarr path not configured (managed build not yet available)");
+                    return;
+                }
+                Some(p) if !p.exists() => {
+                    eprintln!("skipping: {} not present", p.display());
+                    return;
+                }
+                _ => {}
             }
         }
 

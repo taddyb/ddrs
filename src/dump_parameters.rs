@@ -38,8 +38,11 @@ where
         .expect("kan_head section required for trained-KAN inference");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    eprintln!("opening CONUS adjacency: {}", ds.conus_adjacency.display());
-    let conus = ConusAdjacencyStore::open(&ds.conus_adjacency)
+    // TODO(managed-adjacency Task 7): replace expect with resolved path from adjacency cache.
+    let conus_path = ds.conus_adjacency.as_ref()
+        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    eprintln!("opening CONUS adjacency: {}", conus_path.display());
+    let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
     let n_reaches = conus.order.len();
     eprintln!("CONUS reaches: {n_reaches}");
@@ -193,8 +196,11 @@ where
         .expect("kan_head section required for init dump");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    eprintln!("opening CONUS adjacency: {}", ds.conus_adjacency.display());
-    let conus = ConusAdjacencyStore::open(&ds.conus_adjacency)
+    // TODO(managed-adjacency Task 7): replace expect with resolved path from adjacency cache.
+    let conus_path = ds.conus_adjacency.as_ref()
+        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    eprintln!("opening CONUS adjacency: {}", conus_path.display());
+    let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
     let n_reaches = conus.order.len();
     eprintln!("CONUS reaches: {n_reaches}");

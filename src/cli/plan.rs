@@ -103,14 +103,22 @@ pub fn plan(
         path: config_path.into(),
         source: "data_sources: missing".into(),
     })?;
-    let pairs: Vec<(String, PathBuf)> = vec![
-        ("attributes".into(),      data_sources.attributes.clone()),
-        ("conus_adjacency".into(), data_sources.conus_adjacency.clone()),
-        ("gages_adjacency".into(), data_sources.gages_adjacency.clone()),
-        ("streamflow".into(),      data_sources.streamflow.clone()),
-        ("observations".into(),    data_sources.observations.clone()),
-        ("gages".into(),           data_sources.gages.clone()),
+    // Optional adjacency keys are only fingerprinted when explicitly configured.
+    let mut pairs: Vec<(String, PathBuf)> = vec![
+        ("attributes".into(),   data_sources.attributes.clone()),
+        ("streamflow".into(),   data_sources.streamflow.clone()),
+        ("observations".into(), data_sources.observations.clone()),
+        ("gages".into(),        data_sources.gages.clone()),
     ];
+    if let Some(p) = &data_sources.conus_adjacency {
+        pairs.push(("conus_adjacency".into(), p.clone()));
+    }
+    if let Some(p) = &data_sources.gages_adjacency {
+        pairs.push(("gages_adjacency".into(), p.clone()));
+    }
+    if let Some(p) = &data_sources.geospatial_fabric {
+        pairs.push(("geospatial_fabric".into(), p.clone()));
+    }
     let mut sources = BTreeMap::new();
     for (key, path) in pairs {
         let live = match lock.sources.get(&key) {

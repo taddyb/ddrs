@@ -123,14 +123,24 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
         source: Box::<dyn std::error::Error + Send + Sync>::from("data_sources: missing"),
     })?;
 
-    let pairs = [
+    // Build the fingerprint pairs. Optional keys (adjacency zarr stores,
+    // geospatial_fabric) are only locked when explicitly configured.
+    let mut pairs: Vec<(&str, PathBuf)> = vec![
         ("attributes", ds.attributes.clone()),
-        ("conus_adjacency", ds.conus_adjacency.clone()),
-        ("gages_adjacency", ds.gages_adjacency.clone()),
         ("streamflow", ds.streamflow.clone()),
         ("observations", ds.observations.clone()),
         ("gages", ds.gages.clone()),
     ];
+    if let Some(p) = &ds.conus_adjacency {
+        pairs.push(("conus_adjacency", p.clone()));
+    }
+    if let Some(p) = &ds.gages_adjacency {
+        pairs.push(("gages_adjacency", p.clone()));
+    }
+    if let Some(p) = &ds.geospatial_fabric {
+        pairs.push(("geospatial_fabric", p.clone()));
+    }
+
     // Parallel reachability + fingerprint. std::thread::scope is fine — these
     // are I/O-bound and the count is small.
     let results: Result<Vec<(String, Result<_, CliError>)>, CliError> = std::thread::scope(|s| {
