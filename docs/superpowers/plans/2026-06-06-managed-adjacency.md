@@ -96,22 +96,22 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 1: Config & lockfile
 
-- [ ] `src/config.rs`: add `data_sources.geospatial_fabric: Option<PathBuf>`; change
+- [x] `src/config.rs`: add `data_sources.geospatial_fabric: Option<PathBuf>`; change
       `conus_adjacency`/`gages_adjacency` to `Option<PathBuf>`.
-- [ ] Load-time validation rule: *(both adjacency keys present)* **or**
+- [x] Load-time validation rule: *(both adjacency keys present)* **or**
       *(geospatial_fabric present)*; otherwise a `ConfigInvalid` naming the missing keys.
       Partial adjacency (one of two) is an error.
-- [ ] `src/cli/init.rs`: fingerprint+lock `geospatial_fabric` when configured; lock
+- [x] `src/cli/init.rs`: fingerprint+lock `geospatial_fabric` when configured; lock
       adjacency keys only when explicitly configured. `init` smoke flow unchanged.
-- [ ] `src/cli/lockfile.rs`: `diff_against_live` tolerates sources present in only
+- [x] `src/cli/lockfile.rs`: `diff_against_live` tolerates sources present in only
       one side when the key is optional (report as drift, not error).
-- [ ] `config/merit_training.yaml` + `src/cli/plan_bootstrap.rs` template: remove the
+- [x] `config/merit_training.yaml` + `src/cli/plan_bootstrap.rs` template: remove the
       two adjacency paths, add
       `geospatial_fabric: /projects/mhpi/data/MERIT/raw/continent/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp`.
       Note: DDR's config key is `geospatial_fabric_gpkg`; we use `geospatial_fabric`
       since we accept `.shp` (and read only the sibling `.dbf`). Document the mapping
       in a comment.
-- [ ] Unit tests for the config validation matrix (both/neither/partial keys).
+- [x] Unit tests for the config validation matrix (both/neither/partial keys).
 
 ## Task 2: dbf reader
 
