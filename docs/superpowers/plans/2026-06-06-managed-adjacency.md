@@ -156,14 +156,14 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 5: zarr writer
 
-- [ ] `src/adjacency/zarr_write.rs`: write zarr-v3 groups byte-compatible with
+- [x] `src/adjacency/zarr_write.rs`: write zarr-v3 groups byte-compatible with
       `ddr_engine/core/zarr_io.py`'s layout — root group attrs
       (`format: "COO"`, `shape`, `geodataset: "merit"`, `data_types`), arrays
       `indices_0`/`indices_1` (int32), `values` (uint8 ones), `order` (int32),
       bytes + zstd codecs, comparable chunking — **plus** `length_m`/`slope`
       (float32) on the CONUS store.
-- [ ] Gauges store: one subgroup per STAID with the same array set + the two attrs.
-- [ ] Round-trip test: write a tiny store, reopen with `ConusAdjacencyStore::open`
+- [x] Gauges store: one subgroup per STAID with the same array set + the two attrs.
+- [x] Round-trip test: write a tiny store, reopen with `ConusAdjacencyStore::open`
       and `GagesAdjacencyStore::open` — the readers are the compatibility oracle.
 
 ## Task 6: adjacency cache
