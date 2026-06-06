@@ -125,7 +125,7 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 3: CONUS builder
 
-- [ ] `src/adjacency/build.rs`: port `ddr_engine/merit/build.py::create_adjacency_matrix`.
+- [x] `src/adjacency/build.rs`: port `ddr_engine/merit/build.py::create_adjacency_matrix`.
       Cite engine line numbers in comments (repo convention):
       - upstream dict from `up1–up4` (`build_upstream_dict`),
       - Kahn topological sort,
@@ -135,10 +135,10 @@ README.md                       # getting-started: adjacency now managed
       - lower-triangular COO (`row = downstream idx`, `col = upstream idx`),
         single-successor assert ("not dendritic" otherwise),
       - final assert `rows[k] >= cols[k]` (routing invariant 3).
-- [ ] `length_m` / `slope` (the actual bug fix): `lengthkm × 1000.0`; NaN/inf →
+- [x] `length_m` / `slope` (the actual bug fix): `lengthkm × 1000.0`; NaN/inf →
       column mean over finite values, mirroring `merit.py:78` (`naninfmean`) and
       `merit.py:409-417` (`fill_nans`). f32 output, aligned to `order`.
-- [ ] Unit tests on synthetic networks: chain, confluence, cycle removal,
+- [x] Unit tests on synthetic networks: chain, confluence, cycle removal,
       isolated reaches, NaN fills, triangularity.
 
 ## Task 4: gauge subgraph builder
