@@ -13,7 +13,10 @@
 //!   - [`write_gauges_store`] writes an empty root group with one subgroup per
 //!     STAID, each carrying the same array set as the engine's
 //!     `coo_to_zarr_group_generic` (`indices_0`/`indices_1`/`values`/`order`)
-//!     plus the `gage_catchment`/`gage_idx` attrs the reader requires.
+//!     plus the `gage_catchment`/`gage_idx` attrs the reader requires. Every
+//!     subgroup's `shape` attr is `[conus_n, conus_n]` — the full CONUS
+//!     dimension — matching `zarr_io.py:326,383` and the real on-disk store
+//!     (`merit_gages_conus_adjacency.zarr/<staid>/zarr.json → shape:[346321,346321]`).
 //!
 //! ## Layout decisions vs the engine (`zarr_io.py`)
 //!
@@ -36,6 +39,18 @@
 //!   structural divergence from the engine and it is invisible to the reader.
 //!   The per-STAID gauge subgroups in the real store *already* use a single
 //!   full-size chunk, so for those we match exactly.
+//!
+//! ## Byte-level notes (harmless divergences from the real store)
+//!
+//! - **`_zarrs` provenance attr**: `zarrs` stamps a `_zarrs` key on each
+//!   array's metadata. The real store (written by zarr-python) has empty array
+//!   attrs. This is ignored by all readers and does not affect data fidelity.
+//!
+//! - **`bytes` codec serialization**: `zarrs` writes `{"endian":"little"}` for
+//!   the bytes codec config; zarr-python wrote bare `{"name":"bytes"}`. Both
+//!   encode little-endian byte order and are semantically equivalent — readers
+//!   honour them identically. Byte-compatibility is satisfied at read-semantics
+//!   level, not at literal JSON byte level.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -81,8 +96,12 @@ pub fn write_conus_store(adj: &ConusAdjacency, dest: &Path) -> Result<()> {
 /// Write the per-gauge adjacency store at `dest` (a directory path): an empty
 /// root group with one subgroup per STAID.
 ///
+/// `conus_n` is the total number of CONUS reaches (e.g. 346 321 for MERIT).
+/// Every subgroup's `shape` attr is written as `[conus_n, conus_n]`, matching
+/// `zarr_io.py:326,383` and the real on-disk store.
+///
 /// Round-trips through [`crate::data::store::zarr::GagesAdjacencyStore::open`].
-pub fn write_gauges_store(subgraphs: &[GaugeSubgraph], dest: &Path) -> Result<()> {
+pub fn write_gauges_store(subgraphs: &[GaugeSubgraph], conus_n: usize, dest: &Path) -> Result<()> {
     let storage = Arc::new(FilesystemStore::new(dest).map_err(|e| zarr_err(dest, e))?);
 
     // Empty root group (matches the real merit_gages store's root zarr.json).
@@ -93,15 +112,8 @@ pub fn write_gauges_store(subgraphs: &[GaugeSubgraph], dest: &Path) -> Result<()
 
     for sg in subgraphs {
         let group_path = format!("/{}", sg.staid.as_str());
-        // CONUS dimension is implied by the gauge's position space; the engine
-        // stores the full CONUS [n, n] shape in `shape`. We don't know n here
-        // (subgraphs carry only their own nodes), so derive the COO shape from
-        // the engine's contract: shape is [n, n] but the reader never reads it.
-        // We store the subset's own extent (max position + 1) which keeps the
-        // attr self-consistent without the CONUS count; the reader ignores it.
-        let dim = subgraph_dim(sg);
 
-        let mut attrs = coo_root_attrs(dim);
+        let mut attrs = coo_root_attrs(conus_n);
         attrs.insert(
             "gage_catchment".into(),
             serde_json::Value::Number(sg.gage_catchment.into()),
@@ -150,20 +162,6 @@ fn coo_root_attrs(dim: usize) -> serde_json::Map<String, serde_json::Value> {
     data_types.insert("values".into(), serde_json::Value::String("uint8".into()));
     m.insert("data_types".into(), serde_json::Value::Object(data_types));
     m
-}
-
-/// The CONUS extent for a gauge subgraph's `shape` attr. The reader ignores it;
-/// we report `max position + 1` over the COO so the value is self-consistent.
-fn subgraph_dim(sg: &GaugeSubgraph) -> usize {
-    let max_pos = sg
-        .rows
-        .iter()
-        .chain(sg.cols.iter())
-        .chain(std::iter::once(&(sg.gage_idx as i32)))
-        .copied()
-        .max()
-        .unwrap_or(0);
-    (max_pos as usize) + 1
 }
 
 /// `bytes` (little-endian) + `zstd(0, false)` — the engine's codec chain.
@@ -353,7 +351,10 @@ mod tests {
         let subs = vec![g50.clone(), g30.clone()];
 
         let dir = tmp_dir("gauges");
-        write_gauges_store(&subs, &dir).expect("write gauges");
+        // Synthetic CONUS has 6 reaches; pass that as conus_n so every
+        // subgroup's shape attr equals [6, 6].
+        let conus_n = 6_usize;
+        write_gauges_store(&subs, conus_n, &dir).expect("write gauges");
 
         let staids = vec![Staid::from("00000050"), Staid::from("00000030")];
         let store = GagesAdjacencyStore::open(&dir, &staids).expect("open gauges");
@@ -381,6 +382,16 @@ mod tests {
         assert_eq!(sv["attributes"]["gage_idx"], 4);
         assert_eq!(sv["attributes"]["gage_catchment"], 50);
         assert_eq!(sv["node_type"], "group");
+        // shape must be full CONUS [n, n], not the subgraph extent.
+        assert_eq!(sv["attributes"]["shape"][0], conus_n as i64);
+        assert_eq!(sv["attributes"]["shape"][1], conus_n as i64);
+
+        // Same check for the smaller subgroup.
+        let sub30_json = std::fs::read_to_string(dir.join("00000030").join("zarr.json"))
+            .expect("read 00000030 zarr.json");
+        let sv30: serde_json::Value = serde_json::from_str(&sub30_json).expect("parse");
+        assert_eq!(sv30["attributes"]["shape"][0], conus_n as i64);
+        assert_eq!(sv30["attributes"]["shape"][1], conus_n as i64);
     }
 
     #[test]
@@ -395,7 +406,7 @@ mod tests {
             cols: vec![],
         };
         let dir = tmp_dir("headwater");
-        write_gauges_store(&[hw], &dir).expect("write");
+        write_gauges_store(&[hw], 6, &dir).expect("write");
 
         let store =
             GagesAdjacencyStore::open(&dir, &[Staid::from("00000010")]).expect("open");
