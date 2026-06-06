@@ -227,8 +227,11 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
         }
         eprintln!("warning: data source drift since last plan: {drift:?} — relocking");
     }
-    // Rewrite only when something actually changed (mtime/size/fp), so an
-    // unchanged re-plan leaves the lock byte-identical.
+    // Rewrite only when something actually changed, so an unchanged re-plan
+    // leaves the lock byte-identical. Note: intentionally stat-sensitive
+    // (full Fingerprint equality incl. mtime/size) while `drift` above is
+    // content-only (fp) — a touched-but-identical file relocks silently so
+    // the next plan hits the stat fast-path.
     let needs_write = prior_lock
         .as_ref()
         .map(|l| l.sources != sources)

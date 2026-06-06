@@ -129,6 +129,9 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
             cache_key: pr.resolved_adjacency.cache_key.clone(),
             cache_hit: pr.resolved_adjacency.cache_hit,
         }),
+        // `matched`/`drift` record the state AT PLAN ENTRY. On a non-strict
+        // run with drift, plan() has already refreshed sources.lock, so the
+        // file on disk may match `sources` even when `matched: false`.
         source_lock: SourceLockRef {
             lockfile: input.workspace.lockfile(),
             matched: pr.drift.is_empty(),
