@@ -198,12 +198,13 @@ impl MeritGagesDataset {
         })?;
 
         // ---------- 1. Adjacency + gage CSV ----------
-        // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+        // Defensive: `ddrs plan` resolves adjacency (explicit or managed build)
+        // and materializes the paths into the config before the dataset opens.
         let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| DataError::Malformed {
             path: std::path::PathBuf::from("<config>"),
-            message: "conus_adjacency not configured — adjacency paths not configured; \
-                      set conus_adjacency/gages_adjacency explicitly or wait for managed \
-                      adjacency build (Task 7)".into(),
+            message: "conus_adjacency not resolved — open the dataset via `ddrs run` \
+                      (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                      explicitly".into(),
         })?;
         let conus = Arc::new(ConusAdjacencyStore::open(conus_path)?);
         let gage_meta = GageMetadata::open(&ds.gages)?;
@@ -225,9 +226,9 @@ impl MeritGagesDataset {
         // Open the gages adjacency store with the DA_VALID set.
         let gages_adj_path = ds.gages_adjacency.as_ref().ok_or_else(|| DataError::Malformed {
             path: std::path::PathBuf::from("<config>"),
-            message: "gages_adjacency not configured — adjacency paths not configured; \
-                      set conus_adjacency/gages_adjacency explicitly or wait for managed \
-                      adjacency build (Task 7)".into(),
+            message: "gages_adjacency not resolved — open the dataset via `ddrs run` \
+                      (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                      explicitly".into(),
         })?;
         let gages_adj = Arc::new(GagesAdjacencyStore::open(gages_adj_path, &da_valid)?);
 

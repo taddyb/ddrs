@@ -12,6 +12,12 @@ pub struct GcInput {
     pub dry_run: bool,
 }
 
+/// Prune `.ddrs/runs/` per the filters in `input`.
+///
+/// v1 deliberately leaves `.ddrs/adjacency/` caches alone: they are
+/// content-addressed and shared across runs, and a managed build is the
+/// expensive (~1–2 min) artifact gc exists to protect. Key-based GC of stale
+/// adjacency entries (no run references a given key) is a follow-up.
 pub fn run_gc(ws: &Workspace, input: GcInput) -> Result<Vec<PathBuf>, CliError> {
     let runs_dir = ws.runs_dir();
     if !runs_dir.is_dir() { return Ok(vec![]); }

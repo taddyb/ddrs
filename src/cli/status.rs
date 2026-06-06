@@ -8,6 +8,9 @@ pub fn run_status(ws: &Workspace, as_json: bool) -> Result<(), CliError> {
     let runs = ws.runs_dir();
     let total = walk_size(&runs).unwrap_or(0);
     let total_gb = total as f64 / 1e9;
+    let adjacency = ws.root().join("adjacency");
+    let adj_bytes = walk_size(&adjacency).unwrap_or(0);
+    let adj_gb = adj_bytes as f64 / 1e9;
     let last_run = latest_run_id(&runs)?;
     let lock_present = ws.lockfile().is_file();
     if as_json {
@@ -17,14 +20,17 @@ pub fn run_status(ws: &Workspace, as_json: bool) -> Result<(), CliError> {
             "last_run": last_run,
             "runs_dir_bytes": total,
             "runs_dir_gb": total_gb,
+            "adjacency_dir_bytes": adj_bytes,
+            "adjacency_dir_gb": adj_gb,
         });
         println!("{}", serde_json::to_string_pretty(&v)
             .map_err(|e| CliError::Other(Box::new(e)))?);
     } else {
-        println!("workspace     {}", ws.root().display());
-        println!("lockfile      {}", if lock_present { "present" } else { "missing" });
-        println!("last run      {}", last_run.unwrap_or_else(|| "(none)".into()));
-        println!(".ddrs/runs/   {:.2} GB", total_gb);
+        println!("workspace      {}", ws.root().display());
+        println!("lockfile       {}", if lock_present { "present" } else { "missing" });
+        println!("last run       {}", last_run.unwrap_or_else(|| "(none)".into()));
+        println!(".ddrs/runs/    {:.2} GB", total_gb);
+        println!(".ddrs/adjacency/ {:.2} GB", adj_gb);
         if total_gb > 10.0 {
             println!("hint: total runs/ exceeds 10 GB — consider `ddrs gc`");
         }

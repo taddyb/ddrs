@@ -44,10 +44,28 @@ experiment:
 
     // Patch yaml to point at real (empty) files instead of /dev/null
     // so init can fingerprint them.
-    for name in ["attributes", "conus_adjacency", "gages_adjacency",
-                 "streamflow", "observations", "gages"] {
+    for name in ["attributes", "streamflow", "observations", "gages"] {
         let p = proj.join(format!("{name}.bin"));
         fs::write(&p, b"x").unwrap();
+        let s = fs::read_to_string(&cfg_path).unwrap();
+        let s = s.replace(&format!("{name}: /dev/null"),
+                          &format!("{name}: {}", p.display()));
+        fs::write(&cfg_path, s).unwrap();
+    }
+
+    // Adjacency keys must point at real zarr store skeletons so plan's
+    // up-front layout validation passes (Task 7 — explicit-path branch).
+    let conus = proj.join("conus.zarr");
+    fs::create_dir_all(&conus).unwrap();
+    fs::write(conus.join("zarr.json"), "{}").unwrap();
+    for array in ["order", "length_m", "slope", "indices_0", "indices_1"] {
+        fs::create_dir_all(conus.join(array)).unwrap();
+        fs::write(conus.join(array).join("zarr.json"), "{}").unwrap();
+    }
+    let gages = proj.join("gages_adj.zarr");
+    fs::create_dir_all(&gages).unwrap();
+    fs::write(gages.join("zarr.json"), "{}").unwrap();
+    for (name, p) in [("conus_adjacency", &conus), ("gages_adjacency", &gages)] {
         let s = fs::read_to_string(&cfg_path).unwrap();
         let s = s.replace(&format!("{name}: /dev/null"),
                           &format!("{name}: {}", p.display()));

@@ -39,20 +39,22 @@ pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
 
-    // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+    // `ddrs plan` resolves adjacency (explicit or managed build) and materializes
+    // the resolved paths into the config before this runs, so these are defensive
+    // — they only fire if a caller bypasses plan with a fabric-only config.
     let conus_adj = ds
         .conus_adjacency
         .as_ref()
         .ok_or(BaselineError::ConfigMissing(
-            "conus_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
-             explicitly or wait for managed adjacency build (Task 7)",
+            "conus_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
         ))?;
     let gages_adj = ds
         .gages_adjacency
         .as_ref()
         .ok_or(BaselineError::ConfigMissing(
-            "gages_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
-             explicitly or wait for managed adjacency build (Task 7)",
+            "gages_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
         ))?;
     let mut h = blake3::Hasher::new();
     for p in [
@@ -210,20 +212,20 @@ pub fn save_cached(
         .experiment
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
-    // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+    // Defensive: `ddrs plan` materializes resolved paths before save_cached runs.
     let conus_adj = ds
         .conus_adjacency
         .clone()
         .ok_or(BaselineError::ConfigMissing(
-            "conus_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
-             explicitly or wait for managed adjacency build (Task 7)",
+            "conus_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
         ))?;
     let gages_adj = ds
         .gages_adjacency
         .clone()
         .ok_or(BaselineError::ConfigMissing(
-            "gages_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
-             explicitly or wait for managed adjacency build (Task 7)",
+            "gages_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
         ))?;
     let manifest = CacheManifest {
         key: key.to_string(),

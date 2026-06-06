@@ -31,4 +31,5 @@ pub mod build;
 pub mod cache;
 pub mod dbf;
 pub mod gauges;
+pub mod validate;
 pub mod zarr_write;

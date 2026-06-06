@@ -38,12 +38,13 @@ where
         .expect("kan_head section required for trained-KAN inference");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    // TODO(managed-adjacency Task 7): replace with resolved path from adjacency cache.
+    // Defensive: callers route through `ddrs run`/`plan`, which materialize the
+    // resolved adjacency paths into the config before dump runs.
     let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
         path: "<config>".into(),
-        source: "conus_adjacency not configured — adjacency paths not configured; \
-                 set conus_adjacency/gages_adjacency explicitly or wait for managed \
-                 adjacency build (Task 7)".into(),
+        source: "conus_adjacency not resolved — invoke via `ddrs run --plot` \
+                 (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                 explicitly".into(),
     })?;
     eprintln!("opening CONUS adjacency: {}", conus_path.display());
     let conus = ConusAdjacencyStore::open(conus_path)
@@ -200,12 +201,13 @@ where
         .expect("kan_head section required for init dump");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    // TODO(managed-adjacency Task 7): replace with resolved path from adjacency cache.
+    // Defensive: callers route through `ddrs run`/`plan`, which materialize the
+    // resolved adjacency paths into the config before dump_init runs.
     let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
         path: "<config>".into(),
-        source: "conus_adjacency not configured — adjacency paths not configured; \
-                 set conus_adjacency/gages_adjacency explicitly or wait for managed \
-                 adjacency build (Task 7)".into(),
+        source: "conus_adjacency not resolved — invoke via `ddrs run --plot` \
+                 (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                 explicitly".into(),
     })?;
     eprintln!("opening CONUS adjacency: {}", conus_path.display());
     let conus = ConusAdjacencyStore::open(conus_path)

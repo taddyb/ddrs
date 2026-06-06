@@ -22,8 +22,25 @@ pub struct PlanResult {
     pub sources: BTreeMap<String, Fingerprint>,
     pub drift: Vec<String>,
     pub summary: PlanSummary,
+    pub resolved_adjacency: ResolvedAdjacency,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub baseline: Option<BaselineInfo>,
+}
+
+/// The CONUS + gages adjacency stores `run` will actually open, after
+/// resolution. For explicit-path configs these mirror the configured paths and
+/// the cache fields are `None`. For fabric-only (managed-build) configs these
+/// point at `<workspace_root>/adjacency/<key>/` and the cache fields are set.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedAdjacency {
+    pub conus: PathBuf,
+    pub gages: PathBuf,
+    /// Content-addressed cache key — `Some` only for managed builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
+    /// Whether the managed-build cache was a hit — `Some` only for managed builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
 }
 
 /// Summed Q' baseline result attached to `PlanResult`. The full `Metrics`
@@ -81,7 +98,7 @@ pub fn plan(
         Workflow::Train | Workflow::TrainAndTest => ConfigMode::Training,
         Workflow::Eval => ConfigMode::Testing,
     };
-    let config = if mode == ConfigMode::Training {
+    let mut config = if mode == ConfigMode::Training {
         preview
     } else {
         Config::from_yaml_file_with_mode(config_path, mode)
@@ -137,13 +154,19 @@ pub fn plan(
     }
     let drift = diff_against_live(&lock, &sources);
 
-    // Step 6: zarr/icechunk metadata-only validation. v1 stub — the
-    // existing ConusAdjacencyStore::open is the only "open" that's both
-    // cheap and present today. The time-window check against the
-    // streamflow store is deferred to a follow-up; not a blocker for
-    // shipping plan validation today (the integration test in Task 21
-    // exercises the lockfile + fingerprint paths, which are the bulk of
-    // plan's value).
+    // Step 6: resolve adjacency. Explicit paths → validate every required
+    // array exists up front (naming the missing array + store on failure).
+    // Fabric-only → cache lookup by content key; hit reuses, miss builds
+    // (with a progress line). Same side-effectful-plan precedent as the Q'
+    // baseline. The resolved paths are materialized back into the in-memory
+    // `config` so every downstream consumer (dataset, baseline, dump) reads
+    // them — but `run` snapshots the ORIGINAL config file (`fs::copy` of
+    // `config_path`), so the mutation never leaks into the bootstrap source.
+    let resolved_adjacency = resolve_adjacency(&config, config_path, workspace)?;
+    if let Some(ds) = config.data_sources.as_mut() {
+        ds.conus_adjacency = Some(resolved_adjacency.conus.clone());
+        ds.gages_adjacency = Some(resolved_adjacency.gages.clone());
+    }
 
     // Step 7: compute summary.
     let summary = compute_summary(&config, workflow)?;
@@ -153,7 +176,7 @@ pub fn plan(
     // workflow=Train, so the user sees the same reference number across
     // workflows. Failures here are non-fatal — they shouldn't block the
     // plan validation, which is the user's primary signal.
-    let baseline = compute_baseline(config_path, workspace);
+    let baseline = compute_baseline(config_path, workspace, &resolved_adjacency);
 
     Ok(PlanResult {
         config,
@@ -162,18 +185,91 @@ pub fn plan(
         sources,
         drift,
         summary,
+        resolved_adjacency,
         baseline,
     })
 }
 
-fn compute_baseline(config_path: &Path, workspace: &Workspace) -> Option<BaselineInfo> {
-    let test_cfg = match Config::from_yaml_file_with_mode(config_path, ConfigMode::Testing) {
+/// Resolve the CONUS + gages adjacency stores `run` will open.
+///
+/// - Both adjacency keys present → validate each required array exists up front
+///   (cheap fs checks; the actual open happens downstream as today).
+/// - Keys absent (fabric-only) → content-addressed cache lookup; hit reuses,
+///   miss builds. `adjacency::cache::resolve_or_build` prints its own progress.
+fn resolve_adjacency(
+    config: &Config,
+    config_path: &Path,
+    workspace: &Workspace,
+) -> Result<ResolvedAdjacency, CliError> {
+    let ds = config.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: config_path.into(),
+        source: "data_sources: missing".into(),
+    })?;
+
+    match (&ds.conus_adjacency, &ds.gages_adjacency) {
+        (Some(conus), Some(gages)) => {
+            // Explicit paths: validate layout, naming the missing array + store.
+            crate::adjacency::validate::validate_conus_store_layout(conus)
+                .map_err(|e| CliError::ConfigInvalid {
+                    path: config_path.into(),
+                    source: Box::new(e),
+                })?;
+            crate::adjacency::validate::validate_gages_store_layout(gages)
+                .map_err(|e| CliError::ConfigInvalid {
+                    path: config_path.into(),
+                    source: Box::new(e),
+                })?;
+            Ok(ResolvedAdjacency {
+                conus: conus.clone(),
+                gages: gages.clone(),
+                cache_key: None,
+                cache_hit: None,
+            })
+        }
+        // Fabric-only (managed build). `validate_data_sources` (config.rs) has
+        // already rejected the partial-adjacency and neither-source cases at
+        // load time, so a missing fabric here is an internal invariant break.
+        _ => {
+            let fabric = ds.geospatial_fabric.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+                path: config_path.into(),
+                source: "data_sources: no adjacency paths and no geospatial_fabric".into(),
+            })?;
+            let outcome =
+                crate::adjacency::cache::resolve_or_build(workspace.root(), fabric, &ds.gages)
+                    .map_err(|e| CliError::ConfigInvalid {
+                        path: config_path.into(),
+                        source: Box::new(e),
+                    })?;
+            Ok(ResolvedAdjacency {
+                conus: outcome.paths.conus,
+                gages: outcome.paths.gages,
+                cache_key: Some(outcome.key),
+                cache_hit: Some(outcome.cache_hit),
+            })
+        }
+    }
+}
+
+fn compute_baseline(
+    config_path: &Path,
+    workspace: &Workspace,
+    resolved: &ResolvedAdjacency,
+) -> Option<BaselineInfo> {
+    let mut test_cfg = match Config::from_yaml_file_with_mode(config_path, ConfigMode::Testing) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("warning: summed Q' baseline skipped (testing config: {e})");
             return None;
         }
     };
+    // The testing config is re-parsed from disk, so it carries the original
+    // (possibly absent) adjacency keys. Materialize the resolved paths so the
+    // baseline cache key hashes the SAME paths the dataset will open — a
+    // managed rebuild under a new key correctly invalidates the baseline.
+    if let Some(ds) = test_cfg.data_sources.as_mut() {
+        ds.conus_adjacency = Some(resolved.conus.clone());
+        ds.gages_adjacency = Some(resolved.gages.clone());
+    }
     match crate::baseline::compute_or_load_cached(&test_cfg, workspace.root()) {
         Ok((q, key, cache_hit)) => Some(BaselineInfo {
             cache_dir: crate::baseline::cache_dir(workspace.root(), &key),
