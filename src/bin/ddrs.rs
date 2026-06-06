@@ -23,7 +23,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Deprecated: merged into `ddrs plan`. Stub removed in 0.4.
-    #[command(hide = true)]
+    // disable_help_flag so `ddrs init --help` is treated as an unknown arg and
+    // exits non-zero instead of silently succeeding with exit 0.
+    #[command(hide = true, disable_help_flag = true)]
     Init {
         #[arg(long, hide = true)] force: bool,
         #[arg(long, default_value_t = 8.0, hide = true)] min_free_gpu_gb: f32,

@@ -24,5 +24,27 @@ fn init_does_not_appear_in_help() {
         .output()
         .expect("ddrs binary should run");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.contains("init"), "init must be hidden from --help");
+    // Check the Commands: section for a literal `init` entry rather than a
+    // bare substring (which words like "initializes" would trip).
+    let commands_section = stdout.split("Commands:").nth(1).unwrap_or("");
+    assert!(
+        !commands_section.lines().any(|l| {
+            let t = l.trim();
+            t == "init" || t.starts_with("init ")
+        }),
+        "init must be hidden from --help, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn init_help_flag_fails_loudly() {
+    let out = Command::new(env!("CARGO_BIN_EXE_ddrs"))
+        .args(["init", "--help"])
+        .output()
+        .expect("ddrs binary should run");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "`ddrs init --help` must not silently succeed"
+    );
 }
