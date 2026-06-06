@@ -200,20 +200,20 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 8: parity tests & docs
 
-- [ ] `tests/adjacency_parity.rs` (`#[ignore]` by default, like
+- [x] `tests/adjacency_parity.rs` (`#[ignore]` by default, like
       `conus_adjacency_loads_real_merit_zarr`): build from the real pfaf_7 `.dbf`,
       compare `order`, `indices_0`, `indices_1` element-for-element against the
       engine-built store at the locked path; assert exactly the engine's
       cycle-removal delta; spot-check `length_m`/`slope` against
       hand-computed fills for a few COMIDs. Sample ~10 STAIDs against the
       engine-built gauges store.
-- [ ] `tests/data_zarr_store.rs`: keep, but point at a resolved/managed store once
+- [x] `tests/data_zarr_store.rs`: keep, but point at a resolved/managed store once
       available (or leave targeting the explicit-override path; decide in-task).
-- [ ] CLAUDE.md: data-sources table (adjacency rows → "managed, see
+- [x] CLAUDE.md: data-sources table (adjacency rows → "managed, see
       `.ddrs/adjacency/`"; add geospatial_fabric row), workspace-layout table
       (+ `.ddrs/adjacency/<key>/`), note that `ddrs plan` may also build adjacency
       on first run.
-- [ ] README getting-started: reflect the smaller required `data_sources` set.
+- [x] README getting-started: reflect the smaller required `data_sources` set.
 
 ---
 
