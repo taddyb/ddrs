@@ -168,15 +168,15 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 6: adjacency cache
 
-- [ ] `src/adjacency/cache.rs`, mirroring `src/baseline/cache.rs`:
+- [x] `src/adjacency/cache.rs`, mirroring `src/baseline/cache.rs`:
       layout `.ddrs/adjacency/<key>/{merit_conus_adjacency.zarr, merit_gages_conus_adjacency.zarr, manifest.json}`.
-- [ ] `key = blake3(dbf content-fp ∥ gages-csv content-fp ∥ BUILDER_VERSION)[..16]`.
+- [x] `key = blake3(dbf content-fp ∥ gages-csv content-fp ∥ BUILDER_VERSION)[..16]`.
       **Content** fingerprints (blake3 of file bytes), not paths/stat — see the
       lockfile blind spot above. `BUILDER_VERSION` const in `adjacency/mod.rs`;
       bump on any algorithm change to invalidate caches.
-- [ ] `manifest.json`: input paths + fingerprints, n / nnz / n_gauges /
+- [x] `manifest.json`: input paths + fingerprints, n / nnz / n_gauges /
       cycle-dropped COMIDs, build duration, ddrs git SHA.
-- [ ] Build into a temp dir, rename into place (crash-safe, same as baseline cache).
+- [x] Build into a temp dir, rename into place (crash-safe, same as baseline cache).
 
 ## Task 7: plan resolution + run integration
 
