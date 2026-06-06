@@ -909,6 +909,48 @@ pub(crate) fn cuda_device_index<B: Backend + 'static>(device: &B::Device) -> usi
     cuda_device.index
 }
 
+/// Make `device`'s primary CUDA context current on the calling thread.
+///
+/// cuSPARSE dispatches into whatever context is current on the calling
+/// thread. cubecl only sets the calling thread's context when it first
+/// materialises a client for a device (cubecl-cuda `runtime.rs`
+/// `create_client`); afterwards, command execution re-binds contexts inside
+/// cubecl's server, not here. So once a SECOND device's client has been
+/// created, this thread can be left pointing at the wrong device — handing
+/// cuSPARSE device-B buffers/streams under device-A's context. cuSPARSE then
+/// derives kernel launch configs from mismatched device state and crashes
+/// with an integer divide-by-zero (SIGFPE) inside `cusparseSpSV_solve`.
+/// Reproduced on an 8-GPU host by `tests/device_selection.rs` stage 2
+/// (smoke on cuda:0, then cuda:1).
+///
+/// Called from `ensure_cuda_cache`, which every raw-cuSPARSE entry point
+/// goes through, so both cache build (analysis) and per-solve calls run
+/// under the matching context. The retain/release pair cannot drop the
+/// primary-context refcount to zero: `compute_client` is called first, and
+/// cubecl's runtime holds its own retain for the device's lifetime.
+pub(crate) fn bind_primary_context<B: Backend + 'static>(device: &B::Device) {
+    // Materialise (or look up) the cubecl client first — guarantees the
+    // primary context is alive and retained by the runtime before we
+    // release our temporary retain below.
+    let _ = compute_client::<B>(device);
+    let ordinal = cuda_device_index::<B>(device) as i32;
+    let cu_device = cudarc::driver::result::device::get(ordinal)
+        .unwrap_or_else(|e| panic!("bind_primary_context: cuDeviceGet({ordinal}) failed: {e:?}"));
+    // SAFETY: `cu_device` is a valid device; the primary context outlives the
+    // release because cubecl's runtime keeps its own retain (see doc above).
+    unsafe {
+        let ctx = cudarc::driver::result::primary_ctx::retain(cu_device).unwrap_or_else(|e| {
+            panic!("bind_primary_context: primary_ctx::retain({ordinal}) failed: {e:?}")
+        });
+        cudarc::driver::result::ctx::set_current(ctx).unwrap_or_else(|e| {
+            panic!("bind_primary_context: ctx::set_current({ordinal}) failed: {e:?}")
+        });
+        cudarc::driver::result::primary_ctx::release(cu_device).unwrap_or_else(|e| {
+            panic!("bind_primary_context: primary_ctx::release({ordinal}) failed: {e:?}")
+        });
+    }
+}
+
 /// Returns cubecl-cuda's active CUDA stream for the current logical stream.
 ///
 /// Uses `ComputeClient::exclusive_with_server` (added in the SP-7 cubecl-runtime
@@ -1292,6 +1334,11 @@ pub(crate) unsafe fn ensure_cuda_cache<'a, B: Backend + 'static>(
     pattern: &'a crate::sparse::CsrPattern,
     device: &B::Device,
 ) -> &'a CudaPatternCache {
+    // Re-bind on EVERY call, not just cache build: the thread-current context
+    // only tracks cubecl client *creation*, so it can point at a different
+    // device than `device` whenever more than one GPU has been touched in
+    // this process. See `bind_primary_context` for the failure mode.
+    bind_primary_context::<B>(device);
     let device_index = cuda_device_index::<B>(device);
     pattern
         .cuda_cache

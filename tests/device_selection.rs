@@ -51,6 +51,7 @@ fn sandbox_smoke_passes_on_nonzero_cuda_device() {
     // Stage 1: BURN kernels only (CPU sparse solve) on device 1.
     inputs.config.params.sparse_solver = SparseSolver::Cpu;
     inputs.config.params.use_cuda_graphs = false;
+    eprintln!("[stage 1] cpu solver on cuda:1");
     let r = run_smoke(&inputs, 1);
     assert!(r.passed, "cpu-solver smoke failed on cuda:1: {r:?}");
 
@@ -58,7 +59,9 @@ fn sandbox_smoke_passes_on_nonzero_cuda_device() {
     // non-zero ordinal.
     inputs.config.params.sparse_solver = SparseSolver::Cuda;
     inputs.config.params.use_cuda_graphs = false;
+    eprintln!("[stage 2] cusparse on cuda:0");
     let r0 = run_smoke(&inputs, 0);
+    eprintln!("[stage 2] cusparse on cuda:1");
     let r1 = run_smoke(&inputs, 1);
     assert!(r0.passed, "cusparse smoke failed on cuda:0: {r0:?}");
     assert!(r1.passed, "cusparse smoke failed on cuda:1: {r1:?}");
@@ -76,6 +79,7 @@ fn sandbox_smoke_passes_on_nonzero_cuda_device() {
     // falls back, smoke still runs the direct path; `passed` must hold
     // either way.
     inputs.config.params.use_cuda_graphs = true;
+    eprintln!("[stage 3] cusparse + cuda graphs on cuda:1");
     let rg = run_smoke(&inputs, 1);
     assert!(rg.passed, "cuda-graph smoke failed on cuda:1: {rg:?}");
     assert!(
