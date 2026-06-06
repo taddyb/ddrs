@@ -25,6 +25,12 @@ np_seed: 42
 # `geospatial_fabric` and accept a .shp path; only the sibling .dbf is read.
 data_sources:
   attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  # geospatial_fabric triggers the managed adjacency build (Task 7 of the
+  # managed-adjacency plan). Until that builder lands, `ddrs plan` will skip
+  # the summed Q' baseline with a warning when conus_adjacency/gages_adjacency
+  # are absent. To use pre-built zarr stores today, replace this key with:
+  #   conus_adjacency: /path/to/merit_conus_adjacency.zarr
+  #   gages_adjacency: /path/to/merit_gages_conus_adjacency.zarr
   geospatial_fabric: /projects/mhpi/data/MERIT/raw/continent/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp
   streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
   observations: /mnt/ssd1/data/icechunk/usgs_daily_observations

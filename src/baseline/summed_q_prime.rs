@@ -71,11 +71,21 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
 
     let (start, end, n_days) = parse_window(&exp.start_time, &exp.end_time)?;
 
-    // TODO(managed-adjacency Task 7): replace expects with resolved paths from adjacency cache.
-    let conus_path = ds.conus_adjacency.as_ref()
-        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
-    let gages_adj_path = ds.gages_adjacency.as_ref()
-        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+    let conus_path = ds
+        .conus_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "conus_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
+             explicitly or wait for managed adjacency build (Task 7)",
+        ))?;
+    let gages_adj_path = ds
+        .gages_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "gages_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
+             explicitly or wait for managed adjacency build (Task 7)",
+        ))?;
 
     let conus = ConusAdjacencyStore::open(conus_path)?;
     let gage_meta = GageMetadata::open(&ds.gages)?;

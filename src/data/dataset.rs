@@ -198,9 +198,13 @@ impl MeritGagesDataset {
         })?;
 
         // ---------- 1. Adjacency + gage CSV ----------
-        // TODO(managed-adjacency Task 7): replace expects with resolved paths from adjacency cache.
-        let conus_path = ds.conus_adjacency.as_ref()
-            .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+        // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+        let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| DataError::Malformed {
+            path: std::path::PathBuf::from("<config>"),
+            message: "conus_adjacency not configured — adjacency paths not configured; \
+                      set conus_adjacency/gages_adjacency explicitly or wait for managed \
+                      adjacency build (Task 7)".into(),
+        })?;
         let conus = Arc::new(ConusAdjacencyStore::open(conus_path)?);
         let gage_meta = GageMetadata::open(&ds.gages)?;
 
@@ -219,8 +223,12 @@ impl MeritGagesDataset {
         );
 
         // Open the gages adjacency store with the DA_VALID set.
-        let gages_adj_path = ds.gages_adjacency.as_ref()
-            .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+        let gages_adj_path = ds.gages_adjacency.as_ref().ok_or_else(|| DataError::Malformed {
+            path: std::path::PathBuf::from("<config>"),
+            message: "gages_adjacency not configured — adjacency paths not configured; \
+                      set conus_adjacency/gages_adjacency explicitly or wait for managed \
+                      adjacency build (Task 7)".into(),
+        })?;
         let gages_adj = Arc::new(GagesAdjacencyStore::open(gages_adj_path, &da_valid)?);
 
         // Filter 2 + 3: adjacency presence + headwater drop.

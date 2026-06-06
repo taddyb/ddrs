@@ -39,12 +39,21 @@ pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
 
-    // TODO(managed-adjacency Task 7): when adjacency paths are built by ddrs,
-    // replace these expects with the resolved paths from the adjacency cache.
-    let conus_adj = ds.conus_adjacency.as_ref()
-        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
-    let gages_adj = ds.gages_adjacency.as_ref()
-        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+    let conus_adj = ds
+        .conus_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "conus_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
+             explicitly or wait for managed adjacency build (Task 7)",
+        ))?;
+    let gages_adj = ds
+        .gages_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "gages_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
+             explicitly or wait for managed adjacency build (Task 7)",
+        ))?;
     let mut h = blake3::Hasher::new();
     for p in [
         &ds.streamflow,
@@ -201,6 +210,21 @@ pub fn save_cached(
         .experiment
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
+    // TODO(managed-adjacency Task 7): replace with resolved paths from adjacency cache.
+    let conus_adj = ds
+        .conus_adjacency
+        .clone()
+        .ok_or(BaselineError::ConfigMissing(
+            "conus_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
+             explicitly or wait for managed adjacency build (Task 7)",
+        ))?;
+    let gages_adj = ds
+        .gages_adjacency
+        .clone()
+        .ok_or(BaselineError::ConfigMissing(
+            "gages_adjacency — adjacency paths not configured; set conus_adjacency/gages_adjacency \
+             explicitly or wait for managed adjacency build (Task 7)",
+        ))?;
     let manifest = CacheManifest {
         key: key.to_string(),
         n_gauges,
@@ -216,11 +240,8 @@ pub fn save_cached(
             streamflow: ds.streamflow.clone(),
             observations: ds.observations.clone(),
             gages: ds.gages.clone(),
-            // TODO(managed-adjacency Task 7): replace with resolved paths.
-            gages_adjacency: ds.gages_adjacency.clone()
-                .expect("adjacency paths not yet resolved — managed build lands in Task 7"),
-            conus_adjacency: ds.conus_adjacency.clone()
-                .expect("adjacency paths not yet resolved — managed build lands in Task 7"),
+            gages_adjacency: gages_adj,
+            conus_adjacency: conus_adj,
             start_time: exp.start_time.clone(),
             end_time: exp.end_time.clone(),
         },
@@ -413,5 +434,46 @@ mod tests {
             .join(format!("ddrs_baseline_missing_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         assert!(load_cached(&tmp, "deadbeefdeadbeef").is_none());
+    }
+
+    /// When adjacency paths are absent (fabric-only config, pre-Task 7),
+    /// `cache_key` must return `Err` rather than panicking.
+    #[test]
+    fn cache_key_returns_err_when_adjacency_absent() {
+        use crate::config::{DataSources, Experiment};
+        let mut cfg = Config::default();
+        cfg.mode = "testing".into();
+        cfg.seed = 0;
+        cfg.data_sources = Some(DataSources {
+            attributes: PathBuf::from("/dev/null/attrs.nc"),
+            conus_adjacency: None,      // ← fabric-only config
+            gages_adjacency: None,
+            geospatial_fabric: Some(PathBuf::from("/dev/null/fabric.shp")),
+            streamflow: PathBuf::from("/dev/null/sf.ic"),
+            observations: PathBuf::from("/dev/null/obs.ic"),
+            gages: PathBuf::from("/dev/null/gages.csv"),
+        });
+        cfg.experiment = Some(Experiment {
+            batch_size: 1,
+            start_time: "2000/01/01".into(),
+            end_time: "2000/01/03".into(),
+            epochs: 1,
+            rho: None,
+            shuffle: false,
+            warmup: 0,
+            learning_rate: Default::default(),
+            grad_clip_max_norm: None,
+            checkpoint: None,
+        });
+        let result = cache_key(&cfg);
+        assert!(
+            result.is_err(),
+            "cache_key must return Err when adjacency paths are absent"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("conus_adjacency"),
+            "error message should mention conus_adjacency, got: {msg}"
+        );
     }
 }

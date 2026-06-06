@@ -38,9 +38,13 @@ where
         .expect("kan_head section required for trained-KAN inference");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    // TODO(managed-adjacency Task 7): replace expect with resolved path from adjacency cache.
-    let conus_path = ds.conus_adjacency.as_ref()
-        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    // TODO(managed-adjacency Task 7): replace with resolved path from adjacency cache.
+    let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "<config>".into(),
+        source: "conus_adjacency not configured — adjacency paths not configured; \
+                 set conus_adjacency/gages_adjacency explicitly or wait for managed \
+                 adjacency build (Task 7)".into(),
+    })?;
     eprintln!("opening CONUS adjacency: {}", conus_path.display());
     let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
@@ -196,9 +200,13 @@ where
         .expect("kan_head section required for init dump");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    // TODO(managed-adjacency Task 7): replace expect with resolved path from adjacency cache.
-    let conus_path = ds.conus_adjacency.as_ref()
-        .expect("adjacency paths not yet resolved — managed build lands in Task 7");
+    // TODO(managed-adjacency Task 7): replace with resolved path from adjacency cache.
+    let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "<config>".into(),
+        source: "conus_adjacency not configured — adjacency paths not configured; \
+                 set conus_adjacency/gages_adjacency explicitly or wait for managed \
+                 adjacency build (Task 7)".into(),
+    })?;
     eprintln!("opening CONUS adjacency: {}", conus_path.display());
     let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
