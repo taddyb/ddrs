@@ -18,6 +18,9 @@
 //!                       │
 //!          (Task 5)     ▼
 //!              zarr_write::write_conus_store() / write_gauges_store()
+//!                       │
+//!          (Task 6)     ▼
+//!              cache::resolve_or_build()  ← content-addressed, crash-safe
 //! ```
 
 /// Bump on any algorithm change that would invalidate previously-cached
@@ -25,6 +28,7 @@
 pub const BUILDER_VERSION: u32 = 1;
 
 pub mod build;
+pub mod cache;
 pub mod dbf;
 pub mod gauges;
 pub mod zarr_write;

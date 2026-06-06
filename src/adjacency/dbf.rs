@@ -65,7 +65,7 @@ pub fn read_flowpath_records(path: &Path) -> crate::data::error::Result<Vec<Flow
 // ---------------------------------------------------------------------------
 
 /// If `path` has a `.shp` extension, swap it for `.dbf`; otherwise return as-is.
-fn resolve_dbf_path(path: &Path) -> PathBuf {
+pub(crate) fn resolve_dbf_path(path: &Path) -> PathBuf {
     match path.extension().and_then(|e| e.to_str()) {
         Some(ext) if ext.eq_ignore_ascii_case("shp") => path.with_extension("dbf"),
         _ => path.to_path_buf(),
