@@ -55,6 +55,8 @@ struct ManifestStatusOnly {
     status: String,
 }
 
+// Interactive path is tested via the `choose_source` unit tests in
+// tests/cli_plan_bootstrap.rs (injectable reader — no TTY needed).
 fn pick_source(input: &BootstrapInput) -> Result<BootstrapSource, CliError> {
     match latest_successful_run(&input.runs_dir)? {
         Some(p) => {

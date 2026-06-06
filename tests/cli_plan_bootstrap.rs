@@ -1,5 +1,7 @@
 use ddrs::cli::plan_bootstrap::{bootstrap, BootstrapInput, BootstrapSource};
 use std::fs;
+use std::io::Cursor;
+use std::path::PathBuf;
 
 #[test]
 fn bootstrap_copies_template_when_no_history() {
@@ -46,9 +48,6 @@ fn bootstrap_uses_latest_successful_run_when_present() {
     let copied = fs::read_to_string(&target).unwrap();
     assert!(copied.contains("from_last: true"));
 }
-
-use std::io::Cursor;
-use std::path::PathBuf;
 
 #[test]
 fn choose_source_picks_template_on_2() {
