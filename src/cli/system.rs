@@ -100,6 +100,8 @@ pub fn record_smoke(probe: &mut SystemProbe, key: String, backend: &str) {
 
 /// Result of [`ensure_system_ready`].
 pub struct SystemReadiness {
+    /// Post-write probe snapshot (matches what was persisted to
+    /// `.ddrs/system.json`); available to callers needing GPU metadata.
     pub probe: SystemProbe,
     pub smoke_passed: bool,
     pub smoke_reused: bool,
@@ -116,6 +118,8 @@ pub fn ensure_system_ready(
     skip_smoke: bool,
 ) -> Result<SystemReadiness, CliError> {
     let mut probe = probe()?.unwrap_or_default();
+    // Skip the warning on CPU-only hosts and when mem_get_info failed — both
+    // report free_gpu_gb_at_probe == 0.0.
     if probe.free_gpu_gb_at_probe < min_free_gpu_gb && probe.free_gpu_gb_at_probe > 0.0 {
         eprintln!(
             "warning: free GPU memory {:.1} GB is below floor {} GB",

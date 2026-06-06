@@ -25,12 +25,12 @@ fn second_call_reuses_smoke_verdict() {
     assert!(first.smoke_passed);
     assert!(!first.smoke_reused, "first run must execute the smoke");
     let passed_at_1 = SystemProbe::read(&ws.system_json())
-        .unwrap().smoke_test.unwrap().passed_at;
+        .unwrap().smoke_test.expect("system.json should contain a smoke_test record after first run").passed_at;
     // Second call reuses the cached verdict — passed_at unchanged.
     let second = ensure_system_ready(&ws, false, 0.0, false).unwrap();
     assert!(second.smoke_reused, "second run must reuse the cache");
     let passed_at_2 = SystemProbe::read(&ws.system_json())
-        .unwrap().smoke_test.unwrap().passed_at;
+        .unwrap().smoke_test.expect("system.json should contain a smoke_test record after first run").passed_at;
     assert_eq!(passed_at_1, passed_at_2);
 }
 
