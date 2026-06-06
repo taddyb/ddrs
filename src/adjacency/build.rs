@@ -7,35 +7,34 @@
 //! describe the SAME graph the engine writes (identical node set, edge set, and
 //! cycle drops), so the two zarr stores are interchangeable for routing.
 //!
-//! ## Topological order is NOT byte-identical to the engine store (Task 8)
+//! ## Topological order matches the engine store element-for-element
 //!
-//! The synthetic tests (`tests/adjacency_build.rs`) pin element-for-element
-//! `order` parity on small graphs, but the real CONUS engine store's `order` is
-//! a *different valid permutation* of ours — see `tests/adjacency_parity.rs`.
-//! Root cause: the engine's `build_upstream_dict` returns a dict whose edge
-//! iteration order is polars `group_by` order (hash-based, non-deterministic),
-//! and rustworkx's `topological_sort` tie-breaks on edge-insertion order. The
-//! engine's stored order is therefore an irreproducible artifact of one polars
-//! run. Our LIFO-Kahn order (below) is deterministic and equally valid; the
-//! load-bearing invariants are structural (node/edge sets, lower-triangular,
-//! cycle drops), which `adjacency_parity.rs` asserts.
+//! The engine's `order` array is **deterministic and reproducible**: two engine
+//! runs on the real pfaf_7 dbf produce identical output, and this managed build
+//! reproduces it element-for-element (0 diffs over all 346,321 CONUS positions —
+//! see `tests/adjacency_parity.rs`). An earlier claim that the engine order was
+//! an "irreproducible polars `group_by` artifact" was disproven and removed: the
+//! order depends only on node-INDEX order (a function of `sorted(keys)` node
+//! insertion), not on edge-insertion order, because MERIT is dendritic.
 //!
 //! ## Topological-sort parity
 //!
-//! The engine calls `rx.topological_sort` (rustworkx 0.17.1). That is Kahn's
-//! algorithm with a **LIFO stack**: the stack is seeded with every
-//! zero-indegree node pushed in node-index order `0..N`, then nodes are popped;
-//! when a popped node's successor reaches indegree 0 it is pushed. We replicate
-//! this exactly (verified empirically against rustworkx 0.17.1 on random DAGs —
-//! a `BTreeMap`/COMID-keyed queue would NOT match). Node *index* order is the
-//! tie-break key, so we must build nodes in the same insertion order the engine
-//! does:
+//! The engine calls `rx.topological_sort` (rustworkx 0.17.1), which delegates to
+//! `petgraph::algo::toposort` (petgraph `0.8`). That is **NOT** Kahn's
+//! algorithm — it is an iterative DFS recording nodes in *finish-time* order
+//! (Kosaraju-style), then reversed. See `DiGraph::topological_sort` for the
+//! exact rule and the petgraph source citations. The earlier LIFO-Kahn port was
+//! wrong: it disagreed with rustworkx on ~85% of random DAGs.
+//!
+//! Node *index* order is the primary determinant of the output, so we build
+//! nodes in the same insertion order the engine does:
 //!   1. iterate downstream COMIDs in **ascending** order (`sorted(keys)`),
 //!   2. add the downstream node if unseen, then
 //!   3. add each upstream node (upstream lists are sorted ascending) if unseen.
 //!
-//! Edges carry no tie-break weight here because MERIT is dendritic (one
-//! successor per node), so per-node successor visit order is irrelevant.
+//! Per-node successor visit order is the only other tie-break the DFS uses, but
+//! MERIT is dendritic (one successor per node), so each successor list has
+//! length <= 1 and that tie-break is a no-op on the real fabric.
 //!
 //! ## length_m / slope fill — deliberate divergence from the engine
 //!
@@ -292,15 +291,13 @@ fn build_upstream_dict(
 }
 
 /// A minimal directed graph mirroring the parts of `rx.PyDiGraph` the engine
-/// uses: node data (COMID per index) and per-node successors, with a Kahn-stack
-/// topological sort matching rustworkx 0.17.1.
+/// uses: node data (COMID per index) and per-node successors, with a DFS
+/// finish-time topological sort matching rustworkx 0.17.1 (petgraph `toposort`).
 struct DiGraph {
     /// COMID stored at each node index (insertion order = index order).
     node_data: Vec<i64>,
     /// Per-node successor node indices, in edge-insertion order.
     successors: Vec<Vec<usize>>,
-    /// Per-node in-degree.
-    indegree: Vec<usize>,
 }
 
 impl DiGraph {
@@ -329,61 +326,102 @@ impl DiGraph {
         }
 
         // Edge insertion: iterate keys (deterministic via sorted keys), adding
-        // from_comid -> to_comid. The engine iterates dict.items() (unordered),
-        // but edge order does not affect the result for a dendritic graph;
-        // using sorted keys keeps this fully deterministic.
+        // from_comid -> to_comid. The engine iterates dict.items() (polars
+        // group_by order), but MERIT is dendritic — every node has at most ONE
+        // successor — so each node's successor list has length <= 1 and the
+        // edge-insertion order across nodes cannot change any node's successor
+        // ordering. The DFS toposort's only successor-order tie-break (reverse
+        // edge-insertion) is therefore a no-op on this graph, so a deterministic
+        // sorted-key insertion reproduces the engine's order exactly.
         let n = node_data.len();
         let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
-        let mut indegree: Vec<usize> = vec![0; n];
         for &to_comid in &keys {
             let to_idx = node_index[&to_comid];
             for &from_comid in &upstream_dict[&to_comid] {
                 let from_idx = node_index[&from_comid];
                 successors[from_idx].push(to_idx);
-                indegree[to_idx] += 1;
             }
         }
 
         DiGraph {
             node_data,
             successors,
-            indegree,
         }
     }
 
-    /// Kahn's algorithm with a LIFO stack, matching rustworkx 0.17.1
-    /// `topological_sort` (verified empirically). Returns node indices in topo
-    /// order, or `Err(cycle_comids)` listing every COMID on a simple cycle.
+    /// DFS finish-time topological sort, replicating rustworkx 0.17.1
+    /// `topological_sort` exactly. Returns node indices in topo order, or
+    /// `Err(cycle_comids)` listing every COMID on a simple cycle.
+    ///
+    /// rustworkx's `topological_sort` delegates to `petgraph::algo::toposort`
+    /// (rustworkx 0.17.1 `src/dag_algo/mod.rs`; petgraph `0.8`,
+    /// `src/algo/mod.rs::toposort`). petgraph's `toposort` is **not** Kahn's
+    /// algorithm — it is an iterative DFS that records nodes in *finish-time*
+    /// order (Kosaraju-style), then reverses. The exact rule:
+    ///   1. Outer loop over nodes in **node-index order** `0..N`; skip if
+    ///      already discovered.
+    ///   2. Push the node on a DFS stack. While the stack is non-empty, peek
+    ///      the top `nx`:
+    ///        - first visit (mark discovered): push each not-yet-discovered
+    ///          successor of `nx`, **in reverse edge-insertion order** (petgraph
+    ///          `neighbors()` on a directed graph yields edges most-recently-
+    ///          added first); do NOT pop `nx`.
+    ///        - second visit: pop `nx`; if not yet finished, mark it finished
+    ///          and append it to `finish_stack`.
+    ///   3. Reverse `finish_stack` to get the topological order.
+    ///
+    /// The successor-iteration order is therefore load-bearing: it must match
+    /// petgraph's reverse-of-insertion neighbour order, and edges are inserted
+    /// here in the same order the engine inserts them (sorted-key dict, sorted
+    /// upstreams — see `DiGraph::build`). Verified element-for-element against
+    /// rustworkx 0.17.1 on 4400+ random DAGs (dendritic + general) plus the
+    /// CONUS store; a LIFO-Kahn queue does NOT match (it failed ~85% of graphs).
     fn topological_sort(&self) -> Result<Vec<usize>, Vec<i64>> {
         let n = self.node_data.len();
-        let mut indegree = self.indegree.clone();
-        // Seed: zero-indegree nodes pushed in ascending node-index order, so
-        // popping yields descending index order (rustworkx behaviour).
-        let mut stack: Vec<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
-        let mut order = Vec::with_capacity(n);
-        while let Some(node) = stack.pop() {
-            order.push(node);
-            for &succ in &self.successors[node] {
-                indegree[succ] -= 1;
-                if indegree[succ] == 0 {
-                    stack.push(succ);
+
+        // petgraph's `toposort` returns `Err(Cycle)` (rustworkx raises
+        // `DAGHasCycle`) when the graph is cyclic; its DFS phase always visits
+        // every node, so length alone cannot detect a cycle. Detect cycles up
+        // front via SCC and return the cycle COMIDs, mirroring the engine's
+        // `rx.simple_cycles` drop set. On an acyclic graph this is a cheap pass.
+        let cycle_comids = self.cycle_comids();
+        if !cycle_comids.is_empty() {
+            return Err(cycle_comids);
+        }
+
+        let mut discovered = vec![false; n];
+        let mut finished = vec![false; n];
+        let mut finish_stack: Vec<usize> = Vec::with_capacity(n);
+        let mut stack: Vec<usize> = Vec::new();
+
+        for start in 0..n {
+            if discovered[start] {
+                continue;
+            }
+            stack.push(start);
+            while let Some(&nx) = stack.last() {
+                if !discovered[nx] {
+                    discovered[nx] = true;
+                    // petgraph yields neighbours in reverse edge-insertion
+                    // order; replicate by iterating our (insertion-order)
+                    // successor list back to front.
+                    for &succ in self.successors[nx].iter().rev() {
+                        if !discovered[succ] {
+                            stack.push(succ);
+                        }
+                    }
+                } else {
+                    stack.pop();
+                    if !finished[nx] {
+                        finished[nx] = true;
+                        finish_stack.push(nx);
+                    }
                 }
             }
         }
-        if order.len() == n {
-            Ok(order)
-        } else {
-            // Cycle: collect COMIDs of every node on a simple cycle. The engine
-            // uses `rx.simple_cycles`; the union of all simple-cycle node sets
-            // is exactly the set of nodes still having indegree > 0 plus those
-            // reachable only through them — i.e. every node NOT emitted that is
-            // part of a strongly-connected component of size > 1 or feeds one.
-            // The engine drops every COMID returned by simple_cycles; that set
-            // equals the nodes participating in cycles. We compute it directly
-            // via Tarjan's SCC and take all nodes in any SCC of size > 1, plus
-            // self-loops.
-            Err(self.cycle_comids())
-        }
+        finish_stack.reverse();
+        debug_assert_eq!(finish_stack.len(), n, "acyclic graph must emit all nodes");
+        Ok(finish_stack)
     }
 
     /// COMIDs on simple cycles, matching the union of `rx.simple_cycles` node

@@ -5,12 +5,11 @@
 //! produced by running the real `ddr_engine` pipeline (rustworkx 0.17.1
 //! `build_upstream_dict` → `build_graph` → `topological_sort`) on the same
 //! synthetic networks, so these tests pin element-for-element parity with the
-//! engine on small graphs (where the engine's polars `group_by` edge order is
-//! incidentally stable).
+//! engine.
 //!
-//! NOTE: element-for-element `order` parity does NOT hold at CONUS scale — the
-//! engine's stored order is a non-deterministic polars-`group_by` artifact. The
-//! structural invariants that do hold are asserted in `tests/adjacency_parity.rs`.
+//! Element-for-element `order` parity holds at CONUS scale too: the engine's
+//! `topological_sort` (petgraph DFS finish-time order) is deterministic and the
+//! managed build reproduces it exactly. See `tests/adjacency_parity.rs`.
 
 use ddrs::adjacency::build::{build_conus_adjacency, BuildError};
 use ddrs::adjacency::dbf::FlowpathRecord;
@@ -178,6 +177,58 @@ fn not_dendritic_is_an_error() {
         }
         other => panic!("expected NotDendritic, got {other:?}"),
     }
+}
+
+/// Fuzz parity: replay 1000 random dendritic MERIT-like networks through the
+/// public builder and compare `order` element-for-element against rustworkx
+/// 0.17.1 (the engine's `topological_sort`). The fixture
+/// `tests/fixtures/toposort_fuzz.jsonl` is generated under DDR's venv by
+/// `scripts/dump_toposort_fixtures.py`; each line carries raw FlowpathRecord
+/// rows plus the engine's topological order. This is the regression guard for
+/// the DFS-finish-time toposort port in `src/adjacency/build.rs` — a LIFO-Kahn
+/// queue (the prior, buggy port) fails ~85% of these graphs.
+#[test]
+fn fuzz_toposort_matches_rustworkx() {
+    use std::io::BufRead;
+
+    #[derive(serde::Deserialize)]
+    struct Case {
+        records: Vec<Vec<i64>>, // [comid, up1, up2, up3, up4]
+        order: Vec<i64>,
+    }
+
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/toposort_fuzz.jsonl");
+    let file = std::fs::File::open(path)
+        .unwrap_or_else(|e| panic!("open {path}: {e} (regenerate with scripts/dump_toposort_fixtures.py)"));
+
+    let mut total = 0usize;
+    for (li, line) in std::io::BufReader::new(file).lines().enumerate() {
+        let line = line.unwrap();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let case: Case = serde_json::from_str(&line).unwrap();
+        let records: Vec<FlowpathRecord> = case
+            .records
+            .iter()
+            .map(|row| {
+                let comid = row[0];
+                let ups: Vec<i64> = row[1..].iter().copied().filter(|&u| u > 0).collect();
+                rec(comid, &ups, 1.0, 0.01)
+            })
+            .collect();
+        let adj = build_conus_adjacency(&records)
+            .unwrap_or_else(|e| panic!("line {li}: build failed: {e:?}"));
+        let ours: Vec<i64> = adj.order.iter().map(|&c| c as i64).collect();
+        assert_eq!(
+            ours, case.order,
+            "line {li}: order mismatch vs rustworkx\n  ours = {ours:?}\n  rx   = {:?}",
+            case.order
+        );
+        total += 1;
+    }
+    assert!(total >= 1000, "expected >= 1000 fuzz cases, ran {total}");
+    eprintln!("fuzz_toposort_matches_rustworkx: {total} graphs match rustworkx element-for-element");
 }
 
 #[test]

@@ -8,36 +8,35 @@
 //! cargo test --test adjacency_parity -- --ignored --nocapture
 //! ```
 //!
-//! ## IMPORTANT: the engine store's `order` is NOT reproducible
+//! ## The engine store's `order` IS reproducible — element-for-element contract
 //!
-//! The original Task-8 contract was "`order`/`indices_0`/`indices_1` match the
-//! engine store element-for-element." Running this on the real CONUS fabric
-//! disproves that contract: the node SETS, edge SETS (in COMID space), dropped
-//! set, lower-triangularity, and isolated-tail length all match exactly, but the
-//! topological *order* is a different (equally valid) permutation.
+//! The Task-8 contract is "`order`/`indices_0`/`indices_1` match the engine
+//! store element-for-element," and it holds on the real CONUS fabric. The
+//! engine's `topological_sort` delegates to `petgraph::algo::toposort`
+//! (rustworkx 0.17.1, petgraph 0.8): an iterative DFS finish-time ordering that
+//! is fully deterministic. The output depends only on node-INDEX order (a
+//! function of `sorted(keys)` node insertion in `build_graph`, `graph.py:55-86`),
+//! NOT on edge-insertion order, because MERIT is dendritic (one successor per
+//! node). Two engine runs produce identical `order`, and the managed build
+//! reproduces it with 0 element diffs over all 346,321 positions.
 //!
-//! Root cause: the engine's `build_upstream_dict` (`graph.py:9-52`) returns a
-//! dict whose **key/edge iteration order is polars `group_by` order** — hash-
-//! based and non-deterministic across machines/versions. `build_graph`
-//! (`graph.py:82-85`) then inserts edges in that `items()` order, and rustworkx's
-//! `topological_sort` uses per-node successor-insertion order as its tie-break.
-//! So the engine's stored `order` array is an artifact of one irreproducible
-//! polars run; two engine builds on different machines would not agree either.
-//! (Task 3's element-for-element synthetic tests still hold — on tiny graphs the
-//! edge order is incidentally stable; at 346 K nodes it is not.)
+//! (An earlier revision wrongly claimed the engine `order` was an irreproducible
+//! polars `group_by` artifact and weakened this test to set-based checks; that
+//! claim was disproven — the divergence was a bug in the Rust port's toposort,
+//! which used LIFO-Kahn instead of petgraph's DFS. Fixed in `build.rs`.)
 //!
-//! The reader contract does not depend on the specific permutation: gauge
-//! subgraphs reference CONUS *positions*, always resolved through the SAME
-//! `order` array they were built with. So the load-bearing invariants are
-//! structural, and that is what this test asserts:
-//!   1. CONUS node set, edge set (COMID space), dropped set, lower-triangular,
-//!      and length all match the engine store.
+//! What this test asserts:
+//!   1. CONUS `order`, `indices_0`, `indices_1` match the engine store
+//!      element-for-element (the contract). Node/edge SET checks remain as
+//!      additional structural guards.
 //!   2. length_m/slope spot-checks (NOT an element compare — our builder fills
 //!      NaN/inf with the finite-column mean, the documented bug fix).
-//!   3. Gauges: per sampled STAID, node SETS and edge SETS **in COMID space**
-//!      plus `gage_catchment` match. `gage_idx` is position-space and therefore
-//!      order-dependent; we assert instead that it resolves (in each store's own
-//!      `order`) to the same outlet COMID.
+//!   3. Gauges: per sampled STAID, `gage_idx` and `gage_catchment` match the
+//!      engine directly (position-space comparison is valid now that CONUS order
+//!      matches). Per-gauge `rows`/`cols` arrays are compared as node/edge SETS
+//!      in COMID space: the engine's per-subgroup COO row order came from Python
+//!      set iteration and is genuinely non-deterministic, so only the SETS are
+//!      a stable contract there.
 //!
 //! ## Data location
 //!
@@ -118,12 +117,43 @@ fn managed_build_matches_engine_store() {
     eprintln!("  engine order: {}  nnz: {}", engine.n, engine.nnz);
 
     // ========================================================================
-    // Section 1: CONUS structural parity (node set, edge set, lower-triangular)
-    //   NOT element-for-element order — see the module header for why the engine
-    //   store's `order` permutation is irreproducible.
+    // Section 1: CONUS element-for-element parity (the contract) + structural
+    //   guards. `order`, `indices_0`, `indices_1` must match the engine store
+    //   position by position (the engine's petgraph DFS toposort is
+    //   deterministic — see the module header).
     // ========================================================================
     assert_eq!(conus.order.len(), engine.n, "order length");
     assert_eq!(conus.rows.len(), engine.nnz, "nnz");
+
+    // ---- Element-for-element `order` ----------------------------------------
+    let order_diffs = conus
+        .order
+        .iter()
+        .zip(engine.order.iter())
+        .filter(|(&ours, &eng)| ours as i64 != eng.0)
+        .count();
+    assert_eq!(
+        order_diffs, 0,
+        "CONUS `order` differs from engine store at {order_diffs}/{} positions",
+        conus.order.len()
+    );
+
+    // ---- Element-for-element `indices_0` / `indices_1` ----------------------
+    let row_diffs = conus
+        .rows
+        .iter()
+        .zip(engine.indices_0.iter())
+        .filter(|(&ours, &eng)| ours != eng)
+        .count();
+    let col_diffs = conus
+        .cols
+        .iter()
+        .zip(engine.indices_1.iter())
+        .filter(|(&ours, &eng)| ours != eng)
+        .count();
+    assert_eq!(row_diffs, 0, "indices_0 differs at {row_diffs}/{} positions", conus.rows.len());
+    assert_eq!(col_diffs, 0, "indices_1 differs at {col_diffs}/{} positions", conus.cols.len());
+    eprintln!("section 1 element-for-element OK: order/indices_0/indices_1 all match");
 
     // Node SETS (COMID space) equal.
     let our_nodes: BTreeSet<i64> = conus.order.iter().map(|&c| c as i64).collect();
@@ -317,8 +347,8 @@ fn managed_build_matches_engine_store() {
         let ours = our_by_staid[staid.as_str()];
         let eng = engine_gauges.get(staid).expect("engine subgraph");
 
-        // Outlet COMID matches, and each store's gage_idx resolves (through its
-        // own `order`) to that outlet COMID.
+        // Outlet COMID matches. With CONUS `order` parity restored, gage_idx is
+        // directly comparable (engine position == ours).
         let outlet = ours.gage_catchment;
         assert_eq!(
             outlet.to_string(),
@@ -327,6 +357,14 @@ fn managed_build_matches_engine_store() {
             staid.as_str(),
             outlet,
             eng.gage_catchment
+        );
+        assert_eq!(
+            ours.gage_idx,
+            eng.gage_idx,
+            "STAID {}: gage_idx ours {} vs engine {} (CONUS order parity should make these equal)",
+            staid.as_str(),
+            ours.gage_idx,
+            eng.gage_idx
         );
         assert_eq!(
             conus.order[ours.gage_idx] as i64,

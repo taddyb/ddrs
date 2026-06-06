@@ -196,10 +196,11 @@ MERIT flowlines `.shp`/`.dbf`) and `ddrs plan` builds the CONUS + gauges zarr
 stores into `.ddrs/adjacency/<key>/` on first run (content-addressed, ~10 s),
 reusing them afterwards. Only the `.dbf` attribute table is read — `.shp`
 geometry is never opened. To skip the build, set both `conus_adjacency` and
-`gages_adjacency` to pre-built zarr stores. The managed builder's graph output
-(node set, edge set, cycle drops) matches an engine-built store; the topological
-*order* is a valid permutation, not byte-identical (the engine's order came from
-a non-deterministic polars `group_by`) — see `tests/adjacency_parity.rs`.
+`gages_adjacency` to pre-built zarr stores. The managed builder matches an
+engine-built store **element-for-element** — `order`, `indices_0`, `indices_1`
+are byte-identical (the engine's `topological_sort` is petgraph's deterministic
+DFS finish-time order, reproducible across runs; the builder's `topological_sort`
+in `src/adjacency/build.rs` replicates it) — see `tests/adjacency_parity.rs`.
 
 CONUS MERIT is 346,321 reaches × 338,814 edges (not millions — the port can
 target consumer GPUs). Training config lives at `config/merit_training.yaml`
