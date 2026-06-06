@@ -83,13 +83,13 @@ Install once:
 cargo install --path .   # puts `ddrs` in ~/.cargo/bin/
 ```
 
-First-time flow `init → plan → run`:
+First-time flow `plan → run`:
 
 ```bash
-ddrs init                                      # GPU probe + smoke + bootstraps ./ddrs.yaml
-                                               #   (opens $EDITOR) + locks data_sources
-ddrs plan                                      # validates ddrs.yaml against locked sources +
-                                               #   computes summed-Q' baseline (cached)
+ddrs plan                                      # GPU probe + smoke (cached) + bootstraps
+                                               #   ./ddrs.yaml (opens $EDITOR) + locks
+                                               #   data_sources + validates + computes
+                                               #   summed-Q' baseline (cached)
 ddrs run --workflow train-and-test             # full sweep: train, eval, write manifest
 ddrs run --workflow train                      # equivalent to legacy `train`
 ddrs run --workflow eval                       # equivalent to legacy `eval`
@@ -98,20 +98,16 @@ ddrs status                                    # workspace summary + disk usage
 ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 ```
 
-**The bootstrap-from-last-run gotcha** (`src/cli/plan_bootstrap.rs:58-63`):
-when `ddrs init` materializes `ddrs.yaml`, it prefers
-`.ddrs/runs/<latest successful>/config.yaml` over the bundled
-`config/merit_training.yaml`. So `rm ddrs.yaml && ddrs init` recreates the
-workspace config **from your latest successful run**, NOT from the tracked
-template. If you change `config/merit_training.yaml` (e.g. invariant 7 work,
-parameter-range fixes) and want a clean rebootstrap, either:
+**Bootstrap source prompt** (`src/cli/plan_bootstrap.rs`): when `ddrs plan`
+materializes a missing `ddrs.yaml` and a previous successful run exists, it
+asks whether to start from that run's `config.yaml` snapshot or the bundled
+`config/merit_training.yaml` template. Non-TTY callers must pass `--config`.
+Lock semantics: `plan` reports drift against `.ddrs/sources.lock`, then
+refreshes the lock ("sources as of my last plan"); `ddrs run --strict` aborts
+with exit 4 *before* relocking, preserving the evidence.
 
-- pass `--config config/merit_training.yaml` to **every** subcommand
-  (the top-level flag works on `init`/`plan`/`run`), or
-- nuke `.ddrs/runs/` before rerunning `ddrs init`, or
-- hand-edit `ddrs.yaml` to match the tracked template.
-
-The first option is the cleanest for short-lived experiments:
+Pass `--config config/merit_training.yaml` to force the clean template on any
+subcommand:
 
 ```bash
 ddrs --config config/merit_training.yaml plan --workflow train-and-test
@@ -120,7 +116,7 @@ ddrs --config config/merit_training.yaml run  --workflow train-and-test
 
 `mode:` and `workflow:` must agree (`mode: training` ↔
 `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`);
-`ddrs init` rejects contradictions at load time.
+`ddrs plan` rejects contradictions at load time.
 
 Full design at
 `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
@@ -130,9 +126,9 @@ implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`
 
 | Path | Written by | Purpose |
 |---|---|---|
-| `ddrs.yaml` | `ddrs init` (via `$EDITOR`) | Workflow + experiment config (gitignored) |
-| `.ddrs/system.json` | `ddrs init` | GPU/driver/smoke-test record |
-| `.ddrs/sources.lock` | `ddrs init` | Fingerprints of `data_sources` paths |
+| `ddrs.yaml` | `ddrs plan` (via `$EDITOR`) | Workflow + experiment config (gitignored) |
+| `.ddrs/system.json` | `ddrs plan` | GPU/driver/smoke-test record |
+| `.ddrs/sources.lock` | `ddrs plan` | Fingerprints of `data_sources` paths |
 | `.ddrs/adjacency/<key>/` | `ddrs plan` first time (managed build) | Cached CONUS + gauges adjacency zarr stores, content-addressed |
 | `.ddrs/baselines/<key>/` | `ddrs plan` first time | Cached summed-Q' baseline |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
