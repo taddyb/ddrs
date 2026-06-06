@@ -16,6 +16,7 @@ fn manifest_round_trips_via_serde_json() {
         exit_reason: None,
         system: SystemProbe::default(),
         sources: BTreeMap::new(),
+        resolved_adjacency: None,
         source_lock: SourceLockRef {
             lockfile: ".ddrs/sources.lock".into(),
             matched: true,

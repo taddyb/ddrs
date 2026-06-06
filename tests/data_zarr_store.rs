@@ -3,6 +3,12 @@
 //! Touches `~/projects/ddr/data/merit_conus_adjacency.zarr` and
 //! `~/projects/ddr/data/merit_gages_conus_adjacency.zarr` directly. Skips
 //! gracefully if either is absent so CI on a clean checkout doesn't break.
+//!
+//! These intentionally target the **explicit engine-built** zarr stores: their
+//! purpose is to validate the *reader* against a real on-disk store, which stays
+//! valid regardless of how the store was produced. Parity of the *managed*
+//! builder's output (`src/adjacency/`) against an engine store is covered
+//! separately by `tests/adjacency_parity.rs`.
 use std::path::PathBuf;
 
 use ddrs::data::{Comid, ConusAdjacencyStore, GagesAdjacencyStore, Staid};

@@ -16,10 +16,22 @@ np_seed: 42
 # Source paths — read in place by ddrs's Rust loaders (zarrs + icechunk + netcdf).
 # No export/materialization step; the harness reads DDR's live data sources
 # straight from disk.
+#
+# adjacency strategy: provide `geospatial_fabric` and let `ddrs plan` build the
+# zarr stores under .ddrs/adjacency/. Alternatively set both `conus_adjacency`
+# and `gages_adjacency` to use pre-built zarr stores directly.
+#
+# Note: DDR's config uses `geospatial_fabric_gpkg` (GeoPackage). We use
+# `geospatial_fabric` and accept a .shp path; only the sibling .dbf is read.
 data_sources:
   attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
-  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
-  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  # geospatial_fabric triggers the managed adjacency build: on first `ddrs plan`
+  # the .dbf sibling is parsed into zarr stores cached under .ddrs/adjacency/<key>/
+  # (~1-2 min), reused on subsequent runs. To use pre-built zarr stores instead,
+  # drop this key and set both:
+  #   conus_adjacency: /path/to/merit_conus_adjacency.zarr
+  #   gages_adjacency: /path/to/merit_gages_conus_adjacency.zarr
+  geospatial_fabric: /projects/mhpi/data/MERIT/raw/continent/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp
   streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
   observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
   gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv

@@ -133,6 +133,7 @@ implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`
 | `ddrs.yaml` | `ddrs init` (via `$EDITOR`) | Workflow + experiment config (gitignored) |
 | `.ddrs/system.json` | `ddrs init` | GPU/driver/smoke-test record |
 | `.ddrs/sources.lock` | `ddrs init` | Fingerprints of `data_sources` paths |
+| `.ddrs/adjacency/<key>/` | `ddrs plan` first time (managed build) | Cached CONUS + gauges adjacency zarr stores, content-addressed |
 | `.ddrs/baselines/<key>/` | `ddrs plan` first time | Cached summed-Q' baseline |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
 | `.ddrs/runs/<id>/config.yaml` | `ddrs run` | **Snapshot of the config that produced this run** (the `plan_bootstrap` source) |
@@ -183,11 +184,23 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 
 | Source | Path | Crate |
 |---|---|---|
-| MERIT adjacency | `~/projects/ddr/data/merit_conus_adjacency.zarr` | `zarrs` |
-| Per-gauge subgraphs | `~/projects/ddr/data/merit_gages_conus_adjacency.zarr` | `zarrs` |
+| Geospatial fabric | `riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp` (+ sibling `.dbf`) | `dbase` |
+| MERIT adjacency | managed, built from the fabric → `.ddrs/adjacency/<key>/` (or explicit override) | `zarrs` |
+| Per-gauge subgraphs | managed, built from the fabric → `.ddrs/adjacency/<key>/` (or explicit override) | `zarrs` |
 | Catchment attributes | `~/projects/ddr/data/merit_global_attributes_v2.nc` | `netcdf` (TODO) |
 | Streamflow forcing | `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic` | `icechunk` (TODO) |
 | USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` (TODO) |
+
+The adjacency stores are now **managed**: provide `geospatial_fabric` (the raw
+MERIT flowlines `.shp`/`.dbf`) and `ddrs plan` builds the CONUS + gauges zarr
+stores into `.ddrs/adjacency/<key>/` on first run (content-addressed, ~10 s),
+reusing them afterwards. Only the `.dbf` attribute table is read — `.shp`
+geometry is never opened. To skip the build, set both `conus_adjacency` and
+`gages_adjacency` to pre-built zarr stores. The managed builder matches an
+engine-built store **element-for-element** — `order`, `indices_0`, `indices_1`
+are byte-identical (the engine's `topological_sort` is petgraph's deterministic
+DFS finish-time order, reproducible across runs; the builder's `topological_sort`
+in `src/adjacency/build.rs` replicates it) — see `tests/adjacency_parity.rs`.
 
 CONUS MERIT is 346,321 reaches × 338,814 edges (not millions — the port can
 target consumer GPUs). Training config lives at `config/merit_training.yaml`
@@ -211,8 +224,10 @@ KAN config, lr) do **not** invalidate. Contents:
 train-and-test` copies these into `<run_dir>/baseline/`.
 
 Note: `ddrs plan` is therefore no longer side-effect-free — first run
-opens icechunk and reads ~370 MB of daily Qr. Subsequent plans on the same
-input set are cache hits and instant.
+opens icechunk and reads ~370 MB of daily Qr, and (when `geospatial_fabric` is
+configured instead of explicit adjacency zarr paths) builds the managed
+adjacency stores into `.ddrs/adjacency/<key>/` from the raw `.dbf` (~10 s).
+Subsequent plans on the same input set are cache hits and instant for both.
 
 Implementation: `src/baseline/`. Mirrors
 `~/projects/ddr/scripts/summed_q_prime.py`.

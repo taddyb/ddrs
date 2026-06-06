@@ -71,11 +71,28 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
 
     let (start, end, n_days) = parse_window(&exp.start_time, &exp.end_time)?;
 
-    let conus = ConusAdjacencyStore::open(&ds.conus_adjacency)?;
+    // Defensive: `ddrs plan` materializes resolved adjacency paths into the
+    // config before compute runs, so these only fire if a caller bypasses plan.
+    let conus_path = ds
+        .conus_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "conus_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
+        ))?;
+    let gages_adj_path = ds
+        .gages_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "gages_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
+        ))?;
+
+    let conus = ConusAdjacencyStore::open(conus_path)?;
     let gage_meta = GageMetadata::open(&ds.gages)?;
     let all_staids: Vec<Staid> = gage_meta.rows.iter().map(|r| r.staid.clone()).collect();
 
-    let gages_adj = GagesAdjacencyStore::open(&ds.gages_adjacency, &all_staids)?;
+    let gages_adj = GagesAdjacencyStore::open(gages_adj_path, &all_staids)?;
     // Preserve CSV order; drop gauges without a subgraph.
     let valid_staids: Vec<Staid> = all_staids
         .iter()
@@ -85,7 +102,7 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
     if valid_staids.is_empty() {
         return Err(BaselineError::NoGauges {
             gages: ds.gages.clone(),
-            adj: ds.gages_adjacency.clone(),
+            adj: gages_adj_path.clone(),
         });
     }
 

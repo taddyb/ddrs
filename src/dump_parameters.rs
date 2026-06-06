@@ -38,8 +38,16 @@ where
         .expect("kan_head section required for trained-KAN inference");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    eprintln!("opening CONUS adjacency: {}", ds.conus_adjacency.display());
-    let conus = ConusAdjacencyStore::open(&ds.conus_adjacency)
+    // Defensive: callers route through `ddrs run`/`plan`, which materialize the
+    // resolved adjacency paths into the config before dump runs.
+    let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "<config>".into(),
+        source: "conus_adjacency not resolved — invoke via `ddrs run --plot` \
+                 (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                 explicitly".into(),
+    })?;
+    eprintln!("opening CONUS adjacency: {}", conus_path.display());
+    let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
     let n_reaches = conus.order.len();
     eprintln!("CONUS reaches: {n_reaches}");
@@ -193,8 +201,16 @@ where
         .expect("kan_head section required for init dump");
 
     // ---------- 1. CONUS topology: COMID order + per-reach slope ----------
-    eprintln!("opening CONUS adjacency: {}", ds.conus_adjacency.display());
-    let conus = ConusAdjacencyStore::open(&ds.conus_adjacency)
+    // Defensive: callers route through `ddrs run`/`plan`, which materialize the
+    // resolved adjacency paths into the config before dump_init runs.
+    let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "<config>".into(),
+        source: "conus_adjacency not resolved — invoke via `ddrs run --plot` \
+                 (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                 explicitly".into(),
+    })?;
+    eprintln!("opening CONUS adjacency: {}", conus_path.display());
+    let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
     let n_reaches = conus.order.len();
     eprintln!("CONUS reaches: {n_reaches}");

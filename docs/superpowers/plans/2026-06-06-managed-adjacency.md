@@ -96,36 +96,36 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 1: Config & lockfile
 
-- [ ] `src/config.rs`: add `data_sources.geospatial_fabric: Option<PathBuf>`; change
+- [x] `src/config.rs`: add `data_sources.geospatial_fabric: Option<PathBuf>`; change
       `conus_adjacency`/`gages_adjacency` to `Option<PathBuf>`.
-- [ ] Load-time validation rule: *(both adjacency keys present)* **or**
+- [x] Load-time validation rule: *(both adjacency keys present)* **or**
       *(geospatial_fabric present)*; otherwise a `ConfigInvalid` naming the missing keys.
       Partial adjacency (one of two) is an error.
-- [ ] `src/cli/init.rs`: fingerprint+lock `geospatial_fabric` when configured; lock
+- [x] `src/cli/init.rs`: fingerprint+lock `geospatial_fabric` when configured; lock
       adjacency keys only when explicitly configured. `init` smoke flow unchanged.
-- [ ] `src/cli/lockfile.rs`: `diff_against_live` tolerates sources present in only
+- [x] `src/cli/lockfile.rs`: `diff_against_live` tolerates sources present in only
       one side when the key is optional (report as drift, not error).
-- [ ] `config/merit_training.yaml` + `src/cli/plan_bootstrap.rs` template: remove the
+- [x] `config/merit_training.yaml` + `src/cli/plan_bootstrap.rs` template: remove the
       two adjacency paths, add
       `geospatial_fabric: /projects/mhpi/data/MERIT/raw/continent/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp`.
       Note: DDR's config key is `geospatial_fabric_gpkg`; we use `geospatial_fabric`
       since we accept `.shp` (and read only the sibling `.dbf`). Document the mapping
       in a comment.
-- [ ] Unit tests for the config validation matrix (both/neither/partial keys).
+- [x] Unit tests for the config validation matrix (both/neither/partial keys).
 
 ## Task 2: dbf reader
 
-- [ ] Add `dbase` to `Cargo.toml`.
-- [ ] `src/adjacency/dbf.rs`: read the `.dbf` sibling of the configured `.shp`
+- [x] Add `dbase` to `Cargo.toml`.
+- [x] `src/adjacency/dbf.rs`: read the `.dbf` sibling of the configured `.shp`
       (or the `.dbf` directly if configured as such). Extract
       `FlowpathRecord { comid: i64, lengthkm: f64, slope: f64, next_down_id: i64, up: [i64; 4] }`.
       Missing/null numeric → NaN (matches geopandas semantics so fills match DDR).
-- [ ] `DataError`-style error with `PathBuf` context per repo convention.
-- [ ] Test: header-only fixture or synthetic dbf; assert column extraction + NaN handling.
+- [x] `DataError`-style error with `PathBuf` context per repo convention.
+- [x] Test: header-only fixture or synthetic dbf; assert column extraction + NaN handling.
 
 ## Task 3: CONUS builder
 
-- [ ] `src/adjacency/build.rs`: port `ddr_engine/merit/build.py::create_adjacency_matrix`.
+- [x] `src/adjacency/build.rs`: port `ddr_engine/merit/build.py::create_adjacency_matrix`.
       Cite engine line numbers in comments (repo convention):
       - upstream dict from `up1–up4` (`build_upstream_dict`),
       - Kahn topological sort,
@@ -135,85 +135,85 @@ README.md                       # getting-started: adjacency now managed
       - lower-triangular COO (`row = downstream idx`, `col = upstream idx`),
         single-successor assert ("not dendritic" otherwise),
       - final assert `rows[k] >= cols[k]` (routing invariant 3).
-- [ ] `length_m` / `slope` (the actual bug fix): `lengthkm × 1000.0`; NaN/inf →
+- [x] `length_m` / `slope` (the actual bug fix): `lengthkm × 1000.0`; NaN/inf →
       column mean over finite values, mirroring `merit.py:78` (`naninfmean`) and
       `merit.py:409-417` (`fill_nans`). f32 output, aligned to `order`.
-- [ ] Unit tests on synthetic networks: chain, confluence, cycle removal,
+- [x] Unit tests on synthetic networks: chain, confluence, cycle removal,
       isolated reaches, NaN fills, triangularity.
 
 ## Task 4: gauge subgraph builder
 
-- [ ] `src/adjacency/gauges.rs`: port `build_gauge_adjacencies`/`subset_upstream`.
+- [x] `src/adjacency/gauges.rs`: port `build_gauge_adjacencies`/`subset_upstream`.
       Read the gages CSV (already a locked source) mirroring DDR's `MERITGauge`
       validation for the STAID → outlet-COMID mapping. Per STAID: BFS upstream
       over the CONUS graph, emit COO in **CONUS position space** (matching
       `GageSubgraph`'s contract in `src/data/store/zarr.rs:102-116`), with
       `gage_idx` (outlet's CONUS position) and `gage_catchment` attrs.
-- [ ] STAIDs whose catchment COMID is missing from the network: skip with a
+- [x] STAIDs whose catchment COMID is missing from the network: skip with a
       warning (mirrors `GagesAdjacencyStore::open`'s silent-drop semantics).
-- [ ] Unit test: synthetic 6-reach network, 2 gauges; assert subgraph node sets
+- [x] Unit test: synthetic 6-reach network, 2 gauges; assert subgraph node sets
       and `gage_idx`.
 
 ## Task 5: zarr writer
 
-- [ ] `src/adjacency/zarr_write.rs`: write zarr-v3 groups byte-compatible with
+- [x] `src/adjacency/zarr_write.rs`: write zarr-v3 groups byte-compatible with
       `ddr_engine/core/zarr_io.py`'s layout — root group attrs
       (`format: "COO"`, `shape`, `geodataset: "merit"`, `data_types`), arrays
       `indices_0`/`indices_1` (int32), `values` (uint8 ones), `order` (int32),
       bytes + zstd codecs, comparable chunking — **plus** `length_m`/`slope`
       (float32) on the CONUS store.
-- [ ] Gauges store: one subgroup per STAID with the same array set + the two attrs.
-- [ ] Round-trip test: write a tiny store, reopen with `ConusAdjacencyStore::open`
+- [x] Gauges store: one subgroup per STAID with the same array set + the two attrs.
+- [x] Round-trip test: write a tiny store, reopen with `ConusAdjacencyStore::open`
       and `GagesAdjacencyStore::open` — the readers are the compatibility oracle.
 
 ## Task 6: adjacency cache
 
-- [ ] `src/adjacency/cache.rs`, mirroring `src/baseline/cache.rs`:
+- [x] `src/adjacency/cache.rs`, mirroring `src/baseline/cache.rs`:
       layout `.ddrs/adjacency/<key>/{merit_conus_adjacency.zarr, merit_gages_conus_adjacency.zarr, manifest.json}`.
-- [ ] `key = blake3(dbf content-fp ∥ gages-csv content-fp ∥ BUILDER_VERSION)[..16]`.
+- [x] `key = blake3(dbf content-fp ∥ gages-csv content-fp ∥ BUILDER_VERSION)[..16]`.
       **Content** fingerprints (blake3 of file bytes), not paths/stat — see the
       lockfile blind spot above. `BUILDER_VERSION` const in `adjacency/mod.rs`;
       bump on any algorithm change to invalidate caches.
-- [ ] `manifest.json`: input paths + fingerprints, n / nnz / n_gauges /
+- [x] `manifest.json`: input paths + fingerprints, n / nnz / n_gauges /
       cycle-dropped COMIDs, build duration, ddrs git SHA.
-- [ ] Build into a temp dir, rename into place (crash-safe, same as baseline cache).
+- [x] Build into a temp dir, rename into place (crash-safe, same as baseline cache).
 
 ## Task 7: plan resolution + run integration
 
-- [ ] `src/cli/plan.rs`: replace the step-6 validation stub:
+- [x] `src/cli/plan.rs`: replace the step-6 validation stub:
       - explicit adjacency paths → open both stores, verify every required array
         exists up front; on failure name the missing array and suggest either
         removing the keys (managed build) or repairing the store;
       - keys absent → cache lookup by key; hit → reuse; miss → build with a
         `log`-style progress line ("building MERIT adjacency from <dbf> — first
         run takes ~1–2 min"). Same side-effectful-plan precedent as the Q' baseline.
-- [ ] `PlanResult` gains `resolved_adjacency { conus: PathBuf, gages: PathBuf, cache_key: Option<String>, cache_hit: Option<bool> }`;
+- [x] `PlanResult` gains `resolved_adjacency { conus: PathBuf, gages: PathBuf, cache_key: Option<String>, cache_hit: Option<bool> }`;
       plan's human output prints it.
-- [ ] Baseline + dataset paths consume the **resolved** paths (the baseline cache
+- [x] Baseline + dataset paths consume the **resolved** paths (the baseline cache
       key in `src/baseline/cache.rs` hashes these path strings — resolved cache
       paths flow in automatically; a rebuild under a new key correctly invalidates
       the baseline).
-- [ ] `src/cli/run.rs` + `manifest.rs`: run manifest records resolved paths +
+- [x] `src/cli/run.rs` + `manifest.rs`: run manifest records resolved paths +
       adjacency cache key; `ddrs show` displays them.
-- [ ] `ddrs status`/`gc`: report `.ddrs/adjacency/` disk usage; `gc` leaves
+- [x] `ddrs status`/`gc`: report `.ddrs/adjacency/` disk usage; `gc` leaves
       adjacency caches alone in v1 (document; key-based GC is a follow-up).
 
 ## Task 8: parity tests & docs
 
-- [ ] `tests/adjacency_parity.rs` (`#[ignore]` by default, like
+- [x] `tests/adjacency_parity.rs` (`#[ignore]` by default, like
       `conus_adjacency_loads_real_merit_zarr`): build from the real pfaf_7 `.dbf`,
       compare `order`, `indices_0`, `indices_1` element-for-element against the
       engine-built store at the locked path; assert exactly the engine's
       cycle-removal delta; spot-check `length_m`/`slope` against
       hand-computed fills for a few COMIDs. Sample ~10 STAIDs against the
       engine-built gauges store.
-- [ ] `tests/data_zarr_store.rs`: keep, but point at a resolved/managed store once
+- [x] `tests/data_zarr_store.rs`: keep, but point at a resolved/managed store once
       available (or leave targeting the explicit-override path; decide in-task).
-- [ ] CLAUDE.md: data-sources table (adjacency rows → "managed, see
+- [x] CLAUDE.md: data-sources table (adjacency rows → "managed, see
       `.ddrs/adjacency/`"; add geospatial_fabric row), workspace-layout table
       (+ `.ddrs/adjacency/<key>/`), note that `ddrs plan` may also build adjacency
       on first run.
-- [ ] README getting-started: reflect the smaller required `data_sources` set.
+- [x] README getting-started: reflect the smaller required `data_sources` set.
 
 ---
 

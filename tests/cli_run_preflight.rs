@@ -9,8 +9,21 @@ fn run_train_requires_gpu_when_none_probed() {
     }
     use std::fs;
     let tmp = tempfile::tempdir().unwrap();
+    // Minimal adjacency store skeletons so plan's up-front layout validation
+    // passes and the GPU pre-flight (which runs after plan) is what fires.
+    let conus = tmp.path().join("conus.zarr");
+    fs::create_dir_all(&conus).unwrap();
+    fs::write(conus.join("zarr.json"), "{}").unwrap();
+    for array in ["order", "length_m", "slope", "indices_0", "indices_1"] {
+        fs::create_dir_all(conus.join(array)).unwrap();
+        fs::write(conus.join(array).join("zarr.json"), "{}").unwrap();
+    }
+    let gages = tmp.path().join("gages.zarr");
+    fs::create_dir_all(&gages).unwrap();
+    fs::write(gages.join("zarr.json"), "{}").unwrap();
+
     let cfg_path = tmp.path().join("ddrs.yaml");
-    fs::write(&cfg_path, r#"
+    fs::write(&cfg_path, format!(r#"
 mode: training
 geodataset: merit
 seed: 1
@@ -18,12 +31,12 @@ np_seed: 1
 workflow: train
 data_sources:
   attributes: /dev/null
-  conus_adjacency: /dev/null
-  gages_adjacency: /dev/null
+  conus_adjacency: {conus}
+  gages_adjacency: {gages}
   streamflow: /dev/null
   observations: /dev/null
   gages: /dev/null
-"#).unwrap();
+"#, conus = conus.display(), gages = gages.display())).unwrap();
     let ws_root = tmp.path().join(".ddrs");
     fs::create_dir_all(ws_root.join("runs")).unwrap();
     let lock = ddrs::cli::lockfile::Lockfile {

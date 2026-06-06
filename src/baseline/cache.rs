@@ -39,13 +39,30 @@ pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
 
+    // `ddrs plan` resolves adjacency (explicit or managed build) and materializes
+    // the resolved paths into the config before this runs, so these are defensive
+    // — they only fire if a caller bypasses plan with a fabric-only config.
+    let conus_adj = ds
+        .conus_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "conus_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
+        ))?;
+    let gages_adj = ds
+        .gages_adjacency
+        .as_ref()
+        .ok_or(BaselineError::ConfigMissing(
+            "gages_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
+        ))?;
     let mut h = blake3::Hasher::new();
     for p in [
         &ds.streamflow,
         &ds.observations,
         &ds.gages,
-        &ds.gages_adjacency,
-        &ds.conus_adjacency,
+        gages_adj,
+        conus_adj,
     ] {
         h.update(canonicalize_or_raw(p).as_bytes());
         h.update(b"\n");
@@ -195,6 +212,21 @@ pub fn save_cached(
         .experiment
         .as_ref()
         .ok_or(BaselineError::ConfigMissing("experiment"))?;
+    // Defensive: `ddrs plan` materializes resolved paths before save_cached runs.
+    let conus_adj = ds
+        .conus_adjacency
+        .clone()
+        .ok_or(BaselineError::ConfigMissing(
+            "conus_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
+        ))?;
+    let gages_adj = ds
+        .gages_adjacency
+        .clone()
+        .ok_or(BaselineError::ConfigMissing(
+            "gages_adjacency — adjacency not resolved; run via `ddrs plan`/`ddrs run`, \
+             or set conus_adjacency/gages_adjacency explicitly",
+        ))?;
     let manifest = CacheManifest {
         key: key.to_string(),
         n_gauges,
@@ -210,8 +242,8 @@ pub fn save_cached(
             streamflow: ds.streamflow.clone(),
             observations: ds.observations.clone(),
             gages: ds.gages.clone(),
-            gages_adjacency: ds.gages_adjacency.clone(),
-            conus_adjacency: ds.conus_adjacency.clone(),
+            gages_adjacency: gages_adj,
+            conus_adjacency: conus_adj,
             start_time: exp.start_time.clone(),
             end_time: exp.end_time.clone(),
         },
@@ -323,8 +355,9 @@ mod tests {
         cfg.seed = 0;
         cfg.data_sources = Some(DataSources {
             attributes: PathBuf::from("/dev/null/attrs.nc"),
-            conus_adjacency: PathBuf::from("/dev/null/conus.zarr"),
-            gages_adjacency: PathBuf::from("/dev/null/gages_adj.zarr"),
+            conus_adjacency: Some(PathBuf::from("/dev/null/conus.zarr")),
+            gages_adjacency: Some(PathBuf::from("/dev/null/gages_adj.zarr")),
+            geospatial_fabric: None,
             streamflow: PathBuf::from("/dev/null/sf.ic"),
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),
@@ -403,5 +436,46 @@ mod tests {
             .join(format!("ddrs_baseline_missing_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         assert!(load_cached(&tmp, "deadbeefdeadbeef").is_none());
+    }
+
+    /// When adjacency paths are absent (fabric-only config, pre-Task 7),
+    /// `cache_key` must return `Err` rather than panicking.
+    #[test]
+    fn cache_key_returns_err_when_adjacency_absent() {
+        use crate::config::{DataSources, Experiment};
+        let mut cfg = Config::default();
+        cfg.mode = "testing".into();
+        cfg.seed = 0;
+        cfg.data_sources = Some(DataSources {
+            attributes: PathBuf::from("/dev/null/attrs.nc"),
+            conus_adjacency: None,      // ← fabric-only config
+            gages_adjacency: None,
+            geospatial_fabric: Some(PathBuf::from("/dev/null/fabric.shp")),
+            streamflow: PathBuf::from("/dev/null/sf.ic"),
+            observations: PathBuf::from("/dev/null/obs.ic"),
+            gages: PathBuf::from("/dev/null/gages.csv"),
+        });
+        cfg.experiment = Some(Experiment {
+            batch_size: 1,
+            start_time: "2000/01/01".into(),
+            end_time: "2000/01/03".into(),
+            epochs: 1,
+            rho: None,
+            shuffle: false,
+            warmup: 0,
+            learning_rate: Default::default(),
+            grad_clip_max_norm: None,
+            checkpoint: None,
+        });
+        let result = cache_key(&cfg);
+        assert!(
+            result.is_err(),
+            "cache_key must return Err when adjacency paths are absent"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("conus_adjacency"),
+            "error message should mention conus_adjacency, got: {msg}"
+        );
     }
 }

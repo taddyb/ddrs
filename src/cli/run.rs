@@ -8,8 +8,8 @@ use burn::backend::Autodiff;
 use burn_cuda::Cuda;
 
 use crate::cli::{
-    manifest::{GitInfo, Manifest, RunOutputs, SourceLockRef},
-    plan::{plan, PlanResult},
+    manifest::{GitInfo, Manifest, ResolvedAdjacencyRef, RunOutputs, SourceLockRef},
+    plan::{apply_resolved, plan, PlanResult},
     types::{RunStatus, Workflow},
     workspace::Workspace,
 };
@@ -121,6 +121,12 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
         exit_reason,
         system: Default::default(),
         sources: pr.sources.clone(),
+        resolved_adjacency: Some(ResolvedAdjacencyRef {
+            conus: pr.resolved_adjacency.conus.clone(),
+            gages: pr.resolved_adjacency.gages.clone(),
+            cache_key: pr.resolved_adjacency.cache_key.clone(),
+            cache_hit: pr.resolved_adjacency.cache_hit,
+        }),
         source_lock: SourceLockRef {
             lockfile: input.workspace.lockfile(),
             matched: pr.drift.is_empty(),
@@ -132,6 +138,19 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     };
     manifest.write_atomic(&run_dir.join("manifest.json"))?;
     Ok(run_dir)
+}
+
+/// Materialize the plan's resolved adjacency paths into a freshly-parsed
+/// config. `dispatch` re-reads the config file from disk per phase, so the
+/// re-parsed config carries the ORIGINAL (possibly absent) adjacency keys; this
+/// threads the paths `plan` resolved so the dataset/baseline open the same
+/// stores. Mutates only this in-memory copy — the on-disk snapshot is the
+/// untouched original (`fs::copy(config_path, …)` above).
+///
+/// Delegates to `plan::apply_resolved` — the canonical implementation lives
+/// there, next to `ResolvedAdjacency`.
+fn apply_resolved_adjacency(cfg: &mut Config, pr: &PlanResult) {
+    apply_resolved(cfg, &pr.resolved_adjacency);
 }
 
 fn workflow_slug(w: Workflow) -> &'static str {
@@ -205,8 +224,9 @@ fn dispatch(
                 let device = cubecl::cuda::CudaDevice::new(pr.config.device);
                 let phase1_start = Instant::now();
 
-                let train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
+                let mut train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
+                apply_resolved_adjacency(&mut train_cfg, pr);
                 let train_dataset = MeritGagesDataset::open(&train_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -267,8 +287,9 @@ fn dispatch(
 
                 // --- Phase 1: training ---
                 let phase1_start = Instant::now();
-                let train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
+                let mut train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
+                apply_resolved_adjacency(&mut train_cfg, pr);
                 let train_dataset = MeritGagesDataset::open(&train_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -310,8 +331,9 @@ fn dispatch(
 
                 // --- Phase 2: testing ---
                 let phase2_start = Instant::now();
-                let test_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Testing)
+                let mut test_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Testing)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
+                apply_resolved_adjacency(&mut test_cfg, pr);
                 let test_dataset = MeritGagesDataset::open(&test_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 

@@ -36,6 +36,24 @@ falls back to CPU otherwise — so the install path works on laptops and CI.
 The bundled `config/merit_training.yaml` is the editor template; the
 `workflow:` key is already set to `train-and-test`.
 
+The adjacency stores are **managed**, so `data_sources` only needs the raw
+inputs:
+
+```yaml
+data_sources:
+  geospatial_fabric: /path/to/riv_pfaf_7_..._bugfix1.shp  # MERIT flowlines (.dbf read)
+  attributes:        /path/to/merit_global_attributes_v2.nc
+  streamflow:        /path/to/merit_dhbv2_UH_retrospective.ic
+  observations:      /path/to/usgs_daily_observations
+  gages:             /path/to/gages_3000.csv
+```
+
+On the first `ddrs plan`, the CONUS and per-gauge adjacency zarr stores are
+built from the fabric's `.dbf` into `.ddrs/adjacency/<key>/` (~10 s,
+content-addressed and reused afterwards). If you already have pre-built zarr
+stores, drop `geospatial_fabric` and set both `conus_adjacency` and
+`gages_adjacency` to their paths instead.
+
 ### What lives where
 
 | Path | Written by | Purpose |
@@ -43,6 +61,7 @@ The bundled `config/merit_training.yaml` is the editor template; the
 | `ddrs.yaml` | `ddrs init` (via `$EDITOR`) | Workflow + experiment config |
 | `.ddrs/system.json` | `ddrs init` | GPU/driver/smoke-test record |
 | `.ddrs/sources.lock` | `ddrs init` | Fingerprints of `data_sources` paths |
+| `.ddrs/adjacency/<key>/` | `ddrs plan` (managed build) | Cached CONUS + gauges adjacency zarr stores |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
 | `output/predictions_latest.zarr` | `ddrs run --workflow eval` / `train-and-test` Phase 2 | Predictions for plotting |
 | `output/saved_models_*/epoch_*_mb_*.mpk` | `ddrs run --workflow train` / `train-and-test` Phase 1 | KAN checkpoints |

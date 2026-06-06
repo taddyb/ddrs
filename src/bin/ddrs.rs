@@ -93,6 +93,19 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             } else {
                 println!("workflow {:?}", pr.workflow);
                 println!("drift    {:?}", pr.drift);
+                let ra = &pr.resolved_adjacency;
+                println!("adjacency");
+                println!("  conus  {}", ra.conus.display());
+                println!("  gages  {}", ra.gages.display());
+                if let Some(ref key) = ra.cache_key {
+                    println!(
+                        "  cache  {} ({})",
+                        key,
+                        if ra.cache_hit == Some(true) { "hit" } else { "built" },
+                    );
+                } else {
+                    println!("  cache  (explicit paths — no managed build)");
+                }
                 if let Some(ref b) = pr.baseline {
                     ddrs::baseline::print_metrics_summary(&b.metrics, b.n_gauges);
                     eprintln!(
@@ -141,6 +154,11 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                     if dry_run { "would delete" } else { "deleted" },
                     p.display(),
                 );
+            }
+            // Adjacency caches are content-addressed and expensive to rebuild;
+            // v1 gc never touches them (key-based GC is a follow-up).
+            if ws.root().join("adjacency").is_dir() {
+                println!("note: .ddrs/adjacency/ caches are kept (not pruned by gc in v1)");
             }
             Ok(())
         }

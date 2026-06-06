@@ -43,6 +43,18 @@ pub struct GitInfo {
     pub branch: String,
 }
 
+/// Resolved adjacency stores the run opened, recorded for provenance.
+/// `cache_key`/`cache_hit` are `Some` only for managed (fabric) builds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAdjacencyRef {
+    pub conus: PathBuf,
+    pub gages: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLockRef {
     pub lockfile: PathBuf,
@@ -77,6 +89,8 @@ pub struct Manifest {
     pub exit_reason: Option<String>,
     pub system: SystemProbe,
     pub sources: BTreeMap<String, Fingerprint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_adjacency: Option<ResolvedAdjacencyRef>,
     pub source_lock: SourceLockRef,
     pub outputs: RunOutputs,
     pub metrics: serde_json::Value,
