@@ -10,10 +10,35 @@ use ddrs::cli::workspace::{discover_config, Workspace};
 use ddrs::cli::{CliError, ExitCode, Workflow};
 
 #[derive(Parser)]
-#[command(name = "ddrs", about = "Differentiable Distributed Routing")]
+#[command(
+    name = "ddrs",
+    about = "Differentiable Distributed Routing — train and evaluate a \
+             Muskingum-Cunge routing model with a KAN parameter head",
+    after_help = "\
+LIFECYCLE:
+    ddrs plan    Prepare + preview: probes the GPU (first run only), bootstraps
+                 ddrs.yaml if missing, locks data sources, validates the config,
+                 and builds adjacency/baseline caches. Idempotent — run anytime.
+    ddrs run     Execute a workflow. Re-plans internally, then trains/evaluates.
+    ddrs show    Inspect a past run's manifest.
+    ddrs status  Workspace summary + disk usage.
+    ddrs gc      Prune old runs from .ddrs/runs/.
+
+WORKFLOWS (--workflow flag, or the `workflow:` key in ddrs.yaml):
+    train           Train the KAN head            (needs `mode: training`)
+    eval            Evaluate a checkpoint         (needs `mode: testing`)
+    train-and-test  Train, evaluate, and compare vs. the summed-Q' baseline
+
+STARTING FRESH:
+    rm ddrs.yaml && ddrs plan — you'll be asked whether to start from your
+    last successful run's config or the clean bundled template."
+)]
 struct Cli {
+    /// Path to the experiment config (default: discover ddrs.yaml upward
+    /// from the current directory, stopping at the first .git ancestor).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+    /// Workspace directory (default: .ddrs/ beside the config).
     #[arg(long, global = true)]
     workspace: Option<PathBuf>,
     #[command(subcommand)]
@@ -30,29 +55,60 @@ enum Cmd {
         #[arg(long, hide = true)] force: bool,
         #[arg(long, default_value_t = 8.0, hide = true)] min_free_gpu_gb: f32,
     },
+    /// Prepare the workspace and preview the workflow: GPU probe + cached
+    /// smoke test, ddrs.yaml bootstrap, data-source locking, config
+    /// validation, adjacency/baseline cache builds. Idempotent.
     Plan {
+        /// Override the `workflow:` key in ddrs.yaml for this invocation.
         #[arg(long, value_enum)] workflow: Option<Workflow>,
+        /// Print the plan result as JSON instead of human-readable text.
         #[arg(long)] json: bool,
+        /// Re-run the GPU smoke test even if a cached verdict exists.
         #[arg(long)] force: bool,
+        /// Warn when free GPU memory at probe time is below this many GB.
         #[arg(long, default_value_t = 8.0)] min_free_gpu_gb: f32,
     },
+    /// Execute a workflow: re-plans, then trains and/or evaluates, writing
+    /// checkpoints + manifest to .ddrs/runs/<id>/.
     Run {
+        /// Override the `workflow:` key in ddrs.yaml for this invocation.
         #[arg(long, value_enum)] workflow: Option<Workflow>,
+        /// After a successful run, dump per-COMID KAN parameters to
+        /// plot/kan_parameters.nc (NetCDF).
         #[arg(long)] plot: bool,
+        /// Exit with code 4 if data sources changed since the last plan,
+        /// instead of warning and relocking.
         #[arg(long)] strict: bool,
+        /// Stop each training epoch after this many mini-batches (debugging).
         #[arg(long)] max_mini_batches: Option<usize>,
         /// Replay a captured mini-batch order from JSON (matched-batch parity
         /// experiment). When set, overrides the default per-epoch shuffle.
         /// JSON schema: array of {"epoch": int, "mb": int, "staids": [str, ...]}.
         #[arg(long, value_name = "PATH")] batch_order_from: Option<PathBuf>,
+        /// Print the run result as JSON instead of human-readable text.
         #[arg(long)] json: bool,
     },
-    Show { run_id: String, #[arg(long)] json: bool },
-    Status { #[arg(long)] json: bool },
+    /// Inspect a past run's manifest.
+    Show {
+        /// Run ID under .ddrs/runs/ (list them with `ddrs status`).
+        run_id: String,
+        /// Print the manifest as JSON.
+        #[arg(long)] json: bool,
+    },
+    /// Summarize the workspace: runs, lockfile state, disk usage.
+    Status {
+        /// Print the summary as JSON.
+        #[arg(long)] json: bool,
+    },
+    /// Delete old run directories from .ddrs/runs/.
     Gc {
+        /// Keep the N most recent runs.
         #[arg(long)] keep: Option<usize>,
+        /// Never delete successful runs.
         #[arg(long)] keep_successful: bool,
+        /// Only delete runs older than this duration (e.g. "30d", "12h").
         #[arg(long)] older_than: Option<String>,
+        /// List what would be deleted without deleting anything.
         #[arg(long)] dry_run: bool,
     },
 }

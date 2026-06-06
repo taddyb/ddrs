@@ -32,8 +32,11 @@ pub enum ConfigMode {
 #[serde(rename_all = "kebab-case")]
 #[clap(rename_all = "kebab-case")]
 pub enum Workflow {
+    /// Train the KAN head (requires `mode: training`).
     Train,
+    /// Evaluate a trained checkpoint over the testing window (requires `mode: testing`).
     Eval,
+    /// Train, then evaluate, then compare against the summed-Q' baseline.
     TrainAndTest,
 }
 
