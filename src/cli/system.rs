@@ -1,8 +1,12 @@
+use std::fs;
+use std::path::Path;
+
 use chrono::SecondsFormat;
 use cudarc::driver::{result, CudaContext};
 
 use crate::cli::CliError;
 use crate::cli::manifest::{SmokeTestRecord, SystemProbe};
+use crate::cli::workspace::Workspace;
 
 /// In-process GPU probe via cudarc. Returns `Ok(None)` when no CUDA device
 /// is present (so the caller can present a remediation hint).
@@ -92,4 +96,83 @@ pub fn record_smoke(probe: &mut SystemProbe, key: String, backend: &str) {
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         backend: Some(backend.to_string()),
     });
+}
+
+/// Result of [`ensure_system_ready`].
+pub struct SystemReadiness {
+    pub probe: SystemProbe,
+    pub smoke_passed: bool,
+    pub smoke_reused: bool,
+}
+
+/// Ensure the workspace skeleton exists and the GPU probe + smoke test are
+/// recorded in `.ddrs/system.json`. Idempotent: a cached smoke verdict
+/// (keyed by [`smoke_key`]) is reused unless `force` is set. This is the
+/// former `ddrs init` Phase A, now the first step of `ddrs plan`.
+pub fn ensure_system_ready(
+    ws: &Workspace,
+    force: bool,
+    min_free_gpu_gb: f32,
+    skip_smoke: bool,
+) -> Result<SystemReadiness, CliError> {
+    let mut probe = probe()?.unwrap_or_default();
+    if probe.free_gpu_gb_at_probe < min_free_gpu_gb && probe.free_gpu_gb_at_probe > 0.0 {
+        eprintln!(
+            "warning: free GPU memory {:.1} GB is below floor {} GB",
+            probe.free_gpu_gb_at_probe, min_free_gpu_gb
+        );
+    }
+    fs::create_dir_all(ws.runs_dir())?;
+    fs::write(ws.version_file(), env!("CARGO_PKG_VERSION"))?;
+
+    // Pick backend up-front so the cache key matches the work we'd do.
+    let backend = if probe.gpu.is_empty() { "cpu" } else { "cuda" };
+    let key = smoke_key(&probe, backend);
+    let cached_passing = SystemProbe::read(&ws.system_json())
+        .ok()
+        .and_then(|p| p.smoke_test)
+        .map(|s| s.key == key)
+        .unwrap_or(false);
+    let (smoke_passed, smoke_reused) = if skip_smoke {
+        // Don't claim "reused" if there's no prior record — just "passed".
+        (true, cached_passing)
+    } else if cached_passing && !force {
+        (true, true)
+    } else {
+        let (ok, _b) = run_smoke(&probe)?;
+        (ok, false)
+    };
+    if smoke_passed && !smoke_reused {
+        record_smoke(&mut probe, key, backend);
+    } else if smoke_reused {
+        // Preserve the prior smoke_test record.
+        if let Ok(prior) = SystemProbe::read(&ws.system_json()) {
+            probe.smoke_test = prior.smoke_test;
+        }
+    }
+    probe.write_atomic(&ws.system_json())?;
+    Ok(SystemReadiness { probe, smoke_passed, smoke_reused })
+}
+
+fn run_smoke(probe: &SystemProbe) -> Result<(bool, &'static str), CliError> {
+    let inputs = crate::sandbox::load_embedded()
+        .or_else(|_| crate::sandbox::load_from_dir(Path::new("fixtures/sandbox")))?;
+    if probe.gpu.is_empty() {
+        eprintln!("no CUDA detected — running CPU smoke (slower but functionally equivalent)");
+        type I = burn::backend::NdArray<f32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
+        Ok((r.passed, "cpu"))
+    } else {
+        type I = burn_cuda::Cuda<f32, i32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
+        Ok((r.passed, "cuda"))
+    }
+}
+
+/// Test-only re-export so integration tests can drive the backend selection.
+#[doc(hidden)]
+pub fn run_smoke_for_test(probe: &SystemProbe) -> Result<(bool, &'static str), CliError> {
+    run_smoke(probe)
 }

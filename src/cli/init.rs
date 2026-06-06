@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use crate::cli::{
     fingerprint::fingerprint_path,
     lockfile::Lockfile,
-    manifest::SystemProbe,
     system,
     workspace::Workspace,
 };
@@ -42,42 +41,10 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     let ws = Workspace::with_root(&input.workspace);
 
     // ── Phase A: install-level probes (no config required) ─────────────
-    let mut probe = system::probe()?.unwrap_or_default();
-    if probe.free_gpu_gb_at_probe < input.min_free_gpu_gb && probe.free_gpu_gb_at_probe > 0.0 {
-        eprintln!(
-            "warning: free GPU memory {:.1} GB is below floor {} GB",
-            probe.free_gpu_gb_at_probe, input.min_free_gpu_gb
-        );
-    }
-    fs::create_dir_all(ws.runs_dir())?;
-    fs::write(ws.version_file(), env!("CARGO_PKG_VERSION"))?;
-
-    // Pick backend up-front so the cache key matches the work we'd do.
-    let backend = if probe.gpu.is_empty() { "cpu" } else { "cuda" };
-    let key = system::smoke_key(&probe, backend);
-    let cached_passing = SystemProbe::read(&ws.system_json())
-        .ok()
-        .and_then(|p| p.smoke_test)
-        .map(|s| s.key == key)
-        .unwrap_or(false);
-    let (smoke_passed, smoke_reused) = if input.skip_smoke {
-        // Don't claim "reused" if there's no prior record — just "passed".
-        (true, cached_passing)
-    } else if cached_passing && !input.force {
-        (true, true)
-    } else {
-        let (ok, _b) = run_smoke(&probe)?;
-        (ok, false)
-    };
-    if smoke_passed && !smoke_reused {
-        system::record_smoke(&mut probe, key, backend);
-    } else if smoke_reused {
-        // Preserve the prior smoke_test record.
-        if let Ok(prior) = SystemProbe::read(&ws.system_json()) {
-            probe.smoke_test = prior.smoke_test;
-        }
-    }
-    probe.write_atomic(&ws.system_json())?;
+    let ready = system::ensure_system_ready(
+        &ws, input.force, input.min_free_gpu_gb, input.skip_smoke,
+    )?;
+    let (smoke_passed, smoke_reused) = (ready.smoke_passed, ready.smoke_reused);
 
     // ── Phase D: bootstrap ddrs.yaml if missing (interactive) ─────────
     let config_path = input.config_path.or_else(|| {
@@ -174,29 +141,10 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     Ok(InitOutput { smoke_passed, smoke_reused })
 }
 
-fn run_smoke(probe: &crate::cli::manifest::SystemProbe)
-    -> Result<(bool, &'static str), CliError>
-{
-    let inputs = crate::sandbox::load_embedded()
-        .or_else(|_| crate::sandbox::load_from_dir(Path::new("fixtures/sandbox")))?;
-    if probe.gpu.is_empty() {
-        eprintln!("no CUDA detected — running CPU smoke (slower but functionally equivalent)");
-        type I = burn::backend::NdArray<f32>;
-        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
-        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
-        Ok((r.passed, "cpu"))
-    } else {
-        type I = burn_cuda::Cuda<f32, i32>;
-        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
-        let r = crate::sandbox::smoke::<I>(&inputs, &device)?;
-        Ok((r.passed, "cuda"))
-    }
-}
-
-/// Test-only re-export so integration tests can drive the backend selection.
+/// Test-only forwarder (the implementation moved to `cli::system`).
 #[doc(hidden)]
 pub fn run_smoke_for_test(probe: &crate::cli::manifest::SystemProbe)
     -> Result<(bool, &'static str), CliError>
 {
-    run_smoke(probe)
+    crate::cli::system::run_smoke_for_test(probe)
 }
