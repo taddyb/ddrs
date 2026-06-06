@@ -5,7 +5,12 @@
 //! produced by running the real `ddr_engine` pipeline (rustworkx 0.17.1
 //! `build_upstream_dict` → `build_graph` → `topological_sort`) on the same
 //! synthetic networks, so these tests pin element-for-element parity with the
-//! engine (the Task 8 contract) on small graphs.
+//! engine on small graphs (where the engine's polars `group_by` edge order is
+//! incidentally stable).
+//!
+//! NOTE: element-for-element `order` parity does NOT hold at CONUS scale — the
+//! engine's stored order is a non-deterministic polars-`group_by` artifact. The
+//! structural invariants that do hold are asserted in `tests/adjacency_parity.rs`.
 
 use ddrs::adjacency::build::{build_conus_adjacency, BuildError};
 use ddrs::adjacency::dbf::FlowpathRecord;

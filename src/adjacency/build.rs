@@ -4,8 +4,21 @@
 //! (`engine/src/ddr_engine/merit/build.py:20-107`) and its graph helpers in
 //! `engine/src/ddr_engine/merit/graph.py` (`build_upstream_dict:9-52`,
 //! `build_graph:55-86`). The output `order` / `indices_0` / `indices_1` arrays
-//! must match the engine element-for-element so the zarr the engine writes and
-//! the zarr this builder writes are interchangeable (Task 8 parity test).
+//! describe the SAME graph the engine writes (identical node set, edge set, and
+//! cycle drops), so the two zarr stores are interchangeable for routing.
+//!
+//! ## Topological order is NOT byte-identical to the engine store (Task 8)
+//!
+//! The synthetic tests (`tests/adjacency_build.rs`) pin element-for-element
+//! `order` parity on small graphs, but the real CONUS engine store's `order` is
+//! a *different valid permutation* of ours — see `tests/adjacency_parity.rs`.
+//! Root cause: the engine's `build_upstream_dict` returns a dict whose edge
+//! iteration order is polars `group_by` order (hash-based, non-deterministic),
+//! and rustworkx's `topological_sort` tie-breaks on edge-insertion order. The
+//! engine's stored order is therefore an irreproducible artifact of one polars
+//! run. Our LIFO-Kahn order (below) is deterministic and equally valid; the
+//! load-bearing invariants are structural (node/edge sets, lower-triangular,
+//! cycle drops), which `adjacency_parity.rs` asserts.
 //!
 //! ## Topological-sort parity
 //!
