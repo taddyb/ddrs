@@ -180,22 +180,22 @@ README.md                       # getting-started: adjacency now managed
 
 ## Task 7: plan resolution + run integration
 
-- [ ] `src/cli/plan.rs`: replace the step-6 validation stub:
+- [x] `src/cli/plan.rs`: replace the step-6 validation stub:
       - explicit adjacency paths → open both stores, verify every required array
         exists up front; on failure name the missing array and suggest either
         removing the keys (managed build) or repairing the store;
       - keys absent → cache lookup by key; hit → reuse; miss → build with a
         `log`-style progress line ("building MERIT adjacency from <dbf> — first
         run takes ~1–2 min"). Same side-effectful-plan precedent as the Q' baseline.
-- [ ] `PlanResult` gains `resolved_adjacency { conus: PathBuf, gages: PathBuf, cache_key: Option<String>, cache_hit: Option<bool> }`;
+- [x] `PlanResult` gains `resolved_adjacency { conus: PathBuf, gages: PathBuf, cache_key: Option<String>, cache_hit: Option<bool> }`;
       plan's human output prints it.
-- [ ] Baseline + dataset paths consume the **resolved** paths (the baseline cache
+- [x] Baseline + dataset paths consume the **resolved** paths (the baseline cache
       key in `src/baseline/cache.rs` hashes these path strings — resolved cache
       paths flow in automatically; a rebuild under a new key correctly invalidates
       the baseline).
-- [ ] `src/cli/run.rs` + `manifest.rs`: run manifest records resolved paths +
+- [x] `src/cli/run.rs` + `manifest.rs`: run manifest records resolved paths +
       adjacency cache key; `ddrs show` displays them.
-- [ ] `ddrs status`/`gc`: report `.ddrs/adjacency/` disk usage; `gc` leaves
+- [x] `ddrs status`/`gc`: report `.ddrs/adjacency/` disk usage; `gc` leaves
       adjacency caches alone in v1 (document; key-based GC is a follow-up).
 
 ## Task 8: parity tests & docs
