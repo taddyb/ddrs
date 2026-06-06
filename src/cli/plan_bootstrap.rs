@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -57,8 +57,49 @@ struct ManifestStatusOnly {
 
 fn pick_source(input: &BootstrapInput) -> Result<BootstrapSource, CliError> {
     match latest_successful_run(&input.runs_dir)? {
-        Some(p) => Ok(BootstrapSource::LastSuccessful(p)),
+        Some(p) => {
+            if input.interactive {
+                let stdin = std::io::stdin();
+                let mut lock = stdin.lock();
+                choose_source(&mut lock, p)
+            } else {
+                // Non-interactive callers (tests) keep the historical
+                // last-run preference.
+                Ok(BootstrapSource::LastSuccessful(p))
+            }
+        }
         None => Ok(BootstrapSource::Template),
+    }
+}
+
+/// Interactive source selection, split out with an injectable reader so
+/// tests can drive it without a TTY. Empty input defaults to [1] (last run).
+pub fn choose_source(
+    reader: &mut impl BufRead,
+    last_run_config: PathBuf,
+) -> Result<BootstrapSource, CliError> {
+    let run_id = last_run_config
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_string();
+    loop {
+        eprintln!("No ddrs.yaml found. Start from:");
+        eprintln!("  [1] config of last successful run ({run_id})");
+        eprintln!("  [2] clean template (config/merit_training.yaml)");
+        eprint!("> ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            // EOF mid-prompt — fall back to the historical default.
+            return Ok(BootstrapSource::LastSuccessful(last_run_config));
+        }
+        match line.trim() {
+            "" | "1" => return Ok(BootstrapSource::LastSuccessful(last_run_config)),
+            "2" => return Ok(BootstrapSource::Template),
+            other => eprintln!("unrecognized choice {other:?} — enter 1 or 2"),
+        }
     }
 }
 
