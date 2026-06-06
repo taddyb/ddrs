@@ -74,6 +74,21 @@ If you regenerate fixtures, V1 must still pass. If it suddenly fails
 after regeneration, DDR's solver moved — investigate the DDR diff
 before touching ddrs.
 
+> **The reference DDR state is NOT a pushed commit (as of 2026-06-06).**
+> The port mirrors the desktop checkout of `~/projects/ddr`, which
+> contains unpushed work — notably `src/ddr/geometry/trapezoidal.py`
+> (the source of ddrs's `src/geometry.rs`), which exists at *no* commit
+> in DDR's public history. DDR-at-HEAD instead *learns*
+> `top_width`/`side_slope` (sandbox: denorm(0.5) log-space), while ddrs
+> derives them Leopold-Maddock-style (`top_width = p·depth^q`).
+> Regenerating the fixture from a clean DDR clone therefore produces a
+> ~1%-divergent reference (max abs ≈ 0.55 m³/s, NSE ≈ 0.9996) at
+> *every* ddrs commit — that is a wrong-reference artifact, not a port
+> bug. Until the DDR-side geometry work is pushed, only the desktop's
+> DDR tree generates a valid V1 fixture. See
+> `docs/superpowers/plans/2026-06-06-sigfpe-wukong-debug-handoff.md`
+> §Outcome for the full investigation.
+
 ## When V1 fails
 
 The example's own `output/ddrs_vs_ddr.csv` is the first diagnostic.

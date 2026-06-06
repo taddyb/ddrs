@@ -26,15 +26,15 @@ setup; everything downstream just works.
 
 2. **The `taddyb/cubecl` fork on branch `ddrs-release`.** The
    `[patch.crates-io]` block in `Cargo.toml` redirects every
-   `cubecl-*` and `burn-*` crate to local clones under
-   `/home/tbindas/projects/cubecl/crates/` and
-   `/home/tbindas/projects/burn/crates/`:
+   `cubecl-*` and `burn-*` crate to the forks pinned as git
+   dependencies — no local clones required, `git clone && cargo build`
+   works as-is:
 
    ```toml
    [patch.crates-io]
-   cubecl         = { path = "/home/tbindas/projects/cubecl/crates/cubecl" }
-   cubecl-cuda    = { path = "/home/tbindas/projects/cubecl/crates/cubecl-cuda" }
-   cubecl-common  = { path = "/home/tbindas/projects/cubecl/crates/cubecl-common" }
+   cubecl         = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+   cubecl-cuda    = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
+   cubecl-common  = { git = "https://github.com/taddyb/cubecl.git", branch = "ddrs-release" }
    # ...one entry per cubecl-* and burn-* crate
    ```
 
@@ -51,18 +51,21 @@ setup; everything downstream just works.
      without the `cuEventSynchronize` call that would invalidate a
      stream mid-capture.
 
-3. **CUDA Toolkit 12+ with driver 595+** for the GPU path. ddrs's
-   current `config/merit_training.yaml` defaults to `sparse_solver:
-   cuda` and `use_cuda_graphs: true`, so the GPU path is exercised on
-   every default training run. The CPU path needs none of this — it
-   uses `burn-ndarray` and runs end-to-end without a single CUDA call.
-   The unit tests under `cargo test` exercise the CPU path and pass on
-   a CUDA-less machine.
+3. **CUDA Toolkit 12+ with a CUDA-12-capable driver** for the GPU
+   path; validated on driver 575.57.08 (8× A100, sm_80) and a desktop
+   RTX 4080. ddrs's current `config/merit_training.yaml` defaults to
+   `sparse_solver: cuda` and `use_cuda_graphs: true`, so the GPU path
+   is exercised on every default training run. The CPU path needs none
+   of this — it uses `burn-ndarray` and runs end-to-end without a
+   single CUDA call. The unit tests under `cargo test` exercise the
+   CPU path and pass on a CUDA-less machine.
 
-4. **DDR reference repository** at `/home/tbindas/projects/ddr` for V1
-   fixture regeneration. `scripts/export_ddr_sandbox.py` runs under
-   DDR's `uv` venv to produce the six CSVs that
-   `examples/compare_ddr_sandbox.rs` reads back to verify the port.
+4. **DDR reference repository** at `~/projects/ddr` for V1 fixture
+   regeneration. `scripts/export_ddr_sandbox.py` runs under DDR's `uv`
+   venv to produce the six CSVs that `examples/compare_ddr_sandbox.rs`
+   reads back to verify the port. NB: a valid V1 fixture currently
+   requires the desktop's DDR working tree — see
+   [Comparing to DDR](reference/ddr-comparison.md).
 
 ## Data file paths
 

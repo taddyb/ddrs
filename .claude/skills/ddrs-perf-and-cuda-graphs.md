@@ -205,6 +205,20 @@ left by the un-captured backward.
    The captured kernel sequence assumes the cuSPARSE path; the CPU sparse
    solver has nothing to capture. No error is raised — the run just
    degrades to SP-8 fusion only.
+7. **cuSPARSE dispatches into the thread-current CUDA context — on
+   multi-GPU hosts that context can belong to the wrong device.** cubecl
+   only sets the calling thread's context when it first *creates* a client
+   for a device; afterwards command execution re-binds inside cubecl's
+   server, not on the caller. Once a second device has been touched in the
+   process, a cuSPARSE call can run under device A's context with device
+   B's buffers/stream and die with an integer divide-by-zero (SIGFPE)
+   inside `cusparseSpSV_solve`. `ensure_cuda_cache` therefore calls
+   `bind_primary_context` (src/sparse/cusparse.rs) on every call — all
+   raw-cuSPARSE entry points pass through it. Graph capture/replay bind
+   the context themselves. Never add a cuSPARSE call path that bypasses
+   `ensure_cuda_cache` without binding the target device's primary
+   context first. Regression test: `tests/device_selection.rs` (needs
+   ≥2 GPUs; skips otherwise).
 
 ## Verification
 

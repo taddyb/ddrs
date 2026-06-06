@@ -17,9 +17,9 @@ sources:
 
 ddrs has four external dependencies the build resolves against:
 1. **Rust stable** (≥ 1.80; tested on 1.94.0).
-2. **The taddyb/cubecl fork** at `/home/tbindas/projects/cubecl` on branch `ddrs-release`. Patched into ddrs's `[patch.crates-io]` block in `Cargo.toml`. Carries three ddrs-specific patches over upstream cubecl 0.10: stream accessor, exclusive_with_server, flush_no_sync.
-3. **CUDA Toolkit 12+ with driver 595+** for the GPU path (`sparse_solver: cuda` + `use_cuda_graphs: true` defaults in `config/merit_training.yaml`). The CPU path needs none of this and uses `burn-ndarray`.
-4. **DDR reference repository** at `/home/tbindas/projects/ddr` for V1 fixture regeneration (`scripts/export_ddr_sandbox.py` runs under DDR's `uv` venv).
+2. **The taddyb/cubecl fork**, pinned as a git dependency (`github.com/taddyb/cubecl`, branch `ddrs-release`) via ddrs's `[patch.crates-io]` block in `Cargo.toml` — no local clone required. Carries three ddrs-specific patches over upstream cubecl 0.10: stream accessor, exclusive_with_server, flush_no_sync.
+3. **CUDA Toolkit 12+ with a CUDA-12-capable driver** for the GPU path (`sparse_solver: cuda` + `use_cuda_graphs: true` defaults in `config/merit_training.yaml`); validated on driver 575.57.08 (8× A100, sm_80) and a desktop RTX 4080. The CPU path needs none of this and uses `burn-ndarray`.
+4. **DDR reference repository** at `~/projects/ddr` for V1 fixture regeneration (`scripts/export_ddr_sandbox.py` runs under DDR's `uv` venv). NB: a valid V1 fixture currently requires the desktop's DDR working tree — see `.claude/skills/ddrs-comparing-to-ddr.md` §Regenerating fixtures.
 
 ## Data file paths
 

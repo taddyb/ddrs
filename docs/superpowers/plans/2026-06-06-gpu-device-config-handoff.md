@@ -4,6 +4,15 @@
 **Status:** implementation complete; validation IN PROGRESS — blocked on a
 SIGFPE in the new integration test (undiagnosed, see "Where it stands").
 
+> **UPDATE (2026-06-06, later wukong session):** the SIGFPE is root-caused
+> and FIXED (commit `2bba409` — thread-current CUDA context vs cuSPARSE on
+> multi-GPU; `bind_primary_context` in `ensure_cuda_cache`).
+> `device_selection` passes all 3 stages on wukong. The remaining checklist
+> items below are updated in
+> `2026-06-06-sigfpe-wukong-debug-handoff.md` §Outcome — parity gate and
+> the `device: 1` end-to-end are BLOCKED by wukong data / unpushed
+> desktop-DDR state, not by this feature.
+
 ## Goal (user request, verbatim intent)
 
 > There must be a config setting for setting the GPU device. Currently this
