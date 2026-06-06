@@ -636,11 +636,12 @@ mod tests {
                 }
             }
             // Adjacency zarr required to open MeritGagesDataset; skip if not
-            // configured (fabric-only config awaits Task 7 managed build).
+            // configured (fabric-only configs resolve managed paths via
+            // `ddrs plan`, which this test doesn't run).
             for opt in &[&ds.conus_adjacency, &ds.gages_adjacency] {
                 match opt {
                     None => {
-                        eprintln!("skipping: adjacency zarr path not configured (managed build not yet available)");
+                        eprintln!("skipping: adjacency zarr path not configured (test does not run the managed build)");
                         return;
                     }
                     Some(p) if !p.exists() => {

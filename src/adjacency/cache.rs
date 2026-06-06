@@ -101,9 +101,10 @@ struct CacheManifest {
 /// `workspace_root` is the ddrs workspace root (`.ddrs/..` parent); the cache
 /// lands at `<workspace_root>/adjacency/<key>/`.
 ///
-/// On a cache miss the build takes ~1–2 min on real MERIT data (108 MB dbf +
-/// ~3 000 BFS traversals + zarr writes). A progress line is printed before
-/// the build begins so the user knows it is not hung.
+/// On a cache miss the build takes ~10 s on real MERIT data (108 MB dbf +
+/// ~3 000 BFS traversals + zarr writes; measured ~2 s on an NVMe host). A
+/// progress line is printed before the build begins so the user knows it is
+/// not hung.
 pub fn resolve_or_build(
     workspace_root: &Path,
     fabric: &Path,
@@ -129,7 +130,7 @@ pub fn resolve_or_build(
 
     // --- 3. Cache miss: build into a temp dir then rename -------------------
     println!(
-        "  building MERIT adjacency from {} — first run takes ~1-2 min",
+        "  building MERIT adjacency from {} — first run takes ~10 s",
         dbf_path.display()
     );
 
