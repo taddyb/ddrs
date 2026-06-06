@@ -81,12 +81,59 @@ pub struct PlanSummary {
     pub gpu_mem_gb_upper_bound: Option<f32>,
 }
 
-pub fn plan(
-    config_path: &Path,
-    workflow_override: Option<Workflow>,
-    workspace: &Workspace,
-) -> Result<PlanResult, CliError> {
-    // Step 1: load config once (preview in Training mode — we'll re-parse
+pub struct PlanInput {
+    /// Explicit config path. `None` → bootstrap `./ddrs.yaml` interactively.
+    pub config_path: Option<PathBuf>,
+    pub workflow: Option<Workflow>,
+    /// Re-run the GPU smoke test even if a cached verdict exists.
+    pub force: bool,
+    pub min_free_gpu_gb: f32,
+    /// Skip the smoke test (CI/tests).
+    pub skip_smoke: bool,
+    /// Abort with `LockDrift` on drift instead of warning + relocking.
+    /// `run --strict` passes true.
+    pub strict: bool,
+}
+
+impl Default for PlanInput {
+    fn default() -> Self {
+        Self {
+            config_path: None,
+            workflow: None,
+            force: false,
+            min_free_gpu_gb: 8.0,
+            skip_smoke: false,
+            strict: false,
+        }
+    }
+}
+
+pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliError> {
+    // Step 0: workspace skeleton + GPU probe + cached smoke test (the
+    // former `init` Phase A). Idempotent and cheap after the first call.
+    let ready = crate::cli::system::ensure_system_ready(
+        workspace,
+        input.force,
+        input.min_free_gpu_gb,
+        input.skip_smoke,
+    )?;
+    if !ready.smoke_passed {
+        return Err(CliError::Runtime(
+            "smoke test failed: the routing core does not run on this system. \
+             See .ddrs/system.json for the probe record."
+                .into(),
+        ));
+    }
+
+    // Step 1: locate or bootstrap ddrs.yaml (interactive, TTY only).
+    let config_path = match input.config_path {
+        Some(p) => p,
+        None => bootstrap_config(workspace)?,
+    };
+    let config_path = config_path.as_path();
+    let workflow_override = input.workflow;
+
+    // Step 2: load config once (preview in Training mode — we'll re-parse
     // if the resolved workflow says testing).
     let preview = Config::from_yaml_file_with_mode(config_path, ConfigMode::Training)
         .map_err(|e| CliError::ConfigInvalid {
@@ -94,7 +141,7 @@ pub fn plan(
             source: Box::new(e),
         })?;
 
-    // Step 2: resolve workflow — CLI flag wins, then YAML, then error.
+    // Step 3: resolve workflow — CLI flag wins, then YAML, then error.
     let workflow = workflow_override.or(preview.workflow).ok_or_else(|| {
         CliError::ConfigInvalid {
             path: config_path.into(),
@@ -106,7 +153,7 @@ pub fn plan(
         }
     })?;
 
-    // Step 3: re-parse if the resolved workflow needs Testing overlay.
+    // Step 4: re-parse if the resolved workflow needs Testing overlay.
     let mode = match workflow {
         Workflow::Train | Workflow::TrainAndTest => ConfigMode::Training,
         Workflow::Eval => ConfigMode::Testing,
@@ -121,14 +168,15 @@ pub fn plan(
             })?
     };
 
-    // Step 4: read lockfile (required; init must have produced it).
+    // Step 5: read the prior lock if one exists. First-ever plan: none.
     let lock_path = workspace.lockfile();
-    if !lock_path.is_file() {
-        return Err(CliError::WorkspaceNotInitialized { path: workspace.root().into() });
-    }
-    let lock = Lockfile::read(&lock_path)?;
+    let prior_lock = if lock_path.is_file() {
+        Some(Lockfile::read(&lock_path)?)
+    } else {
+        None
+    };
 
-    // Step 5: compute live fingerprints (reusing locked fp when stat matches).
+    // Step 6: compute live fingerprints (reusing locked fp when stat matches).
     let data_sources = config.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
         path: config_path.into(),
         source: "data_sources: missing".into(),
@@ -151,7 +199,7 @@ pub fn plan(
     }
     let mut sources = BTreeMap::new();
     for (key, path) in pairs {
-        let live = match lock.sources.get(&key) {
+        let live = match prior_lock.as_ref().and_then(|l| l.sources.get(&key)) {
             Some(locked) => {
                 let r = reuse_if_unchanged(&path, locked)?;
                 Fingerprint {
@@ -165,9 +213,37 @@ pub fn plan(
         };
         sources.insert(key, live);
     }
-    let drift = diff_against_live(&lock, &sources);
 
-    // Step 6: resolve adjacency. Explicit paths → validate every required
+    let drift = prior_lock
+        .as_ref()
+        .map(|l| diff_against_live(l, &sources))
+        .unwrap_or_default();
+
+    // Drift policy + auto-relock. Strict callers (run --strict) abort
+    // BEFORE the lock is refreshed so the drift evidence survives.
+    if !drift.is_empty() {
+        if input.strict {
+            return Err(CliError::LockDrift { fields: drift });
+        }
+        eprintln!("warning: data source drift since last plan: {drift:?} — relocking");
+    }
+    // Rewrite only when something actually changed (mtime/size/fp), so an
+    // unchanged re-plan leaves the lock byte-identical.
+    let needs_write = prior_lock
+        .as_ref()
+        .map(|l| l.sources != sources)
+        .unwrap_or(true);
+    if needs_write {
+        Lockfile {
+            ddrs_version: env!("CARGO_PKG_VERSION").into(),
+            created_at: chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            sources: sources.clone(),
+        }
+        .write_atomic(&lock_path)?;
+    }
+
+    // Step 7: resolve adjacency. Explicit paths → validate every required
     // array exists up front (naming the missing array + store on failure).
     // Fabric-only → cache lookup by content key; hit reuses, miss builds
     // (with a progress line). Same side-effectful-plan precedent as the Q'
@@ -178,10 +254,10 @@ pub fn plan(
     let resolved_adjacency = resolve_adjacency(&config, config_path, workspace)?;
     apply_resolved(&mut config, &resolved_adjacency);
 
-    // Step 7: compute summary.
+    // Step 8: compute summary.
     let summary = compute_summary(&config, workflow)?;
 
-    // Step 8: summed Q' baseline. Always uses the testing-mode overlay
+    // Step 9: summed Q' baseline. Always uses the testing-mode overlay
     // (the eval window the trained model is judged against), even when
     // workflow=Train, so the user sees the same reference number across
     // workflows. Failures here are non-fatal — they shouldn't block the
@@ -316,4 +392,35 @@ fn compute_summary(cfg: &Config, workflow: Workflow) -> Result<PlanSummary, CliE
         chunks: None,
         gpu_mem_gb_upper_bound,
     })
+}
+
+/// Bootstrap `./ddrs.yaml` via $EDITOR when no config was found. TTY only —
+/// non-interactive callers get an actionable ConfigInvalid.
+fn bootstrap_config(workspace: &Workspace) -> Result<PathBuf, CliError> {
+    let target = std::env::current_dir()
+        .map_err(CliError::from)?
+        .join("ddrs.yaml");
+    let bundled = PathBuf::from("config/merit_training.yaml");
+    crate::cli::plan_bootstrap::bootstrap(crate::cli::plan_bootstrap::BootstrapInput {
+        target: target.clone(),
+        runs_dir: workspace.runs_dir(),
+        bundled_template: bundled,
+        editor_cmd: None,
+        interactive: true,
+    })
+    .map_err(|e| {
+        let msg = format!("{e}");
+        if msg.contains("not a TTY") || msg.contains("run interactively") {
+            CliError::ConfigInvalid {
+                path: target.clone(),
+                source: "no ddrs.yaml found and stdin is not a TTY. \
+                         Pass --config or write ddrs.yaml manually, then \
+                         re-run `ddrs plan`."
+                    .into(),
+            }
+        } else {
+            e
+        }
+    })?;
+    Ok(target)
 }

@@ -5,7 +5,7 @@
 //! `cargo test --test cli_run_drift -- --ignored` on a host where those
 //! paths exist.
 
-use ddrs::cli::init::{run_init, InitInput};
+use ddrs::cli::plan::{plan, PlanInput};
 use ddrs::cli::run::{run, RunInput};
 use ddrs::cli::types::Workflow;
 use ddrs::cli::workspace::Workspace;
@@ -24,14 +24,15 @@ fn run_warns_on_drift_strict_fails_on_drift() {
     .unwrap();
     let ws = Workspace::with_root(d.path().join(".ddrs"));
 
-    run_init(InitInput {
-        workspace: ws.root().to_path_buf(),
-        config_path: Some(cfg.clone()),
-        min_free_gpu_gb: 0.0,
-        force: false,
-        skip_smoke: true,
-    })
-    .expect("init must succeed when merit data is reachable");
+    plan(
+        PlanInput {
+            config_path: Some(cfg.clone()),
+            skip_smoke: true,
+            ..Default::default()
+        },
+        &ws,
+    )
+    .expect("plan must succeed when merit data is reachable");
 
     // Touch one of the data source files to force a drift fp diff.
     let gages = std::path::PathBuf::from(

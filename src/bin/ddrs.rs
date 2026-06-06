@@ -29,6 +29,8 @@ enum Cmd {
     Plan {
         #[arg(long, value_enum)] workflow: Option<Workflow>,
         #[arg(long)] json: bool,
+        #[arg(long)] force: bool,
+        #[arg(long, default_value_t = 8.0)] min_free_gpu_gb: f32,
     },
     Run {
         #[arg(long, value_enum)] workflow: Option<Workflow>,
@@ -80,13 +82,18 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 skip_smoke: false,
             }).map(|_| ())
         }
-        Cmd::Plan { workflow, json } => {
-            let cfg_path = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
-                path: ".".into(),
-                source: "no ddrs.yaml found in current directory. \
-                         Run `ddrs init` first.".into(),
-            })?;
-            let pr = ddrs::cli::plan::plan(&cfg_path, workflow, &ws)?;
+        Cmd::Plan { workflow, json, force, min_free_gpu_gb } => {
+            let pr = ddrs::cli::plan::plan(
+                ddrs::cli::plan::PlanInput {
+                    config_path: cfg_path,
+                    workflow,
+                    force,
+                    min_free_gpu_gb,
+                    skip_smoke: false,
+                    strict: false,
+                },
+                &ws,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&pr)
                     .map_err(|e| CliError::Other(Box::new(e)))?);

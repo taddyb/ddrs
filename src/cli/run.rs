@@ -9,7 +9,7 @@ use burn_cuda::Cuda;
 
 use crate::cli::{
     manifest::{GitInfo, Manifest, ResolvedAdjacencyRef, RunOutputs, SourceLockRef},
-    plan::{apply_resolved, plan, PlanResult},
+    plan::{apply_resolved, plan, PlanInput, PlanResult},
     types::{RunStatus, Workflow},
     workspace::Workspace,
 };
@@ -37,8 +37,18 @@ pub struct RunInput {
 }
 
 pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
-    // 1. Plan as a library call (reused — not re-parsed in run).
-    let pr: PlanResult = plan(&input.config_path, input.workflow, &input.workspace)?;
+    // 1. Plan as a library call (reused — not re-parsed in run). Handles
+    //    workspace init, smoke caching, drift policy (strict aborts before
+    //    the relock), and adjacency/baseline caches.
+    let pr: PlanResult = plan(
+        PlanInput {
+            config_path: Some(input.config_path.clone()),
+            workflow: input.workflow,
+            strict: input.strict,
+            ..PlanInput::default()
+        },
+        &input.workspace,
+    )?;
 
     // 1b. GPU pre-flight for workflows that need training kernels.
     if matches!(pr.workflow, Workflow::Train | Workflow::TrainAndTest) {
@@ -55,14 +65,6 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
                 workflow_slug(pr.workflow)
             )));
         }
-    }
-
-    // 2. Drift policy.
-    if !pr.drift.is_empty() {
-        if input.strict {
-            return Err(CliError::LockDrift { fields: pr.drift });
-        }
-        eprintln!("warning: data source drift: {:?}", pr.drift);
     }
 
     // 3. Create run directory.
