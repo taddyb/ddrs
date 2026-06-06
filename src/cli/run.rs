@@ -9,7 +9,7 @@ use burn_cuda::Cuda;
 
 use crate::cli::{
     manifest::{GitInfo, Manifest, ResolvedAdjacencyRef, RunOutputs, SourceLockRef},
-    plan::{plan, PlanResult},
+    plan::{apply_resolved, plan, PlanResult},
     types::{RunStatus, Workflow},
     workspace::Workspace,
 };
@@ -146,11 +146,11 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
 /// threads the paths `plan` resolved so the dataset/baseline open the same
 /// stores. Mutates only this in-memory copy — the on-disk snapshot is the
 /// untouched original (`fs::copy(config_path, …)` above).
+///
+/// Delegates to `plan::apply_resolved` — the canonical implementation lives
+/// there, next to `ResolvedAdjacency`.
 fn apply_resolved_adjacency(cfg: &mut Config, pr: &PlanResult) {
-    if let Some(ds) = cfg.data_sources.as_mut() {
-        ds.conus_adjacency = Some(pr.resolved_adjacency.conus.clone());
-        ds.gages_adjacency = Some(pr.resolved_adjacency.gages.clone());
-    }
+    apply_resolved(cfg, &pr.resolved_adjacency);
 }
 
 fn workflow_slug(w: Workflow) -> &'static str {

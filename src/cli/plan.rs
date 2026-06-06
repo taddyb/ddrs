@@ -43,6 +43,19 @@ pub struct ResolvedAdjacency {
     pub cache_hit: Option<bool>,
 }
 
+/// Materialize `resolved` paths into a freshly-parsed (or in-flight) config.
+///
+/// Re-parsed configs carry the ORIGINAL (possibly absent) adjacency keys from
+/// disk; call this to thread the resolved paths so dataset / baseline / dump
+/// all open the same stores. Mutates only the in-memory copy — the on-disk
+/// snapshot (`fs::copy(config_path, …)` in `run`) is never touched.
+pub(crate) fn apply_resolved(cfg: &mut Config, resolved: &ResolvedAdjacency) {
+    if let Some(ds) = cfg.data_sources.as_mut() {
+        ds.conus_adjacency = Some(resolved.conus.clone());
+        ds.gages_adjacency = Some(resolved.gages.clone());
+    }
+}
+
 /// Summed Q' baseline result attached to `PlanResult`. The full `Metrics`
 /// vector is held in-memory but skipped from JSON output (NaN handling +
 /// size); the JSON view exposes only the small identifying triple.
@@ -163,10 +176,7 @@ pub fn plan(
     // them — but `run` snapshots the ORIGINAL config file (`fs::copy` of
     // `config_path`), so the mutation never leaks into the bootstrap source.
     let resolved_adjacency = resolve_adjacency(&config, config_path, workspace)?;
-    if let Some(ds) = config.data_sources.as_mut() {
-        ds.conus_adjacency = Some(resolved_adjacency.conus.clone());
-        ds.gages_adjacency = Some(resolved_adjacency.gages.clone());
-    }
+    apply_resolved(&mut config, &resolved_adjacency);
 
     // Step 7: compute summary.
     let summary = compute_summary(&config, workflow)?;
@@ -266,10 +276,7 @@ fn compute_baseline(
     // (possibly absent) adjacency keys. Materialize the resolved paths so the
     // baseline cache key hashes the SAME paths the dataset will open — a
     // managed rebuild under a new key correctly invalidates the baseline.
-    if let Some(ds) = test_cfg.data_sources.as_mut() {
-        ds.conus_adjacency = Some(resolved.conus.clone());
-        ds.gages_adjacency = Some(resolved.gages.clone());
-    }
+    apply_resolved(&mut test_cfg, resolved);
     match crate::baseline::compute_or_load_cached(&test_cfg, workspace.root()) {
         Ok((q, key, cache_hit)) => Some(BaselineInfo {
             cache_dir: crate::baseline::cache_dir(workspace.root(), &key),
