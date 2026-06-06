@@ -26,3 +26,4 @@ pub const BUILDER_VERSION: u32 = 1;
 
 pub mod build;
 pub mod dbf;
+pub mod gauges;
