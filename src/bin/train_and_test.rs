@@ -28,7 +28,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use burn::backend::Autodiff;
 use burn_cuda::Cuda;
 use clap::Parser;
 
@@ -38,7 +37,6 @@ use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
 use ddrs::training::bootstrap::bootstrap_head_and_state;
 use ddrs::training::checkpoint::load_kan_head;
 use ddrs::training::driver::train;
-use ddrs::training::optimizer::build_adam;
 use ddrs::training::{
     evaluate, write_predictions_zarr, EvalParams, ZarrAttrs,
 };
@@ -80,7 +78,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     type I = Cuda<f32, i32>;
-    type AB = Autodiff<I>;
 
     // -----------------------------------------------------------------------
     // Phase 1: training
@@ -113,8 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_grid(head_section.grid)
     .with_k(head_section.k);
 
-    let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
-    let mut optimizer = build_adam::<KanHead<AB>, AB>();
+    let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&train_cfg, &device)?;
 
     train::<I>(
         &train_cfg,
@@ -224,6 +220,15 @@ fn find_latest_mpk(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("mpk") {
+            continue;
+        }
+        // Skip optimizer sidecars (epoch_E_mb_M_optim.mpk) — they're written
+        // right after the head file, so an mtime race would pick them.
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.ends_with("_optim"))
+        {
             continue;
         }
         let mtime = entry.metadata()?.modified()?;

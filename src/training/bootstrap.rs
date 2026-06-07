@@ -1,22 +1,27 @@
-//! Shared head + state constructor used by the training binaries and the CLI.
+//! Shared head + state + optimizer constructor used by the training binaries
+//! and the CLI.
 //!
-//! Extracts the ~12-line KAN-head + TrainState setup that was duplicated
-//! across `train` and `train_and_test`. The optimizer is NOT included here
-//! because `build_adam` returns `impl Optimizer<M, B>` (an opaque type that
-//! cannot be named in a struct field without exposing BURN internals).
-//! Callers construct it with one additional line:
-//!   `let mut optimizer = build_adam::<KanHead<AB>, AB>();`
+//! Extracts the KAN-head + TrainState + Adam setup that was duplicated across
+//! `train` and `train_and_test`, and centralises checkpoint resume: when
+//! `experiment.checkpoint` is set, the head weights, Adam moments, and the
+//! train-loop position (epoch, mini-batch, rng, sampler permutation) are all
+//! restored from the checkpoint + its sidecars (see `checkpoint.rs`).
 
 use burn::backend::Autodiff;
+use burn::optim::Optimizer;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use rand::SeedableRng;
-use rand::rngs::StdRng;
+use rand_chacha::ChaCha12Rng;
 
 use crate::config::Config;
+use crate::data::error::Result;
 use crate::nn::kan_head::{KanHead, KanHeadConfig};
+use crate::training::checkpoint::{load_kan_head, load_optimizer, load_train_state, optim_base, state_path};
 use crate::training::driver::TrainState;
+use crate::training::optimizer::build_adam;
 
-/// Initialise the KAN head and the mutable training state from `cfg`.
+/// Initialise the KAN head, the mutable training state, and the Adam
+/// optimizer from `cfg`.
 ///
 /// Type parameter `I` is the **inner** (non-autodiff) backend, matching the
 /// convention used by `TrainState<I>` and the training binaries
@@ -27,12 +32,22 @@ use crate::training::driver::TrainState;
 /// `burn-backend-0.21.0/src/backend/base.rs:141`). KanLayer uses its own
 /// seeded StdRng on CPU and is independent of the backend RNG.
 ///
-/// The optimizer is intentionally excluded — call
-/// `build_adam::<KanHead<Autodiff<I>>, Autodiff<I>>()` at the call site.
+/// Resume: when `experiment.checkpoint` is set, the head weights are loaded
+/// from the `.mpk`, and — if the sidecars written by `driver::train` exist —
+/// the Adam moments (`*_optim.mpk`) and train-loop position (`*_state.json`:
+/// epoch, next mini-batch, rng, sampler permutation + cursor) are restored
+/// too, making the resumed run continue exactly where the original left off
+/// (same gauge batches, same rho-windows, lr schedule at the true epoch).
+/// Checkpoints from before the sidecar scheme resume weights-only with the
+/// epoch counter back at 1.
 pub fn bootstrap_head_and_state<I>(
     cfg: &Config,
     device: &<Autodiff<I> as burn::tensor::backend::BackendTypes>::Device,
-) -> (KanHead<Autodiff<I>>, TrainState<I>)
+) -> Result<(
+    KanHead<Autodiff<I>>,
+    TrainState<I>,
+    impl Optimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
+)>
 where
     I: Backend,
     Autodiff<I>: AutodiffBackend<InnerBackend = I>,
@@ -50,13 +65,58 @@ where
 
     <Autodiff<I> as Backend>::seed(device, cfg.seed);
     let head: KanHead<Autodiff<I>> = head_cfg.init::<Autodiff<I>>(device);
+    let mut optimizer = build_adam::<KanHead<Autodiff<I>>, Autodiff<I>>();
 
-    let state = TrainState::<I> {
-        head: head.clone(),
+    let mut state = TrainState::<I> {
+        head,
         epoch: 1,
         mini_batch: 0,
-        rng: StdRng::seed_from_u64(cfg.seed),
+        rng: ChaCha12Rng::seed_from_u64(cfg.seed),
+        resume_sampler: None,
     };
 
-    (head, state)
+    // Resume from `experiment.checkpoint` if set. The seed-initialised head
+    // above doubles as the architecture template; its values are discarded
+    // by load_record.
+    if let Some(ckpt) = cfg.experiment.as_ref().and_then(|e| e.checkpoint.as_ref()) {
+        // CompactRecorder appends `.mpk` itself; accept the path with or
+        // without the extension.
+        let base = if ckpt.extension().is_some_and(|e| e == "mpk") {
+            ckpt.with_extension("")
+        } else {
+            ckpt.clone()
+        };
+        state.head = load_kan_head::<Autodiff<I>>(&base, state.head, device)?;
+        println!("warm start: loaded KAN head from {}.mpk", base.display());
+
+        // Sidecar 1: Adam moments.
+        let optim = optim_base(&base);
+        if optim.with_extension("mpk").is_file() {
+            optimizer = load_optimizer(&optim, optimizer, device)?;
+            println!("warm start: restored Adam state from {}.mpk", optim.display());
+        } else {
+            println!("warm start: no {}.mpk — Adam starts cold", optim.display());
+        }
+
+        // Sidecar 2: train-loop position (epoch, mini-batch, rng, sampler).
+        let st_path = state_path(&base);
+        if st_path.is_file() {
+            let st = load_train_state(&st_path)?;
+            state.epoch = st.epoch;
+            state.mini_batch = st.next_mini_batch;
+            state.rng = st.rng;
+            state.resume_sampler = Some((st.sampler_indices, st.sampler_cursor));
+            println!(
+                "warm start: resuming at epoch {} mb {} (rng + sampler restored)",
+                st.epoch, st.next_mini_batch
+            );
+        } else {
+            println!(
+                "warm start: no {} — restarting at epoch 1 with a fresh shuffle",
+                st_path.display()
+            );
+        }
+    }
+
+    Ok((state.head.clone(), state, optimizer))
 }

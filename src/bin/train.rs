@@ -18,16 +18,13 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use burn::backend::Autodiff;
 use burn_cuda::Cuda;
 use clap::Parser;
 
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
-use ddrs::nn::kan_head::KanHead;
 use ddrs::training::bootstrap::bootstrap_head_and_state;
 use ddrs::training::driver::train;
-use ddrs::training::optimizer::build_adam;
 
 #[derive(Parser, Debug)]
 #[command(name = "train", about = "ddrs training-only entrypoint (no test phase)")]
@@ -54,7 +51,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&cli.checkpoint_dir)?;
 
     type I = Cuda<f32, i32>;
-    type AB = Autodiff<I>;
 
     let start = Instant::now();
     println!("=== Training ===");
@@ -74,8 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.params.sparse_solver, cfg.params.use_cuda_graphs,
     );
 
-    let (_, mut state) = bootstrap_head_and_state::<I>(&cfg, &device);
-    let mut optimizer = build_adam::<KanHead<AB>, AB>();
+    let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&cfg, &device)?;
 
     train::<I>(
         &cfg,

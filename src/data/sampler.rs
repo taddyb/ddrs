@@ -34,6 +34,18 @@ impl RandomSampler {
         self.cursor = 0;
     }
 
+    /// Capture the current permutation + cursor for a checkpoint sidecar.
+    pub fn snapshot(&self) -> (Vec<usize>, usize) {
+        (self.indices.clone(), self.cursor)
+    }
+
+    /// Restore a permutation + cursor captured by [`snapshot`](Self::snapshot)
+    /// so a resumed run continues mid-epoch with the same gauge batches.
+    pub fn restore(&mut self, indices: Vec<usize>, cursor: usize) {
+        self.indices = indices;
+        self.cursor = cursor;
+    }
+
     /// Return the next batch's indices, or `None` if the epoch is done.
     pub fn next_batch(&mut self) -> Option<Vec<usize>> {
         let remaining = self.indices.len().saturating_sub(self.cursor);
@@ -78,6 +90,24 @@ impl BatchSource {
         match self {
             BatchSource::Shuffle(s) => s.next_batch(),
             BatchSource::Replay(s) => s.next_batch(),
+        }
+    }
+
+    /// Snapshot the underlying `RandomSampler` for a checkpoint sidecar.
+    /// `None` for `Replay` — the matched-batch experiment carries its own
+    /// batch record and doesn't participate in checkpoint resume.
+    pub fn snapshot(&self) -> Option<(Vec<usize>, usize)> {
+        match self {
+            BatchSource::Shuffle(s) => Some(s.snapshot()),
+            BatchSource::Replay(_) => None,
+        }
+    }
+
+    /// Restore a `Shuffle` sampler from a checkpoint sidecar (mid-epoch
+    /// resume). No-op for `Replay`.
+    pub fn restore(&mut self, indices: Vec<usize>, cursor: usize) {
+        if let BatchSource::Shuffle(s) = self {
+            s.restore(indices, cursor);
         }
     }
 }

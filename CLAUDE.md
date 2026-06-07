@@ -122,6 +122,22 @@ ddrs --config config/merit_training.yaml run  --workflow train-and-test
 `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`);
 `ddrs init` rejects contradictions at load time.
 
+**Resume from a checkpoint**: set `experiment.checkpoint:` in `ddrs.yaml` to a
+saved `.mpk` (path accepted with or without the extension, e.g.
+`.ddrs/runs/<id>/checkpoints/epoch_25_mb_8.mpk`) and
+`bootstrap_head_and_state` (`src/training/bootstrap.rs`) restores everything
+the training loop needs: head weights from the `.mpk`, Adam moments from the
+`epoch_E_mb_M_optim.mpk` sidecar, and the loop position (epoch, next
+mini-batch, rng, in-flight epoch's sampler permutation + cursor) from
+`epoch_E_mb_M_state.json` — so the resumed run draws the SAME gauge batches
+and rho-windows the original would have, and the `learning_rate` schedule
+continues at the true epoch. Remember to raise `experiment.epochs` past the
+checkpoint's epoch or the resumed run trains zero batches. Checkpoints from
+before the sidecar scheme (≤ 2026-06-07) resume weights-only: Adam cold,
+epoch counter back at 1. Sidecar naming is underscore-joined because burn's
+recorder calls `set_extension("mpk")` — a dotted `.optim` base would clobber
+the head file (`src/training/checkpoint.rs` module docs).
+
 Full design at
 `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
 implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
