@@ -5,8 +5,8 @@
 //! ## Pipeline overview
 //!
 //! ```text
-//!   .shp/.dbf  ──► dbf::read_flowpath_records()
-//!                       │
+//!   .shp/.dbf | .gpkg ──► fabric::read_fabric_records()
+//!                       │    (dispatches to dbf:: or gpkg:: by extension)
 //!                       ▼
 //!               Vec<FlowpathRecord>
 //!                       │
@@ -30,6 +30,8 @@ pub const BUILDER_VERSION: u32 = 1;
 pub mod build;
 pub mod cache;
 pub mod dbf;
+pub mod fabric;
 pub mod gauges;
+pub mod gpkg;
 pub mod validate;
 pub mod zarr_write;

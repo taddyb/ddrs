@@ -358,6 +358,7 @@ mod tests {
             conus_adjacency: Some(PathBuf::from("/dev/null/conus.zarr")),
             gages_adjacency: Some(PathBuf::from("/dev/null/gages_adj.zarr")),
             geospatial_fabric: None,
+            geospatial_fabric_layer: None,
             streamflow: PathBuf::from("/dev/null/sf.ic"),
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),
@@ -451,6 +452,7 @@ mod tests {
             conus_adjacency: None,      // ← fabric-only config
             gages_adjacency: None,
             geospatial_fabric: Some(PathBuf::from("/dev/null/fabric.shp")),
+            geospatial_fabric_layer: None,
             streamflow: PathBuf::from("/dev/null/sf.ic"),
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),

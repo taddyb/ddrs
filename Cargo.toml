@@ -57,9 +57,12 @@ blake3 = "1"
 os_pipe = "1"
 humantime = "2"
 dbase = "0.7.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 approx = "0.5"
+dbase = "0.7.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 which = "6"
 
