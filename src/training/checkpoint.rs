@@ -11,18 +11,25 @@
 //! `.mpk` to the caller-supplied base path. Pass `/path/to/checkpoint` and the
 //! file written on disk will be `/path/to/checkpoint.mpk`.
 //!
-//! # Sidecar files (full resume)
+//! # Checkpoint directory layout (full resume)
 //!
-//! Each head checkpoint base `epoch_E_mb_M` gets two sidecars so
-//! `experiment.checkpoint` resumes are exact, not weights-only:
+//! A checkpoint is a DIRECTORY `epoch_E_mb_M/` holding three fixed-name files
+//! so `experiment.checkpoint` resumes are exact, not weights-only:
 //!
-//! - `epoch_E_mb_M_optim.mpk`  — Adam record (moments) via CompactRecorder
-//! - `epoch_E_mb_M_state.json` — [`TrainCkptState`]: epoch, next mini-batch,
-//!   serialized rng, and the sampler's permutation + cursor
+//! ```text
+//! epoch_E_mb_M/
+//! ├── head.mpk      KAN weights      (CompactRecorder)
+//! ├── optim.mpk     Adam moments     (CompactRecorder)
+//! └── state.json    [`TrainCkptState`]: epoch, next mini-batch, serialized
+//!                   rng, sampler permutation + cursor
+//! ```
 //!
-//! The suffixes are UNDERSCORE-joined, not dotted: burn's file recorder calls
-//! `Path::set_extension("mpk")`, so a dotted `epoch_E_mb_M.optim` base would
-//! collapse back to `epoch_E_mb_M.mpk` and clobber the head checkpoint.
+//! `experiment.checkpoint:` points at the directory; the inner filenames are
+//! hardcoded. [`head_base`]/[`optim_base`] return the recorder *bases*
+//! (`dir/head`, `dir/optim`) — `CompactRecorder` appends `.mpk` itself.
+//! [`state_path`] returns the full `dir/state.json` path. Each file gets its
+//! own name in its own directory, so nothing can clobber the head and the
+//! whole checkpoint copies/deletes as one unit.
 
 use std::path::{Path, PathBuf};
 
@@ -68,18 +75,21 @@ pub fn load_kan_head<B: Backend>(
 // Sidecars: optimizer record + train-loop state
 // ---------------------------------------------------------------------------
 
-/// `epoch_E_mb_M` → `epoch_E_mb_M_optim` (recorder appends `.mpk`).
-pub fn optim_base(head_base: &Path) -> PathBuf {
-    let mut name = head_base.file_name().unwrap_or_default().to_os_string();
-    name.push("_optim");
-    head_base.with_file_name(name)
+/// Recorder base for the KAN head inside a checkpoint dir: `dir/head`
+/// (`CompactRecorder` appends `.mpk` → `dir/head.mpk`).
+pub fn head_base(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("head")
 }
 
-/// `epoch_E_mb_M` → `epoch_E_mb_M_state.json`.
-pub fn state_path(head_base: &Path) -> PathBuf {
-    let mut name = head_base.file_name().unwrap_or_default().to_os_string();
-    name.push("_state.json");
-    head_base.with_file_name(name)
+/// Recorder base for the Adam moments inside a checkpoint dir: `dir/optim`
+/// (`CompactRecorder` appends `.mpk` → `dir/optim.mpk`).
+pub fn optim_base(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("optim")
+}
+
+/// Train-loop state path inside a checkpoint dir: `dir/state.json`.
+pub fn state_path(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("state.json")
 }
 
 /// Train-loop position saved alongside each head checkpoint so a resumed run

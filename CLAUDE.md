@@ -122,21 +122,22 @@ ddrs --config config/merit_training.yaml run  --workflow train-and-test
 `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`);
 `ddrs init` rejects contradictions at load time.
 
-**Resume from a checkpoint**: set `experiment.checkpoint:` in `ddrs.yaml` to a
-saved `.mpk` (path accepted with or without the extension, e.g.
-`.ddrs/runs/<id>/checkpoints/epoch_25_mb_8.mpk`) and
-`bootstrap_head_and_state` (`src/training/bootstrap.rs`) restores everything
-the training loop needs: head weights from the `.mpk`, Adam moments from the
-`epoch_E_mb_M_optim.mpk` sidecar, and the loop position (epoch, next
-mini-batch, rng, in-flight epoch's sampler permutation + cursor) from
-`epoch_E_mb_M_state.json` — so the resumed run draws the SAME gauge batches
-and rho-windows the original would have, and the `learning_rate` schedule
-continues at the true epoch. Remember to raise `experiment.epochs` past the
-checkpoint's epoch or the resumed run trains zero batches. Checkpoints from
-before the sidecar scheme (≤ 2026-06-07) resume weights-only: Adam cold,
-epoch counter back at 1. Sidecar naming is underscore-joined because burn's
-recorder calls `set_extension("mpk")` — a dotted `.optim` base would clobber
-the head file (`src/training/checkpoint.rs` module docs).
+**Resume from a checkpoint**: a checkpoint is a DIRECTORY `epoch_E_mb_M/`
+holding three fixed-name files — `head.mpk` (KAN weights), `optim.mpk` (Adam
+moments), `state.json` (epoch, next mini-batch, rng, in-flight epoch's sampler
+permutation + cursor). Set `experiment.checkpoint:` in `ddrs.yaml` to that
+directory (e.g. `.ddrs/runs/<id>/checkpoints/epoch_25_mb_8`) and
+`bootstrap_head_and_state` (`src/training/bootstrap.rs`) restores all three —
+so the resumed run draws the SAME gauge batches and rho-windows the original
+would have, and the `learning_rate` schedule continues at the true epoch.
+Remember to raise `experiment.epochs` past the checkpoint's epoch or the
+resumed run trains zero batches. The path helpers `head_base`/`optim_base`
+return the recorder bases (`dir/head`, `dir/optim`; `CompactRecorder` appends
+`.mpk`); `state_path` returns `dir/state.json` (`src/training/checkpoint.rs`).
+Resume state is exact, but stored weights/moments are f16
+(`CompactRecorder` = `HalfPrecisionSettings`), so a resumed trajectory drifts
+slowly from the uninterrupted one — see
+`docs/2026-06-07-checkpoint-resume-handoff.md` follow-up #1.
 
 Full design at
 `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the

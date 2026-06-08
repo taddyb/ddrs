@@ -16,7 +16,9 @@ use rand_chacha::ChaCha12Rng;
 use crate::config::Config;
 use crate::data::error::Result;
 use crate::nn::kan_head::{KanHead, KanHeadConfig};
-use crate::training::checkpoint::{load_kan_head, load_optimizer, load_train_state, optim_base, state_path};
+use crate::training::checkpoint::{
+    head_base, load_kan_head, load_optimizer, load_train_state, optim_base, state_path,
+};
 use crate::training::driver::TrainState;
 use crate::training::optimizer::build_adam;
 
@@ -32,14 +34,12 @@ use crate::training::optimizer::build_adam;
 /// `burn-backend-0.21.0/src/backend/base.rs:141`). KanLayer uses its own
 /// seeded StdRng on CPU and is independent of the backend RNG.
 ///
-/// Resume: when `experiment.checkpoint` is set, the head weights are loaded
-/// from the `.mpk`, and — if the sidecars written by `driver::train` exist —
-/// the Adam moments (`*_optim.mpk`) and train-loop position (`*_state.json`:
-/// epoch, next mini-batch, rng, sampler permutation + cursor) are restored
+/// Resume: when `experiment.checkpoint` is set (a checkpoint DIRECTORY
+/// `epoch_E_mb_M/`), the head weights are loaded from `head.mpk`, and — if
+/// `optim.mpk` / `state.json` exist — the Adam moments and train-loop position
+/// (epoch, next mini-batch, rng, sampler permutation + cursor) are restored
 /// too, making the resumed run continue exactly where the original left off
 /// (same gauge batches, same rho-windows, lr schedule at the true epoch).
-/// Checkpoints from before the sidecar scheme resume weights-only with the
-/// epoch counter back at 1.
 pub fn bootstrap_head_and_state<I>(
     cfg: &Config,
     device: &<Autodiff<I> as burn::tensor::backend::BackendTypes>::Device,
@@ -75,22 +75,16 @@ where
         resume_sampler: None,
     };
 
-    // Resume from `experiment.checkpoint` if set. The seed-initialised head
-    // above doubles as the architecture template; its values are discarded
-    // by load_record.
-    if let Some(ckpt) = cfg.experiment.as_ref().and_then(|e| e.checkpoint.as_ref()) {
-        // CompactRecorder appends `.mpk` itself; accept the path with or
-        // without the extension.
-        let base = if ckpt.extension().is_some_and(|e| e == "mpk") {
-            ckpt.with_extension("")
-        } else {
-            ckpt.clone()
-        };
-        state.head = load_kan_head::<Autodiff<I>>(&base, state.head, device)?;
-        println!("warm start: loaded KAN head from {}.mpk", base.display());
+    // Resume from `experiment.checkpoint` if set. It points at a checkpoint
+    // DIRECTORY `epoch_E_mb_M/` holding head.mpk + optim.mpk + state.json. The
+    // seed-initialised head above doubles as the architecture template; its
+    // values are discarded by load_record.
+    if let Some(ckpt_dir) = cfg.experiment.as_ref().and_then(|e| e.checkpoint.as_ref()) {
+        state.head = load_kan_head::<Autodiff<I>>(&head_base(ckpt_dir), state.head, device)?;
+        println!("warm start: loaded KAN head from {}", head_base(ckpt_dir).display());
 
-        // Sidecar 1: Adam moments.
-        let optim = optim_base(&base);
+        // Adam moments.
+        let optim = optim_base(ckpt_dir);
         if optim.with_extension("mpk").is_file() {
             optimizer = load_optimizer(&optim, optimizer, device)?;
             println!("warm start: restored Adam state from {}.mpk", optim.display());
@@ -98,8 +92,8 @@ where
             println!("warm start: no {}.mpk — Adam starts cold", optim.display());
         }
 
-        // Sidecar 2: train-loop position (epoch, mini-batch, rng, sampler).
-        let st_path = state_path(&base);
+        // Train-loop position (epoch, mini-batch, rng, sampler).
+        let st_path = state_path(ckpt_dir);
         if st_path.is_file() {
             let st = load_train_state(&st_path)?;
             state.epoch = st.epoch;

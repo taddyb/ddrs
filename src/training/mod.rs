@@ -21,7 +21,7 @@ pub mod zarr_io;
 
 pub use bootstrap::bootstrap_head_and_state;
 pub use checkpoint::{
-    load_kan_head, load_optimizer, load_train_state, optim_base, save_kan_head,
+    head_base, load_kan_head, load_optimizer, load_train_state, optim_base, save_kan_head,
     save_optimizer, save_train_state, state_path, TrainCkptState,
 };
 pub use forward::{

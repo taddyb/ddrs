@@ -25,11 +25,11 @@ use burn::tensor::{backend::Backend, Tensor, TensorData};
 
 use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
-use crate::data::error::Result;
+use crate::data::error::{DataError, Result};
 use crate::data::sampler::{BatchSource, RandomSampler};
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    optim_base, save_optimizer, save_train_state, state_path, TrainCkptState,
+    head_base, optim_base, save_optimizer, save_train_state, state_path, TrainCkptState,
 };
 use crate::training::forward::forward;
 use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
@@ -184,17 +184,24 @@ pub fn train<I: Backend>(
             let grads = clip_grad_norm(grads, &state.head, grad_clip);
             state.head = optimizer.step(lr as f64, state.head.clone(), grads);
 
-            // Checkpoint: .valid() strips autodiff; save_kan_head<I> writes to disk.
-            let ckpt_path =
+            // Checkpoint directory `epoch_E_mb_M/` holding head.mpk + optim.mpk
+            // + state.json (fixed names). See checkpoint.rs module docs.
+            let ckpt_dir =
                 checkpoint_dir.join(format!("epoch_{epoch}_mb_{}", state.mini_batch));
-            save_kan_head(&ckpt_path, &state.head.clone().valid())?;
+            std::fs::create_dir_all(&ckpt_dir).map_err(|e| DataError::Io {
+                path: ckpt_dir.clone(),
+                source: e,
+            })?;
 
-            // Sidecars for exact resume: Adam moments + train-loop position
-            // (rng, sampler permutation/cursor). See checkpoint.rs module docs.
-            save_optimizer(&optim_base(&ckpt_path), &*optimizer)?;
+            // .valid() strips autodiff; save_kan_head<I> writes to disk.
+            save_kan_head(&head_base(&ckpt_dir), &state.head.clone().valid())?;
+
+            // Adam moments + train-loop position (rng, sampler permutation/cursor)
+            // for exact resume.
+            save_optimizer(&optim_base(&ckpt_dir), &*optimizer)?;
             if let Some((sampler_indices, sampler_cursor)) = sampler.snapshot() {
                 save_train_state(
-                    &state_path(&ckpt_path),
+                    &state_path(&ckpt_dir),
                     &TrainCkptState {
                         epoch,
                         next_mini_batch: state.mini_batch + 1,

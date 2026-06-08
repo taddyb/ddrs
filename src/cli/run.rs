@@ -159,31 +159,30 @@ fn workflow_slug(w: Workflow) -> &'static str {
     }
 }
 
-/// Parse `epoch_E_mb_M` from a checkpoint file stem. `None` for anything
-/// else — including the `epoch_E_mb_M_optim` sidecars, which must never be
-/// mistaken for a head checkpoint.
+/// Parse `epoch_E_mb_M` from a checkpoint directory name.
 fn parse_ckpt_stem(stem: &str) -> Option<(usize, usize)> {
     let rest = stem.strip_prefix("epoch_")?;
     let (epoch_s, rest) = rest.split_once("_mb_")?;
     let epoch = epoch_s.parse().ok()?;
-    let mb = rest.parse().ok()?; // "8_optim" fails to parse → sidecar skipped
+    let mb = rest.parse().ok()?;
     Some((epoch, mb))
 }
 
+/// Returns the head-weights base (`<dir>/epoch_E_mb_M/head`, no `.mpk` — the
+/// recorder appends it) of the latest checkpoint directory, ordered by
+/// (epoch, mb) parsed numerically (a lexicographic sort would rank epoch_9
+/// above epoch_25).
 fn latest_checkpoint_base(dir: &Path) -> Option<PathBuf> {
-    // Returns the path WITHOUT the `.mpk` suffix (CompactRecorder appends it).
-    // Ordered by (epoch, mb) parsed numerically — a lexicographic sort would
-    // rank epoch_9 above epoch_25.
     fs::read_dir(dir).ok()?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "mpk").unwrap_or(false))
+        .filter(|p| p.is_dir())
         .filter_map(|p| {
-            let key = parse_ckpt_stem(p.file_stem()?.to_str()?)?;
+            let key = parse_ckpt_stem(p.file_name()?.to_str()?)?;
             Some((key, p))
         })
         .max_by_key(|(key, _)| *key)
-        .map(|(_, p)| p.with_extension(""))
+        .map(|(_, p)| crate::training::head_base(&p))
 }
 
 fn copy_cargo_lock_if_reachable(run_dir: &Path) -> std::io::Result<()> {
@@ -558,15 +557,15 @@ fn build_batch_source(
     ))
 }
 
-/// Returns paths to all `.mpk` files in `dir`, relative to `dir`'s parent
-/// (i.e. `checkpoints/epoch_5_mb_0.mpk`).
+/// Returns paths to all checkpoint directories in `dir`, relative to `dir`'s
+/// parent (i.e. `checkpoints/epoch_5_mb_0`).
 fn list_mpk_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else { return vec![] };
     let dir_name = dir.file_name().unwrap_or_default();
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "mpk").unwrap_or(false))
+        .filter(|p| p.is_dir() && parse_ckpt_stem(p.file_name().unwrap_or_default().to_str().unwrap_or("")).is_some())
         .map(|p| {
             let fname = p.file_name().unwrap_or_default();
             PathBuf::from(dir_name).join(fname)

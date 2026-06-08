@@ -5,15 +5,25 @@
 ## What this is
 
 `experiment.checkpoint:` in `ddrs.yaml` now resumes training **exactly** —
-not just warm-starting weights. Every per-mini-batch checkpoint written by
-`ddrs run` (and the legacy `train`/`train_and_test` binaries) now consists of
-three files:
+not just warm-starting weights.
 
-| File | Contents | Format |
+> **Layout update (2026-06-07, post-handoff):** checkpoints are now a
+> **directory** `epoch_E_mb_M/` with fixed inner filenames, not flat
+> `epoch_E_mb_M*` siblings. `experiment.checkpoint:` points at the directory.
+> This retires the `set_extension("mpk")` underscore-suffix hack below and
+> makes a checkpoint copy/delete/gc as one unit. Path helpers:
+> `head_base(dir)`→`dir/head`, `optim_base(dir)`→`dir/optim` (recorder appends
+> `.mpk`), `state_path(dir)`→`dir/state.json`. Unit tests:
+> `tests/checkpoint_resume.rs`.
+
+Every per-mini-batch checkpoint written by `ddrs run` (and the legacy
+`train`/`train_and_test` binaries) is a directory of three files:
+
+| File (in `epoch_E_mb_M/`) | Contents | Format |
 |---|---|---|
-| `epoch_E_mb_M.mpk` | KAN head weights (unchanged) | burn CompactRecorder |
-| `epoch_E_mb_M_optim.mpk` | Adam record (both moment tensors) | burn CompactRecorder |
-| `epoch_E_mb_M_state.json` | epoch, next mini-batch, serialized rng, sampler permutation + cursor | JSON |
+| `head.mpk` | KAN head weights | burn CompactRecorder |
+| `optim.mpk` | Adam record (both moment tensors) | burn CompactRecorder |
+| `state.json` | epoch, next mini-batch, serialized rng, sampler permutation + cursor | JSON |
 
 On resume, `bootstrap_head_and_state` (`src/training/bootstrap.rs`) restores
 all three, so the resumed run:
@@ -22,10 +32,6 @@ all three, so the resumed run:
 - draws the **same gauge batches** — including the rest of an in-flight
   epoch's shuffle — and the **same rho-windows** the original run would have,
 - steps Adam with **warm moments** instead of restarting cold.
-
-Sidecar suffixes are underscore-joined (`_optim`, `_state`) because burn's
-recorder calls `Path::set_extension("mpk")` — a dotted `.optim` base would
-collapse onto the head file and clobber it.
 
 ## How to use
 
