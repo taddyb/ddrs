@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use burn::backend::Autodiff;
 use burn_cuda::Cuda;
 
 use crate::cli::{
@@ -20,7 +19,6 @@ use crate::nn::kan_head::{KanHead, KanHeadConfig};
 use crate::training::bootstrap::bootstrap_head_and_state;
 use crate::training::checkpoint::load_kan_head;
 use crate::training::driver::train as training_train;
-use crate::training::optimizer::build_adam;
 use crate::training::{evaluate, write_predictions_zarr, EvalParams, ZarrAttrs};
 
 pub struct RunInput {
@@ -161,16 +159,30 @@ fn workflow_slug(w: Workflow) -> &'static str {
     }
 }
 
+/// Parse `epoch_E_mb_M` from a checkpoint directory name.
+fn parse_ckpt_stem(stem: &str) -> Option<(usize, usize)> {
+    let rest = stem.strip_prefix("epoch_")?;
+    let (epoch_s, rest) = rest.split_once("_mb_")?;
+    let epoch = epoch_s.parse().ok()?;
+    let mb = rest.parse().ok()?;
+    Some((epoch, mb))
+}
+
+/// Returns the head-weights base (`<dir>/epoch_E_mb_M/head`, no `.mpk` — the
+/// recorder appends it) of the latest checkpoint directory, ordered by
+/// (epoch, mb) parsed numerically (a lexicographic sort would rank epoch_9
+/// above epoch_25).
 fn latest_checkpoint_base(dir: &Path) -> Option<PathBuf> {
-    // Returns the path WITHOUT the `.mpk` suffix (CompactRecorder appends it).
-    let mut entries: Vec<_> = fs::read_dir(dir).ok()?
+    fs::read_dir(dir).ok()?
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "mpk").unwrap_or(false))
-        .collect();
-    entries.sort();
-    let latest = entries.pop()?;
-    Some(latest.with_extension(""))
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            let key = parse_ckpt_stem(p.file_name()?.to_str()?)?;
+            Some((key, p))
+        })
+        .max_by_key(|(key, _)| *key)
+        .map(|(_, p)| crate::training::head_base(&p))
 }
 
 fn copy_cargo_lock_if_reachable(run_dir: &Path) -> std::io::Result<()> {
@@ -208,7 +220,6 @@ fn dispatch(
     run_dir: &Path,
 ) -> (RunStatus, Option<String>, serde_json::Value, RunOutputs) {
     type I = Cuda<f32, i32>;
-    type AB = Autodiff<I>;
 
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(serde_json::Value, RunOutputs), CliError> {
         match pr.workflow {
@@ -241,8 +252,8 @@ fn dispatch(
                 .with_grid(head_section.grid)
                 .with_k(head_section.k);
 
-                let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
-                let mut optimizer = build_adam::<KanHead<AB>, AB>();
+                let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&train_cfg, &device)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
 
                 let batch_source = build_batch_source(&input.batch_order_from, &train_dataset);
                 let ckpt_dir = run_dir.join("checkpoints");
@@ -304,8 +315,8 @@ fn dispatch(
                 .with_grid(head_section.grid)
                 .with_k(head_section.k);
 
-                let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
-                let mut optimizer = build_adam::<KanHead<AB>, AB>();
+                let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&train_cfg, &device)
+                    .map_err(|e| CliError::Other(Box::new(e)))?;
 
                 let batch_source = build_batch_source(&input.batch_order_from, &train_dataset);
                 let ckpt_dir = run_dir.join("checkpoints");
@@ -546,15 +557,15 @@ fn build_batch_source(
     ))
 }
 
-/// Returns paths to all `.mpk` files in `dir`, relative to `dir`'s parent
-/// (i.e. `checkpoints/epoch_5_mb_0.mpk`).
+/// Returns paths to all checkpoint directories in `dir`, relative to `dir`'s
+/// parent (i.e. `checkpoints/epoch_5_mb_0`).
 fn list_mpk_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else { return vec![] };
     let dir_name = dir.file_name().unwrap_or_default();
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "mpk").unwrap_or(false))
+        .filter(|p| p.is_dir() && parse_ckpt_stem(p.file_name().unwrap_or_default().to_str().unwrap_or("")).is_some())
         .map(|p| {
             let fname = p.file_name().unwrap_or_default();
             PathBuf::from(dir_name).join(fname)

@@ -28,7 +28,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use burn::backend::Autodiff;
 use burn_cuda::Cuda;
 use clap::Parser;
 
@@ -38,7 +37,6 @@ use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
 use ddrs::training::bootstrap::bootstrap_head_and_state;
 use ddrs::training::checkpoint::load_kan_head;
 use ddrs::training::driver::train;
-use ddrs::training::optimizer::build_adam;
 use ddrs::training::{
     evaluate, write_predictions_zarr, EvalParams, ZarrAttrs,
 };
@@ -80,7 +78,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     type I = Cuda<f32, i32>;
-    type AB = Autodiff<I>;
 
     // -----------------------------------------------------------------------
     // Phase 1: training
@@ -113,8 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_grid(head_section.grid)
     .with_k(head_section.k);
 
-    let (_, mut state) = bootstrap_head_and_state::<I>(&train_cfg, &device);
-    let mut optimizer = build_adam::<KanHead<AB>, AB>();
+    let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&train_cfg, &device)?;
 
     train::<I>(
         &train_cfg,
@@ -215,28 +211,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Find the most-recently-modified `.mpk` file under `dir`. Returns the path
-/// WITHOUT the `.mpk` suffix so it can be passed straight to `load_kan_head` (which
-/// re-appends `.mpk` via `CompactRecorder::set_extension`).
+/// Find the latest checkpoint directory `epoch_E_mb_M/` under `dir`, ordered by
+/// (epoch, mb) parsed numerically. Returns the head-weights base
+/// (`<dir>/epoch_E_mb_M/head`, no `.mpk` — the recorder re-appends it).
 fn find_latest_mpk(dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("mpk") {
-            continue;
-        }
-        let mtime = entry.metadata()?.modified()?;
-        if latest.as_ref().map_or(true, |(t, _)| mtime > *t) {
-            latest = Some((mtime, path));
-        }
+    fn parse(name: &str) -> Option<(usize, usize)> {
+        let rest = name.strip_prefix("epoch_")?;
+        let (e, rest) = rest.split_once("_mb_")?;
+        Some((e.parse().ok()?, rest.parse().ok()?))
     }
+    let latest = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            let key = parse(p.file_name()?.to_str()?)?;
+            Some((key, p))
+        })
+        .max_by_key(|(key, _)| *key);
     let (_, p) = latest.ok_or_else(|| {
         format!(
-            "no .mpk checkpoints found in {} — did Phase 1 produce any?",
+            "no checkpoint directories found in {} — did Phase 1 produce any?",
             dir.display()
         )
     })?;
-    // Strip .mpk so CompactRecorder's set_extension produces the right path.
-    Ok(p.with_extension(""))
+    Ok(ddrs::training::head_base(&p))
 }

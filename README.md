@@ -41,7 +41,7 @@ inputs:
 
 ```yaml
 data_sources:
-  geospatial_fabric: /path/to/riv_pfaf_7_..._bugfix1.shp  # MERIT flowlines (.dbf read)
+  geospatial_fabric: /path/to/riv_pfaf_7_..._bugfix1.shp  # MERIT flowlines (.shp/.dbf/.gpkg)
   attributes:        /path/to/merit_global_attributes_v2.nc
   streamflow:        /path/to/merit_dhbv2_UH_retrospective.ic
   observations:      /path/to/usgs_daily_observations
@@ -49,8 +49,12 @@ data_sources:
 ```
 
 On the first `ddrs plan`, the CONUS and per-gauge adjacency zarr stores are
-built from the fabric's `.dbf` into `.ddrs/adjacency/<key>/` (~10 s,
-content-addressed and reused afterwards). If you already have pre-built zarr
+built from the fabric's attribute table into `.ddrs/adjacency/<key>/` (~10 s
+for the CONUS dbf, content-addressed and reused afterwards). The fabric may
+also be a GeoPackage — e.g. a merged global MERIT flowlines `.gpkg` — in
+which case attributes are read via SQL and geometry is never touched; if the
+gpkg holds more than one feature layer, pick one with
+`geospatial_fabric_layer: <name>`. If you already have pre-built zarr
 stores, drop `geospatial_fabric` and set both `conus_adjacency` and
 `gages_adjacency` to their paths instead.
 

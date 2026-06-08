@@ -244,12 +244,16 @@ fn resolve_adjacency(
                 path: config_path.into(),
                 source: "data_sources: no adjacency paths and no geospatial_fabric".into(),
             })?;
-            let outcome =
-                crate::adjacency::cache::resolve_or_build(workspace.root(), fabric, &ds.gages)
-                    .map_err(|e| CliError::ConfigInvalid {
-                        path: config_path.into(),
-                        source: Box::new(e),
-                    })?;
+            let outcome = crate::adjacency::cache::resolve_or_build(
+                workspace.root(),
+                fabric,
+                ds.geospatial_fabric_layer.as_deref(),
+                &ds.gages,
+            )
+            .map_err(|e| CliError::ConfigInvalid {
+                path: config_path.into(),
+                source: Box::new(e),
+            })?;
             Ok(ResolvedAdjacency {
                 conus: outcome.paths.conus,
                 gages: outcome.paths.gages,

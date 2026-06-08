@@ -122,6 +122,23 @@ ddrs --config config/merit_training.yaml run  --workflow train-and-test
 `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`);
 `ddrs init` rejects contradictions at load time.
 
+**Resume from a checkpoint**: a checkpoint is a DIRECTORY `epoch_E_mb_M/`
+holding three fixed-name files — `head.mpk` (KAN weights), `optim.mpk` (Adam
+moments), `state.json` (epoch, next mini-batch, rng, in-flight epoch's sampler
+permutation + cursor). Set `experiment.checkpoint:` in `ddrs.yaml` to that
+directory (e.g. `.ddrs/runs/<id>/checkpoints/epoch_25_mb_8`) and
+`bootstrap_head_and_state` (`src/training/bootstrap.rs`) restores all three —
+so the resumed run draws the SAME gauge batches and rho-windows the original
+would have, and the `learning_rate` schedule continues at the true epoch.
+Remember to raise `experiment.epochs` past the checkpoint's epoch or the
+resumed run trains zero batches. The path helpers `head_base`/`optim_base`
+return the recorder bases (`dir/head`, `dir/optim`; `CompactRecorder` appends
+`.mpk`); `state_path` returns `dir/state.json` (`src/training/checkpoint.rs`).
+Resume state is exact, but stored weights/moments are f16
+(`CompactRecorder` = `HalfPrecisionSettings`), so a resumed trajectory drifts
+slowly from the uninterrupted one — see
+`docs/2026-06-07-checkpoint-resume-handoff.md` follow-up #1.
+
 Full design at
 `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
 implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
@@ -184,7 +201,7 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 
 | Source | Path | Crate |
 |---|---|---|
-| Geospatial fabric | `riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp` (+ sibling `.dbf`) | `dbase` |
+| Geospatial fabric | `riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp` (+ sibling `.dbf`), or a `.gpkg` (e.g. merged global `global_merit_riv.gpkg`) | `dbase` / `rusqlite` |
 | MERIT adjacency | managed, built from the fabric → `.ddrs/adjacency/<key>/` (or explicit override) | `zarrs` |
 | Per-gauge subgraphs | managed, built from the fabric → `.ddrs/adjacency/<key>/` (or explicit override) | `zarrs` |
 | Catchment attributes | `~/projects/ddr/data/merit_global_attributes_v2.nc` | `netcdf` (TODO) |
@@ -192,10 +209,14 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 | USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` (TODO) |
 
 The adjacency stores are now **managed**: provide `geospatial_fabric` (the raw
-MERIT flowlines `.shp`/`.dbf`) and `ddrs plan` builds the CONUS + gauges zarr
-stores into `.ddrs/adjacency/<key>/` on first run (content-addressed, ~10 s),
-reusing them afterwards. Only the `.dbf` attribute table is read — `.shp`
-geometry is never opened. To skip the build, set both `conus_adjacency` and
+MERIT flowlines as `.shp`/`.dbf`, or a `.gpkg` such as the merged global
+fabric) and `ddrs plan` builds the CONUS + gauges zarr stores into
+`.ddrs/adjacency/<key>/` on first run (content-addressed, ~10 s for the CONUS
+dbf; ~25 s read+build for the 2.94M-reach global gpkg, plus per-gauge
+subgraphs and zarr writes), reusing them afterwards. Only
+the attribute table is read — `.shp` geometry / gpkg geometry blobs are never
+opened. For multi-layer gpkg files set `geospatial_fabric_layer` (it
+participates in the cache key). To skip the build, set both `conus_adjacency` and
 `gages_adjacency` to pre-built zarr stores. The managed builder matches an
 engine-built store **element-for-element** — `order`, `indices_0`, `indices_1`
 are byte-identical (the engine's `topological_sort` is petgraph's deterministic
@@ -226,7 +247,8 @@ train-and-test` copies these into `<run_dir>/baseline/`.
 Note: `ddrs plan` is therefore no longer side-effect-free — first run
 opens icechunk and reads ~370 MB of daily Qr, and (when `geospatial_fabric` is
 configured instead of explicit adjacency zarr paths) builds the managed
-adjacency stores into `.ddrs/adjacency/<key>/` from the raw `.dbf` (~10 s).
+adjacency stores into `.ddrs/adjacency/<key>/` from the raw fabric
+(`.dbf` ~10 s; global `.gpkg` ~25 s read+build, measured 2026-06-06).
 Subsequent plans on the same input set are cache hits and instant for both.
 
 Implementation: `src/baseline/`. Mirrors

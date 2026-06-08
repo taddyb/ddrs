@@ -51,15 +51,21 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 ndarray = "0.16"
 ndarray-npy = { version = "0.9", optional = true }
 rand = "0.8"
+# ChaCha12Rng IS rand 0.8's StdRng (identical streams from seed_from_u64);
+# we name it directly so the training rng can be serde-checkpointed for resume.
+rand_chacha = { version = "0.3", features = ["serde1"] }
 rand_distr = "0.4"
 clap = { version = "4", features = ["derive"] }
 blake3 = "1"
 os_pipe = "1"
 humantime = "2"
 dbase = "0.7.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 approx = "0.5"
+dbase = "0.7.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 which = "6"
 

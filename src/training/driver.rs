@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use rand::rngs::StdRng;
+use rand_chacha::ChaCha12Rng;
 
 use burn::backend::Autodiff;
 use burn::module::AutodiffModule;
@@ -25,9 +25,12 @@ use burn::tensor::{backend::Backend, Tensor, TensorData};
 
 use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
-use crate::data::error::Result;
+use crate::data::error::{DataError, Result};
 use crate::data::sampler::{BatchSource, RandomSampler};
 use crate::nn::kan_head::KanHead;
+use crate::training::checkpoint::{
+    head_base, optim_base, save_optimizer, save_train_state, state_path, TrainCkptState,
+};
 use crate::training::forward::forward;
 use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
 
@@ -35,11 +38,18 @@ use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_do
 ///
 /// Parameterized on the inner backend `I` so the autodiff type
 /// (`Autodiff<I>`) is always explicit and matches the `forward` signature.
+///
+/// `rng` is `ChaCha12Rng` (= rand 0.8's `StdRng`, identical stream from
+/// `seed_from_u64`) so it can be serde-checkpointed for exact resume.
 pub struct TrainState<I: Backend> {
     pub head: KanHead<Autodiff<I>>,
     pub epoch: usize,
     pub mini_batch: usize,
-    pub rng: StdRng,
+    pub rng: ChaCha12Rng,
+    /// Mid-epoch resume: the in-flight epoch's sampler permutation + cursor
+    /// from a checkpoint sidecar. Consumed by `train` on its first epoch
+    /// (skipping the reshuffle); `None` for fresh runs.
+    pub resume_sampler: Option<(Vec<usize>, usize)>,
 }
 
 /// Run the full training loop.
@@ -64,8 +74,16 @@ pub fn train<I: Backend>(
         BatchSource::Shuffle(RandomSampler::new(dataset.len(), exp.batch_size, true))
     });
 
+    // Mid-epoch resume: the first epoch reuses the checkpointed permutation +
+    // cursor instead of reshuffling (the shuffle that produced it already
+    // consumed the rng in the original run).
+    let mut pending_restore = state.resume_sampler.take();
+
     for epoch in state.epoch..=exp.epochs {
-        sampler.reshuffle(&mut state.rng);
+        match pending_restore.take() {
+            Some((indices, cursor)) => sampler.restore(indices, cursor),
+            None => sampler.reshuffle(&mut state.rng),
+        }
         let lr = resolve_lr(&exp.learning_rate, epoch);
         eprintln!("epoch {epoch} lr={lr}");
 
@@ -166,10 +184,33 @@ pub fn train<I: Backend>(
             let grads = clip_grad_norm(grads, &state.head, grad_clip);
             state.head = optimizer.step(lr as f64, state.head.clone(), grads);
 
-            // Checkpoint: .valid() strips autodiff; save_kan_head<I> writes to disk.
-            let ckpt_path =
+            // Checkpoint directory `epoch_E_mb_M/` holding head.mpk + optim.mpk
+            // + state.json (fixed names). See checkpoint.rs module docs.
+            let ckpt_dir =
                 checkpoint_dir.join(format!("epoch_{epoch}_mb_{}", state.mini_batch));
-            save_kan_head(&ckpt_path, &state.head.clone().valid())?;
+            std::fs::create_dir_all(&ckpt_dir).map_err(|e| DataError::Io {
+                path: ckpt_dir.clone(),
+                source: e,
+            })?;
+
+            // .valid() strips autodiff; save_kan_head<I> writes to disk.
+            save_kan_head(&head_base(&ckpt_dir), &state.head.clone().valid())?;
+
+            // Adam moments + train-loop position (rng, sampler permutation/cursor)
+            // for exact resume.
+            save_optimizer(&optim_base(&ckpt_dir), &*optimizer)?;
+            if let Some((sampler_indices, sampler_cursor)) = sampler.snapshot() {
+                save_train_state(
+                    &state_path(&ckpt_dir),
+                    &TrainCkptState {
+                        epoch,
+                        next_mini_batch: state.mini_batch + 1,
+                        rng: state.rng.clone(),
+                        sampler_indices,
+                        sampler_cursor,
+                    },
+                )?;
+            }
 
             // SP-10 multi-batch OOM fix: every per-timestep call to
             // `fresh_primitive_from_scratch` (~24 per t on the CUDA-graph

@@ -488,8 +488,8 @@ fn v4_test_period_matches_ddr_for_frozen_constant_params() {
 #[test]
 fn v3_train_one_epoch_runs_end_to_end() {
     use burn::backend::{Autodiff, NdArray};
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand_chacha::ChaCha12Rng;
     use ddrs::nn::kan_head::KanHeadConfig;
     use ddrs::training::{TrainState, train, build_adam};
 
@@ -539,7 +539,8 @@ fn v3_train_one_epoch_runs_end_to_end() {
         head,
         epoch: 1,
         mini_batch: 0,
-        rng: StdRng::seed_from_u64(42),
+        rng: ChaCha12Rng::seed_from_u64(42),
+        resume_sampler: None,
     };
     let mut optimizer = build_adam::<ddrs::nn::kan_head::KanHead<AB>, AB>();
 

@@ -9,10 +9,11 @@
 //!                                    dropped COMIDs, build duration, git SHA
 //! ```
 //!
-//! The key is blake3 of the .dbf file bytes ∥ gages CSV file bytes ∥
-//! BUILDER_VERSION, truncated to 16 hex chars. Content fingerprints (not
-//! stat/path) are used so that moving or renaming the files does NOT
-//! invalidate, and so two files with identical bytes share a cache entry.
+//! The key is blake3 of the resolved fabric file bytes (.dbf or .gpkg) ∥
+//! gages CSV file bytes ∥ optional gpkg layer name ∥ BUILDER_VERSION,
+//! truncated to 16 hex chars. Content fingerprints (not stat/path) are used
+//! so that moving or renaming the files does NOT invalidate, and so two
+//! files with identical bytes share a cache entry.
 //!
 //! Build is crash-safe: everything is written into a temp dir
 //! `<root>/adjacency/.tmp-<key>` then atomically renamed into place.
@@ -25,7 +26,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::adjacency::build::{build_conus_adjacency, BuildError};
-use crate::adjacency::dbf::{read_flowpath_records, resolve_dbf_path};
+use crate::adjacency::fabric::{read_fabric_records, resolve_fabric};
 use crate::adjacency::gauges::build_gauge_subgraphs;
 use crate::adjacency::zarr_write::{write_conus_store, write_gauges_store};
 use crate::adjacency::BUILDER_VERSION;
@@ -67,12 +68,19 @@ pub enum AdjacencyCacheError {
 struct CacheManifest {
     key: String,
     builder_version: u32,
-    /// Absolute path of the .dbf (or .shp) input supplied by the caller.
+    /// Absolute path of the fabric input supplied by the caller
+    /// (.shp, .dbf, or .gpkg).
     fabric_path: PathBuf,
-    /// Absolute path of the resolved .dbf file that was hashed.
-    /// May differ from `fabric_path` when the caller supplies a .shp sibling.
-    dbf_path: PathBuf,
-    /// blake3 hex of the resolved .dbf file bytes.
+    /// Absolute path of the resolved file that was hashed: the sibling .dbf
+    /// for a .shp input, the file itself for .dbf/.gpkg.
+    /// (Serde alias keeps manifests written before gpkg support readable.)
+    #[serde(alias = "dbf_path")]
+    fabric_resolved_path: PathBuf,
+    /// gpkg feature layer used, when the fabric is a .gpkg with an explicit
+    /// `geospatial_fabric_layer`. `None` for dBASE fabrics / single-layer gpkg.
+    #[serde(default)]
+    fabric_layer: Option<String>,
+    /// blake3 hex of the resolved fabric file bytes.
     fabric_fingerprint: String,
     /// Absolute path of the gages CSV.
     gages_path: PathBuf,
@@ -96,27 +104,31 @@ struct CacheManifest {
 
 /// Resolve the adjacency cache for the given inputs, building if necessary.
 ///
-/// `fabric` may be a `.shp` or `.dbf` path — the `.dbf` sibling is opened for
-/// hashing and reading (same resolution as [`read_flowpath_records`]).
+/// `fabric` may be a `.shp` (sibling `.dbf` opened), `.dbf`, or `.gpkg` path —
+/// see `fabric::resolve_fabric`. `fabric_layer` selects the gpkg feature layer
+/// (ignored for dBASE inputs; config validation rejects that combination).
 /// `workspace_root` is the ddrs workspace root (`.ddrs/..` parent); the cache
 /// lands at `<workspace_root>/adjacency/<key>/`.
 ///
-/// On a cache miss the build takes ~10 s on real MERIT data (108 MB dbf +
-/// ~3 000 BFS traversals + zarr writes; measured ~2 s on an NVMe host). A
+/// On a cache miss the build takes ~10 s on real CONUS MERIT data (108 MB dbf
+/// + ~3 000 BFS traversals + zarr writes; measured ~2 s on an NVMe host). A
 /// progress line is printed before the build begins so the user knows it is
-/// not hung.
+/// not hung. For a multi-GB global gpkg the content fingerprint itself costs
+/// a few seconds of hashing on first run.
 pub fn resolve_or_build(
     workspace_root: &Path,
     fabric: &Path,
+    fabric_layer: Option<&str>,
     gages_csv: &Path,
 ) -> Result<AdjacencyCacheOutcome, AdjacencyCacheError> {
-    // Resolve the actual .dbf path (mirrors the dbf reader's resolution).
-    let dbf_path = resolve_dbf_path(fabric);
+    // Resolve the hashable artifact (.shp → sibling .dbf; .dbf/.gpkg as-is).
+    let resolved = resolve_fabric(fabric).map_err(AdjacencyCacheError::Data)?;
+    let resolved_path = resolved.resolved_path().to_path_buf();
 
     // --- 1. Compute the content key -----------------------------------------
-    let dbf_fp = file_fingerprint(&dbf_path)?;
+    let fabric_fp = file_fingerprint(&resolved_path)?;
     let gages_fp = file_fingerprint(gages_csv)?;
-    let key = content_key(&dbf_fp, &gages_fp);
+    let key = content_key(&fabric_fp, &gages_fp, fabric_layer);
 
     // --- 2. Cache hit? -------------------------------------------------------
     let cache_dir = adjacency_cache_dir(workspace_root, &key);
@@ -130,8 +142,9 @@ pub fn resolve_or_build(
 
     // --- 3. Cache miss: build into a temp dir then rename -------------------
     println!(
-        "  building MERIT adjacency from {} — first run takes ~10 s",
-        dbf_path.display()
+        "  building MERIT adjacency from {} — first run takes ~10 s (CONUS dbf) \
+         to a few minutes (global gpkg)",
+        resolved_path.display()
     );
 
     let tmp_dir = workspace_root
@@ -143,7 +156,7 @@ pub fn resolve_or_build(
 
     let t0 = Instant::now();
 
-    let records = read_flowpath_records(&dbf_path)
+    let records = read_fabric_records(fabric, fabric_layer)
         .map_err(AdjacencyCacheError::Data)?;
 
     let conus = build_conus_adjacency(&records)
@@ -172,8 +185,9 @@ pub fn resolve_or_build(
         key: key.clone(),
         builder_version: BUILDER_VERSION,
         fabric_path: fabric.to_path_buf(),
-        dbf_path: dbf_path.clone(),
-        fabric_fingerprint: dbf_fp,
+        fabric_resolved_path: resolved_path.clone(),
+        fabric_layer: fabric_layer.map(str::to_string),
+        fabric_fingerprint: fabric_fp,
         gages_path: gages_csv.to_path_buf(),
         gages_fingerprint: gages_fp,
         n,
@@ -231,16 +245,26 @@ fn is_cache_hit(dir: &Path) -> bool {
     dir.join("manifest.json").exists()
 }
 
-/// 16-hex-char (64-bit prefix) content key: blake3(dbf_fp ∥ gages_fp ∥ version).
+/// 16-hex-char (64-bit prefix) content key:
+/// blake3(fabric_fp ∥ gages_fp ∥ [layer ∥] version).
 ///
 /// Inputs are the full hex fingerprints of the file bytes, not the paths.
 /// Collision-free at our scale; safe for filesystem use.
-fn content_key(dbf_fp: &str, gages_fp: &str) -> String {
+///
+/// `layer` participates in the key only when `Some`: a multi-layer gpkg has
+/// identical bytes regardless of which layer is selected, so the layer name
+/// must distinguish cache entries. Folding it in only when set keeps every
+/// pre-gpkg cache key (dbf fabrics, layer always `None`) unchanged.
+fn content_key(fabric_fp: &str, gages_fp: &str, layer: Option<&str>) -> String {
     let mut h = blake3::Hasher::new();
-    h.update(dbf_fp.as_bytes());
+    h.update(fabric_fp.as_bytes());
     h.update(b"\n");
     h.update(gages_fp.as_bytes());
     h.update(b"\n");
+    if let Some(layer) = layer {
+        h.update(layer.as_bytes());
+        h.update(b"\n");
+    }
     h.update(BUILDER_VERSION.to_le_bytes().as_ref());
     let hex = h.finalize().to_hex();
     hex.as_str()[..16].to_string()
@@ -351,23 +375,33 @@ mod tests {
 
     #[test]
     fn content_key_is_16_hex_chars() {
-        let k = content_key("aabbcc", "ddeeff");
+        let k = content_key("aabbcc", "ddeeff", None);
         assert_eq!(k.len(), 16, "key must be 16 hex chars, got: {k}");
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()), "key must be hex: {k}");
     }
 
     #[test]
     fn content_key_is_stable() {
-        let k1 = content_key("fp1", "fp2");
-        let k2 = content_key("fp1", "fp2");
+        let k1 = content_key("fp1", "fp2", None);
+        let k2 = content_key("fp1", "fp2", None);
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn content_key_differs_on_different_inputs() {
-        let k1 = content_key("aaaa", "bbbb");
-        let k2 = content_key("aaaa", "cccc");
+        let k1 = content_key("aaaa", "bbbb", None);
+        let k2 = content_key("aaaa", "cccc", None);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn content_key_differs_on_layer() {
+        // Same fabric bytes, different gpkg layer → distinct cache entries.
+        let base = content_key("aaaa", "bbbb", None);
+        let l1 = content_key("aaaa", "bbbb", Some("flowlines"));
+        let l2 = content_key("aaaa", "bbbb", Some("catchments"));
+        assert_ne!(l1, l2);
+        assert_ne!(base, l1);
     }
 
     // ── end-to-end cache tests ───────────────────────────────────────────────
@@ -381,7 +415,7 @@ mod tests {
         write_tiny_gages(&gages_path);
 
         // First call: cache miss → build.
-        let out1 = resolve_or_build(&ws, &dbf_path, &gages_path)
+        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path)
             .expect("first build");
         assert!(!out1.cache_hit, "first call should be a cache miss");
         assert_eq!(out1.key.len(), 16);
@@ -402,12 +436,13 @@ mod tests {
         assert!(m.dropped_comids.is_empty(), "no cycles in tiny network");
         assert!(m.build_duration_secs >= 0.0);
         assert_eq!(m.builder_version, BUILDER_VERSION);
-        // dbf_path and fabric_path must agree (both are .dbf here).
+        // resolved path and fabric_path must agree (both are .dbf here).
         assert_eq!(m.fabric_path, dbf_path);
-        assert_eq!(m.dbf_path, dbf_path);
+        assert_eq!(m.fabric_resolved_path, dbf_path);
+        assert!(m.fabric_layer.is_none(), "dbf fabric has no layer");
 
         // Second call: cache hit.
-        let out2 = resolve_or_build(&ws, &dbf_path, &gages_path)
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path)
             .expect("second call");
         assert!(out2.cache_hit, "second call should be a cache hit");
         assert_eq!(out2.key, out1.key, "same key on hit");
@@ -436,8 +471,8 @@ mod tests {
         );
         write_tiny_gages(&gages_path);
 
-        let out1 = resolve_or_build(&ws, &dbf_v1, &gages_path).expect("build v1");
-        let out2 = resolve_or_build(&ws, &dbf_v2, &gages_path).expect("build v2");
+        let out1 = resolve_or_build(&ws, &dbf_v1, None, &gages_path).expect("build v1");
+        let out2 = resolve_or_build(&ws, &dbf_v2, None, &gages_path).expect("build v2");
 
         assert_ne!(out1.key, out2.key, "keys must differ for different dbf content");
         assert!(!out1.cache_hit);
@@ -459,7 +494,7 @@ mod tests {
         // content_key output against a manual hash that includes the version.
         let dbf_fp = "deadbeef";
         let gages_fp = "cafebabe";
-        let k = content_key(dbf_fp, gages_fp);
+        let k = content_key(dbf_fp, gages_fp, None);
 
         let mut h = blake3::Hasher::new();
         h.update(dbf_fp.as_bytes());
@@ -482,7 +517,7 @@ mod tests {
         write_tiny_dbf(&dbf_path);
         write_tiny_gages(&gages_path);
 
-        let out = resolve_or_build(&ws, &dbf_path, &gages_path).expect("build");
+        let out = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("build");
         assert!(!out.cache_hit);
 
         // Verify the conus store round-trips.

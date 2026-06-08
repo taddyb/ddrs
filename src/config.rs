@@ -55,12 +55,19 @@ pub struct DataSources {
     pub streamflow: std::path::PathBuf,
     pub observations: std::path::PathBuf,
     pub gages: std::path::PathBuf,
-    /// Path to the MERIT flowlines shapefile (.shp; sibling .dbf is read).
-    /// Corresponds to DDR's `geospatial_fabric_gpkg` key (DDR uses .gpkg;
-    /// we accept .shp and read only the .dbf). Required when `conus_adjacency`
-    /// and `gages_adjacency` are absent; used by `ddrs plan` to build them.
+    /// Path to the MERIT flowlines fabric: `.shp` (sibling `.dbf` read),
+    /// `.dbf`, or `.gpkg` (attribute columns read via SQL; geometry never
+    /// opened in any format). Matches DDR's `geospatial_fabric_gpkg` artifact.
+    /// Required when `conus_adjacency` and `gages_adjacency` are absent;
+    /// used by `ddrs plan` to build them.
     #[serde(default)]
     pub geospatial_fabric: Option<std::path::PathBuf>,
+    /// Feature layer to read when `geospatial_fabric` is a `.gpkg` with more
+    /// than one feature layer (e.g. a file holding both flowlines and
+    /// catchments). Optional for single-layer gpkg files; invalid for
+    /// `.shp`/`.dbf` fabrics.
+    #[serde(default)]
+    pub geospatial_fabric_layer: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,6 +391,8 @@ impl Config {
 /// - Neither adjacency key present, but `geospatial_fabric` present → OK (managed build).
 /// - Neither adjacency key and no `geospatial_fabric` → error: name missing keys.
 /// - Exactly one adjacency key → error: partial adjacency.
+/// - `geospatial_fabric_layer` set while the fabric is not a `.gpkg` → error
+///   (the layer concept only exists for GeoPackage).
 fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
     let ds = match cfg.data_sources.as_ref() {
         None => return Ok(()), // no data_sources section at all — allowed for default/test configs
@@ -392,6 +401,24 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
     let has_conus = ds.conus_adjacency.is_some();
     let has_gages = ds.gages_adjacency.is_some();
     let has_fabric = ds.geospatial_fabric.is_some();
+
+    // Layer selection is a gpkg-only concept; reject it for dBASE fabrics
+    // (or with no fabric at all) at load time rather than silently ignoring.
+    if ds.geospatial_fabric_layer.is_some() {
+        let is_gpkg = ds
+            .geospatial_fabric
+            .as_ref()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("gpkg"));
+        if !is_gpkg {
+            return Err(
+                "data_sources: `geospatial_fabric_layer` is set but `geospatial_fabric` \
+                 is not a .gpkg file — the layer key only applies to GeoPackage fabrics."
+                    .to_string(),
+            );
+        }
+    }
 
     match (has_conus, has_gages, has_fabric) {
         // Both explicit zarr paths: valid.
@@ -699,6 +726,45 @@ data_sources:
         assert!(
             msg.contains("conus_adjacency` is missing"),
             "expected partial-adjacency error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gpkg_fabric_with_layer_valid() {
+        // .gpkg fabric + explicit layer → valid managed-build config.
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  geospatial_fabric: /dev/null/global_merit_riv.gpkg
+  geospatial_fabric_layer: flowlines
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gpkg_layer.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("gpkg fabric + layer should be valid");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert_eq!(ds.geospatial_fabric_layer.as_deref(), Some("flowlines"));
+    }
+
+    #[test]
+    fn layer_without_gpkg_fabric_rejected() {
+        // geospatial_fabric_layer alongside a .shp fabric → config error.
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  geospatial_fabric_layer: flowlines
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_layer_no_gpkg.yaml", ds_block);
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("geospatial_fabric_layer") && msg.contains(".gpkg"),
+            "expected layer-without-gpkg error, got: {msg}"
         );
     }
 

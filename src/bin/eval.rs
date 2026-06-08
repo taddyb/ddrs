@@ -28,7 +28,7 @@ use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::data::TestWindow;
 use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
-use ddrs::training::checkpoint::load_kan_head;
+use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::{evaluate, write_predictions_zarr, EvalParams, FrozenParams, ZarrAttrs};
 
 #[derive(Parser, Debug)]
@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long)]
     config: PathBuf,
 
-    /// MLP checkpoint base path (no .mpk suffix). Required unless --frozen.
+    /// Checkpoint directory `epoch_E_mb_M/` (holds head.mpk). Required unless --frozen.
     #[arg(long)]
     checkpoint: Option<PathBuf>,
 
@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_grid(head_section.grid)
         .with_k(head_section.k);
         let head_template: KanHead<I> = head_cfg.init::<I>(&device);
-        let head = load_kan_head::<I>(cli.checkpoint.as_ref().unwrap(), head_template, &device)?;
+        let head = load_kan_head::<I>(&head_base(cli.checkpoint.as_ref().unwrap()), head_template, &device)?;
         evaluate::<I>(&cfg, &dataset, EvalParams::KanHead(&head), &device, cli.batch_size_days)?
     };
 
