@@ -37,8 +37,8 @@ pub use ids::{Comid, IdIndex, Staid};
 pub use sampler::{RandomSampler, SequentialSampler};
 pub use store::{
     AttributesStore, ConusAdjacencyStore, GageMetadata, GageRow, GageSubgraph,
-    GagesAdjacencyStore, GlobalObservationsStore, ObservationsStore, StreamflowStore,
-    UsgsObservationsStore,
+    GagesAdjacencyStore, GlobalObservationsStore, GlobalStreamflowStore, ObservationsStore,
+    StreamflowSource, StreamflowStore, UsgsObservationsStore,
 };
 pub use statistics::{fill_nans, fill_nans_1d, naninfmean, AttrStatRow, AttrStats};
 pub use test_window::TestWindow;

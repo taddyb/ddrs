@@ -13,18 +13,20 @@ pub mod icechunk;
 pub mod netcdf;
 pub mod zarr;
 pub mod zarr_obs;
+pub mod zarr_qprime;
 
 pub use gage_csv::{GageMetadata, GageRow};
 pub use icechunk::{StreamflowStore, UsgsObservationsStore};
 pub use netcdf::AttributesStore;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
 pub use zarr_obs::GlobalObservationsStore;
+pub use zarr_qprime::GlobalStreamflowStore;
 
 use ndarray::Array2;
 
 use crate::data::dates::RhoWindow;
 use crate::data::error::Result;
-use crate::data::ids::Staid;
+use crate::data::ids::{Comid, Staid};
 
 /// Format-dispatching observations reader. The `observations` data source is
 /// either an icechunk repo (`usgs_daily_observations`, CONUS) or a plain
@@ -66,6 +68,62 @@ impl ObservationsStore {
         match self {
             Self::Usgs(s) => s.read_window(window, staids),
             Self::Global(s) => s.read_window(window, staids),
+        }
+    }
+}
+
+/// Format-dispatching Q' (unit-catchment streamflow) reader. The
+/// `streamflow` data source is either an icechunk repo
+/// (`merit_dhbv2_UH_retrospective`, CONUS) or a `merit_global_v2.x`-style
+/// multi-zone zarr v2 store (global). Both are daily m³/s per COMID with
+/// the same read contract (missing COMIDs → 0.001 fill).
+pub enum StreamflowSource {
+    /// Icechunk-backed CONUS retrospective.
+    Icechunk(StreamflowStore),
+    /// Multi-zone zarr v2 global predictions (one group per pfaf-2 zone).
+    GlobalZarr(GlobalStreamflowStore),
+}
+
+impl StreamflowSource {
+    /// Open `path`, sniffing the format: zone groups (`.zgroup` +
+    /// `streamflow/.zarray`, at the root or one level down) mean the
+    /// global zarr v2 layout; anything else is treated as an icechunk repo.
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self> {
+        let path = path.into();
+        if GlobalStreamflowStore::sniff(&path) {
+            Ok(Self::GlobalZarr(GlobalStreamflowStore::open(path)?))
+        } else {
+            Ok(Self::Icechunk(StreamflowStore::open(path)?))
+        }
+    }
+
+    pub fn read_window_daily(
+        &self,
+        window_start: chrono::NaiveDate,
+        n_days: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        match self {
+            Self::Icechunk(s) => s.read_window_daily(window_start, n_days, comids),
+            Self::GlobalZarr(s) => s.read_window_daily(window_start, n_days, comids),
+        }
+    }
+
+    pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
+        match self {
+            Self::Icechunk(s) => s.read_window(window, comids),
+            Self::GlobalZarr(s) => s.read_window(window, comids),
+        }
+    }
+
+    pub fn read_test_window(
+        &self,
+        window: &crate::data::TestWindow,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        match self {
+            Self::Icechunk(s) => s.read_test_window(window, comids),
+            Self::GlobalZarr(s) => s.read_test_window(window, comids),
         }
     }
 }

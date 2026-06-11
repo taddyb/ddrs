@@ -208,16 +208,36 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 | Streamflow forcing | `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic` | `icechunk` (TODO) |
 | USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` (TODO) |
 | Global observations | `/gpfs/hjj5218/data/dmc_forcing/observation/dMC_global_v3.1` (zarr v2 group, one f64 array per `Provider__GageId`) | `zarrs` |
+| Global streamflow forcing | `/gpfs/hjj5218/data/dmc_forcing/streamflow/zarr/8km/merit_global_v2.7` (multi-zone zarr v2, `(time, COMID)` f64 per pfaf-2 zone) | `zarrs` |
+| Global gage metadata | `/gpfs/hjj5218/data/dmc_forcing/gage_information/formatted_gage_csvs/v3.1/8km/` (57 per-zone `<zone>_all.csv`) | `csv` |
 
-The `observations` data source auto-detects its format
-(`ObservationsStore::open`, `src/data/store/mod.rs`): a `.zgroup` at the root
-means the dMC_global_v3.1 zarr-v2 layout (`src/data/store/zarr_obs.rs` — daily
-m³/s, NaN = missing, implicit time axis 1980-01-01→2020-12-31, 14,976 days,
-verified against USGS NWIS); anything else is opened as an icechunk repo. The
-global store has 6,051 gages from 25+ providers. Its gage→COMID metadata
-lives in `/gpfs/hjj5218/data/dmc_forcing/gage_information/` (permission-locked
-as of 2026-06-10 — ask hjj5218); the `gages` CSV for global runs must use the
-full `Provider__GageId` strings as STAID.
+The `observations` and `streamflow` data sources auto-detect their format
+(`ObservationsStore::open` / `StreamflowSource::open`,
+`src/data/store/mod.rs`); the icechunk CONUS path is the fallback when the
+zarr-v2 sniff fails. Facts of the global stores (established empirically —
+they carry no units attrs):
+
+- **Observations** (`src/data/store/zarr_obs.rs`): daily m³/s, NaN = missing,
+  implicit time axis 1980-01-01→2020-12-31 (14,976 days), verified against
+  USGS NWIS. 6,051 gages from 25+ providers, named `Provider__GageId`.
+- **Streamflow Q'** (`src/data/store/zarr_qprime.rs`): one zarr group per
+  pfaf-2 zone (60 zones, 2.9M COMIDs), `streamflow` is **time-major**
+  `(time, COMID)` f64, CF time `days since 1980-01-01`. Units are m³/s —
+  confirmed by per-COMID magnitude match against the CONUS
+  `merit_dhbv2_UH_retrospective` reference (declared `m^3/s`) and by summed
+  upstream Q' reproducing observed USGS discharge (best gage ratio 1.05,
+  corr 0.95). ~42k fabric reaches lack predictions → 0.001 fill at read.
+  Version dirs: v2.x readme at `streamflow/zarr/8km/readme{,_file}`; v2.7 is
+  the latest as of 2026-06-11.
+- **Gage CSVs**: `GageMetadata::open` accepts a directory and concatenates
+  all `*.csv` in filename order (no STANAME column needed; STAID holds the
+  full `Provider__GageId`, every row has a COMID).
+
+The fabric for global runs is `/projects/mhpi/data/MERIT/raw/
+global_merit_riv.gpkg` (2,939,408 flowlines) via the existing managed
+adjacency build. Attributes stay on `merit_global_attributes_v2.nc`
+(already global: 2,939,404 COMIDs, zones 11-91; stats JSON exists under
+`~/projects/ddr/data/statistics/`).
 
 The adjacency stores are now **managed**: provide `geospatial_fabric` (the raw
 MERIT flowlines as `.shp`/`.dbf`, or a `.gpkg` such as the merged global
