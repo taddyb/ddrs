@@ -42,6 +42,11 @@ enum Cmd {
         #[arg(long)] json: bool,
     },
     Show { run_id: String, #[arg(long)] json: bool },
+    /// Named data-source groups ("save files") under config/sources/
+    Sources {
+        #[command(subcommand)]
+        cmd: SourcesCmd,
+    },
     Status { #[arg(long)] json: bool },
     Gc {
         #[arg(long)] keep: Option<usize>,
@@ -49,6 +54,16 @@ enum Cmd {
         #[arg(long)] older_than: Option<String>,
         #[arg(long)] dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum SourcesCmd {
+    /// Snapshot the current config's data_sources block as a named group
+    Save { name: String, #[arg(long)] force: bool },
+    /// Switch the config's data_sources to a named group and re-lock
+    Use { name: String },
+    /// List saved groups ('*' marks the one currently in the config)
+    List,
 }
 
 fn main() {
@@ -136,6 +151,40 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
         Cmd::Show { run_id, json } => ddrs::cli::show::run_show(&ws, &run_id, json),
+        Cmd::Sources { cmd } => {
+            let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
+                path: ".".into(),
+                source: "no ddrs.yaml found in current directory.".into(),
+            })?;
+            match cmd {
+                SourcesCmd::Save { name, force } => {
+                    let dest = ddrs::cli::sources::run_save(&cfg, &name, force)?;
+                    println!("saved data_sources -> {}", dest.display());
+                }
+                SourcesCmd::Use { name } => {
+                    let relocked = ddrs::cli::sources::run_use(&cfg, &name, &ws)?;
+                    println!("switched {} to group {name:?}", cfg.display());
+                    if relocked {
+                        println!("sources.lock refreshed");
+                    } else {
+                        println!("no workspace yet -- `ddrs init` will lock these sources");
+                    }
+                }
+                SourcesCmd::List => {
+                    let entries = ddrs::cli::sources::run_list(&cfg)?;
+                    if entries.is_empty() {
+                        println!(
+                            "no groups in {} -- create one with `ddrs sources save <name>`",
+                            ddrs::cli::sources::groups_dir(&cfg).display(),
+                        );
+                    }
+                    for e in entries {
+                        println!("{} {}", if e.active { "*" } else { " " }, e.name);
+                    }
+                }
+            }
+            Ok(())
+        }
         Cmd::Status { json } => ddrs::cli::status::run_status(&ws, json),
         Cmd::Gc { keep, keep_successful, older_than, dry_run } => {
             let dur = older_than.as_deref()

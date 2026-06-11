@@ -98,6 +98,24 @@ ddrs status                                    # workspace summary + disk usage
 ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 ```
 
+**Data-source groups** (`src/cli/sources.rs`): named "save files" for the
+`data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
+`conus` and `global` ship in-repo). Switching datasets never requires
+hand-editing `ddrs.yaml`:
+
+```bash
+ddrs sources list                # '*' marks the group matching ddrs.yaml
+ddrs sources save <name>         # snapshot current data_sources (--force to overwrite)
+ddrs sources use  <name>         # splice group into ddrs.yaml + refresh sources.lock
+```
+
+`save`/`use` are textual — comments inside the block travel with the group,
+everything outside the block is untouched — and `use` validates the spliced
+config parses before committing, then re-locks `sources.lock` (when `.ddrs`
+exists) so `ddrs plan` sees no drift. Starting a global train from a CONUS
+workspace is therefore: `ddrs sources use global && ddrs plan --workflow
+train && ddrs run --workflow train`.
+
 **The bootstrap-from-last-run gotcha** (`src/cli/plan_bootstrap.rs:58-63`):
 when `ddrs init` materializes `ddrs.yaml`, it prefers
 `.ddrs/runs/<latest successful>/config.yaml` over the bundled
