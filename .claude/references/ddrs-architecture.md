@@ -21,7 +21,7 @@ sources:
 routing solver. The autograd boundary is `MuskingumCunge::forward(q_prime)
 -> Tensor<Autodiff<I>, 2>`: spatial NN-derived parameters
 `(n, q_spatial, p_spatial)` flow in, a 2-D `(time, reach)` discharge tensor
-flows out, and gradients trace cleanly back to the upstream MLP head. The
+flows out, and gradients trace cleanly back to the upstream routing head. The
 inner-backend generic `I` resolves to `NdArray<f32>` (CPU) or
 `Cuda<f32, i32>` (GPU) at compile time.
 
@@ -45,7 +45,7 @@ practice.
 | `src/cuda_graph/` | SP-10 CUDA Graph capture/replay. `capture.rs`, fused `#[cube]` kernels in `geometry_kernel.rs`, persistent handle scratch in `scratch.rs`. | (ddrs-specific perf layer) |
 | `src/geometry.rs` | Trapezoidal channel geometry (Leopold & Maddock), pure math used by `forward_chain_inner`. | `ddr/geometry/trapezoidal.py` |
 | `src/config.rs` | YAML config, parameter ranges, attribute minimums, log-space flags, `SparseSolver` enum. | `ddr/validation/configs.py` (Params subset) |
-| `src/nn/mlp.rs` | MLP head producing `[0, 1]` parameters, replaces DDR's KAN with the same I/O contract. | `ddr/nn/kan.py` (interface only) |
+| `src/nn/kan_head.rs` | KAN routing head (`rskan::KanLayer`): `Linear(F, H) → KanLayer(H, H) × num_hidden_layers → Linear(H, P) → Sigmoid` (no inter-block ReLU), producing `[0, 1]` parameters. Matches DDR's `kan.py` layer stack. | `ddr/nn/kan.py` |
 | `src/data/` | Live readers for DDR's training data — zarr/netcdf/icechunk. `ids.rs` (`Comid`/`Staid`), `dates.rs` (rho-window sampler), `store/zarr.rs` (`ConusAdjacencyStore`, `GagesAdjacencyStore`). | `ddr/data/` (`Dates`, gauge selection, etc.) |
 | `src/training/` | Training driver: `forward.rs`, `loss.rs`, `metrics.rs`, `optimizer.rs`, `checkpoint.rs`, zarr output. | `ddr/training/` |
 | `src/bin/` | CLI entry points (`merit_train`, etc.). | `ddr/scripts/` |

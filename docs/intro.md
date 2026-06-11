@@ -8,8 +8,8 @@ of **0.385** — CUDA finishes a 3-batch smoke train in 1.96 minutes versus
 CPU's 5.09 minutes, a 2.6× speed-up.
 
 The published mdBook is regenerated from the canonical agent-readable
-skills under `.claude/skills/ddrs-*.md` via the `/regenerate-docs`
-meta-skill. Each chapter expands its source skill into prose while
+reference docs under `.claude/references/ddrs-*.md` via the `/regenerate-docs`
+meta-skill. Each chapter expands its source reference into prose while
 preserving the technical content verbatim. If you find a discrepancy
 between a chapter and the source code it documents, the source code is
 the truth — file an issue or run `/regenerate-docs` to refresh.

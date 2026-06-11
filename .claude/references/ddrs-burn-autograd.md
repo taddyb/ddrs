@@ -18,7 +18,8 @@ to register a custom `Backward<B, N>` from a downstream crate like ddrs.
 ddrs uses this for `CsrSolveOp` (in `src/sparse/mod.rs`) and `TimestepOp`
 (in `src/routing/mmc_op.rs`).
 
-Verified by `spike_backward/visibility_check.rs` (square op; dy/dx = 2x).
+Verified by the `sparse_gradcheck` and `sp8_gradcheck` integration tests
+(see Verification below).
 
 ### Visibility map
 
@@ -103,14 +104,17 @@ fn my_op<B: Backend>(x: Tensor<Autodiff<B>, D>) -> Tensor<Autodiff<B>, D> {
 
 ## Implications for ddrs
 
-The CSR triangular-solve port is unblocked. State for the analytical adjoint will be
-`(A_values_primitive, x_primitive, crow: Vec<i32>, col: Vec<i32>)` — the index arrays
-are not tensors, just Vecs we clone into State. The backward will:
+The CSR triangular-solve port is unblocked. State for the analytical adjoint is
+`CsrSolveState { a_values, x, pattern: Arc<CsrPattern>, use_cuda }` — the structural
+CSR arrays live behind a shared `Arc<CsrPattern>` (so per-timestep cloning is a
+refcount bump, not an O(nnz) copy onto the tape), not loose `Vec<i32>` index arrays
+in State. `CsrSolveOp` is therefore `Backward<B, 2>` (two parents: `a_values` and
+`b`). The backward will:
 
-1. Build CSR `A` from `(A_values, crow, col)` on the inner backend (no autograd).
+1. Build CSR `A` from `a_values` + the `Arc<CsrPattern>` on the inner backend (no autograd).
 2. Solve `A^T · gradb = grad_out` via upper-triangular substitution.
 3. Compute `gradA_values[k] = -gradb[row(k)] * x[col(k)]` for each non-zero.
-4. Register `gradA_values` → A_values parent, `gradb` → b parent.
+4. Register `gradA_values` → `a_values` parent, `gradb` → `b` parent.
 
 This mirrors `~/projects/ddr/src/ddr/routing/utils.py:515` (`TriangularSparseSolver`) 1:1.
 
@@ -118,8 +122,11 @@ This mirrors `~/projects/ddr/src/ddr/routing/utils.py:515` (`TriangularSparseSol
 
 ```bash
 cargo test --test sparse_gradcheck
+cargo test --test sp8_gradcheck
 ```
 
-Validates that the hand-written custom `Backward` for `CsrSolveOp`
-produces correct gradients. The `spike_backward/visibility_check.rs`
-file also exercises the recipe directly.
+`sparse_gradcheck` validates the hand-written `Backward` for `CsrSolveOp`
+against DDR's `TriangularSparseSolver` adjoint fixtures; `sp8_gradcheck`
+checks the fused timestep op against central finite differences over all
+five tracked parents. Neither test is `#[ignore]`d, so plain `cargo test`
+runs them (no `-- --ignored` needed).

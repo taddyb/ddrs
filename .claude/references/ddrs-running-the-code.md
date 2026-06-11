@@ -45,8 +45,10 @@ target/release/train \
     --checkpoint-dir output/saved_models
 ```
 
-Runs Phase 1 only (no test phase). Writes one `.mpk` per mini-batch to
-`--checkpoint-dir`. For smoke tests / nsys profiling, cap the inner loop with
+Runs Phase 1 only (no test phase). Writes one checkpoint per mini-batch to
+`--checkpoint-dir`, each a directory `epoch_E_mb_M/` (holding
+`head.mpk`/`optim.mpk`/`state.json`). For smoke tests / nsys profiling, cap
+the inner loop with
 `--max-mini-batches N` (still runs all configured epochs, just `N` batches
 each).
 
@@ -55,14 +57,16 @@ each).
 ```bash
 target/release/eval \
     --config config/merit_training.yaml \
-    --checkpoint output/saved_models/epoch_5 \
+    --checkpoint output/saved_models/epoch_5_mb_8 \
     --output output/model_test.zarr \
     --batch-size-days 15
 ```
 
-`--checkpoint` points at the `.mpk` base path (no suffix). Use `--frozen` to
-skip MLP loading and run with scalar default parameters (V4 dev path). Writes
-a DDR-compatible zarr at `--output` and logs an NSE summary.
+`--checkpoint` points at the checkpoint **directory** `epoch_E_mb_M/`
+(which holds `head.mpk`); the binary derives the recorder base from it via
+`head_base`, which appends the `.mpk` suffix internally. Use `--frozen` to
+skip KAN-head loading and run with scalar default parameters (V4 dev path).
+Writes a DDR-compatible zarr at `--output` and logs an NSE summary.
 
 ## Train + test (full pipeline)
 
@@ -74,9 +78,9 @@ target/release/train_and_test \
 ```
 
 Sequences Phase 1 (`train()`) then Phase 2 (`evaluate()`) in one process,
-auto-discovering the latest `.mpk` in `--checkpoint-dir` between phases.
-Mirrors DDR's `scripts/train_and_test.py`. Accepts the same
-`--max-mini-batches N` cap.
+auto-discovering the latest checkpoint directory `epoch_E_mb_M/` in
+`--checkpoint-dir` between phases. Mirrors DDR's `scripts/train_and_test.py`.
+Accepts the same `--max-mini-batches N` cap.
 
 ## V1 regression (compare_ddr_sandbox)
 
@@ -158,9 +162,9 @@ runs CPU-only (`NdArray<f32>`) for deterministic V1 comparison.
 - **fixtures/sandbox/ is gitignored.** Missing fixtures → `compare_ddr_sandbox`
   panics at the first CSV read. Regenerate via the DDR `uv` venv (see
   Setup skill).
-- **MLP checkpoints are not transferable from DDR.** `eval.rs` accepts only
-  ddrs-trained `.mpk` files; DDR's `.pt` weights match the I/O contract but
-  not the internal architecture.
+- **KAN-head checkpoints are not transferable from DDR.** `eval.rs` accepts
+  only ddrs-trained `.mpk` files; DDR's `.pt` weights match the I/O contract
+  but not the internal record layout.
 
 ## Verification
 

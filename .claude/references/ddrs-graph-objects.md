@@ -213,7 +213,7 @@ adjacency would be undefined.
   `discharge_t` from the previous setup (skips the cold-start solve).
   `carry_state == false` reruns the cold-start. If `discharge_t.is_none()`
   (first call), the cold-start runs regardless of the flag.
-- **`n_active` varies between batches.** Gauge subgraphs from
+- **`n` varies between batches.** Gauge subgraphs from
   `GagesAdjacencyStore` are different sizes per batch. The `CudaPatternCache`
   is **per-instance** (inside the `CsrPattern`), not global — different
   `MuskingumCunge` instances with different `n` have independent caches.

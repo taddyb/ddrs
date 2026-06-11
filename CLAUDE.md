@@ -23,7 +23,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
    desktop's `~/projects/ddr` working tree (unpushed `geometry/trapezoidal.py`
    work). A fixture regenerated from a clean DDR clone diverges ~1% at every
    ddrs commit — wrong reference, not a port bug. See
-   `.claude/skills/ddrs-comparing-to-ddr.md` §Regenerating fixtures.
+   `.claude/references/ddrs-comparing-to-ddr.md` §Regenerating fixtures.
 2. **f32 throughout the routing core.** No mixed precision. The DDR comparison
    sits at the f32 precision floor (~1e-7 rel diff per reach); any cast to
    f64/bf16 breaks reproducibility against the reference.
@@ -32,7 +32,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 4. **Don't replace the hand-written sparse backward** in `src/sparse.rs`
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
-   `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `.claude/references/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
 5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`.** Do NOT
    reintroduce the prior MLP placeholder. The KAN head matches DDR-Python's
    `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) × num_hidden_layers →
@@ -42,7 +42,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 6. **rskan is a git dependency pinned to a tag.** When updating `rskan`, bump
    the tag in `Cargo.toml`'s `rskan = { git = ..., tag = ... }`, then re-run
    `tests/kan_head.rs` and the full parity sweep before merging.
-   `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `.claude/references/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
 7. **KAN head parity vs DDR must pass on every PR that touches `src/nn/`,
    `Cargo.toml`'s rskan pin, or DDR's `nn/kan.py`.** Run:
    `cargo test --features fixtures --test kan_head_init_repro --test kan_head_init_parity --test kan_head_fixture_forward --test kan_head_fixture_backward`
@@ -281,7 +281,7 @@ Implementation: `src/baseline/`. Mirrors
 
 ## When in doubt
 
-- Sparse / autograd questions → `.claude/skills/ddrs-burn-autograd.md`
+- Sparse / autograd questions → `.claude/references/ddrs-burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`
