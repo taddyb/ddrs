@@ -207,6 +207,17 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 | Catchment attributes | `~/projects/ddr/data/merit_global_attributes_v2.nc` | `netcdf` (TODO) |
 | Streamflow forcing | `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic` | `icechunk` (TODO) |
 | USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` (TODO) |
+| Global observations | `/gpfs/hjj5218/data/dmc_forcing/observation/dMC_global_v3.1` (zarr v2 group, one f64 array per `Provider__GageId`) | `zarrs` |
+
+The `observations` data source auto-detects its format
+(`ObservationsStore::open`, `src/data/store/mod.rs`): a `.zgroup` at the root
+means the dMC_global_v3.1 zarr-v2 layout (`src/data/store/zarr_obs.rs` — daily
+m³/s, NaN = missing, implicit time axis 1980-01-01→2020-12-31, 14,976 days,
+verified against USGS NWIS); anything else is opened as an icechunk repo. The
+global store has 6,051 gages from 25+ providers. Its gage→COMID metadata
+lives in `/gpfs/hjj5218/data/dmc_forcing/gage_information/` (permission-locked
+as of 2026-06-10 — ask hjj5218); the `gages` CSV for global runs must use the
+full `Provider__GageId` strings as STAID.
 
 The adjacency stores are now **managed**: provide `geospatial_fabric` (the raw
 MERIT flowlines as `.shp`/`.dbf`, or a `.gpkg` such as the merged global

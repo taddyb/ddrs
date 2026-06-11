@@ -16,8 +16,8 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
-    AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore, StreamflowStore,
-    UsgsObservationsStore,
+    AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore, ObservationsStore,
+    StreamflowStore,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -167,7 +167,7 @@ pub struct MeritGagesDataset {
     pub(crate) stats: Arc<AttrStats>,
     pub(crate) gages: Arc<GageMetadata>,
     pub(crate) streamflow: Arc<StreamflowStore>,
-    pub(crate) observations: Arc<UsgsObservationsStore>,
+    pub(crate) observations: Arc<ObservationsStore>,
     pub(crate) time_axis: TimeAxis,
     pub(crate) attr_names: Vec<String>,
     pub(crate) means: Array1<f32>,
@@ -269,7 +269,7 @@ impl MeritGagesDataset {
 
         // ---------- 3. Icechunk stores ----------
         let streamflow = Arc::new(StreamflowStore::open(&ds.streamflow)?);
-        let observations = Arc::new(UsgsObservationsStore::open(&ds.observations)?);
+        let observations = Arc::new(ObservationsStore::open(&ds.observations)?);
 
         // ---------- 4. Time axis from experiment dates ----------
         let time_axis = parse_experiment_axis(&exp.start_time, &exp.end_time)?;

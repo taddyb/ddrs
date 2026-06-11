@@ -22,8 +22,7 @@ use crate::config::Config;
 use crate::data::error::DataError;
 use crate::data::ids::{Comid, Staid};
 use crate::data::store::{
-    ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore, StreamflowStore,
-    UsgsObservationsStore,
+    ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore, ObservationsStore, StreamflowStore,
 };
 use crate::training::metrics::Metrics;
 
@@ -127,7 +126,7 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
     );
 
     let streamflow = StreamflowStore::open(&ds.streamflow)?;
-    let observations = UsgsObservationsStore::open(&ds.observations)?;
+    let observations = ObservationsStore::open(&ds.observations)?;
 
     let qr_daily = streamflow.read_window_daily(start, n_days, &all_needed_sorted)?;
     let obs_daily = observations.read_window_daily(start, n_days, &valid_staids)?;
