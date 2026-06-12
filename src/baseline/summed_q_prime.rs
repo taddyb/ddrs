@@ -92,10 +92,20 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
     let all_staids: Vec<Staid> = gage_meta.rows.iter().map(|r| r.staid.clone()).collect();
 
     let gages_adj = GagesAdjacencyStore::open(gages_adj_path, &all_staids)?;
-    // Preserve CSV order; drop gauges without a subgraph.
+    let observations = ObservationsStore::open(&ds.observations)?;
+    // Preserve CSV order; drop gauges without a subgraph or without an
+    // observation series (reads hard-error on missing STAIDs, and global
+    // gage CSVs list a few dozen gauges the obs product lacks).
     let valid_staids: Vec<Staid> = all_staids
         .iter()
         .filter(|s| gages_adj.get(s).is_some())
+        .filter(|s| {
+            let present = observations.contains(s);
+            if !present {
+                eprintln!("warning: gauge {s} has no observation series; skipping");
+            }
+            present
+        })
         .cloned()
         .collect();
     if valid_staids.is_empty() {
@@ -126,7 +136,6 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
     );
 
     let streamflow = StreamflowSource::open(&ds.streamflow)?;
-    let observations = ObservationsStore::open(&ds.observations)?;
 
     let qr_daily = streamflow.read_window_daily(start, n_days, &all_needed_sorted)?;
     let obs_daily = observations.read_window_daily(start, n_days, &valid_staids)?;

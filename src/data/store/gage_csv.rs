@@ -116,20 +116,36 @@ impl GageMetadata {
                 message: "gage directory contains no .csv files".into(),
             });
         }
+        // Per-zone CSV sets repeat gauges (v3.1/8km lists most gauges 4×,
+        // differing only in float formatting) — dedupe by STAID, first
+        // occurrence wins, so `rows` is one row per gauge like the
+        // single-file production CSVs.
         let mut rows: Vec<GageRow> = Vec::new();
+        let mut by_staid: HashMap<Staid, usize> = HashMap::new();
+        let mut n_dupes = 0usize;
         for csv_path in csvs {
             let file = std::fs::File::open(&csv_path).map_err(|e| DataError::Io {
                 path: csv_path.clone(),
                 source: e,
             })?;
             let part = Self::from_reader(file, csv_path)?;
-            rows.extend(part.rows);
+            for row in part.rows {
+                if by_staid.contains_key(&row.staid) {
+                    n_dupes += 1;
+                    continue;
+                }
+                by_staid.insert(row.staid.clone(), rows.len());
+                rows.push(row);
+            }
         }
-        let by_staid: HashMap<Staid, usize> = rows
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (r.staid.clone(), i))
-            .collect();
+        if n_dupes > 0 {
+            eprintln!(
+                "gage CSV dir {}: deduped {} repeated STAID rows ({} gauges kept)",
+                dir.display(),
+                n_dupes,
+                rows.len()
+            );
+        }
         Ok(Self {
             path: dir,
             rows,
@@ -237,15 +253,21 @@ STAID,STANAME,DRAIN_SQKM,LAT_GAGE,LNG_GAGE,COMID,COMID_DRAIN_SQKM,COMID_UNITAREA
             format!("{HDR}\nGRDC__6233450,0,1000.0,48.0,10.0,11000123,11000123_0,[1.01]\n"),
         )
         .unwrap();
+        // HYSETS gauge repeated with float-formatting drift (the v3.1 dup
+        // pattern) — first occurrence must win.
         std::fs::write(
             tmp.path().join("74_all.csv"),
-            format!("{HDR}\nHYSETS__11AE009,0,840.1,48.969,-106.839,74001534,74001534_0,[1.02 0.99]\n"),
+            format!(
+                "{HDR}\nHYSETS__11AE009,0,840.1,48.969,-106.839,74001534,74001534_0,[1.02 0.99]\n\
+                 HYSETS__11AE009,0,840.1000001,48.969,-106.839,74001534,74001534_0,[1.02]\n"
+            ),
         )
         .unwrap();
         std::fs::write(tmp.path().join("notes.txt"), "ignored").unwrap();
 
         let m = GageMetadata::open(tmp.path()).expect("parse dir");
-        assert_eq!(m.rows.len(), 2);
+        assert_eq!(m.rows.len(), 2, "duplicate STAID rows are deduped");
+        assert!((m.rows[1].drain_sqkm - 840.1).abs() < 1e-9, "first row wins");
         // Sorted filename order: 11_all.csv first.
         assert_eq!(m.rows[0].staid.as_str(), "GRDC__6233450");
         assert_eq!(m.rows[1].staid.as_str(), "HYSETS__11AE009");
@@ -267,8 +289,10 @@ STAID,STANAME,DRAIN_SQKM,LAT_GAGE,LNG_GAGE,COMID,COMID_DRAIN_SQKM,COMID_UNITAREA
             return;
         }
         let m = GageMetadata::open(dir).expect("parse v3.1 dir");
-        // 57 zone CSVs; every row must carry a COMID for adjacency builds.
+        // 57 zone CSVs, 23,491 raw rows → 5,975 unique gauges after dedupe
+        // (most gauges are listed 4×, differing only in float formatting).
         assert!(m.rows.len() > 5000, "got {} rows", m.rows.len());
+        assert!(m.rows.len() < 7000, "dedupe regressed: {} rows", m.rows.len());
         assert!(m.rows.iter().all(|r| r.comid.is_some()));
         use crate::data::ids::Staid;
         let r = &m.rows[m.by_staid[&Staid::new("HYSETS__11AE009")]];

@@ -70,6 +70,16 @@ impl ObservationsStore {
             Self::Global(s) => s.read_window(window, staids),
         }
     }
+
+    /// Whether the store has a series for `staid`. Used to pre-filter gauge
+    /// sets (gage CSVs can list gauges the observation product lacks — 63 of
+    /// 5,975 in the v3.1 global set) so reads never hit `MissingIds`.
+    pub fn contains(&self, staid: &Staid) -> bool {
+        match self {
+            Self::Usgs(s) => s.index.contains(staid),
+            Self::Global(s) => s.index.contains(staid),
+        }
+    }
 }
 
 /// Format-dispatching Q' (unit-catchment streamflow) reader. The

@@ -209,12 +209,14 @@ impl MeritGagesDataset {
         let conus = Arc::new(ConusAdjacencyStore::open(conus_path)?);
         let gage_meta = GageMetadata::open(&ds.gages)?;
 
-        // Filter 1: DA_VALID drop.
+        // Filter 1: DA_VALID drop. Rows without the column (e.g. the v3.1
+        // global per-zone CSVs carry no DA_VALID) pass — only an explicit
+        // False drops the gauge.
         let pre_filter = gage_meta.rows.len();
         let da_valid: Vec<Staid> = gage_meta
             .rows
             .iter()
-            .filter(|r| r.da_valid == Some(true))
+            .filter(|r| r.da_valid.unwrap_or(true))
             .map(|r| r.staid.clone())
             .collect();
         eprintln!(
@@ -270,6 +272,21 @@ impl MeritGagesDataset {
         // ---------- 3. Icechunk stores ----------
         let streamflow = Arc::new(StreamflowSource::open(&ds.streamflow)?);
         let observations = Arc::new(ObservationsStore::open(&ds.observations)?);
+
+        // Filter 4: drop gauges the observation store has no series for —
+        // observation reads hard-error on missing STAIDs, and the global
+        // v3.1 gage CSVs list a few dozen gauges absent from the obs zarr.
+        let pre_obs = gauges.len();
+        gauges.retain(|s| observations.contains(s));
+        if gauges.len() != pre_obs {
+            eprintln!(
+                "observations filter: kept {}/{} gauges (dropped {} absent from {})",
+                gauges.len(),
+                pre_obs,
+                pre_obs - gauges.len(),
+                ds.observations.display()
+            );
+        }
 
         // ---------- 4. Time axis from experiment dates ----------
         let time_axis = parse_experiment_axis(&exp.start_time, &exp.end_time)?;
