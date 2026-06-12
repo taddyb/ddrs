@@ -7,7 +7,9 @@ native `dimension_names` metadata, so `xr.open_zarr` raises:
     KeyError: 'Zarr object is missing the `dimension_names` metadata which
     is required for xarray to determine variable dimensions.'
 
-In addition, `gage_ids` is stored as `(G, 8) uint8` with `_dtype_hint: |S8`
+In addition, `gage_ids` is stored as `(G, W) uint8` with `_dtype_hint: |S<W>`
+(W = longest ID; exactly 8 in stores written before 2026-06-12, which
+truncated global Provider__GageId names)
 rather than as a 1D string/bytes array, so even after a successful open
 the gauge axis would still need manual decoding.
 
@@ -33,12 +35,12 @@ import zarr
 def _decode_gage_ids(arr: np.ndarray) -> np.ndarray:
     """Normalize gage_ids to a 1D array of Python strings.
 
-    ddrs writes (G, 8) uint8 (bytes spread across a `char` axis). Older
+    ddrs writes (G, W) uint8 (bytes spread across a `char` axis). Older
     zarr/xarray versions stored as 1D |S8 bytes or object dtype. Handle all
     three so the same downstream code works regardless of store vintage.
     """
     if arr.ndim == 2 and arr.dtype == np.uint8:
-        # (G, 8) uint8 → strip trailing NULs and decode ASCII per row
+        # (G, W) uint8 → strip trailing NULs and decode ASCII per row
         return np.array(
             [bytes(row).rstrip(b"\x00").decode("ascii") for row in arr]
         )

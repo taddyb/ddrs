@@ -222,12 +222,15 @@ fn write_gage_ids_u8(
     strings: &[String],
 ) -> Result<()> {
     let n = strings.len();
-    // Zero-padded 8-byte ASCII per STAID convention.
-    let mut buf = vec![0u8; n * 8];
+    // Zero-padded fixed-width ASCII, width = longest ID (min 8 to keep the
+    // historical |S8 layout for USGS STAIDs). A hardcoded 8 silently
+    // truncated global `Provider__GageId` names — e.g. `GRDC__1286661` →
+    // `GRDC__12` — collapsing 5,224 gauges onto 93 distinct prefixes.
+    let width = strings.iter().map(|s| s.len()).max().unwrap_or(0).max(8);
+    let mut buf = vec![0u8; n * width];
     for (i, s) in strings.iter().enumerate() {
         let bytes = s.as_bytes();
-        let len = bytes.len().min(8);
-        buf[i * 8..i * 8 + len].copy_from_slice(&bytes[..len]);
+        buf[i * width..i * width + bytes.len()].copy_from_slice(bytes);
     }
 
     let mut attr_map = serde_json::Map::new();
@@ -240,12 +243,12 @@ fn write_gage_ids_u8(
     );
     attr_map.insert(
         "_dtype_hint".into(),
-        serde_json::Value::String("|S8".into()),
+        serde_json::Value::String(format!("|S{width}")),
     );
 
     let array = ArrayBuilder::new(
-        vec![n as u64, 8],
-        vec![n as u64, 8],
+        vec![n as u64, width as u64],
+        vec![n as u64, width as u64],
         data_type::uint8(),
         0_u8,
     )
@@ -328,5 +331,46 @@ mod tests {
             Arc::new(FilesystemStore::new(&zpath).expect("open store"));
         let arr = ZarrArray::open(read_storage, "/predictions").expect("open predictions");
         assert_eq!(arr.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn gage_ids_wider_than_8_bytes_round_trip_unclipped() {
+        // Global Provider__GageId names exceed the historical 8-byte STAID
+        // width; the writer must widen, not truncate (the old behavior
+        // collapsed 5,224 global gauges onto 93 distinct 8-byte prefixes).
+        let ids = vec![
+            "GRDC__1286661".to_string(),       // 13 bytes
+            "BOMAustralia__403213".to_string(), // 20 bytes
+            "01013500".to_string(),             // legacy USGS, 8 bytes
+        ];
+
+        let mut zpath = std::env::temp_dir();
+        zpath.push(format!("ddrs_zarr_gageids_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&zpath);
+        std::fs::create_dir_all(&zpath).expect("mkdir");
+        let storage = Arc::new(FilesystemStore::new(&zpath).expect("store"));
+
+        write_gage_ids_u8(&storage, &zpath, &ids).expect("write");
+
+        let read_storage: ReadableStorage =
+            Arc::new(FilesystemStore::new(&zpath).expect("open store"));
+        let arr = ZarrArray::open(read_storage, "/gage_ids").expect("open gage_ids");
+        let width = ids.iter().map(|s| s.len()).max().unwrap();
+        assert_eq!(arr.shape(), &[3, width as u64]);
+        assert_eq!(
+            arr.attributes()["_dtype_hint"],
+            serde_json::json!(format!("|S{width}")),
+        );
+
+        let bytes: Vec<u8> = arr
+            .retrieve_array_subset::<Vec<u8>>(&arr.subset_all())
+            .expect("read");
+        for (i, id) in ids.iter().enumerate() {
+            let row = &bytes[i * width..(i + 1) * width];
+            let decoded: Vec<u8> =
+                row.iter().copied().take_while(|&b| b != 0).collect();
+            assert_eq!(std::str::from_utf8(&decoded).unwrap(), id);
+        }
+        let _ = std::fs::remove_dir_all(&zpath);
     }
 }

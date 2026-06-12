@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 
 # Bundled loader handles ddrs's zarr v3 layout (missing dimension_names) and
-# the (G, 8) uint8 gage_ids encoding. Without this, `xr.open_zarr` raises
+# the (G, W) uint8 gage_ids encoding. Without this, `xr.open_zarr` raises
 # KeyError and `.sel(gage_ids="01013500")` silently misses.
 SKILL_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts" if "__file__" in dir() else Path("/home/tbindas/projects/ddrs/.claude/worktrees/plot-predictions-notebook/.claude/skills/ddrs-eval-plots/scripts")
 sys.path.insert(0, str(SKILL_SCRIPTS))
@@ -93,5 +93,5 @@ print(f"saved {out}")
 - **NSE inside the slice, not over full zarr.** When the user asks for a single year, recomputing NSE for that window is more informative than reusing the whole-period NSE.
 - **For multiple gauges**: loop over `GAGE_ID` and save one PNG per gauge. Don't put multiple gauges on one axis — discharge magnitudes vary by orders of magnitude across basins.
 - **Adding a comparison line (e.g., summed Q' baseline)**: open the baseline zarr, slice the same time window, plot with `linestyle="--"` and add to the legend.
-- **`gage_ids` dtype gotcha — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, 8) uint8` with `_dtype_hint: |S8`, NOT as a 1D bytes/string array. Combined with the missing `dimension_names` metadata in the zarr v3 store, `xr.open_zarr` plus a naïve decode fails in two different places. The bundled `scripts/load_ddrs_predictions.py` handles both: opens with the raw `zarr` library, assembles an `xarray.Dataset`, decodes the 2D uint8 layout into a clean 1D string axis.
+- **`gage_ids` dtype gotcha — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, W) uint8` with `_dtype_hint: |S<W>` (W = longest ID, min 8 — stores written before 2026-06-12 hard-truncated to 8 bytes, so global IDs in old stores are lossy), NOT as a 1D bytes/string array. Combined with the missing `dimension_names` metadata in the zarr v3 store, `xr.open_zarr` plus a naïve decode fails in two different places. The bundled `scripts/load_ddrs_predictions.py` handles both: opens with the raw `zarr` library, assembles an `xarray.Dataset`, decodes the 2D uint8 layout into a clean 1D string axis.
 - **`obs <= 0` is a sentinel for "missing".** DDR's convention is to treat non-positive observations as unobserved before computing NSE/bias. If your zarr was produced from a USGS source that uses this convention, mask `obs[obs <= 0] = np.nan` before metrics.
