@@ -168,8 +168,13 @@ implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`
 | `.ddrs/baselines/<key>/` | `ddrs plan` first time | Cached summed-Q' baseline |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
 | `.ddrs/runs/<id>/config.yaml` | `ddrs run` | **Snapshot of the config that produced this run** (the `plan_bootstrap` source) |
+| `.ddrs/runs/<id>/run.log` | `ddrs run` (`cli::tee`) | Timestamped tee of the run's stdout+stderr (fd-level, so CUDA stderr and child processes are captured) |
 | `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*.mpk` | `ddrs run` train phase | KAN checkpoints |
 | `.ddrs/runs/<id>/kan_parameters.nc` | `dump_parameters` | Per-COMID denormalised KAN outputs |
+
+Run `<id>` format: `<UTC ts>-[<group>-]<workflow>` — the `[<group>-]` segment
+is the active data-source group (`sources::active_group`), present when the
+config's `data_sources` block matches a saved `config/sources/<name>.yaml`.
 
 ### Legacy binaries (deprecated, removed in 0.4)
 
