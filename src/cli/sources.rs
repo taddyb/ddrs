@@ -274,6 +274,17 @@ pub struct GroupEntry {
     pub active: bool,
 }
 
+/// Name of the saved group whose `data_sources` matches the config, if any.
+/// Used by `cli::run` to make run-directory names self-describing
+/// (`<timestamp>-<group>-<workflow>`).
+pub fn active_group(cfg_path: &Path) -> Option<String> {
+    run_list(cfg_path)
+        .ok()?
+        .into_iter()
+        .find(|e| e.active)
+        .map(|e| e.name)
+}
+
 /// List saved groups; `active` marks the one whose block matches the
 /// config's current `data_sources:` (compared structurally, not textually,
 /// so comment/ordering differences don't break the match).

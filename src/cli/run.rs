@@ -65,21 +65,36 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
         }
     }
 
-    // 3. Create run directory.
+    // 3. Create run directory. The id embeds the active data-source group
+    //    when the config matches a saved group (`<ts>-<group>-<workflow>`,
+    //    e.g. `...Z-global-train-and-test`), so run dirs stay self-describing
+    //    when switching datasets via `ddrs sources use`.
     let started_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let run_id = format!("{}-{}", started_at.replace(':', "-"), workflow_slug(pr.workflow));
+    let group_tag = crate::cli::sources::active_group(&input.config_path)
+        .map(|g| sanitize_group_tag(&g))
+        .filter(|g| !g.is_empty())
+        .map(|g| format!("{g}-"))
+        .unwrap_or_default();
+    let run_id = format!(
+        "{}-{}{}",
+        started_at.replace(':', "-"),
+        group_tag,
+        workflow_slug(pr.workflow)
+    );
     let run_dir = input.workspace.runs_dir().join(&run_id);
     fs::create_dir_all(run_dir.join("checkpoints"))?;
     fs::copy(&input.config_path, run_dir.join("config.yaml"))?;
     let _ = copy_cargo_lock_if_reachable(&run_dir);
     eprintln!("run output → {}", run_dir.display());
 
-    // 4. Dispatch to the workflow (in-process, v1 — no stdout/stderr tee
-    // beyond what training::driver already prints to terminal). Tee'd
-    // log capture is deferred to v1.1 alongside a run-as-subprocess
-    // refactor; the manifest schema already supports stdout.log/stderr.log
-    // paths but we don't populate them yet.
-    let (status, exit_reason, metrics, mut outputs) = dispatch(&input, &pr, &run_dir);
+    // 4. Dispatch to the workflow, teeing fds 1/2 through `cli::tee` so
+    //    everything the workflow prints (incl. CUDA stderr) lands in
+    //    <run_dir>/run.log with per-line UTC timestamps while still
+    //    reaching the terminal.
+    let log_path = run_dir.join("run.log");
+    let (status, exit_reason, metrics, mut outputs) =
+        crate::cli::tee::tee_to(&log_path, || Ok(dispatch(&input, &pr, &run_dir)))?;
+    outputs.run_log = Some(PathBuf::from("run.log"));
 
     // 5. --plot post-step: call dump_parameters::dump if a checkpoint exists.
     //    Output format: kan_parameters.nc (NetCDF — the dump_parameters
@@ -154,6 +169,14 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
 /// there, next to `ResolvedAdjacency`.
 fn apply_resolved_adjacency(cfg: &mut Config, pr: &PlanResult) {
     apply_resolved(cfg, &pr.resolved_adjacency);
+}
+
+/// Group names come from `config/sources/*.yaml` file stems; keep only
+/// filesystem- and id-friendly characters so the run id stays parseable.
+fn sanitize_group_tag(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect()
 }
 
 fn workflow_slug(w: Workflow) -> &'static str {
@@ -289,11 +312,7 @@ fn dispatch(
                 });
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
-                    plot: None,
-                    eval_zarr: None,
-                    baseline_predictions: None,
-                    baseline_observations: None,
-                    baseline_manifest: None,
+                    ..Default::default()
                 };
                 Ok((metrics, outputs))
             }
@@ -440,11 +459,11 @@ fn dispatch(
                 });
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
-                    plot: None,
                     eval_zarr: Some(PathBuf::from("eval/predictions.zarr")),
                     baseline_predictions,
                     baseline_observations,
                     baseline_manifest,
+                    ..Default::default()
                 };
                 Ok((metrics, outputs))
             }
@@ -578,4 +597,17 @@ fn list_mpk_files(dir: &Path) -> Vec<PathBuf> {
         .collect();
     paths.sort();
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_tag_keeps_id_friendly_chars_only() {
+        assert_eq!(sanitize_group_tag("global"), "global");
+        assert_eq!(sanitize_group_tag("conus-v2.1"), "conus-v2.1");
+        assert_eq!(sanitize_group_tag("weird name/!?"), "weirdname");
+        assert_eq!(sanitize_group_tag("///"), "");
+    }
 }

@@ -204,8 +204,7 @@ your-project/
             ├── manifest.json                # the reproducibility record
             ├── config.yaml                  # copy of ddrs.yaml at run start
             ├── Cargo.lock                   # copy if reachable from binary
-            ├── stdout.log
-            ├── stderr.log
+            ├── run.log                      # timestamped tee of stdout+stderr (implemented form)
             ├── checkpoints/                 # .mpk files
             │   └── epoch_5_mb_0.mpk
             └── plot/                        # only if --plot was passed
@@ -457,11 +456,12 @@ pub struct PlanResult {
 3. **Create run directory.** `.ddrs/runs/<timestamp>-<workflow>/`; copy
    `ddrs.yaml` (already in memory; just serialize) and `Cargo.lock` if
    reachable from the binary location.
-4. **Capture stdout/stderr.** Spawn the workflow body in a subprocess (or
-   in-thread with `os_pipe`-redirected `stdout`/`stderr` fds). Each captured
-   chunk is written synchronously to `stdout.log` / `stderr.log` opened
-   `O_APPEND` and also forwarded to the inherited fds. Documented choice;
-   see Concerns.
+4. **Capture stdout/stderr.** *(As implemented, 2026-06-12.)* The workflow
+   body runs in-process with fds 1/2 `dup2`-redirected through `cli::tee`
+   reader threads. Each complete line is prefixed with a UTC timestamp and
+   written to a single combined `run.log` (opened `O_APPEND`, flushed per
+   line) while also being forwarded to the terminal. fd-level capture means
+   CUDA stderr and child processes are included.
 5. **Dispatch to the workflow** via `Workflow` enum match:
    - `Train` → `training::driver::train(&config, &dataset, &mut state, &mut optimizer, &device, &run_dir.join("checkpoints"), max_mini_batches)`
    - `Eval` → `training::eval::eval(&config, &dataset, &checkpoint_dir, &device)`
