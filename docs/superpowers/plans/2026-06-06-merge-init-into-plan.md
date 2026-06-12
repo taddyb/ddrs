@@ -21,7 +21,7 @@
 - Modify: `src/cli/init.rs:44-80` (Phase A body → delegate) and `src/cli/init.rs:177-202` (`run_smoke` → forwarder)
 - Test: `tests/cli_system_ready.rs` (new)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/cli_system_ready.rs`:
 
@@ -77,12 +77,12 @@ fn force_reruns_smoke_without_touching_runs_dir() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test --test cli_system_ready 2>&1 | tail -20`
 Expected: compile error — `ensure_system_ready` not found in `ddrs::cli::system`.
 
-- [ ] **Step 3: Implement `ensure_system_ready` in `src/cli/system.rs`**
+- [x] **Step 3: Implement `ensure_system_ready` in `src/cli/system.rs`**
 
 Append to `src/cli/system.rs` (and add the new imports at the top of the file):
 
@@ -176,7 +176,7 @@ pub fn run_smoke_for_test(probe: &SystemProbe) -> Result<(bool, &'static str), C
 
 Note: `run_smoke` and `run_smoke_for_test` are copied verbatim from `src/cli/init.rs:177-202` (only the `crate::cli::manifest::SystemProbe` path shortens to the already-imported `SystemProbe`).
 
-- [ ] **Step 4: Delegate from `init.rs`**
+- [x] **Step 4: Delegate from `init.rs`**
 
 In `src/cli/init.rs`, replace lines 44–80 (from `// ── Phase A` through `probe.write_atomic(&ws.system_json())?;`) with:
 
@@ -202,12 +202,12 @@ pub fn run_smoke_for_test(probe: &crate::cli::manifest::SystemProbe)
 
 Remove now-unused imports from `init.rs` (`SystemProbe` from the `use crate::cli::{...}` block if the compiler flags it — keep `system` itself).
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test --test cli_system_ready --test cli_init 2>&1 | tail -10`
 Expected: all PASS (cli_init still passes because behavior is unchanged).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/cli/system.rs src/cli/init.rs tests/cli_system_ready.rs
@@ -224,7 +224,7 @@ git commit -m "refactor(cli): extract init Phase A into system::ensure_system_re
 - Modify: `src/cli/plan_bootstrap.rs`
 - Test: `tests/cli_plan_bootstrap.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/cli_plan_bootstrap.rs`:
 
@@ -268,12 +268,12 @@ fn choose_source_reprompts_on_garbage() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test --test cli_plan_bootstrap 2>&1 | tail -10`
 Expected: compile error — `choose_source` not found.
 
-- [ ] **Step 3: Implement the prompt**
+- [x] **Step 3: Implement the prompt**
 
 In `src/cli/plan_bootstrap.rs`, change the imports line to include `BufRead` and `Write`:
 
@@ -333,12 +333,12 @@ pub fn choose_source(
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --test cli_plan_bootstrap 2>&1 | tail -10`
 Expected: all 5 tests PASS (the 2 pre-existing ones use `interactive: false` and are unaffected).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cli/plan_bootstrap.rs tests/cli_plan_bootstrap.rs
@@ -359,7 +359,7 @@ git commit -m "feat(cli): prompt for bootstrap source instead of silently prefer
 - Rewrite: `tests/cli_workspace_uninit.rs` → `tests/cli_plan_fresh.rs`
 - Rewrite: `tests/cli_first_run_e2e.rs`
 
-- [ ] **Step 1: Write the failing lifecycle tests**
+- [x] **Step 1: Write the failing lifecycle tests**
 
 `git mv tests/cli_workspace_uninit.rs tests/cli_plan_fresh.rs`, then replace its content with:
 
@@ -520,12 +520,12 @@ fn plan_lifecycle_idempotent_drift_relock_strict() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test --test cli_plan_fresh --test cli_first_run_e2e 2>&1 | tail -10`
 Expected: compile error — `PlanInput` not found.
 
-- [ ] **Step 3: Restructure `plan()`**
+- [x] **Step 3: Restructure `plan()`**
 
 In `src/cli/plan.rs`:
 
@@ -675,7 +675,7 @@ fn bootstrap_config(workspace: &Workspace) -> Result<PathBuf, CliError> {
 
 3f. The `import` line for `Lockfile` stays (`diff_against_live` too). `chrono` is already a crate dependency (used by `init.rs`/`run.rs`); the fully-qualified `chrono::Utc::now()` needs no new import.
 
-- [ ] **Step 4: Update `run()`**
+- [x] **Step 4: Update `run()`**
 
 In `src/cli/run.rs`, replace step 1 (line 41) and delete the drift-policy block (lines 60–66):
 
@@ -696,7 +696,7 @@ In `src/cli/run.rs`, replace step 1 (line 41) and delete the drift-policy block 
 
 (The old step 2 `if !pr.drift.is_empty() { ... }` block is now inside `plan` — delete it. `pr.drift` is still used by the manifest's `source_lock` further down; that stays.)
 
-- [ ] **Step 5: Update the binary's Plan variant and arm**
+- [x] **Step 5: Update the binary's Plan variant and arm**
 
 In `src/bin/ddrs.rs`, the `Plan` variant gains init's flags:
 
@@ -729,7 +729,7 @@ And the `Cmd::Plan` arm drops the config-required error (plan bootstraps when `N
 
 (the printing body from line 90 down is unchanged).
 
-- [ ] **Step 6: Update remaining test callers**
+- [x] **Step 6: Update remaining test callers**
 
 `tests/cli_plan.rs` — all three `plan(...)` call sites change to the struct form, and the pre-seeded empty lockfiles are no longer needed (plan writes its own):
 
@@ -845,17 +845,17 @@ use ddrs::cli::plan::{plan, PlanInput};
     .expect("plan must succeed when merit data is reachable");
 ```
 
-- [ ] **Step 7: Run the full CLI test suite**
+- [x] **Step 7: Run the full CLI test suite**
 
 Run: `cargo test --test cli_plan_fresh --test cli_first_run_e2e --test cli_plan --test cli_runtime_failure --test cli_system_ready --test cli_plan_bootstrap --test cli_init 2>&1 | tail -15`
 Expected: all PASS. (`cli_init` still passes — `init.rs` exists until Task 4 and its Phase B path is untouched.)
 
-- [ ] **Step 8: Run the whole suite to catch stragglers**
+- [x] **Step 8: Run the whole suite to catch stragglers**
 
 Run: `cargo test 2>&1 | tail -15`
 Expected: green (modulo any failures noted in the pre-task baseline). If another test calls `cli::plan::plan` with the old signature, the compiler will name it — update it to the `PlanInput` struct form exactly as in Step 6.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add -A src/cli/plan.rs src/cli/run.rs src/bin/ddrs.rs tests/
@@ -871,7 +871,7 @@ git commit -m "feat(cli): merge init pipeline into plan with auto-relock drift p
 - Modify: `src/cli/mod.rs:6`, `src/bin/ddrs.rs` (Init variant + arm, run-arm message), `src/error.rs:20`, `src/sandbox.rs:5`
 - Create: `tests/cli_init_stub.rs`, `tests/cli_smoke.rs`
 
-- [ ] **Step 1: Write the failing stub test**
+- [x] **Step 1: Write the failing stub test**
 
 Create `tests/cli_init_stub.rs`:
 
@@ -921,12 +921,12 @@ fn run_smoke_returns_cpu_when_no_cuda() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test --test cli_init_stub --test cli_smoke 2>&1 | tail -10`
 Expected: `init_stub_redirects_to_plan_with_exit_2` FAILS (real init runs and errors differently or succeeds); `cli_smoke` PASSES already (function exists since Task 1). The `init_does_not_appear_in_help` test FAILS (init is visible).
 
-- [ ] **Step 3: Replace init with the stub**
+- [x] **Step 3: Replace init with the stub**
 
 ```bash
 git rm src/cli/init.rs tests/cli_init.rs
@@ -965,12 +965,12 @@ Update the run-arm message (line 124): `"no ddrs.yaml found in current directory
 
 `src/sandbox.rs:5` — update the doc comment: `//!   - \`cli::system\` smoke test (does routing work on this machine?)`
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --test cli_init_stub --test cli_smoke 2>&1 | tail -10` then `cargo test 2>&1 | tail -10`
 Expected: all PASS; nothing references `cli::init` anymore (`grep -rn "cli::init\|run_init" src/ tests/` returns nothing).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -985,7 +985,7 @@ git commit -m "feat(cli)!: remove ddrs init (merged into plan); hidden stub exit
 - Modify: `src/bin/ddrs.rs` (top-level command attrs + every subcommand/flag doc comment)
 - Modify: `src/config.rs:34-38` (Workflow variant docs)
 
-- [ ] **Step 1: Top-level help**
+- [x] **Step 1: Top-level help**
 
 Replace the `#[command(...)]` attribute on `struct Cli` (`src/bin/ddrs.rs:13`) with:
 
@@ -1027,7 +1027,7 @@ And document the two global flags:
     workspace: Option<PathBuf>,
 ```
 
-- [ ] **Step 2: Subcommand + flag doc comments**
+- [x] **Step 2: Subcommand + flag doc comments**
 
 Apply doc comments to every variant and flag in `enum Cmd` (the Init stub keeps only its Task 4 comment):
 
@@ -1090,7 +1090,7 @@ Apply doc comments to every variant and flag in `enum Cmd` (the Init stub keeps 
     },
 ```
 
-- [ ] **Step 3: Workflow value help**
+- [x] **Step 3: Workflow value help**
 
 In `src/config.rs:34-38`, add variant doc comments (clap's derive turns these into `--workflow` value help):
 
@@ -1105,12 +1105,12 @@ pub enum Workflow {
 }
 ```
 
-- [ ] **Step 4: Verify the rendered help**
+- [x] **Step 4: Verify the rendered help**
 
 Run: `cargo run --bin ddrs -- --help` and `cargo run --bin ddrs -- plan --help`
 Expected: top-level shows the LIFECYCLE / WORKFLOWS / STARTING FRESH sections and no `init` row; `plan --help` documents all four flags. Run `cargo run --bin ddrs -- run --help` and confirm `--workflow` lists the three values with their descriptions.
 
-- [ ] **Step 5: Run the suite and commit**
+- [x] **Step 5: Run the suite and commit**
 
 Run: `cargo test --test cli_init_stub 2>&1 | tail -5` (the `init_does_not_appear_in_help` guard still passes), then:
 
@@ -1128,7 +1128,7 @@ Comments only — the parsed YAML must be value-identical. The new comments expl
 **Files:**
 - Modify: `config/merit_training.yaml` (full rewrite below)
 
-- [ ] **Step 1: Replace the file content**
+- [x] **Step 1: Replace the file content**
 
 ```yaml
 # ddrs experiment config. `ddrs plan` copies this template to ./ddrs.yaml on
@@ -1277,7 +1277,7 @@ testing:
   rho: null
 ```
 
-- [ ] **Step 2: Verify values are byte-for-byte unchanged after parsing**
+- [x] **Step 2: Verify values are byte-for-byte unchanged after parsing**
 
 Run:
 
@@ -1293,12 +1293,12 @@ print('parsed values identical')
 
 Expected: `parsed values identical`. If it fails, diff the two parsed dicts key-by-key and fix the template — values must not change.
 
-- [ ] **Step 3: Confirm the Rust parser still accepts it**
+- [x] **Step 3: Confirm the Rust parser still accepts it**
 
 Run: `cargo test --test cli_plan 2>&1 | tail -5` and `cargo run --bin ddrs -- --config config/merit_training.yaml plan --workflow train 2>&1 | head -5`
 Expected: tests pass; plan starts (it may fail later on unreachable data sources on this host — `error: data source unreachable` is acceptable here, a YAML parse error is not).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add config/merit_training.yaml
@@ -1314,7 +1314,7 @@ git commit -m "docs(config): plain-language template comments; values unchanged"
 - Modify: `CLAUDE.md` (CLI section, workspace table, bootstrap gotcha)
 - Modify: `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` (supersession note)
 
-- [ ] **Step 1: README**
+- [x] **Step 1: README**
 
 In `README.md` "First-time setup", replace the three-command block and the paragraph below it with:
 
@@ -1338,7 +1338,7 @@ In the "What lives where" table, change the "Written by" cells: `ddrs.yaml` → 
 
 In "Override workflow on the command line", change the last sentence of the agreement note from "`ddrs init` will reject contradictions at load time." to "`ddrs plan` will reject contradictions at load time."
 
-- [ ] **Step 2: CLAUDE.md**
+- [x] **Step 2: CLAUDE.md**
 
 In `CLAUDE.md` § "### `ddrs` CLI (preferred entrypoint)", replace the first-time-flow block:
 
@@ -1369,7 +1369,7 @@ with exit 4 *before* relocking, preserving the evidence.
 
 In the workspace-layout table, change the "Written by" cells for `ddrs.yaml`, `.ddrs/system.json`, `.ddrs/sources.lock` from `ddrs init` to `ddrs plan`. In the same section, fix any remaining `ddrs init` references (`grep -n "ddrs init" CLAUDE.md` and update each to `ddrs plan`).
 
-- [ ] **Step 3: Mark the old spec superseded**
+- [x] **Step 3: Mark the old spec superseded**
 
 In `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`, insert directly under the title:
 
@@ -1380,12 +1380,12 @@ In `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`, insert dire
 > manifest, and exit-code sections below still stand.
 ```
 
-- [ ] **Step 4: Sweep for stale references**
+- [x] **Step 4: Sweep for stale references**
 
 Run: `grep -rn "ddrs init" README.md CLAUDE.md src/ tests/ config/ | grep -v "merged into"`
 Expected: no output (docs under `docs/superpowers/` keep their historical references).
 
-- [ ] **Step 5: Full verification**
+- [x] **Step 5: Full verification**
 
 Run: `cargo test 2>&1 | tail -15`
 Expected: green (modulo the pre-task baseline).
@@ -1395,7 +1395,7 @@ Insurance (spec §4 — routing untouched, but cheap to confirm):
 Run: `cargo run --release --example compare_ddr_sandbox 2>&1 | tail -3`
 Expected: `ABSOLUTE MATCH`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md CLAUDE.md docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md
