@@ -110,8 +110,8 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 println!("drift    {:?}", pr.drift);
                 let ra = &pr.resolved_adjacency;
                 println!("adjacency");
-                println!("  conus  {}", ra.conus.display());
-                println!("  gages  {}", ra.gages.display());
+                println!("  network {}", ra.conus.display());
+                println!("  gauges  {}", ra.gages.display());
                 if let Some(ref key) = ra.cache_key {
                     println!(
                         "  cache  {} ({})",
