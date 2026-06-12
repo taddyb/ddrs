@@ -19,56 +19,75 @@ sources:
 Every ddrs binary writes its artefacts to one of two places: the
 repo-local `output/` directory (the two examples, plus `eval` by default
 when the user passes `--output output/...`) or a user-supplied
-`--checkpoint-dir` (training). Three formats appear: binary `.mpk` (BURN's
-NamedMessagePack record format — needs `CompactRecorder` to read), plain
-CSV (readable with any tool — pandas/polars/awk), and PNG (rendered with
-`plotters`). Eval also writes a zarr v3 store. There is no global "results
-directory" — each binary owns its own paths.
+`--checkpoint-dir` (training). A checkpoint is a *directory*
+`epoch_E_mb_M/` holding two binary `.mpk` records (BURN's
+NamedMessagePack record format — needs `CompactRecorder` to read) plus a
+JSON sidecar; alongside it appear plain CSV (readable with any tool —
+pandas/polars/awk) and PNG (rendered with `plotters`). Eval also writes a
+zarr v3 store. There is no global "results directory" — each binary owns
+its own paths.
 
 | Artefact | Producer | Path | Format |
 |---|---|---|---|
-| MLP checkpoint | `train` / Phase 1 of `train_and_test` | `<checkpoint-dir>/epoch_{e}_mb_{mb}.mpk` | BURN MPK (f16 weights on disk) |
+| Training checkpoint | `train` / Phase 1 of `train_and_test` | `<checkpoint-dir>/epoch_{e}_mb_{mb}/` (directory) | BURN MPK + JSON (f16 weights on disk) |
 | V1 diff | `examples/compare_ddr_sandbox` | `output/ddrs_vs_ddr.{csv,png}` | CSV + PNG |
 | Hydrograph | `examples/benchmark_hydrograph` | `output/hydrograph.{csv,png}` | CSV + PNG |
 | Eval predictions | `bin/eval` | user `--output` (typically `*.zarr`) | zarr v3 |
 
-## Training checkpoints (`.mpk`)
+## Training checkpoints (`epoch_E_mb_M/` directories)
 
 `train.rs` and the Phase-1 half of `train_and_test.rs` write **one
-checkpoint per mini-batch** under `--checkpoint-dir`, named
-`epoch_{epoch}_mb_{mini_batch}.mpk`. The file extension is appended by
-`CompactRecorder::set_extension` — the in-code path does **not** include
-`.mpk`, but the on-disk file always does. See
-`src/training/driver.rs:130`.
+checkpoint per mini-batch** under `--checkpoint-dir`. As of the
+exact-resume work, a checkpoint is a **directory**, not a single file,
+named `epoch_{epoch}_mb_{mini_batch}/`:
+
+```text
+<checkpoint-dir>/epoch_3_mb_8/
+├── head.mpk      KAN head weights   (CompactRecorder, f16 on disk)
+├── optim.mpk     Adam moments       (CompactRecorder, f16 on disk)
+└── state.json    epoch, next mini-batch, serialized rng, sampler
+                  permutation + cursor
+```
+
+`src/training/driver.rs` (~line 190) calls `create_dir_all` on the
+directory then writes the three files via `head_base`/`optim_base`/
+`state_path` from `src/training/checkpoint.rs`. The `.mpk` extension on
+`head.mpk` and `optim.mpk` is appended by `CompactRecorder` — the in-code
+*base* paths are `dir/head` and `dir/optim`.
 
 Format: `CompactRecorder = NamedMpkFileRecorder<HalfPrecisionSettings>`
 (see `src/training/checkpoint.rs:10-12`). Two consequences:
 
-1. **Weights are stored in half precision** (`f16`) on disk. They expand
-   to `f32` on load to match the routing-core dtype. Saving never widens —
-   re-saving a loaded checkpoint loses the LSBs of the in-memory `f32`.
-2. **No portable C struct.** The file is BURN's named-MessagePack
-   serialization; you cannot reliably parse it with a generic msgpack
+1. **Weights and Adam moments are stored in half precision** (`f16`) on
+   disk. They expand to `f32` on load to match the routing-core dtype.
+   Saving never widens — re-saving a loaded checkpoint loses the LSBs of
+   the in-memory `f32`, so a resumed trajectory drifts slowly from the
+   uninterrupted one.
+2. **No portable C struct.** The `.mpk` files are BURN's named-MessagePack
+   serialization; you cannot reliably parse them with a generic msgpack
    reader because field names depend on the `#[derive(Module)]` shape of
-   `Mlp<B>` at compile time. Read it from Rust:
+   the KAN head at compile time. Read the head from Rust:
 
 ```rust
-use ddrs::training::checkpoint::load_mlp;
-use ddrs::nn::mlp::{Mlp, MlpConfig};
+use ddrs::training::checkpoint::{head_base, load_kan_head};
+use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
 
 // Construct a template with the SAME architecture as when it was saved.
-let mlp_cfg = MlpConfig::new(input_names, learnable_names)
+let head_cfg = KanHeadConfig::new(input_names, learnable_names, seed)
     .with_hidden_size(64)
     .with_num_hidden_layers(2);
-let mlp_template: Mlp<B> = mlp_cfg.init::<B>(&device);
+let head_template: KanHead<B> = head_cfg.init::<B>(&device);
 
-// `path` is the base — pass `epoch_5_mb_120`, NOT `epoch_5_mb_120.mpk`.
-let mlp = load_mlp::<B>(&path, mlp_template, &device)?;
+// Pass the checkpoint DIRECTORY; head_base appends `head`, and the
+// recorder re-appends `.mpk`.
+let head = load_kan_head::<B>(&head_base(&ckpt_dir), head_template, &device)?;
 ```
 
-`train_and_test.rs` does this automatically via `find_latest_mpk`
-(`src/bin/train_and_test.rs:222-244`), which scans the directory by mtime
-and strips the `.mpk` suffix before calling `load_mlp`.
+`eval.rs` does exactly this: `--checkpoint` takes the `epoch_E_mb_M/`
+directory and `load_kan_head(&head_base(...))` reads `head.mpk` from
+inside it (`src/bin/eval.rs:110`). To resume training, point
+`experiment.checkpoint:` at the same directory; `bootstrap_head_and_state`
+(`src/training/bootstrap.rs`) restores head + optimizer + `state.json`.
 
 ## V1 sandbox diff (`output/ddrs_vs_ddr.{csv,png}`)
 
@@ -128,16 +147,16 @@ run.
 (see `src/training/zarr_io.rs:14-20`):
 
 ```
-/predictions    (n_gauges, n_days)  f64   "m^3/s"
-/observations   (n_gauges, n_days)  f64   "m^3/s"
-/gage_ids       (n_gauges, 8)       u8    fixed-length STAID strings
+/predictions    (n_gauges, n_days)  f64   units "m3/s"
+/observations   (n_gauges, n_days)  f64   units "m3/s"
+/gage_ids       (n_gauges, 8)       u8    fixed-width ASCII STAID (_dtype_hint "|S8")
 /time           (n_days,)           i64   nanoseconds since epoch
 ```
 
 Group attributes record run metadata: `description`, `start time`,
 `end time`, `version` (the ddrs `CARGO_PKG_VERSION`),
-`evaluation basins file` (the gages CSV path), `model` (checkpoint base
-path, or the literal `"frozen"` when `--frozen` was passed).
+`evaluation basins file` (the gages CSV path), `model` (the `--checkpoint`
+directory path, or the literal `"frozen"` when `--frozen` was passed).
 
 Read it from xarray:
 
@@ -150,16 +169,19 @@ print(ds.predictions.shape, ds.attrs["model"])
 The format is DDR-compatible — DDR's analysis notebooks open it without
 modification.
 
-`eval` also logs a one-line summary to stdout:
+`eval` also logs a metrics summary to stdout. Per-gauge mean is
+misleading on right-skewed NSE distributions, so only the **median** is
+reported:
 
 ```
 wrote output/model_test.zarr
 gauges with finite NSE: 412 / 430
-mean NSE (finite only): 0.6843
+median NSE (finite only): 0.6843
+median KGE (finite only): 0.7012
 ```
 
-NSE per gauge is **not** written to the zarr — recompute from
-`predictions` vs `observations` if you need it persisted.
+Per-gauge NSE/KGE are **not** written to the zarr — recompute from
+`predictions` vs `observations` if you need them persisted.
 
 ## Gotchas
 
@@ -174,13 +196,16 @@ NSE per gauge is **not** written to the zarr — recompute from
   reject the old file. Re-record after a BURN upgrade; treat checkpoints
   as throwaway across version bumps, not as artefacts to archive
   long-term.
-- **`.mpk` files are not portable from DDR either.** DDR `.pt`
-  files match the I/O contract of `Mlp<B>` but not the internal
-  architecture (DDR's KAN ≠ ddrs's MLP). `eval` rejects them implicitly
-  via `load_record`'s shape check.
-- **Pass the base path, not `.mpk`, to `load_mlp`.** The recorder
-  re-appends the extension. Passing `epoch_5.mpk` produces
-  `epoch_5.mpk.mpk` and a load failure.
+- **`.mpk` files are not portable from DDR either.** DDR's `.pt` files
+  match the KAN head's I/O contract but not its on-disk record format;
+  `load_kan_head`'s `load_record` rejects them.
+- **A checkpoint is a directory, not a file.** Pass the `epoch_E_mb_M/`
+  directory to `eval --checkpoint` and to `experiment.checkpoint:`. The
+  inner filenames (`head.mpk`, `optim.mpk`, `state.json`) are hardcoded;
+  do not point at one of the inner files.
+- **Pass the base path, not `.mpk`, to the loaders.** `head_base` /
+  `optim_base` return `dir/head` / `dir/optim`; the recorder re-appends
+  `.mpk`. Passing `head.mpk` produces `head.mpk.mpk` and a load failure.
 - **Half-precision saves lose `f32` LSBs.** Don't round-trip a checkpoint
   through save→load→save expecting bit-identity — the first save quantises
   to `f16` and subsequent saves preserve only that.
@@ -194,7 +219,7 @@ NSE per gauge is **not** written to the zarr — recompute from
 |---|---|
 | V1 CSV row count + verdict | `cargo run --release --example compare_ddr_sandbox` then `wc -l output/ddrs_vs_ddr.csv` (expect 6 = 1 header + 5 reaches) |
 | Hydrograph wide format | `cargo run --release --example benchmark_hydrograph` then `head -1 output/hydrograph.csv` (expect `t_hours,reach_0,...,reach_9`) |
-| Checkpoint round-trip | `cargo test --lib training::checkpoint` and inspect `<checkpoint-dir>/*.mpk` after `train` |
+| Checkpoint round-trip | `cargo test --lib training::checkpoint` and inspect `<checkpoint-dir>/epoch_*_mb_*/` after `train` |
 | Eval zarr layout | `cargo run --release --bin eval -- --frozen --output /tmp/probe.zarr ...` and open with `xarray.open_zarr` |
 
 The V1 CSV+verdict path is the only output that gates correctness; the

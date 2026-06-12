@@ -4,6 +4,8 @@ description: How ddrs reads the live training data — zarr adjacency stores (CO
 output: usage/inputs-reading.md
 sources:
   - src/data/store/zarr.rs
+  - src/data/store/netcdf.rs
+  - src/data/store/icechunk.rs
   - src/data/ids.rs
   - src/data/dates.rs
   - src/data/error.rs
@@ -27,9 +29,9 @@ keyed by `Comid` / `Staid` newtypes; no `trait Store` unifies them
 |---|---|---|
 | MERIT adjacency | `~/projects/ddr/data/merit_conus_adjacency.zarr` | `zarrs` |
 | Per-gauge subgraphs | `~/projects/ddr/data/merit_gages_conus_adjacency.zarr` | `zarrs` |
-| Catchment attributes | `~/projects/ddr/data/merit_global_attributes_v2.nc` | `netcdf` (TODO) |
-| Streamflow forcing | `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic` | `icechunk` (TODO) |
-| USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` (TODO) |
+| Catchment attributes | `~/projects/ddr/data/merit_global_attributes_v2.nc` | `netcdf` |
+| Streamflow forcing | `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic` | `icechunk` |
+| USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` |
 
 CONUS MERIT is **346,321 reaches × 338,814 edges** — not millions; consumer
 GPUs handle it. `src/data/mod.rs` owns the public re-exports; the dataset
@@ -80,23 +82,63 @@ preserved end-to-end.
 
 ## Netcdf catchment attributes
 
-**Status: TODO** per `CLAUDE.md`. Planned reader uses the `netcdf` crate
-(already a hard dependency — see the `DataError::NetCdf` variant). Target
-file: `~/projects/ddr/data/merit_global_attributes_v2.nc`. Output will be
-an `ndarray::Array2<f32>` indexed by `Comid` position via the
-`ConusAdjacencyStore`'s `IdIndex`.
+`AttributesStore` (`src/data/store/netcdf.rs`) reads the static catchment
+attributes via the `netcdf` crate (`DataError::NetCdf` variant), mirroring
+DDR's `AttributesReader`. `open(path, &attr_names, &comids)` materializes a
+dense `(F, N_present)` f32 matrix — `F` requested attributes × the COMIDs
+present in the file:
+
+```rust
+pub struct AttributesStore {
+    pub path: PathBuf,
+    pub attr_names: Vec<String>,
+    pub attrs: Array2<f32>,        // (F, N_present), f32
+    pub index: IdIndex<Comid>,     // present COMIDs -> column
+    pub row_means: Array1<f32>,    // per-attribute nan/inf-safe mean
+}
+```
+
+Each attribute column is read in full once (~24 MB at 2.94M f64), cast to
+f32, reduced to a NaN/Inf-safe mean (`row_means`, via `naninfmean`), then
+sliced to the present COMID subset. A missing `COMID` coord or attribute
+variable yields `DataError::Malformed`.
 
 ## Icechunk forcing + USGS
 
-**Status: TODO** per `CLAUDE.md`. Planned readers use the `icechunk` crate
-behind the dataset's tokio runtime. Targets:
+`StreamflowStore` and `UsgsObservationsStore` (`src/data/store/icechunk.rs`)
+read the two time-series sources from local icechunk repos. Targets:
 
 - Streamflow forcing: `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic`
 - USGS observations: `/mnt/ssd1/data/icechunk/usgs_daily_observations`
 
-Both are async-first stores; the dataset's `block_on(...)` keeps the
-rest of ddrs synchronous. `DataError::IceChunk { path, source }` is
-already wired for these.
+Because the `icechunk` crate has no `zarrs` dependency, the module wraps an
+`icechunk::Store` behind an `IcZarrStorage` adapter implementing zarrs's
+`ReadableStorageTraits`; each store opens a read-only `main`-branch session
+and owns a `tokio::runtime::Runtime`, calling `block_on(...)` at the
+icechunk boundary so the rest of ddrs stays sync. `DataError::IceChunk
+{ path, source }` carries the path on failure.
+
+Both `open(path)` parse a CF-convention `time` coord ("days since
+YYYY-MM-DD") into `time_start` + `n_time`, then expose windowed reads:
+
+```rust
+pub struct StreamflowStore {        // keyed by Comid
+    pub path: PathBuf,
+    pub index: IdIndex<Comid>,
+    pub time_start: NaiveDate,
+    pub n_time: usize,
+    // ...
+}
+
+let forcing = qr.read_window(&window, &comids)?;                  // (n_hourly, N)
+let daily   = qr.read_window_daily(window_start, n_days, &comids)?; // (n_days, N)
+```
+
+`StreamflowStore::read_window` repeats daily → hourly (`(rho-1)*24` rows);
+`read_window_daily` / `read_test_window` are the daily/eval variants.
+Missing COMIDs fill with `0.001` (discharge minimum).
+`UsgsObservationsStore` keys on `Staid`, stays daily (no hourly transform),
+and hard-errors with `DataError::MissingIds` on absent STAIDs.
 
 ## Newtype IDs
 

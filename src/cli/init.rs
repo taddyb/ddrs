@@ -116,10 +116,18 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
     };
 
     // ── Phase E: lock data sources from the (now-present) yaml ─────────
-    let cfg = Config::from_yaml_file_with_mode(&cfg_path, ConfigMode::Training)
-        .map_err(|e| CliError::ConfigInvalid { path: cfg_path.clone(), source: Box::new(e) })?;
+    lock_sources_from_config(&cfg_path, &ws)?;
+    Ok(InitOutput { smoke_passed, smoke_reused })
+}
+
+/// Fingerprint every configured data source and write `sources.lock`.
+/// Shared by `ddrs init` (Phase E) and `ddrs sources use` (re-lock after
+/// switching groups).
+pub fn lock_sources_from_config(cfg_path: &Path, ws: &Workspace) -> Result<(), CliError> {
+    let cfg = Config::from_yaml_file_with_mode(cfg_path, ConfigMode::Training)
+        .map_err(|e| CliError::ConfigInvalid { path: cfg_path.to_path_buf(), source: Box::new(e) })?;
     let ds = cfg.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
-        path: cfg_path.clone(),
+        path: cfg_path.to_path_buf(),
         source: Box::<dyn std::error::Error + Send + Sync>::from("data_sources: missing"),
     })?;
 
@@ -171,7 +179,7 @@ pub fn run_init(input: InitInput) -> Result<InitOutput, CliError> {
         sources,
     };
     lock.write_atomic(&ws.lockfile())?;
-    Ok(InitOutput { smoke_passed, smoke_reused })
+    Ok(())
 }
 
 fn run_smoke(probe: &crate::cli::manifest::SystemProbe)

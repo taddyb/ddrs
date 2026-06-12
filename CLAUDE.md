@@ -23,7 +23,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
    desktop's `~/projects/ddr` working tree (unpushed `geometry/trapezoidal.py`
    work). A fixture regenerated from a clean DDR clone diverges ~1% at every
    ddrs commit — wrong reference, not a port bug. See
-   `.claude/skills/ddrs-comparing-to-ddr.md` §Regenerating fixtures.
+   `.claude/references/ddrs-comparing-to-ddr.md` §Regenerating fixtures.
 2. **f32 throughout the routing core.** No mixed precision. The DDR comparison
    sits at the f32 precision floor (~1e-7 rel diff per reach); any cast to
    f64/bf16 breaks reproducibility against the reference.
@@ -32,7 +32,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 4. **Don't replace the hand-written sparse backward** in `src/sparse.rs`
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
-   `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `.claude/references/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
 5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`.** Do NOT
    reintroduce the prior MLP placeholder. The KAN head matches DDR-Python's
    `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) × num_hidden_layers →
@@ -42,7 +42,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 6. **rskan is a git dependency pinned to a tag.** When updating `rskan`, bump
    the tag in `Cargo.toml`'s `rskan = { git = ..., tag = ... }`, then re-run
    `tests/kan_head.rs` and the full parity sweep before merging.
-   `.claude/skills/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `.claude/references/ddrs-burn-autograd.md` for the BURN-0.21 recipe it uses.
 7. **KAN head parity vs DDR must pass on every PR that touches `src/nn/`,
    `Cargo.toml`'s rskan pin, or DDR's `nn/kan.py`.** Run:
    `cargo test --features fixtures --test kan_head_init_repro --test kan_head_init_parity --test kan_head_fixture_forward --test kan_head_fixture_backward`
@@ -97,6 +97,24 @@ ddrs show <run-id>                             # inspect a past run's manifest
 ddrs status                                    # workspace summary + disk usage
 ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 ```
+
+**Data-source groups** (`src/cli/sources.rs`): named "save files" for the
+`data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
+`conus` and `global` ship in-repo). Switching datasets never requires
+hand-editing `ddrs.yaml`:
+
+```bash
+ddrs sources list                # '*' marks the group matching ddrs.yaml
+ddrs sources save <name>         # snapshot current data_sources (--force to overwrite)
+ddrs sources use  <name>         # splice group into ddrs.yaml + refresh sources.lock
+```
+
+`save`/`use` are textual — comments inside the block travel with the group,
+everything outside the block is untouched — and `use` validates the spliced
+config parses before committing, then re-locks `sources.lock` (when `.ddrs`
+exists) so `ddrs plan` sees no drift. Starting a global train from a CONUS
+workspace is therefore: `ddrs sources use global && ddrs plan --workflow
+train && ddrs run --workflow train`.
 
 **The bootstrap-from-last-run gotcha** (`src/cli/plan_bootstrap.rs:58-63`):
 when `ddrs init` materializes `ddrs.yaml`, it prefers
@@ -207,6 +225,37 @@ math. Read it before touching `src/routing/` or `src/sparse.rs`.
 | Catchment attributes | `~/projects/ddr/data/merit_global_attributes_v2.nc` | `netcdf` (TODO) |
 | Streamflow forcing | `/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic` | `icechunk` (TODO) |
 | USGS observations | `/mnt/ssd1/data/icechunk/usgs_daily_observations` | `icechunk` (TODO) |
+| Global observations | `/gpfs/hjj5218/data/dmc_forcing/observation/dMC_global_v3.1` (zarr v2 group, one f64 array per `Provider__GageId`) | `zarrs` |
+| Global streamflow forcing | `/gpfs/hjj5218/data/dmc_forcing/streamflow/zarr/8km/merit_global_v2.7` (multi-zone zarr v2, `(time, COMID)` f64 per pfaf-2 zone) | `zarrs` |
+| Global gage metadata | `/gpfs/hjj5218/data/dmc_forcing/gage_information/formatted_gage_csvs/v3.1/8km/` (57 per-zone `<zone>_all.csv`) | `csv` |
+
+The `observations` and `streamflow` data sources auto-detect their format
+(`ObservationsStore::open` / `StreamflowSource::open`,
+`src/data/store/mod.rs`); the icechunk CONUS path is the fallback when the
+zarr-v2 sniff fails. Facts of the global stores (established empirically —
+they carry no units attrs):
+
+- **Observations** (`src/data/store/zarr_obs.rs`): daily m³/s, NaN = missing,
+  implicit time axis 1980-01-01→2020-12-31 (14,976 days), verified against
+  USGS NWIS. 6,051 gages from 25+ providers, named `Provider__GageId`.
+- **Streamflow Q'** (`src/data/store/zarr_qprime.rs`): one zarr group per
+  pfaf-2 zone (60 zones, 2.9M COMIDs), `streamflow` is **time-major**
+  `(time, COMID)` f64, CF time `days since 1980-01-01`. Units are m³/s —
+  confirmed by per-COMID magnitude match against the CONUS
+  `merit_dhbv2_UH_retrospective` reference (declared `m^3/s`) and by summed
+  upstream Q' reproducing observed USGS discharge (best gage ratio 1.05,
+  corr 0.95). ~42k fabric reaches lack predictions → 0.001 fill at read.
+  Version dirs: v2.x readme at `streamflow/zarr/8km/readme{,_file}`; v2.7 is
+  the latest as of 2026-06-11.
+- **Gage CSVs**: `GageMetadata::open` accepts a directory and concatenates
+  all `*.csv` in filename order (no STANAME column needed; STAID holds the
+  full `Provider__GageId`, every row has a COMID).
+
+The fabric for global runs is `/projects/mhpi/data/MERIT/raw/
+global_merit_riv.gpkg` (2,939,408 flowlines) via the existing managed
+adjacency build. Attributes stay on `merit_global_attributes_v2.nc`
+(already global: 2,939,404 COMIDs, zones 11-91; stats JSON exists under
+`~/projects/ddr/data/statistics/`).
 
 The adjacency stores are now **managed**: provide `geospatial_fabric` (the raw
 MERIT flowlines as `.shp`/`.dbf`, or a `.gpkg` such as the merged global
@@ -270,7 +319,7 @@ Implementation: `src/baseline/`. Mirrors
 
 ## When in doubt
 
-- Sparse / autograd questions → `.claude/skills/ddrs-burn-autograd.md`
+- Sparse / autograd questions → `.claude/references/ddrs-burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`

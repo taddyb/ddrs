@@ -241,11 +241,11 @@ or the SP-11 backward-capture work.
 
 ## See also
 
-- `.claude/skills/ddrs-architecture.md` — module map and per-timestep
+- `.claude/references/ddrs-architecture.md` — module map and per-timestep
   dataflow that K1/K2/K3 mirror.
-- `.claude/skills/ddrs-algorithm.md` — the math K1 implements (S1..S23).
-- `.claude/skills/ddrs-burn-autograd.md` — the custom Backward for the
+- `.claude/references/ddrs-algorithm.md` — the math K1 implements (S1..S23).
+- `.claude/references/ddrs-burn-autograd.md` — the custom Backward for the
   sparse triangular solve that sits next to the captured region.
-- `.claude/skills/ddrs-comparing-to-ddr.md` — V1 details, reused as V9.
+- `.claude/references/ddrs-comparing-to-ddr.md` — V1 details, reused as V9.
 - `.claude/ARCHITECTURE.md` — full SP-7..SP-10 prose and the 7-layer
   SP-10 journey.

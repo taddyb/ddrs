@@ -233,7 +233,7 @@ impl StreamflowStore {
 
 /// Parse `units` CF attribute of the form `"days since YYYY-MM-DD"` and
 /// return the epoch as a `NaiveDate`.
-fn parse_cf_epoch(
+pub(crate) fn parse_cf_epoch(
     attrs: &serde_json::Map<String, serde_json::Value>,
     path: &Path,
 ) -> Result<NaiveDate> {
@@ -266,7 +266,7 @@ fn parse_cf_epoch(
 /// Mirrors `np.repeat(daily, 24, axis=1)[:, :n_hourly].T` in
 /// `~/projects/ddr/src/ddr/io/readers.py:447-454` (DDR transposes after; we
 /// yield time-major directly).
-fn daily_to_hourly_trim(daily: &Array2<f32>, n_hourly: usize) -> Array2<f32> {
+pub(crate) fn daily_to_hourly_trim(daily: &Array2<f32>, n_hourly: usize) -> Array2<f32> {
     let (rho_days, n_div) = daily.dim();
     debug_assert!(
         n_hourly <= rho_days * 24,

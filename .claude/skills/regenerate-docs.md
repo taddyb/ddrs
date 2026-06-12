@@ -1,34 +1,34 @@
 ---
 name: regenerate-docs
-description: Reads every .claude/skills/ddrs-*.md, detects which were updated (or whose declared sources changed in git log), and expands each into its corresponding mdBook chapter under docs/. Updates SUMMARY.md from a fixed chapter order. Pre-PR ritual after editing canonical skills.
+description: Reads every .claude/references/ddrs-*.md, detects which were updated (or whose declared sources changed in git log), and expands each into its corresponding mdBook chapter under docs/. Updates SUMMARY.md from a fixed chapter order. Pre-PR ritual after editing the canonical reference docs.
 ---
 
 # /regenerate-docs
 
-Invoked manually before opening a PR that touches `.claude/skills/ddrs-*.md`
-or any source file those skills reference. Rewrites the affected chapters
+Invoked manually before opening a PR that touches `.claude/references/ddrs-*.md`
+or any source file those reference docs cite. Rewrites the affected chapters
 under `docs/` so the published mdBook stays in sync with the source-of-truth
-skills.
+reference docs.
 
 ## Contract
 
 **Inputs:**
-- `.claude/skills/ddrs-*.md` — canonical skills, YAML frontmatter required.
-- `.claude/skills/.regenerate-state.json` — last-regenerated commit SHA per skill.
+- `.claude/references/ddrs-*.md` — canonical reference docs, YAML frontmatter required.
+- `.claude/references/.regenerate-state.json` — last-regenerated commit SHA per skill.
 - Git working tree at HEAD.
 
 **Outputs:**
 - `docs/<output>.md` for each skill whose frontmatter declares `output:`.
 - `docs/SUMMARY.md` rewritten from the chapter-order list below.
-- `.claude/skills/.regenerate-state.json` updated with the new HEAD SHA per regenerated skill.
+- `.claude/references/.regenerate-state.json` updated with the new HEAD SHA per regenerated skill.
 
 **Not autonomous.** This skill is invoked only via `/regenerate-docs`. It does not run on save, on commit, or in CI.
 
 ## Step-by-step behavior
 
-1. **Inventory.** Glob `.claude/skills/ddrs-*.md` (exclude `.regenerate-state.json`). For each, parse YAML frontmatter; require `name`, `description`, `output`, `sources` (list).
+1. **Inventory.** Glob `.claude/references/ddrs-*.md` (exclude `.regenerate-state.json`). For each, parse YAML frontmatter; require `name`, `description`, `output`, `sources` (list).
 
-2. **Load state.** Read `.claude/skills/.regenerate-state.json` (default `{}` if missing). Each entry maps `name` → `last_commit_sha`.
+2. **Load state.** Read `.claude/references/.regenerate-state.json` (default `{}` if missing). Each entry maps `name` → `last_commit_sha`.
 
 3. **Detect changes.** For each skill, compute:
    ```
