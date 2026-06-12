@@ -3,7 +3,6 @@
 pub mod error;
 pub mod fingerprint;
 pub mod gc;
-pub mod init;
 pub mod lockfile;
 pub mod manifest;
 pub mod plan;

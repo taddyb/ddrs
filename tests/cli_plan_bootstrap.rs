@@ -1,5 +1,7 @@
 use ddrs::cli::plan_bootstrap::{bootstrap, BootstrapInput, BootstrapSource};
 use std::fs;
+use std::io::Cursor;
+use std::path::PathBuf;
 
 #[test]
 fn bootstrap_copies_template_when_no_history() {
@@ -45,4 +47,39 @@ fn bootstrap_uses_latest_successful_run_when_present() {
     assert!(matches!(chosen, BootstrapSource::LastSuccessful(_)));
     let copied = fs::read_to_string(&target).unwrap();
     assert!(copied.contains("from_last: true"));
+}
+
+#[test]
+fn choose_source_picks_template_on_2() {
+    let mut input = Cursor::new(b"2\n".to_vec());
+    let chosen = ddrs::cli::plan_bootstrap::choose_source(
+        &mut input,
+        PathBuf::from("/x/.ddrs/runs/2026-01-01T00-00-00Z-train/config.yaml"),
+    )
+    .unwrap();
+    assert!(matches!(chosen, BootstrapSource::Template));
+}
+
+#[test]
+fn choose_source_defaults_to_last_run_on_empty_and_1() {
+    for text in [&b"\n"[..], &b"1\n"[..]] {
+        let mut input = Cursor::new(text.to_vec());
+        let chosen = ddrs::cli::plan_bootstrap::choose_source(
+            &mut input,
+            PathBuf::from("/x/.ddrs/runs/r/config.yaml"),
+        )
+        .unwrap();
+        assert!(matches!(chosen, BootstrapSource::LastSuccessful(_)));
+    }
+}
+
+#[test]
+fn choose_source_reprompts_on_garbage() {
+    let mut input = Cursor::new(b"bananas\n2\n".to_vec());
+    let chosen = ddrs::cli::plan_bootstrap::choose_source(
+        &mut input,
+        PathBuf::from("/x/.ddrs/runs/r/config.yaml"),
+    )
+    .unwrap();
+    assert!(matches!(chosen, BootstrapSource::Template));
 }

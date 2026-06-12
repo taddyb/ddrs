@@ -1,14 +1,25 @@
-use ddrs::cli::plan::plan;
+use ddrs::cli::plan::{plan, PlanInput};
 use ddrs::cli::types::Workflow;
 use ddrs::cli::workspace::Workspace;
 use std::path::Path;
+use std::sync::Mutex;
+
+static CHDIR_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 #[ignore = "requires the merit data sources to be reachable; runs locally"]
 fn plan_succeeds_on_repo_config() {
     let cfg = Path::new("config/merit_training.yaml");
     let ws = Workspace::with_root(std::env::temp_dir().join("ddrs_plan_test/.ddrs"));
-    let _ = plan(cfg, Some(Workflow::Train), &ws);
+    let _ = plan(
+        ddrs::cli::plan::PlanInput {
+            config_path: Some(cfg.to_path_buf()),
+            workflow: Some(Workflow::Train),
+            skip_smoke: true,
+            ..Default::default()
+        },
+        &ws,
+    );
 }
 
 #[test]
@@ -31,15 +42,15 @@ data_sources:
   gages: /dev/null
 "#).unwrap();
     let ws_root = tmp.path().join(".ddrs");
-    fs::create_dir_all(ws_root.join("runs")).unwrap();
-    let lock = ddrs::cli::lockfile::Lockfile {
-        ddrs_version: "test".into(),
-        created_at: "0".into(),
-        sources: std::collections::BTreeMap::new(),
-    };
-    lock.write_atomic(&ws_root.join("sources.lock")).unwrap();
     let ws = ddrs::cli::workspace::Workspace::with_root(&ws_root);
-    let res = ddrs::cli::plan::plan(&cfg_path, None, &ws);
+    let res = ddrs::cli::plan::plan(
+        ddrs::cli::plan::PlanInput {
+            config_path: Some(cfg_path.clone()),
+            skip_smoke: true,
+            ..Default::default()
+        },
+        &ws,
+    );
     match res {
         Ok(pr) => assert_eq!(pr.workflow, ddrs::cli::Workflow::TrainAndTest),
         Err(e) => {
@@ -69,13 +80,6 @@ data_sources:
   gages: /dev/null
 "#).unwrap();
     let ws_root = tmp.path().join(".ddrs");
-    fs::create_dir_all(ws_root.join("runs")).unwrap();
-    let lock = ddrs::cli::lockfile::Lockfile {
-        ddrs_version: "test".into(),
-        created_at: "0".into(),
-        sources: std::collections::BTreeMap::new(),
-    };
-    lock.write_atomic(&ws_root.join("sources.lock")).unwrap();
     let ws = ddrs::cli::workspace::Workspace::with_root(&ws_root);
     let res = ddrs::cli::run::run(ddrs::cli::run::RunInput {
         workspace: ws,
@@ -107,10 +111,37 @@ np_seed: 1
     let ws_root = tmp.path().join(".ddrs");
     std::fs::create_dir_all(&ws_root).unwrap();
     let ws = ddrs::cli::workspace::Workspace::with_root(&ws_root);
-    let err = ddrs::cli::plan::plan(&cfg_path, None, &ws).unwrap_err();
+    let err = ddrs::cli::plan::plan(
+        ddrs::cli::plan::PlanInput {
+            config_path: Some(cfg_path.clone()),
+            skip_smoke: true,
+            ..Default::default()
+        },
+        &ws,
+    )
+    .unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("no `workflow:` key") && msg.contains("--workflow"),
         "got: {msg}"
+    );
+}
+
+#[test]
+fn plan_errors_clearly_when_no_yaml_and_no_tty() {
+    let _g = CHDIR_LOCK.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = ddrs::cli::workspace::Workspace::with_root(tmp.path().join(".ddrs"));
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
+    let res = ddrs::cli::plan::plan(
+        ddrs::cli::plan::PlanInput { skip_smoke: true, ..Default::default() },
+        &ws,
+    );
+    std::env::set_current_dir(&original).unwrap();
+    let msg = format!("{}", res.unwrap_err());
+    assert!(
+        msg.contains("no ddrs.yaml found") && msg.contains("not a TTY"),
+        "expected non-interactive bootstrap error, got: {msg}"
     );
 }

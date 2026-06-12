@@ -19,13 +19,16 @@
 //! (write-to-temp + rename) and refreshes `sources.lock` when a workspace
 //! exists, so `ddrs plan` sees no drift.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::cli::fingerprint::fingerprint_path;
+use crate::cli::lockfile::Lockfile;
 use crate::cli::workspace::Workspace;
-use crate::config::{Config, DataSources};
+use crate::config::{Config, ConfigMode, DataSources};
 use crate::error::CliError;
 
 /// Where group files live: `<config dir>/config/sources/`. For the standard
@@ -179,13 +182,76 @@ pub fn run_use(cfg_path: &Path, name: &str, ws: &Workspace) -> Result<bool, CliE
     fs::rename(&tmp, cfg_path)?;
 
     // Re-lock so `ddrs plan` sees no drift. Only when the workspace exists —
-    // before first `ddrs init`/`plan` there is nothing to refresh.
+    // before the first `ddrs plan` there is nothing to refresh.
     if ws.lockfile().is_file() {
-        crate::cli::init::lock_sources_from_config(cfg_path, ws)?;
+        lock_sources_from_config(cfg_path, ws)?;
         Ok(true)
     } else {
         Ok(false)
     }
+}
+
+/// Fingerprint every configured data source and write `sources.lock`.
+/// Used by `ddrs sources use` to re-lock after switching groups (formerly
+/// `ddrs init` Phase E; `ddrs plan` carries its own drift-aware variant in
+/// `plan.rs` that reuses prior fingerprints via the stat fast-path).
+fn lock_sources_from_config(cfg_path: &Path, ws: &Workspace) -> Result<(), CliError> {
+    let cfg = Config::from_yaml_file_with_mode(cfg_path, ConfigMode::Training)
+        .map_err(|e| CliError::ConfigInvalid { path: cfg_path.to_path_buf(), source: Box::new(e) })?;
+    let ds = cfg.data_sources.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: cfg_path.to_path_buf(),
+        source: Box::<dyn std::error::Error + Send + Sync>::from("data_sources: missing"),
+    })?;
+
+    // Build the fingerprint pairs. Optional keys (adjacency zarr stores,
+    // geospatial_fabric) are only locked when explicitly configured.
+    let mut pairs: Vec<(&str, PathBuf)> = vec![
+        ("attributes", ds.attributes.clone()),
+        ("streamflow", ds.streamflow.clone()),
+        ("observations", ds.observations.clone()),
+        ("gages", ds.gages.clone()),
+    ];
+    if let Some(p) = &ds.conus_adjacency {
+        pairs.push(("conus_adjacency", p.clone()));
+    }
+    if let Some(p) = &ds.gages_adjacency {
+        pairs.push(("gages_adjacency", p.clone()));
+    }
+    if let Some(p) = &ds.geospatial_fabric {
+        pairs.push(("geospatial_fabric", p.clone()));
+    }
+
+    // Parallel reachability + fingerprint. std::thread::scope is fine — these
+    // are I/O-bound and the count is small.
+    let results: Result<Vec<(String, Result<_, CliError>)>, CliError> = std::thread::scope(|s| {
+        let handles: Vec<_> = pairs
+            .iter()
+            .map(|(k, p)| {
+                let p = p.clone();
+                let k = k.to_string();
+                s.spawn(move || (k, fingerprint_path(&p)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .map_err(|_| CliError::Runtime("fingerprint thread panicked".into()))
+            })
+            .collect()
+    });
+    let results = results?;
+    let mut sources = BTreeMap::new();
+    for (k, r) in results {
+        sources.insert(k, r?);
+    }
+    let lock = Lockfile {
+        ddrs_version: env!("CARGO_PKG_VERSION").into(),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        sources,
+    };
+    lock.write_atomic(&ws.lockfile())?;
+    Ok(())
 }
 
 fn list_group_names(cfg_path: &Path) -> Result<Vec<String>, CliError> {

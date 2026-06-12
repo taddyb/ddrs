@@ -1,5 +1,10 @@
 # ddrs CLI Lifecycle (Spec A)
 
+> **Partially superseded (2026-06-06):** `ddrs init` and `ddrs plan` were
+> merged into a single `ddrs plan` command — see
+> `2026-06-06-merge-init-into-plan-design.md`. The run/show/status/gc,
+> manifest, and exit-code sections below still stand.
+
 **Date:** 2026-05-30
 **Status:** Draft — pending review
 **Author:** Tadd Bindas (with Claude)
