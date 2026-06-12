@@ -25,16 +25,18 @@ source ~/.bashrc
 From your project root:
 
 ```bash
-ddrs init      # creates ./.ddrs/, probes GPU, runs smoke test,
-               # opens $EDITOR on ddrs.yaml, locks data sources
-ddrs plan      # validates ddrs.yaml against locked sources, prints summary
+ddrs plan      # probes GPU + smoke test (first run), opens $EDITOR on
+               # ddrs.yaml if missing, locks data sources, validates,
+               # builds adjacency/baseline caches, prints the plan
 ddrs run       # executes the workflow, writes manifest + outputs
 ```
 
-`init` runs a 5-reach RAPID sandbox parity check on CUDA when available and
-falls back to CPU otherwise — so the install path works on laptops and CI.
-The bundled `config/merit_training.yaml` is the editor template; the
-`workflow:` key is already set to `train-and-test`.
+The first `ddrs plan` runs a 5-reach RAPID sandbox parity check on CUDA when
+available and falls back to CPU otherwise — so the install path works on
+laptops and CI. The verdict is cached; later plans are fast. When no
+`ddrs.yaml` exists, `plan` asks whether to start from your last successful
+run's config or the clean bundled template (`config/merit_training.yaml`).
+To start fresh at any time: `rm ddrs.yaml && ddrs plan`.
 
 The adjacency stores are **managed**, so `data_sources` only needs the raw
 inputs:
@@ -62,9 +64,9 @@ stores, drop `geospatial_fabric` and set both `conus_adjacency` and
 
 | Path | Written by | Purpose |
 |---|---|---|
-| `ddrs.yaml` | `ddrs init` (via `$EDITOR`) | Workflow + experiment config |
-| `.ddrs/system.json` | `ddrs init` | GPU/driver/smoke-test record |
-| `.ddrs/sources.lock` | `ddrs init` | Fingerprints of `data_sources` paths |
+| `ddrs.yaml` | `ddrs plan` (via `$EDITOR`) | Workflow + experiment config |
+| `.ddrs/system.json` | `ddrs plan` | GPU/driver/smoke-test record |
+| `.ddrs/sources.lock` | `ddrs plan` | Fingerprints of `data_sources` paths |
 | `.ddrs/adjacency/<key>/` | `ddrs plan` (managed build) | Cached CONUS + gauges adjacency zarr stores |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
 | `output/predictions_latest.zarr` | `ddrs run --workflow eval` / `train-and-test` Phase 2 | Predictions for plotting |
@@ -80,7 +82,7 @@ ddrs plan --workflow eval
 ddrs run --workflow train
 ```
 
-`mode:` and `workflow:` must agree (`mode: training` ↔ `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`). `ddrs init` will reject contradictions at load time.
+`mode:` and `workflow:` must agree (`mode: training` ↔ `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`). `ddrs plan` will reject contradictions at load time.
 
 The top-level `device:` key in `ddrs.yaml` selects the CUDA device ordinal
 (default `0`, mirrors DDR's `device:` key) — on multi-GPU hosts set e.g.

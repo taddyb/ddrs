@@ -1,63 +1,85 @@
-# ddrs MERIT training config.
+# ddrs experiment config. `ddrs plan` copies this template to ./ddrs.yaml on
+# first run (when you pick "clean template" at the bootstrap prompt).
 #
-# Hyperparameters are pulled verbatim from
-# ~/projects/ddr/config/merit_training_config.yaml.
-# Forcing is daily; the loader interpolates to hourly (repeat × 24, trim to
-# n_hourly) before feeding the Muskingum-Cunge engine — same pattern as
-# DDR's StreamflowReader.
+# Hyperparameter VALUES mirror DDR's reference config
+# (~/projects/ddr/config/merit_training_config.yaml) — keep them in sync when
+# comparing against the Python implementation.
 
+# Run mode. `training` activates the experiment: section; `testing` applies
+# the testing: overlay at the bottom instead. Must agree with `workflow:`
+# (training ↔ train / train-and-test, testing ↔ eval) — contradictions are
+# rejected at load time.
 mode: training
-workflow: train-and-test    # ddrs plan/run picks this up; override with --workflow X
+# Default workflow for `ddrs plan` / `ddrs run`; override per-invocation
+# with --workflow.
+workflow: train-and-test
+# Dataset family. `merit` (MERIT-Hydro river network) is the only supported
+# value today.
 geodataset: merit
-device: 0                   # CUDA device ordinal (mirrors DDR's `device:` key)
+# CUDA device ordinal. On multi-GPU hosts, pick a non-display GPU.
+device: 0
+# RNG seeds: `seed` drives model initialization, `np_seed` drives the
+# per-epoch gauge shuffle.
 seed: 42
 np_seed: 42
 
-# Source paths — read in place by ddrs's Rust loaders (zarrs + icechunk + netcdf).
-# No export/materialization step; the harness reads DDR's live data sources
-# straight from disk.
+# Where ddrs reads its inputs. Everything is read in place — no export step.
 #
-# adjacency strategy: provide `geospatial_fabric` and let `ddrs plan` build the
-# zarr stores under .ddrs/adjacency/. Alternatively set both `conus_adjacency`
-# and `gages_adjacency` to use pre-built zarr stores directly.
-#
-# Note: DDR's config uses `geospatial_fabric_gpkg` (GeoPackage). We use
-# `geospatial_fabric` and accept a .shp path; only the sibling .dbf is read.
+# Adjacency strategy: with `geospatial_fabric` set, the first `ddrs plan`
+# builds the CONUS + per-gauge adjacency zarr stores from the fabric's .dbf
+# attribute table into .ddrs/adjacency/<key>/ (~10 s, content-addressed,
+# reused afterwards). To use pre-built stores instead, drop
+# `geospatial_fabric` and set both:
+#   conus_adjacency: /path/to/merit_conus_adjacency.zarr
+#   gages_adjacency: /path/to/merit_gages_conus_adjacency.zarr
 data_sources:
+  # Per-reach catchment attributes (NetCDF): soils, climate, topography.
+  # The kan_head.input_var_names below are columns of this file.
   attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
-  # geospatial_fabric triggers the managed adjacency build: on first `ddrs plan`
-  # the .dbf sibling is parsed into zarr stores cached under .ddrs/adjacency/<key>/
-  # (~1-2 min), reused on subsequent runs. To use pre-built zarr stores instead,
-  # drop this key and set both:
-  #   conus_adjacency: /path/to/merit_conus_adjacency.zarr
-  #   gages_adjacency: /path/to/merit_gages_conus_adjacency.zarr
+  # MERIT-Hydro flowlines shapefile. Only the sibling .dbf attribute table
+  # is read — geometry is never opened.
   geospatial_fabric: /projects/mhpi/data/MERIT/raw/continent/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp
+  # Daily lateral inflow (Q') per reach from the dHBV2 retrospective
+  # (icechunk store). Interpolated to hourly internally.
   streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
+  # USGS daily observed discharge (icechunk store) — the training targets.
   observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  # Gauge table (CSV): station IDs and the MERIT COMID each gauge sits on.
   gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
 
+# Training-loop settings (active when mode: training).
 experiment:
+  # Gauges per mini-batch.
   batch_size: 64
+  # Training window (water years 1982–1995).
   start_time: 1981/10/01
   end_time: 1995/09/30
   epochs: 5
+  # Sequence length in DAYS sampled per mini-batch.
   rho: 90
+  # Re-shuffle gauge order each epoch (seeded by np_seed).
   shuffle: true
+  # Days excluded from the loss at the start of each sequence, so routing
+  # state can spin up from the cold-start estimate.
   warmup: 5
+  # Learning-rate schedule: epoch → LR, applying from that epoch onward.
   learning_rate:
     1: 0.001
     3: 0.0005
+  # Global gradient-norm clip.
   grad_clip_max_norm: 1.0
 
+# The KAN head that maps catchment attributes → routing parameters:
+# Linear(F,H) → KanLayer(H,H) × num_hidden_layers → Linear(H,P) → Sigmoid.
 kan_head:
   hidden_size: 21
   num_hidden_layers: 2
-  # B-spline grid intervals (`num` in pykan). Matches DDR's
-  # ~/projects/ddr/config/merit_training_config.yaml::kan.grid.
+  # B-spline grid intervals per KAN edge (pykan's `num`).
   grid: 50
-  # B-spline order. Matches DDR's ::kan.k. (pykan's KANLayer default is 3,
-  # but DDR overrides to 2 for production.)
+  # B-spline order (pykan's `k`). DDR overrides pykan's default of 3 to 2
+  # in production; keep 2 for parity.
   k: 2
+  # Catchment attributes fed to the head (column names in `attributes`).
   input_var_names:
     - SoilGrids1km_clay
     - aridity
@@ -69,38 +91,54 @@ kan_head:
     - SoilGrids1km_sand
     - ETPOT_Hargr
     - Porosity
+  # Routing parameters the head predicts (denormalized through
+  # params.parameter_ranges below).
   learnable_parameters:
     - n
     - q_spatial
     - p_spatial
 
-# Routing-engine knobs — DDR's MERIT defaults (matches mock_config in tests).
+# Routing-engine settings.
 params:
+  # Physical [min, max] each sigmoid-normalized KAN output maps onto.
   parameter_ranges:
+    # Manning's roughness coefficient.
     n: [0.015, 0.25]
+    # Leopold & Maddock width–depth exponent (top_width = p · depth^q).
     q_spatial: [0.0, 1.0]
+    # Leopold & Maddock width coefficient (same power law).
     p_spatial: [1.0, 200.0]
+  # Floors applied for numerical stability (SI units).
   attribute_minimums:
-    discharge: 1.0e-4
-    slope: 1.0e-3
-    velocity: 0.01
-    depth: 0.01
-    bottom_width: 0.01
+    discharge: 1.0e-4    # m³/s
+    slope: 1.0e-3        # m/m
+    velocity: 0.01       # m/s
+    depth: 0.01          # m
+    bottom_width: 0.01   # m
+  # Fixed values for parameters NOT listed in learnable_parameters.
   defaults:
     p_spatial: 21.0
+  # Parameters denormalized in log space (their range spans decades).
   log_space_parameters:
     - p_spatial
-  sparse_solver: cuda    # opt-in for GPU cuSPARSE solve (requires CUDA backend)
-  use_cuda_graphs: true  # SP-10: forward CUDA Graph capture+replay (CUDA backend only; V7a=0.385)
+  # Sparse triangular solve on the GPU via cuSPARSE (requires the CUDA
+  # backend; remove or set to cpu to fall back to the CPU solver).
+  sparse_solver: cuda
+  # Capture the routing forward pass as a CUDA graph and replay it each
+  # timestep — faster, CUDA backend only.
+  use_cuda_graphs: true
 
-# Test-mode overlay. When the binary is run with --mode testing, these keys
-# replace the corresponding ones in `experiment:`. Absent keys inherit.
+# Testing-mode overlay: when mode: testing (workflow: eval), these keys
+# REPLACE the matching experiment: keys; absent keys inherit.
 #
-# IMPORTANT: batch_size SEMANTIC SHIFTS between modes:
-#   - experiment.batch_size (training) = number of GAUGES per mini-batch
-#   - testing.batch_size              = number of DAYS per chunk
+# CAUTION — batch_size changes meaning between modes:
+#   experiment.batch_size = GAUGES per mini-batch (training)
+#   testing.batch_size    = DAYS per evaluation chunk
 testing:
+  # Evaluation window (water years 1996–2010).
   start_time: 1995/10/01
   end_time: 2010/09/30
-  batch_size: 15      # DAYS, not gauges
-  rho: null           # disabled in test mode
+  # DAYS per evaluation chunk, not gauges.
+  batch_size: 15
+  # Sequence sampling disabled in test mode.
+  rho: null

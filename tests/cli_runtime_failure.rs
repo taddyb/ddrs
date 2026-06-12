@@ -1,4 +1,4 @@
-use ddrs::cli::init::{run_init, InitInput};
+use ddrs::cli::plan::{plan, PlanInput};
 use ddrs::cli::manifest::Manifest;
 use ddrs::cli::run::{run, RunInput};
 use ddrs::cli::types::{RunStatus, Workflow};
@@ -21,17 +21,17 @@ fn run_writes_failure_manifest_when_dispatch_stub_fails() {
     .unwrap();
     let ws = Workspace::with_root(d.path().join(".ddrs"));
 
-    // Phase A only (skip_smoke + no config-required Phase B work for run).
-    // But `run` calls `plan` which requires a lockfile; we need init Phase B.
-    // Skip this test if the merit data sources aren't reachable.
-    let init_result = run_init(InitInput {
-        workspace: ws.root().to_path_buf(),
-        config_path: Some(cfg.clone()),
-        min_free_gpu_gb: 0.0,
-        force: false,
-        skip_smoke: true,
-    });
-    if let Err(e) = init_result {
+    // `run` self-initializes via its internal plan() call, but probe data
+    // reachability first so the test can skip on hosts without merit data.
+    let plan_result = plan(
+        PlanInput {
+            config_path: Some(cfg.clone()),
+            skip_smoke: true,
+            ..Default::default()
+        },
+        &ws,
+    );
+    if let Err(e) = plan_result {
         eprintln!("skipping: data sources not reachable ({e})");
         return;
     }
