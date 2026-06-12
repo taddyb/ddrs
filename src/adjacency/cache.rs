@@ -127,7 +127,7 @@ pub fn resolve_or_build(
 
     // --- 1. Compute the content key -----------------------------------------
     let fabric_fp = file_fingerprint(&resolved_path)?;
-    let gages_fp = file_fingerprint(gages_csv)?;
+    let gages_fp = gages_fingerprint(gages_csv)?;
     let key = content_key(&fabric_fp, &gages_fp, fabric_layer);
 
     // --- 2. Cache hit? -------------------------------------------------------
@@ -271,6 +271,43 @@ fn content_key(fabric_fp: &str, gages_fp: &str, layer: Option<&str>) -> String {
 }
 
 /// blake3 hex over the full contents of a file, using a buffered reader.
+/// Content fingerprint of the gages input: a single CSV file, or a directory
+/// of per-zone CSVs (e.g. `v3.1/8km/<zone>_all.csv` — see
+/// `GageMetadata::open`). For a directory, hash every `*.csv` in sorted
+/// filename order (name + NUL + bytes), so renaming, adding, or editing any
+/// zone file changes the adjacency cache key.
+fn gages_fingerprint(path: &Path) -> Result<String, AdjacencyCacheError> {
+    let md = fs::metadata(path).map_err(AdjacencyCacheError::Io)?;
+    if !md.is_dir() {
+        return file_fingerprint(path);
+    }
+    let mut csvs: Vec<PathBuf> = fs::read_dir(path)
+        .map_err(AdjacencyCacheError::Io)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "csv"))
+        .collect();
+    csvs.sort();
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 65536];
+    for csv in &csvs {
+        if let Some(name) = csv.file_name() {
+            hasher.update(name.to_string_lossy().as_bytes());
+            hasher.update(&[0]);
+        }
+        let file = fs::File::open(csv).map_err(AdjacencyCacheError::Io)?;
+        let mut reader = BufReader::new(file);
+        loop {
+            let n = reader.read(&mut buf).map_err(AdjacencyCacheError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 fn file_fingerprint(path: &Path) -> Result<String, AdjacencyCacheError> {
     let file = fs::File::open(path).map_err(AdjacencyCacheError::Io)?;
     let mut reader = BufReader::new(file);
@@ -402,6 +439,59 @@ mod tests {
         let l2 = content_key("aaaa", "bbbb", Some("catchments"));
         assert_ne!(l1, l2);
         assert_ne!(base, l1);
+    }
+
+    // ── gages fingerprint over a directory ───────────────────────────────────
+
+    #[test]
+    fn gages_fingerprint_handles_directories() {
+        let ws = tmp_workspace("gfp");
+        // Single file: same as file_fingerprint.
+        let single = ws.join("gages.csv");
+        write_tiny_gages(&single);
+        assert_eq!(
+            gages_fingerprint(&single).unwrap(),
+            file_fingerprint(&single).unwrap()
+        );
+
+        // Directory of zone CSVs: stable, sensitive to content and to
+        // filename, blind to non-CSV files.
+        let dir = ws.join("zones");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("11_all.csv"), "STAID,COMID\na,1\n").unwrap();
+        fs::write(dir.join("74_all.csv"), "STAID,COMID\nb,2\n").unwrap();
+        let fp1 = gages_fingerprint(&dir).unwrap();
+        assert_eq!(fp1, gages_fingerprint(&dir).unwrap());
+
+        fs::write(dir.join("readme.txt"), "ignored").unwrap();
+        assert_eq!(fp1, gages_fingerprint(&dir).unwrap(), "non-CSV ignored");
+
+        fs::write(dir.join("74_all.csv"), "STAID,COMID\nb,3\n").unwrap();
+        let fp2 = gages_fingerprint(&dir).unwrap();
+        assert_ne!(fp1, fp2, "editing a zone CSV must change the key");
+
+        fs::rename(dir.join("74_all.csv"), dir.join("75_all.csv")).unwrap();
+        assert_ne!(fp2, gages_fingerprint(&dir).unwrap(), "rename changes key");
+    }
+
+    /// End-to-end: a directory of gage CSVs flows through resolve_or_build
+    /// (the `ddrs plan` path that EISDIR'd before this fix).
+    #[test]
+    fn cache_builds_with_gages_directory() {
+        let ws = tmp_workspace("gdir");
+        let dbf_path = ws.join("fabric.dbf");
+        write_tiny_dbf(&dbf_path);
+        let gages_dir = ws.join("gage_csvs");
+        fs::create_dir(&gages_dir).unwrap();
+        write_tiny_gages(&gages_dir.join("74_all.csv"));
+
+        let out = resolve_or_build(&ws, &dbf_path, None, &gages_dir)
+            .expect("build with gages directory");
+        assert!(!out.cache_hit);
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_dir)
+            .expect("second call");
+        assert!(out2.cache_hit, "same dir contents → cache hit");
+        assert_eq!(out.key, out2.key);
     }
 
     // ── end-to-end cache tests ───────────────────────────────────────────────
