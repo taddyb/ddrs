@@ -1,10 +1,14 @@
-//! Daily downsample + L1 loss with NaN mask.
+//! Daily downsample + training objective with NaN mask.
 //!
 //! Mirrors `~/projects/ddr/src/ddr/scripts_utils.py::compute_daily_runoff`
-//! and `scripts/train.py:62-86` (NaN-filter + L1 + warmup trim).
+//! and `scripts/train.py:62-86` (NaN-filter + warmup trim). The objective
+//! is selectable (`config::LossKind`): the historical L1, or a per-gauge
+//! `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)` composite (`nnse_kge_loss`).
 
 use burn::tensor::{backend::Backend, Tensor};
 use ndarray::{s, Array2};
+
+use crate::config::{LossConfig, LossKind};
 
 /// Tau-trim then daily downsample via area-mode adaptive average pooling.
 ///
@@ -135,13 +139,143 @@ pub fn l1_loss_post_warmup(
     diff.iter().map(|v| v.abs()).sum::<f32>() / (diff.len() as f32)
 }
 
+/// Dispatch a mini-batch to the configured training objective.
+///
+/// `p` / `o` are `(G, T_post_warmup)` with autograd alive on `p`. `o` must
+/// be NaN-free (the driver drops gauges with any NaN in the window before
+/// calling). Returns the scalar batch loss with the autograd graph intact.
+pub fn batch_loss<B: Backend>(
+    p: Tensor<B, 2>,
+    o: Tensor<B, 2>,
+    cfg: &LossConfig,
+) -> Tensor<B, 1> {
+    match cfg.kind {
+        LossKind::L1 => (p - o).abs().mean(),
+        LossKind::NnseKge => nnse_kge_loss(p, o, cfg.nnse_weight, cfg.kge_weight, cfg.eps),
+    }
+}
+
+/// Per-gauge `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)`, averaged over gauges.
+///
+/// Both metrics are computed per gauge along the time axis, then averaged —
+/// so large basins don't dominate. All moments use the population form
+/// (divide by `T`); the `r` and `α` ratios are invariant to that choice.
+///
+/// Why this exists: L1 and NSE are both maximized at a simulated variance
+/// *below* the observed (NSE's optimum sits at `α = r < 1`), so they reward
+/// the Muskingum-Cunge routing for over-attenuating flood peaks. KGE's
+/// `(α - 1)²` term, with `α = σ_sim/σ_obs`, supplies the missing restoring
+/// gradient; NNSE guards correlation and volume. See the loss-decomposition
+/// analysis in the 2026-06 KGE-regression investigation.
+///
+/// `eps` stabilizes the variance/mean denominators (DDR `hydrograph_loss`
+/// uses `0.1`) so a near-constant gauge can't produce a NaN gradient.
+///
+/// KGE = 1 - √((r-1)² + (α-1)² + (β-1)²), so `1 - KGE` is exactly that
+/// Euclidean distance. NNSE = 1/(2 - NSE) ∈ (0, 1], `1 - NNSE` its loss.
+pub fn nnse_kge_loss<B: Backend>(
+    p: Tensor<B, 2>, // (G, T), autograd alive
+    o: Tensor<B, 2>, // (G, T), NaN-free
+    nnse_weight: f32,
+    kge_weight: f32,
+    eps: f32,
+) -> Tensor<B, 1> {
+    // Per-gauge means, kept as (G, 1) for broadcasting back over time.
+    let mean_p = p.clone().mean_dim(1);
+    let mean_o = o.clone().mean_dim(1);
+
+    // Centered series and the raw residual (for NSE's SSE).
+    let pc = p.clone() - mean_p.clone(); // (G, T)
+    let oc = o.clone() - mean_o.clone();
+    let resid = p - o; // (G, T); consumes p, o (last use)
+
+    // Second moments (population) along time → (G, 1).
+    let var_p = (pc.clone() * pc.clone()).mean_dim(1);
+    let var_o = (oc.clone() * oc.clone()).mean_dim(1);
+    let std_p = var_p.add_scalar(eps).sqrt();
+    let std_o = var_o.add_scalar(eps).sqrt();
+    let cov = (pc * oc.clone()).mean_dim(1);
+
+    // KGE components and `1 - KGE` = Euclidean distance of (r, α, β) from 1.
+    let r = cov / (std_p.clone() * std_o.clone());
+    let alpha = std_p / std_o;
+    let beta = mean_p / mean_o.add_scalar(eps);
+    let dr = r.sub_scalar(1.0);
+    let da = alpha.sub_scalar(1.0);
+    let db = beta.sub_scalar(1.0);
+    let one_minus_kge = (dr.clone() * dr + da.clone() * da + db.clone() * db).sqrt();
+    let kge_loss = one_minus_kge.mean();
+
+    // NSE = 1 - SSE/SSO; NNSE = 1/(2 - NSE); loss = 1 - NNSE.
+    let sse = (resid.clone() * resid).sum_dim(1); // (G, 1)
+    let sso = (oc.clone() * oc).sum_dim(1).add_scalar(eps);
+    let nse = (sse / sso).neg().add_scalar(1.0); // 1 - sse/sso
+    let nnse = nse.neg().add_scalar(2.0).recip(); // 1/(2 - nse)
+    let nnse_loss = nnse.neg().add_scalar(1.0).mean(); // 1 - nnse
+
+    nnse_loss.mul_scalar(nnse_weight) + kge_loss.mul_scalar(kge_weight)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::array;
-    use burn::backend::NdArray;
-    use burn::tensor::Tensor;
+    use burn::backend::{Autodiff, NdArray};
+    use burn::tensor::{Tensor, TensorData};
     type Bp = NdArray<f32>;
+    type Ad = Autodiff<NdArray<f32>>;
+
+    fn mk<B: Backend>(rows: &[[f32; 4]]) -> Tensor<B, 2> {
+        let g = rows.len();
+        let flat: Vec<f32> = rows.iter().flatten().copied().collect();
+        Tensor::<B, 1>::from_data(TensorData::new(flat, [g * 4]), &Default::default())
+            .reshape([g, 4])
+    }
+
+    #[test]
+    fn nnse_kge_loss_matches_hand_computation() {
+        // pred = obs centered ×0.5 + mean → α=0.5, r=1, β=1 (one gauge).
+        // obs:  [1,3,1,3] (mean 2, σ²=1);  pred: [1.5,2.5,1.5,2.5] (σ²=0.25)
+        let p = mk::<Bp>(&[[1.5, 2.5, 1.5, 2.5]]);
+        let o = mk::<Bp>(&[[1.0, 3.0, 1.0, 3.0]]);
+        // eps=0 to check exact metric algebra.
+        let loss = nnse_kge_loss(p, o, 1.0, 1.0, 0.0);
+        let v: f32 = loss.into_scalar();
+        // 1-KGE = √((1-1)²+(0.5-1)²+(1-1)²) = 0.5
+        // NSE = 1 - SSE/SSO = 1 - 1/4 = 0.75; NNSE = 1/1.25 = 0.8; 1-NNSE = 0.2
+        assert!((v - (0.2 + 0.5)).abs() < 1e-5, "got {v}");
+    }
+
+    #[test]
+    fn kge_term_prefers_unattenuated_amplitude() {
+        // Pure KGE term (nnse_weight=0): an attenuated prediction must score
+        // a HIGHER loss than the perfect one.
+        let o = mk::<Bp>(&[[1.0, 3.0, 1.0, 3.0]]);
+        let perfect = mk::<Bp>(&[[1.0, 3.0, 1.0, 3.0]]);
+        let attenuated = mk::<Bp>(&[[1.5, 2.5, 1.5, 2.5]]);
+        let l_perfect: f32 =
+            nnse_kge_loss(perfect, o.clone(), 0.0, 1.0, 0.0).into_scalar();
+        let l_atten: f32 =
+            nnse_kge_loss(attenuated, o, 0.0, 1.0, 0.0).into_scalar();
+        assert!(l_perfect < 1e-5, "perfect KGE loss should be ~0, got {l_perfect}");
+        assert!(l_atten > l_perfect, "attenuated {l_atten} !> perfect {l_perfect}");
+    }
+
+    #[test]
+    fn kge_gradient_points_toward_de_attenuation() {
+        // With an attenuated, perfectly-correlated prediction, the gradient
+        // must push peaks UP and troughs DOWN (restore amplitude):
+        //   ∂loss/∂p < 0 at peak timesteps, > 0 at trough timesteps.
+        let p = mk::<Ad>(&[[1.5, 2.5, 1.5, 2.5]]).require_grad();
+        let o = mk::<Ad>(&[[1.0, 3.0, 1.0, 3.0]]);
+        let loss = nnse_kge_loss(p.clone(), o, 0.0, 1.0, 0.1);
+        let grads = loss.backward();
+        let g = p.grad(&grads).unwrap();
+        let gv: Vec<f32> = g.into_data().to_vec().unwrap();
+        // indices 1,3 are peaks (pred 2.5 < obs 3); 0,2 are troughs.
+        assert!(gv[1] < 0.0 && gv[3] < 0.0, "peak grads not negative: {gv:?}");
+        assert!(gv[0] > 0.0 && gv[2] > 0.0, "trough grads not positive: {gv:?}");
+    }
 
     #[test]
     fn l1_loss_post_warmup_basic() {

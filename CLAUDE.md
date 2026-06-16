@@ -277,6 +277,26 @@ CONUS MERIT is 346,321 reaches × 338,814 edges (not millions — the port can
 target consumer GPUs). Training config lives at `config/merit_training.yaml`
 and mirrors `~/projects/ddr/config/merit_training_config.yaml` verbatim.
 
+## Training objective (`src/training/loss.rs`)
+
+The loss is config-selectable via `experiment.loss.kind` (default **L1**,
+which preserves prior behavior exactly — omit the block and nothing changes):
+
+- `l1` — `mean(|p - o|)`. Historical objective.
+- `nnse-kge` — per-gauge `nnse_weight·(1 - NNSE) + kge_weight·(1 - KGE)`.
+
+The `nnse-kge` option exists because L1 and NSE are both maximized at a
+simulated variance *below* observed (NSE's optimum is at `α = r < 1`), so they
+reward the MC routing for over-attenuating flood peaks — the diagnosed cause
+of KGE regressing vs the summed-Q' baseline (median KGE 0.723→0.701 while NSE
+*improved* 0.639→0.684; the whole drop was the KGE `α = σ_sim/σ_obs` term
+falling 0.93→0.85). KGE's `(α-1)²` supplies the restoring gradient; NNSE
+guards correlation and volume. `batch_loss` dispatches; both metrics are
+per-gauge masked (the driver already drops NaN gauges) then averaged, with
+`eps` (default 0.1, matches DDR `hydrograph_loss`) stabilizing denominators.
+Autograd is unchanged — it's a drop-in scalar on the routed predictions, so
+invariant 4 (the sparse backward) is untouched.
+
 ## Baseline
 
 `ddrs plan` and `ddrs run --workflow train-and-test` compute a **summed Q'**

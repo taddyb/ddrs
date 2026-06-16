@@ -68,6 +68,18 @@ experiment:
     3: 0.0005
   # Global gradient-norm clip.
   grad_clip_max_norm: 1.0
+  # Training objective. Omit this block for the historical L1 loss.
+  #   kind: l1        → mean(|p - o|)  (default; rewards peak attenuation)
+  #   kind: nnse-kge  → nnse-weight·(1 - NNSE) + kge-weight·(1 - KGE), per gauge.
+  #                     The KGE term's (alpha-1)^2 restores the hydrograph
+  #                     variance that L1/NSE shrink away (fixes the KGE
+  #                     regression vs the summed-Q' baseline). See
+  #                     src/training/loss.rs.
+  # loss:
+  #   kind: nnse-kge
+  #   nnse-weight: 1.0
+  #   kge-weight: 1.0
+  #   eps: 0.1          # stabilizes variance/mean denominators
 
 # The KAN head that maps catchment attributes → routing parameters:
 # Linear(F,H) → KanLayer(H,H) × num_hidden_layers → Linear(H,P) → Sigmoid.
