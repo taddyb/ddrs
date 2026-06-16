@@ -9,6 +9,7 @@ pub mod plan;
 pub mod plan_bootstrap;
 pub mod run;
 pub mod show;
+pub mod sources;
 pub mod status;
 pub mod system;
 pub mod tee;

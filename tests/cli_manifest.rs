@@ -29,6 +29,7 @@ fn manifest_round_trips_via_serde_json() {
             baseline_predictions: None,
             baseline_observations: None,
             baseline_manifest: None,
+            run_log: None,
         },
         metrics: serde_json::json!({"final_loss": 0.385}),
         max_mini_batches: None,

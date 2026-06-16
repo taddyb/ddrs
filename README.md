@@ -69,8 +69,14 @@ stores, drop `geospatial_fabric` and set both `conus_adjacency` and
 | `.ddrs/sources.lock` | `ddrs plan` | Fingerprints of `data_sources` paths |
 | `.ddrs/adjacency/<key>/` | `ddrs plan` (managed build) | Cached CONUS + gauges adjacency zarr stores |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
-| `output/predictions_latest.zarr` | `ddrs run --workflow eval` / `train-and-test` Phase 2 | Predictions for plotting |
-| `output/saved_models_*/epoch_*_mb_*.mpk` | `ddrs run --workflow train` / `train-and-test` Phase 1 | KAN checkpoints |
+| `.ddrs/runs/<id>/run.log` | `ddrs run` | Timestamped tee of everything the run printed (stdout + stderr, incl. CUDA messages) |
+| `.ddrs/runs/<id>/eval/predictions.zarr` | `ddrs run --workflow eval` / `train-and-test` Phase 2 | Predictions for plotting |
+| `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*/` | `ddrs run --workflow train` / `train-and-test` Phase 1 | KAN checkpoints |
+
+Run ids are `<UTC timestamp>-[<group>-]<workflow>` — e.g.
+`2026-06-12T14-02-10Z-global-train-and-test`. The `<group>` segment appears
+when the config's `data_sources` matches a saved group (see `ddrs sources`
+below), so run dirs say which dataset they were trained on.
 
 ### Override workflow on the command line
 
@@ -87,6 +93,21 @@ ddrs run --workflow train
 The top-level `device:` key in `ddrs.yaml` selects the CUDA device ordinal
 (default `0`, mirrors DDR's `device:` key) — on multi-GPU hosts set e.g.
 `device: 1` to keep training off the display/shared GPU.
+
+### Data-source groups
+
+Named "save files" for the `data_sources:` block, stored under
+`config/sources/<name>.yaml` (tracked in git; `conus` and `global` ship
+in-repo). Switching datasets never requires hand-editing `ddrs.yaml`:
+
+```bash
+ddrs sources list                # '*' marks the group matching ddrs.yaml
+ddrs sources save <name>         # snapshot current data_sources (--force to overwrite)
+ddrs sources use  <name>         # splice group into ddrs.yaml + refresh sources.lock
+```
+
+Starting a global train from a CONUS workspace is just
+`ddrs sources use global && ddrs plan && ddrs run`.
 
 ### Advanced
 

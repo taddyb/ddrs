@@ -154,7 +154,7 @@ These match DDR's `plots.py` and `evaluate.ipynb` so notebooks look familiar:
 - `references/metrics.md` — NSE/KGE/bias distributions across gauges
 - `scripts/load_ddrs_predictions.py` — **always use this** to open predictions/baseline zarrs. Handles two pitfalls every notebook hits otherwise:
   1. ddrs writes zarr v3 with `_ARRAY_DIMENSIONS` but no `dimension_names`, so `xr.open_zarr` raises `KeyError`.
-  2. `gage_ids` is stored as `(G, 8) uint8`, not 1D bytes/string — naïve `.decode()` won't work.
+  2. `gage_ids` is stored as `(G, W) uint8` (W = longest ID, min 8; widened 2026-06-12 so global `Provider__GageId` names are no longer truncated), not 1D bytes/string — naïve `.decode()` won't work.
 
   Both reference templates already import it. Don't reinvent the loading code.
 - `evals/evals.json` — test prompts

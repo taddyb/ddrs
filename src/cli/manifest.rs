@@ -74,6 +74,9 @@ pub struct RunOutputs {
     pub baseline_observations: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_manifest: Option<PathBuf>,
+    /// Timestamped tee of the run's stdout+stderr, relative to the run dir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_log: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

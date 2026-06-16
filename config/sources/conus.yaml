@@ -1,0 +1,10 @@
+data_sources:
+  # CONUS MERIT inputs as available on the MHPI cluster.
+  attributes: /projects/mhpi/tbindas/ddr/data/merit_global_attributes_v2.nc
+  # CONUS-only pfaf-7 flowlines (.dbf sibling read); managed adjacency build
+  geospatial_fabric: /projects/mhpi/data/MERIT/raw/continent/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp
+  # Icechunk dHBV2 UH retrospective (divide-major, daily m³/s)
+  streamflow: /projects/mhpi/tbindas/ddr/data/merit_dhbv2_UH_retrospective
+  # Icechunk USGS daily observations
+  observations: /projects/mhpi/data/icechunk/usgs_daily_observations
+  gages: /projects/mhpi/tbindas/ddr/references/gage_info/gages_3000.csv

@@ -2591,6 +2591,7 @@ dependencies = [
  "dbase",
  "humantime",
  "icechunk",
+ "libc",
  "ndarray 0.16.1",
  "ndarray-npy",
  "netcdf",

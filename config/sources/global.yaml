@@ -1,0 +1,13 @@
+data_sources:
+  # Global MERIT inputs (hjj5218's dMC_global_v3.1 generation).
+  # Units + layout documented in CLAUDE.md §Data sources; readers:
+  # src/data/store/{zarr_obs,zarr_qprime}.rs.
+  attributes: /projects/mhpi/tbindas/ddr/data/merit_global_attributes_v2.nc
+  # 2,939,408 flowlines; managed adjacency build (~25 s + per-gauge subgraphs)
+  geospatial_fabric: /projects/mhpi/data/MERIT/raw/global_merit_riv.gpkg
+  # Multi-zone zarr v2, 60 pfaf-2 zones, daily m³/s, 1980-01-01..2020-12-31
+  streamflow: /gpfs/hjj5218/data/dmc_forcing/streamflow/zarr/8km/merit_global_v2.7
+  # zarr v2 group, 6,051 Provider__GageId arrays, daily m³/s, NaN = missing
+  observations: /gpfs/hjj5218/data/dmc_forcing/observation/dMC_global_v3.1
+  # Directory of 57 per-zone <zone>_all.csv files (STAID = Provider__GageId)
+  gages: /gpfs/hjj5218/data/dmc_forcing/gage_information/formatted_gage_csvs/v3.1/8km

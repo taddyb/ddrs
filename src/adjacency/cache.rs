@@ -3,11 +3,19 @@
 //! Layout under `<workspace_root>/adjacency/<key>/`:
 //!
 //! ```text
-//! merit_conus_adjacency.zarr/      — written by zarr_write::write_conus_store
-//! merit_gages_conus_adjacency.zarr/ — written by zarr_write::write_gauges_store
-//! manifest.json                    — input paths + fingerprints, graph dims,
-//!                                    dropped COMIDs, build duration, git SHA
+//! <fabric>_adjacency.zarr/       — written by zarr_write::write_conus_store
+//! <fabric>_gages_adjacency.zarr/ — written by zarr_write::write_gauges_store
+//! manifest.json                  — input paths + fingerprints, graph dims,
+//!                                  dropped COMIDs, build duration, git SHA
 //! ```
+//!
+//! `<fabric>` is the geospatial-fabric file stem (e.g. `global_merit_riv`
+//! for the global gpkg, `riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1`
+//! for the CONUS shapefile), so the store names say what network they
+//! hold. Caches written before this scheme used fixed
+//! `merit_conus_adjacency.zarr` / `merit_gages_conus_adjacency.zarr`
+//! names regardless of scope; `store_paths` falls back to whatever
+//! `*_adjacency.zarr` pair is present so old caches keep hitting.
 //!
 //! The key is blake3 of the resolved fabric file bytes (.dbf or .gpkg) ∥
 //! gages CSV file bytes ∥ optional gpkg layer name ∥ BUILDER_VERSION,
@@ -125,19 +133,36 @@ pub fn resolve_or_build(
     let resolved = resolve_fabric(fabric).map_err(AdjacencyCacheError::Data)?;
     let resolved_path = resolved.resolved_path().to_path_buf();
 
+    // Store names carry the fabric stem (`global_merit_riv_adjacency.zarr`)
+    // so a cache directory says what network it holds.
+    let fabric_stem = fabric
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "merit".into());
+
     // --- 1. Compute the content key -----------------------------------------
     let fabric_fp = file_fingerprint(&resolved_path)?;
-    let gages_fp = file_fingerprint(gages_csv)?;
+    let gages_fp = gages_fingerprint(gages_csv)?;
     let key = content_key(&fabric_fp, &gages_fp, fabric_layer);
 
     // --- 2. Cache hit? -------------------------------------------------------
     let cache_dir = adjacency_cache_dir(workspace_root, &key);
     if is_cache_hit(&cache_dir) {
-        return Ok(AdjacencyCacheOutcome {
-            paths: store_paths(&cache_dir),
-            key,
-            cache_hit: true,
-        });
+        let paths = store_paths(&cache_dir, &fabric_stem);
+        // A manifest with missing stores (e.g. hand-deleted zarr dirs) is a
+        // stale cache, not a hit — clear it and rebuild.
+        if paths.conus.is_dir() && paths.gages.is_dir() {
+            return Ok(AdjacencyCacheOutcome {
+                paths,
+                key,
+                cache_hit: true,
+            });
+        }
+        eprintln!(
+            "  adjacency cache {} is incomplete (manifest without stores) — rebuilding",
+            cache_dir.display()
+        );
+        fs::remove_dir_all(&cache_dir)?;
     }
 
     // --- 3. Cache miss: build into a temp dir then rename -------------------
@@ -166,7 +191,7 @@ pub fn resolve_or_build(
     let nnz = conus.rows.len();
     let dropped_comids = conus.dropped_comids.clone();
 
-    let conus_dest = tmp_dir.join("merit_conus_adjacency.zarr");
+    let conus_dest = tmp_dir.join(format!("{fabric_stem}_adjacency.zarr"));
     write_conus_store(&conus, &conus_dest)
         .map_err(AdjacencyCacheError::Data)?;
 
@@ -174,7 +199,7 @@ pub fn resolve_or_build(
         .map_err(AdjacencyCacheError::Data)?;
     let n_gauges = subgraphs.len();
 
-    let gages_dest = tmp_dir.join("merit_gages_conus_adjacency.zarr");
+    let gages_dest = tmp_dir.join(format!("{fabric_stem}_gages_adjacency.zarr"));
     write_gauges_store(&subgraphs, n, &gages_dest)
         .map_err(AdjacencyCacheError::Data)?;
 
@@ -204,7 +229,8 @@ pub fn resolve_or_build(
     // between two concurrent builds) treat it as a hit and discard the tmp.
     match fs::rename(&tmp_dir, &cache_dir) {
         Ok(()) => {}
-        Err(_) if is_cache_hit(&cache_dir) => {
+        Err(_) if is_cache_hit(&cache_dir)
+            && store_paths(&cache_dir, &fabric_stem).conus.is_dir() => {
             // Another process won the race; discard our tmp.
             let _ = fs::remove_dir_all(&tmp_dir);
         }
@@ -218,7 +244,7 @@ pub fn resolve_or_build(
     );
 
     Ok(AdjacencyCacheOutcome {
-        paths: store_paths(&cache_dir),
+        paths: store_paths(&cache_dir, &fabric_stem),
         key,
         cache_hit: false,
     })
@@ -231,11 +257,43 @@ pub fn adjacency_cache_dir(workspace_root: &Path, key: &str) -> PathBuf {
 
 // ── internal helpers ─────────────────────────────────────────────────────────
 
-/// The two zarr store paths inside a cache directory.
-fn store_paths(cache_dir: &Path) -> AdjacencyCachePaths {
-    AdjacencyCachePaths {
-        conus: cache_dir.join("merit_conus_adjacency.zarr"),
-        gages: cache_dir.join("merit_gages_conus_adjacency.zarr"),
+/// The two zarr store paths inside a cache directory, named after the
+/// fabric stem. Falls back to whatever `*_adjacency.zarr` pair already
+/// exists (legacy fixed `merit_*conus*` names, or a different stem when the
+/// fabric file was renamed — the content key is byte-addressed, so a rename
+/// still hits the same cache entry).
+fn store_paths(cache_dir: &Path, fabric_stem: &str) -> AdjacencyCachePaths {
+    let network = cache_dir.join(format!("{fabric_stem}_adjacency.zarr"));
+    let gages = cache_dir.join(format!("{fabric_stem}_gages_adjacency.zarr"));
+    if network.is_dir() && gages.is_dir() {
+        return AdjacencyCachePaths { conus: network, gages };
+    }
+    // Fallback scan: any existing pair, classified by the _gages_ marker.
+    let mut found_network = None;
+    let mut found_gages = None;
+    if let Ok(entries) = fs::read_dir(cache_dir) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if !name.ends_with("adjacency.zarr") || !p.is_dir() {
+                continue;
+            }
+            let is_gages = name.ends_with("_gages_adjacency.zarr")
+                || name == "merit_gages_conus_adjacency.zarr";
+            if is_gages {
+                found_gages.get_or_insert(p);
+            } else {
+                found_network.get_or_insert(p);
+            }
+        }
+    }
+    match (found_network, found_gages) {
+        (Some(c), Some(g)) => AdjacencyCachePaths { conus: c, gages: g },
+        // Fresh build (or corrupt cache → miss): the stem names.
+        _ => AdjacencyCachePaths { conus: network, gages },
     }
 }
 
@@ -271,6 +329,43 @@ fn content_key(fabric_fp: &str, gages_fp: &str, layer: Option<&str>) -> String {
 }
 
 /// blake3 hex over the full contents of a file, using a buffered reader.
+/// Content fingerprint of the gages input: a single CSV file, or a directory
+/// of per-zone CSVs (e.g. `v3.1/8km/<zone>_all.csv` — see
+/// `GageMetadata::open`). For a directory, hash every `*.csv` in sorted
+/// filename order (name + NUL + bytes), so renaming, adding, or editing any
+/// zone file changes the adjacency cache key.
+fn gages_fingerprint(path: &Path) -> Result<String, AdjacencyCacheError> {
+    let md = fs::metadata(path).map_err(AdjacencyCacheError::Io)?;
+    if !md.is_dir() {
+        return file_fingerprint(path);
+    }
+    let mut csvs: Vec<PathBuf> = fs::read_dir(path)
+        .map_err(AdjacencyCacheError::Io)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "csv"))
+        .collect();
+    csvs.sort();
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 65536];
+    for csv in &csvs {
+        if let Some(name) = csv.file_name() {
+            hasher.update(name.to_string_lossy().as_bytes());
+            hasher.update(&[0]);
+        }
+        let file = fs::File::open(csv).map_err(AdjacencyCacheError::Io)?;
+        let mut reader = BufReader::new(file);
+        loop {
+            let n = reader.read(&mut buf).map_err(AdjacencyCacheError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 fn file_fingerprint(path: &Path) -> Result<String, AdjacencyCacheError> {
     let file = fs::File::open(path).map_err(AdjacencyCacheError::Io)?;
     let mut reader = BufReader::new(file);
@@ -404,6 +499,102 @@ mod tests {
         assert_ne!(base, l1);
     }
 
+    // ── gages fingerprint over a directory ───────────────────────────────────
+
+    #[test]
+    fn gages_fingerprint_handles_directories() {
+        let ws = tmp_workspace("gfp");
+        // Single file: same as file_fingerprint.
+        let single = ws.join("gages.csv");
+        write_tiny_gages(&single);
+        assert_eq!(
+            gages_fingerprint(&single).unwrap(),
+            file_fingerprint(&single).unwrap()
+        );
+
+        // Directory of zone CSVs: stable, sensitive to content and to
+        // filename, blind to non-CSV files.
+        let dir = ws.join("zones");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("11_all.csv"), "STAID,COMID\na,1\n").unwrap();
+        fs::write(dir.join("74_all.csv"), "STAID,COMID\nb,2\n").unwrap();
+        let fp1 = gages_fingerprint(&dir).unwrap();
+        assert_eq!(fp1, gages_fingerprint(&dir).unwrap());
+
+        fs::write(dir.join("readme.txt"), "ignored").unwrap();
+        assert_eq!(fp1, gages_fingerprint(&dir).unwrap(), "non-CSV ignored");
+
+        fs::write(dir.join("74_all.csv"), "STAID,COMID\nb,3\n").unwrap();
+        let fp2 = gages_fingerprint(&dir).unwrap();
+        assert_ne!(fp1, fp2, "editing a zone CSV must change the key");
+
+        fs::rename(dir.join("74_all.csv"), dir.join("75_all.csv")).unwrap();
+        assert_ne!(fp2, gages_fingerprint(&dir).unwrap(), "rename changes key");
+    }
+
+    /// Caches written before the fabric-stem naming scheme used fixed
+    /// `merit_*conus*` names — they must still hit and resolve to the
+    /// legacy store paths (rebuild would also invalidate the path-keyed
+    /// baseline cache).
+    #[test]
+    fn legacy_conus_named_cache_still_hits() {
+        let ws = tmp_workspace("legacy");
+        let dbf_path = ws.join("fabric.dbf");
+        let gages_path = ws.join("gages.csv");
+        write_tiny_dbf(&dbf_path);
+        write_tiny_gages(&gages_path);
+
+        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("build");
+        let dir = adjacency_cache_dir(&ws, &out1.key);
+        fs::rename(&out1.paths.conus, dir.join("merit_conus_adjacency.zarr")).unwrap();
+        fs::rename(&out1.paths.gages, dir.join("merit_gages_conus_adjacency.zarr")).unwrap();
+
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("hit");
+        assert!(out2.cache_hit, "legacy-named cache must still hit");
+        assert!(out2.paths.conus.ends_with("merit_conus_adjacency.zarr"));
+        assert!(out2.paths.gages.ends_with("merit_gages_conus_adjacency.zarr"));
+        assert!(out2.paths.conus.is_dir() && out2.paths.gages.is_dir());
+    }
+
+    /// A manifest whose zarr stores were deleted by hand must rebuild, not
+    /// report a hit pointing at nothing.
+    #[test]
+    fn manifest_without_stores_rebuilds() {
+        let ws = tmp_workspace("stale");
+        let dbf_path = ws.join("fabric.dbf");
+        let gages_path = ws.join("gages.csv");
+        write_tiny_dbf(&dbf_path);
+        write_tiny_gages(&gages_path);
+
+        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("build");
+        fs::remove_dir_all(&out1.paths.conus).unwrap();
+        fs::remove_dir_all(&out1.paths.gages).unwrap();
+
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("rebuild");
+        assert!(!out2.cache_hit, "stale cache must rebuild, not hit");
+        assert!(out2.paths.conus.is_dir() && out2.paths.gages.is_dir());
+    }
+
+    /// End-to-end: a directory of gage CSVs flows through resolve_or_build
+    /// (the `ddrs plan` path that EISDIR'd before this fix).
+    #[test]
+    fn cache_builds_with_gages_directory() {
+        let ws = tmp_workspace("gdir");
+        let dbf_path = ws.join("fabric.dbf");
+        write_tiny_dbf(&dbf_path);
+        let gages_dir = ws.join("gage_csvs");
+        fs::create_dir(&gages_dir).unwrap();
+        write_tiny_gages(&gages_dir.join("74_all.csv"));
+
+        let out = resolve_or_build(&ws, &dbf_path, None, &gages_dir)
+            .expect("build with gages directory");
+        assert!(!out.cache_hit);
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_dir)
+            .expect("second call");
+        assert!(out2.cache_hit, "same dir contents → cache hit");
+        assert_eq!(out.key, out2.key);
+    }
+
     // ── end-to-end cache tests ───────────────────────────────────────────────
 
     #[test]
@@ -420,9 +611,11 @@ mod tests {
         assert!(!out1.cache_hit, "first call should be a cache miss");
         assert_eq!(out1.key.len(), 16);
 
-        // zarr directories must exist and be readable.
-        assert!(out1.paths.conus.exists(), "conus zarr must exist");
+        // zarr directories must exist, be readable, and carry the fabric stem.
+        assert!(out1.paths.conus.exists(), "network zarr must exist");
         assert!(out1.paths.gages.exists(), "gages zarr must exist");
+        assert!(out1.paths.conus.ends_with("fabric_adjacency.zarr"));
+        assert!(out1.paths.gages.ends_with("fabric_gages_adjacency.zarr"));
 
         // manifest.json must be present with sensible fields.
         let manifest_path = adjacency_cache_dir(&ws, &out1.key).join("manifest.json");

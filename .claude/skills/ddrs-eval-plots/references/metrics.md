@@ -42,7 +42,7 @@ import sys
 import yaml
 from ddr.validation import Metrics, plot_box_fig, plot_cdf, plot_drainage_area_boxplots, plot_gauge_map
 
-# Bundled loader handles ddrs's zarr v3 layout + (G, 8) uint8 gage_ids.
+# Bundled loader handles ddrs's zarr v3 layout + (G, W) uint8 gage_ids.
 SKILL_SCRIPTS = Path("/home/tbindas/projects/ddrs/.claude/worktrees/plot-predictions-notebook/.claude/skills/ddrs-eval-plots/scripts")
 sys.path.insert(0, str(SKILL_SCRIPTS))
 from load_ddrs_predictions import load_predictions_zarr, load_baseline_zarr
@@ -189,7 +189,7 @@ print(f"saved metrics plots to {PLOT_DIR}")
 - **FHV / FLV** (High-Flow Volume / Low-Flow Volume biases) — percent errors in the top/bottom flow regimes; closer to zero is better. From `ddr.validation.Metrics`.
 - **The CDF clips NSE to `[0, ∞)`** to emphasize where useful skill begins. The boxplot uses `[-1, 1]`. This asymmetry is inherited from DDR.
 - **Axis intersection, not subset.** Neither zarr is guaranteed a strict subset of the other — ddrs's predictions zarr and DDR's summed-Q' baseline have been observed to differ by 1-2 days at the time-axis edges, and the gauge sets can be different sizes. Compute the intersection on both axes before metrics, otherwise `.sel(...)` raises `KeyError`. Same rule for the gauges-CSV join — intersect with the predictions zarr `gage_ids` before `.loc[...]`.
-- **`gage_ids` storage gotchas — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, 8) uint8` with `_dtype_hint: |S8`, NOT as 1D bytes/string. The zarr v3 store also lacks the `dimension_names` metadata `xr.open_zarr` requires. The bundled helper opens with raw `zarr`, decodes the 2D uint8 layout per-row, casts `time` from `int64` nanoseconds to `datetime64[ns]`, and assembles a clean `xarray.Dataset`. Use it for both the ddrs zarr and the DDR summed-Q' baseline (same schema).
+- **`gage_ids` storage gotchas — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, W) uint8` with `_dtype_hint: |S<W>` (W = longest ID, min 8; stores written before 2026-06-12 truncated global Provider__GageId names to 8 bytes — per-gauge joins on such stores are unreliable), NOT as 1D bytes/string. The zarr v3 store also lacks the `dimension_names` metadata `xr.open_zarr` requires. The bundled helper opens with raw `zarr`, decodes the 2D uint8 layout per-row, casts `time` from `int64` nanoseconds to `datetime64[ns]`, and assembles a clean `xarray.Dataset`. Use it for both the ddrs zarr and the DDR summed-Q' baseline (same schema).
 - **`GAUGES_CSV` comes from the training YAML.** The path lives at `data_sources.gages` and tracks whatever the model was actually trained on. Hardcoding `camels_670.csv` or `gages_3000.csv` breaks the moment training switches to a different gauge set.
 - **Positional reindex when joining metrics to a smaller gauges DataFrame.** `Metrics(...).nse` is shape `(G_ds,)` keyed positionally by `ds.gage_ids`. If you then intersect with a gauges CSV that lacks some of those gauges, you have `G_csv < G_ds`. Writing `g[col] = m.nse` either errors (length mismatch) or — worse, in some pandas versions — silently broadcasts and writes the wrong gauge's NSE to each row. Always reindex with a `gid_to_idx` lookup before the join. This was iter-2's silent bug.
 - **The gauge map uses the last (rightmost) result in `labels`.** If you want to map the baseline instead, swap the index.

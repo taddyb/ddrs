@@ -1,6 +1,6 @@
 ---
 name: ddrs-formatting-inputs
-description: How to write or modify ddrs's config YAML — parameter ranges, attribute minimums, log_space_parameters, sparse_solver and use_cuda_graphs toggles, mlp head config, experiment/seed/mode top-levels.
+description: How to write or modify ddrs's config YAML — parameter ranges, attribute minimums, log_space_parameters, sparse_solver and use_cuda_graphs toggles, kan_head head config, experiment/seed/mode/workflow/device top-levels.
 output: usage/inputs-formatting.md
 sources:
   - src/config.rs
@@ -28,12 +28,14 @@ solver core (the V1 sandbox example does this).
 
 ```
 mode: training              # str, "training" or "testing"
+workflow: train-and-test    # optional enum, cross-validated against mode
 geodataset: merit           # str, dataset family name
+device: 0                   # usize, CUDA device ordinal
 seed: 42                    # u64, Rust-side RNG seed
 np_seed: 42                 # u64, mirrors DDR's numpy seed
 data_sources: { ... }       # required for the SP-3 dataloader
 experiment: { ... }         # required for the SP-3 dataloader
-mlp:        { ... }         # required when training the MLP head
+kan_head:   { ... }         # KAN routing-head shape (alias: `mlp`)
 params:     { ... }         # required for the routing core
 testing:    { ... }         # optional overlay; applied when mode==testing
 ```
@@ -41,16 +43,40 @@ testing:    { ... }         # optional overlay; applied when mode==testing
 | Key | Type | Role |
 |---|---|---|
 | `mode` | string | Selects the run mode; `Config::from_yaml_file` ignores it, the binary reads it as the default for `--mode`. Defaults to `training`. |
+| `workflow` | enum (optional) | `train`, `eval`, or `train-and-test` (kebab-case). Cross-validated against `mode`: training implies `train`/`train-and-test`, testing implies `eval`; a mismatch is a load-time `DataError::Yaml`. Absent → `None`. |
 | `geodataset` | string | Free-form dataset tag (`merit` for the CONUS adjacency set). Defaults to `merit`. |
+| `device` | usize | CUDA device ordinal, mirrors DDR's `device:` key (`device: 2` → `cuda:2`). Defaults to `0`. |
 | `seed`, `np_seed` | u64 | Two seeds — DDR draws both because numpy and torch RNGs are seeded independently. Both default to `42`. |
 | `data_sources` | section | Five `PathBuf` fields + a gauges CSV; see `ddrs-reading-inputs` for what each path feeds. No defaults — required to construct the dataset. |
 | `experiment` | section | Training schedule. `batch_size`, `start_time`, `end_time`, `epochs`, optional `rho`, `shuffle`, `warmup`, `learning_rate` map, optional `grad_clip_max_norm`, optional `checkpoint`. |
-| `mlp` | section | `hidden_size`, `num_hidden_layers`, `input_var_names`, `learnable_parameters`. |
+| `kan_head` | section | KAN head shape: `hidden_size`, `num_hidden_layers`, `grid`, `k`, `input_var_names`, `learnable_parameters`. Accepts the legacy key `mlp` as a serde alias. |
 | `params` | section | Routing engine knobs (next section). |
 | `testing` | section | Overlay applied to `experiment` when `mode == Testing`. |
 
-The defining file is `src/config.rs:222-231` (struct) and
-`src/config.rs:275-288` (defaults).
+The defining types are in `src/config.rs`: `Config` (`:268-282`),
+`ConfigRaw` (`:312-329`), and `From<ConfigRaw>` (`:331-346`) for the
+root, plus the section structs `DataSources`, `Experiment`,
+`KanHeadConfigSection`, and `Params`.
+
+## `kan_head` section
+
+`KanHeadConfigSection` (`src/config.rs:91-103`) configures the KAN
+routing-head shape. The YAML key is `kan_head:`; the legacy key `mlp:` is
+accepted as a serde alias (`#[serde(alias = "mlp")]` on
+`ConfigRaw::kan_head`, `src/config.rs:326-327`) so older configs still
+parse. Prefer `kan_head:` in new files.
+
+| Key | Type | Default | Role |
+|---|---|---|---|
+| `hidden_size` | usize | required | KAN hidden width |
+| `num_hidden_layers` | usize | required | Number of inner `KanLayer` blocks |
+| `grid` | usize | `5` | B-spline grid intervals (`num` in pykan); merit YAML sets `50` |
+| `k` | usize | `3` | B-spline order; merit YAML sets `2` (DDR's production override) |
+| `input_var_names` | `Vec<String>` | required | Attribute columns fed to the head |
+| `learnable_parameters` | `Vec<String>` | required | Routing parameters the head produces |
+
+`grid` and `k` default via `default_grid`/`default_k`
+(`src/config.rs:105-110`) when absent.
 
 ## `params` section
 
@@ -88,7 +114,8 @@ Physical lower bounds clamped during routing to keep the math stable.
 
 A `Vec<String>` listing parameter names whose denormalization happens in
 log10-space rather than linear (see `src/routing/utils.rs::denormalize`).
-The merit YAML overrides the default (`["p_spatial"]`) with `["n"]`.
+Both the Rust default and the merit YAML are `["p_spatial"]`
+(`src/config.rs:189`, `config/merit_training.yaml:91-92`).
 
 If the YAML list is non-empty it **replaces** the default entirely;
 otherwise the default survives (`src/config.rs:201-203`).
@@ -189,10 +216,11 @@ For root-level fields the pattern is the same but in `Config`,
   `use_cuda_graphs`) compiles, runs, and silently uses the default.
   Watch for this when editing YAML and check the `loads_merit_training_yaml`
   assertions match what you wrote.
-- **`log_space_parameters` entries are bare strings.** A typo (`m` for
-  `n`) parses fine and silently changes the denorm formula for whatever
-  matched. There's no compile-time check; the only guard is the merit
-  YAML test asserting the exact list (`src/config.rs:354`).
+- **`log_space_parameters` entries are bare strings.** A typo
+  (`p_spatail` for `p_spatial`) parses fine and silently changes the
+  denorm formula for whatever matched. There's no compile-time check; the
+  only guard is the merit YAML test asserting the exact list — currently
+  `["p_spatial"]` (`src/config.rs:506`).
 - **YAML defaults moved across SPs.** `sparse_solver` flipped to `cuda`
   in SP-9 (commit `dbcf6e6`); `use_cuda_graphs` flipped to `true` in
   SP-10 (commit `e35af29`). Don't hard-code the assumption that either
@@ -220,7 +248,7 @@ Covers the four critical assertions:
 
 | Test | Locks |
 |---|---|
-| `loads_merit_training_yaml` | YAML round-trip, every default in `params`, mlp section, top-level seed/mode |
+| `loads_merit_training_yaml` | YAML round-trip, every default in `params`, `kan_head` section, top-level seed/mode/workflow/device |
 | `default_config_still_constructs` | `Config::default()` keeps working for the routing-only path |
 | `testing_mode_overlays_apply_to_experiment` | Testing overlay copies fields and clears `rho` |
 | `training_mode_does_not_apply_overlays` | Training mode leaves `experiment` untouched |
