@@ -176,8 +176,8 @@ pub fn train<I: Backend>(
             let p_filt = p_post.select(0, keep_t.clone());
             let o_filt = o_post.select(0, keep_t);
 
-            // L1 loss = mean(|p - o|); autograd alive on `p_filt`.
-            let loss = (p_filt - o_filt).abs().mean();
+            // Config-selected objective (default L1); autograd alive on `p_filt`.
+            let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss);
             let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
             let grads = GradientsParams::from_grads(loss.backward(), &state.head);

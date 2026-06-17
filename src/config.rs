@@ -89,6 +89,45 @@ pub struct Experiment {
     pub grad_clip_max_norm: Option<f32>,
     #[serde(default)]
     pub checkpoint: Option<std::path::PathBuf>,
+    /// Training objective. Defaults to L1 (the historical loss) so configs
+    /// without a `loss:` block are byte-for-byte unchanged in behavior.
+    #[serde(default)]
+    pub loss: LossConfig,
+}
+
+/// Selects the training objective and (for the composite objective) its
+/// component weights. See `src/training/loss.rs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct LossConfig {
+    /// Which objective to optimize.
+    pub kind: LossKind,
+    /// Weight on the `1 - NNSE` term (composite objective only).
+    pub nnse_weight: f32,
+    /// Weight on the `1 - KGE` term (composite objective only).
+    pub kge_weight: f32,
+    /// Stabilization constant added to variance denominators / mean-bias
+    /// denominator so near-constant gauges don't produce NaN gradients.
+    /// Matches DDR `hydrograph_loss`'s `eps=0.1`.
+    pub eps: f32,
+}
+
+impl Default for LossConfig {
+    fn default() -> Self {
+        // L1 fallback preserves the prior training behavior exactly.
+        Self { kind: LossKind::L1, nnse_weight: 1.0, kge_weight: 1.0, eps: 0.1 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum LossKind {
+    /// `mean(|p - o|)` — the historical objective; rewards peak attenuation.
+    #[default]
+    L1,
+    /// `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)`, per gauge. The KGE term's
+    /// `(α-1)²` restores the hydrograph variance L1/NSE shrink away.
+    NnseKge,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -563,6 +602,31 @@ mod tests {
         assert_eq!(exp.start_time, "1995/10/01");
         assert_eq!(exp.end_time, "2010/09/30");
         assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn loss_config_defaults_to_l1() {
+        // An experiment block without `loss:` must default to L1 so existing
+        // configs train identically.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.loss.kind, LossKind::L1);
+        assert!((exp.loss.eps - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loss_config_parses_nnse_kge_kebab_case() {
+        let lc: LossConfig = serde_yaml::from_str(
+            "kind: nnse-kge\nnnse-weight: 0.5\nkge-weight: 2.0\neps: 0.05\n",
+        )
+        .expect("parse loss");
+        assert_eq!(lc.kind, LossKind::NnseKge);
+        assert!((lc.nnse_weight - 0.5).abs() < 1e-9);
+        assert!((lc.kge_weight - 2.0).abs() < 1e-9);
+        assert!((lc.eps - 0.05).abs() < 1e-9);
     }
 
     #[test]

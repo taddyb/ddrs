@@ -28,7 +28,10 @@ pub use forward::{
     scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams,
     FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
-pub use loss::{tau_trim_and_downsample, filter_nan_gauges, l1_loss_post_warmup, FilteredPair};
+pub use loss::{
+    batch_loss, filter_nan_gauges, l1_loss_post_warmup, nnse_kge_loss, tau_trim_and_downsample,
+    FilteredPair,
+};
 pub use driver::{train, TrainState};
 pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
