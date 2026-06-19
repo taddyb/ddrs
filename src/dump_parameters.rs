@@ -102,16 +102,7 @@ where
     // ---------- 4. Load trained KAN head ----------
     <I as Backend>::seed(device, cfg.seed);
 
-    let head_template: KanHead<I> = KanHeadConfig::new(
-        head_cfg.input_var_names.clone(),
-        head_cfg.learnable_parameters.clone(),
-        cfg.seed,
-    )
-    .with_hidden_size(head_cfg.hidden_size)
-    .with_num_hidden_layers(head_cfg.num_hidden_layers)
-    .with_grid(head_cfg.grid)
-    .with_k(head_cfg.k)
-    .init::<I>(device);
+    let head_template: KanHead<I> = crate::config::kan_config(head_cfg, cfg.seed).init::<I>(device);
     eprintln!("loading checkpoint: {}.mpk", checkpoint.display());
     let head = load_kan_head::<I>(checkpoint, head_template, device)
         .map_err(|e| CliError::Other(Box::new(e)))?;
@@ -126,6 +117,7 @@ where
     let mut n_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut q_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut p_phys: Vec<f32> = Vec::with_capacity(n_reaches);
+    let mut x_phys: Vec<f32> = Vec::with_capacity(n_reaches);
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -157,7 +149,38 @@ where
             p_phys.extend(std::iter::repeat(p_default).take(rows));
         }
 
+        // Muskingum X: denormalize when learnable, else the routing constant 0.3.
+        if learn_has("x_storage") {
+            let x_d = denormalize(
+                raw["x_storage"].clone(),
+                cfg.params.parameter_ranges.x_storage,
+                is_log("x_storage"),
+            );
+            x_phys.extend(x_d.into_data().to_vec::<f32>().unwrap());
+        } else {
+            x_phys.extend(std::iter::repeat(0.3_f32).take(rows));
+        }
+
         eprintln!("  batch {start:>7}..{end:<7}  ({} reaches)", end - start);
+    }
+
+    // Summarize the learned X distribution — the decisive check on whether the
+    // routing actually moved its attenuation knob off the sigmoid-init (~0.25).
+    if learn_has("x_storage") {
+        let mut xs = x_phys.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| xs[((p * (xs.len() - 1) as f64).round() as usize).min(xs.len() - 1)];
+        let mean = x_phys.iter().sum::<f32>() / x_phys.len() as f32;
+        let near_lo = x_phys.iter().filter(|&&x| x < 0.05).count() as f64 / x_phys.len() as f64;
+        let near_hi = x_phys.iter().filter(|&&x| x > 0.45).count() as f64 / x_phys.len() as f64;
+        eprintln!(
+            "learned X over {} reaches: min={:.4} p10={:.4} median={:.4} mean={:.4} p90={:.4} max={:.4}",
+            xs.len(), xs[0], pct(0.10), pct(0.50), mean, pct(0.90), xs[xs.len() - 1]
+        );
+        eprintln!(
+            "  range [0,0.5]; sigmoid-init ≈ 0.25.  fraction X<0.05 (max attenuation)={:.1}%  X>0.45 (pure lag)={:.1}%",
+            near_lo * 100.0, near_hi * 100.0
+        );
     }
 
     // ---------- 6. Write NetCDF4 ----------
@@ -171,6 +194,7 @@ where
         &n_phys,
         &q_phys,
         &p_phys,
+        &x_phys,
         &slope_clamped,
         &checkpoint.display().to_string(),
     )
@@ -282,6 +306,7 @@ where
     let mut n_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut q_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut p_phys: Vec<f32> = Vec::with_capacity(n_reaches);
+    let mut x_phys: Vec<f32> = Vec::with_capacity(n_reaches);
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -313,7 +338,38 @@ where
             p_phys.extend(std::iter::repeat(p_default).take(rows));
         }
 
+        // Muskingum X: denormalize when learnable, else the routing constant 0.3.
+        if learn_has("x_storage") {
+            let x_d = denormalize(
+                raw["x_storage"].clone(),
+                cfg.params.parameter_ranges.x_storage,
+                is_log("x_storage"),
+            );
+            x_phys.extend(x_d.into_data().to_vec::<f32>().unwrap());
+        } else {
+            x_phys.extend(std::iter::repeat(0.3_f32).take(rows));
+        }
+
         eprintln!("  batch {start:>7}..{end:<7}  ({} reaches)", end - start);
+    }
+
+    // Summarize the learned X distribution — the decisive check on whether the
+    // routing actually moved its attenuation knob off the sigmoid-init (~0.25).
+    if learn_has("x_storage") {
+        let mut xs = x_phys.clone();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| xs[((p * (xs.len() - 1) as f64).round() as usize).min(xs.len() - 1)];
+        let mean = x_phys.iter().sum::<f32>() / x_phys.len() as f32;
+        let near_lo = x_phys.iter().filter(|&&x| x < 0.05).count() as f64 / x_phys.len() as f64;
+        let near_hi = x_phys.iter().filter(|&&x| x > 0.45).count() as f64 / x_phys.len() as f64;
+        eprintln!(
+            "learned X over {} reaches: min={:.4} p10={:.4} median={:.4} mean={:.4} p90={:.4} max={:.4}",
+            xs.len(), xs[0], pct(0.10), pct(0.50), mean, pct(0.90), xs[xs.len() - 1]
+        );
+        eprintln!(
+            "  range [0,0.5]; sigmoid-init ≈ 0.25.  fraction X<0.05 (max attenuation)={:.1}%  X>0.45 (pure lag)={:.1}%",
+            near_lo * 100.0, near_hi * 100.0
+        );
     }
 
     // ---------- 6. Write NetCDF4 ----------
@@ -327,6 +383,7 @@ where
         &n_phys,
         &q_phys,
         &p_phys,
+        &x_phys,
         &slope_clamped,
         "init-only (no checkpoint)",
     )
@@ -338,12 +395,14 @@ where
 /// Write a NetCDF4 file with the COMID-keyed KAN parameter schema. Each var
 /// carries a `long_name` + `units` attribute so xarray-based plotting code
 /// (e.g. DDR's `plot_parameter_map.ipynb`) gets self-describing axes.
+#[allow(clippy::too_many_arguments)]
 fn write_netcdf(
     path: &Path,
     comids: &[i64],
     n_vals: &[f32],
     q_vals: &[f32],
     p_vals: &[f32],
+    x_vals: &[f32],
     slope: &[f32],
     checkpoint: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -376,6 +435,11 @@ fn write_netcdf(
     let mut v = file.add_variable::<f32>("p_spatial", &["COMID"])?;
     v.put_values(p_vals, ..)?;
     v.put_attribute("long_name", "spatial width-to-depth ratio")?;
+    v.put_attribute("units", "dimensionless")?;
+
+    let mut v = file.add_variable::<f32>("x_storage", &["COMID"])?;
+    v.put_values(x_vals, ..)?;
+    v.put_attribute("long_name", "Muskingum X storage weight (0=attenuation, 0.5=pure lag)")?;
     v.put_attribute("units", "dimensionless")?;
 
     let mut v = file.add_variable::<f32>("slope", &["COMID"])?;

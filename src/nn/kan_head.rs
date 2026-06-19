@@ -35,6 +35,8 @@ use burn::tensor::{backend::Backend, Tensor};
 use rand::SeedableRng;
 use rskan::{KanLayer, KanLayerConfig};
 
+use crate::nn::disagg_head::{DisaggHead, DisaggHeadConfig};
+
 #[cfg(feature = "fixtures")]
 use burn::module::Param;
 #[cfg(feature = "fixtures")]
@@ -74,6 +76,18 @@ pub struct KanHeadConfig {
     /// B-spline order. `3` per cubic-spline default.
     #[config(default = 3)]
     pub k: usize,
+
+    /// Attach a learnable mass-preserving daily→hourly disaggregation head
+    /// (replaces flat `repeat-24` for the forcing). Off by default → the head
+    /// is exactly the prior KAN-only head (parity preserved).
+    #[config(default = false)]
+    pub disagg_enabled: bool,
+    /// Hidden width of the disaggregation MLP (only used when enabled).
+    #[config(default = 16)]
+    pub disagg_hidden_size: usize,
+    /// Whether the disaggregation head also conditions on static attributes.
+    #[config(default = true)]
+    pub disagg_use_attributes: bool,
 }
 
 impl KanHeadConfig {
@@ -128,11 +142,25 @@ impl KanHeadConfig {
             })
             .collect();
 
+        // Optional disaggregation head. Same attribute count as the KAN input;
+        // zero-init output → uniform shape → exact repeat-24 at init.
+        let disagg = if self.disagg_enabled {
+            Some(
+                DisaggHeadConfig::new(self.input_var_names.len(), self.seed)
+                    .with_hidden_size(self.disagg_hidden_size)
+                    .with_use_attributes(self.disagg_use_attributes)
+                    .init::<B>(device),
+            )
+        } else {
+            None
+        };
+
         KanHead {
             input,
             hidden,
             output,
             learnable_parameters: self.learnable_parameters.clone(),
+            disagg,
         }
     }
 }
@@ -147,6 +175,9 @@ pub struct KanHead<B: Backend> {
     /// HashMap. Carried as state so the head round-trips through a record
     /// without requiring callers to re-supply the keys.
     learnable_parameters: Vec<String>,
+    /// Optional learnable daily→hourly forcing disaggregation (None = flat
+    /// `repeat-24`). Trained/checkpointed/loaded with the rest of the head.
+    pub disagg: Option<DisaggHead<B>>,
 }
 
 impl<B: Backend> KanHead<B> {
@@ -327,6 +358,7 @@ mod fixture {
                 hidden,
                 output,
                 learnable_parameters: cfg.learnable_parameters.clone(),
+                disagg: None,
             })
         }
     }

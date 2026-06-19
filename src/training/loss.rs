@@ -152,6 +152,16 @@ pub fn batch_loss<B: Backend>(
     match cfg.kind {
         LossKind::L1 => (p - o).abs().mean(),
         LossKind::NnseKge => nnse_kge_loss(p, o, cfg.nnse_weight, cfg.kge_weight, cfg.eps),
+        LossKind::Kge => kge_component_loss(
+            p,
+            o,
+            cfg.r_weight,
+            cfg.alpha_weight,
+            cfg.beta_weight,
+            cfg.nnse_weight,
+            cfg.kge_clamp,
+            cfg.eps,
+        ),
     }
 }
 
@@ -216,6 +226,81 @@ pub fn nnse_kge_loss<B: Backend>(
     nnse_loss.mul_scalar(nnse_weight) + kge_loss.mul_scalar(kge_weight)
 }
 
+/// Component-weighted KGE loss:
+/// per gauge `r_w·(r-1)² + α_w·(α-1)² + β_w·(β-1)² + nnse_w·(1-NNSE)`, averaged.
+///
+/// Unlike [`nnse_kge_loss`] (which sums the KGE components under one square
+/// root, `1-KGE = √((r-1)²+(α-1)²+(β-1)²)`), this weights each squared
+/// component independently. Two reasons:
+///
+/// 1. **No gradient singularity.** `√(·)` has an infinite-slope cusp as the
+///    prediction approaches perfect KGE (the argument → 0); the squared form
+///    is smooth there, so late-training gradients stay well-behaved.
+/// 2. **Tunable restoring force.** `α_w` independently up-weights the
+///    `(α-1)²` variance-ratio term — the direct counter-pressure to MC
+///    over-attenuation (the diagnosed `α: 0.96 → 0.85` regression). Set
+///    `α_w > 1` to prioritize restoring `σ_sim/σ_obs → 1`.
+///
+/// `nnse_w` keeps the optional NNSE guard (correlation + volume); set it to 0
+/// for a pure component-weighted KGE objective. All moments use the population
+/// form along time; `eps` stabilizes the variance/mean denominators exactly as
+/// in [`nnse_kge_loss`].
+#[allow(clippy::too_many_arguments)]
+pub fn kge_component_loss<B: Backend>(
+    p: Tensor<B, 2>, // (G, T), autograd alive
+    o: Tensor<B, 2>, // (G, T), NaN-free
+    r_weight: f32,
+    alpha_weight: f32,
+    beta_weight: f32,
+    nnse_weight: f32,
+    clamp: f32,
+    eps: f32,
+) -> Tensor<B, 1> {
+    // Per-gauge means, kept as (G, 1) for broadcasting back over time.
+    let mean_p = p.clone().mean_dim(1);
+    let mean_o = o.clone().mean_dim(1);
+
+    // Centered series and the raw residual (for NSE's SSE).
+    let pc = p.clone() - mean_p.clone(); // (G, T)
+    let oc = o.clone() - mean_o.clone();
+    let resid = p - o; // (G, T); consumes p, o (last use)
+
+    // Second moments (population) along time → (G, 1).
+    let var_p = (pc.clone() * pc.clone()).mean_dim(1);
+    let var_o = (oc.clone() * oc.clone()).mean_dim(1);
+    let std_p = var_p.add_scalar(eps).sqrt();
+    let std_o = var_o.add_scalar(eps).sqrt();
+    let cov = (pc * oc.clone()).mean_dim(1);
+
+    // KGE components: r (correlation), α (variance ratio), β (mean ratio).
+    let r = cov / (std_p.clone() * std_o.clone());
+    let alpha = std_p / std_o;
+    let beta = mean_p / mean_o.add_scalar(eps);
+    let dr = r.sub_scalar(1.0);
+    let da = alpha.sub_scalar(1.0);
+    let db = beta.sub_scalar(1.0);
+
+    // Weighted sum of squared component deviations, clamped per gauge so a
+    // collapsed-variance gauge can't hijack the batch gradient, then averaged.
+    let kge_term = (dr.clone() * dr).mul_scalar(r_weight)
+        + (da.clone() * da).mul_scalar(alpha_weight)
+        + (db.clone() * db).mul_scalar(beta_weight);
+    let kge_loss = kge_term.clamp_max(clamp).mean();
+
+    if nnse_weight == 0.0 {
+        return kge_loss;
+    }
+
+    // NSE = 1 - SSE/SSO; NNSE = 1/(2 - NSE); loss = 1 - NNSE.
+    let sse = (resid.clone() * resid).sum_dim(1); // (G, 1)
+    let sso = (oc.clone() * oc).sum_dim(1).add_scalar(eps);
+    let nse = (sse / sso).neg().add_scalar(1.0); // 1 - sse/sso
+    let nnse = nse.neg().add_scalar(2.0).recip(); // 1/(2 - nse)
+    let nnse_loss = nnse.neg().add_scalar(1.0).mean(); // 1 - nnse
+
+    kge_loss + nnse_loss.mul_scalar(nnse_weight)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +354,60 @@ mod tests {
         let p = mk::<Ad>(&[[1.5, 2.5, 1.5, 2.5]]).require_grad();
         let o = mk::<Ad>(&[[1.0, 3.0, 1.0, 3.0]]);
         let loss = nnse_kge_loss(p.clone(), o, 0.0, 1.0, 0.1);
+        let grads = loss.backward();
+        let g = p.grad(&grads).unwrap();
+        let gv: Vec<f32> = g.into_data().to_vec().unwrap();
+        // indices 1,3 are peaks (pred 2.5 < obs 3); 0,2 are troughs.
+        assert!(gv[1] < 0.0 && gv[3] < 0.0, "peak grads not negative: {gv:?}");
+        assert!(gv[0] > 0.0 && gv[2] > 0.0, "trough grads not positive: {gv:?}");
+    }
+
+    #[test]
+    fn kge_component_loss_matches_hand_computation() {
+        // Same fixture as nnse_kge: pred = obs centered ×0.5 + mean
+        //   → α=0.5, r=1, β=1 (one gauge). obs:[1,3,1,3] pred:[1.5,2.5,1.5,2.5].
+        let p = mk::<Bp>(&[[1.5, 2.5, 1.5, 2.5]]);
+        let o = mk::<Bp>(&[[1.0, 3.0, 1.0, 3.0]]);
+        // Pure KGE components (nnse_weight=0), eps=0, default unit weights.
+        // r_w·(0)² + α_w·(0.5-1)² + β_w·(0)² = 0.25.
+        let v: f32 = kge_component_loss(p, o, 1.0, 1.0, 1.0, 0.0, 1e9, 0.0).into_scalar();
+        assert!((v - 0.25).abs() < 1e-5, "got {v}");
+    }
+
+    #[test]
+    fn kge_component_alpha_weight_scales_attenuation_penalty() {
+        // Doubling α_w must exactly double the loss for an α-only error.
+        let p = mk::<Bp>(&[[1.5, 2.5, 1.5, 2.5]]);
+        let o = mk::<Bp>(&[[1.0, 3.0, 1.0, 3.0]]);
+        let l1: f32 = kge_component_loss(p.clone(), o.clone(), 1.0, 1.0, 1.0, 0.0, 1e9, 0.0).into_scalar();
+        let l2: f32 = kge_component_loss(p, o, 1.0, 2.0, 1.0, 0.0, 1e9, 0.0).into_scalar();
+        assert!((l2 - 2.0 * l1).abs() < 1e-5, "α_w=2 gave {l2}, expected 2×{l1}");
+    }
+
+    #[test]
+    fn kge_component_clamp_bounds_collapsed_variance_gauge() {
+        // Gauge 2 has near-constant obs (var_o≈0) → without the clamp the α
+        // term explodes; clamp at 5.0 must bound its contribution. Two gauges:
+        // gauge 0 is well-posed (small loss), gauge 1 is the pathological one.
+        let p = mk::<Bp>(&[[1.5, 2.5, 1.5, 2.5], [10.0, 90.0, 10.0, 90.0]]);
+        let o = mk::<Bp>(&[[1.0, 3.0, 1.0, 3.0], [1.0, 1.0, 1.0, 1.0001]]);
+        // eps small so the collapsed denominator really does blow up unclamped.
+        let unclamped: f32 =
+            kge_component_loss(p.clone(), o.clone(), 1.0, 2.0, 1.0, 0.0, 1e9, 1e-6).into_scalar();
+        let clamped: f32 =
+            kge_component_loss(p, o, 1.0, 2.0, 1.0, 0.0, 5.0, 1e-6).into_scalar();
+        assert!(unclamped > 100.0, "expected blowup without clamp, got {unclamped}");
+        // Mean of two gauges, each ≤ 5.0 after clamp → batch ≤ 5.0.
+        assert!(clamped <= 5.0 + 1e-4, "clamp did not bound the loss: {clamped}");
+    }
+
+    #[test]
+    fn kge_component_gradient_points_toward_de_attenuation() {
+        // With an attenuated, perfectly-correlated prediction, the α term's
+        // gradient must push peaks UP and troughs DOWN (restore amplitude).
+        let p = mk::<Ad>(&[[1.5, 2.5, 1.5, 2.5]]).require_grad();
+        let o = mk::<Ad>(&[[1.0, 3.0, 1.0, 3.0]]);
+        let loss = kge_component_loss(p.clone(), o, 1.0, 1.0, 1.0, 0.0, 1e9, 0.1);
         let grads = loss.backward();
         let g = p.grad(&grads).unwrap();
         let gv: Vec<f32> = g.into_data().to_vec().unwrap();

@@ -32,8 +32,12 @@ pub struct RoutingBatch {
     /// KAN head input contract (`src/nn/kan_head.rs::KanHead::forward`).
     pub spatial_attributes_normalized: Array2<f32>,
     /// q' streamflow forcing, shape `(T_hours, N)`. Already multiplied by
-    /// `flow_scale` per column.
+    /// `flow_scale` per column. The flat `repeat-24` upsampling of
+    /// `q_prime_daily`; used by the no-disaggregation path.
     pub q_prime: Array2<f32>,
+    /// Daily q' forcing, shape `(D, N)` (pre-trim, flow-scaled). Input to the
+    /// learnable disaggregation head; `None` of it is upsampled here.
+    pub q_prime_daily: Array2<f32>,
     /// USGS observations, shape `(T_days, G)`. NaN-tolerant.
     pub observations: Array2<f32>,
     /// For each gauge in `gauge_staids`, list of compressed-cols whose row
@@ -86,6 +90,8 @@ pub struct RoutingTensors<B: Backend> {
     pub spatial_attributes: Tensor<B, 2>,
     /// q' streamflow, shape `(T_hours, N)`. Not yet Autodiff-wrapped.
     pub q_prime: Tensor<B, 2>,
+    /// Daily q' forcing, shape `(D, N)`. Input to the disaggregation head.
+    pub q_prime_daily: Tensor<B, 2>,
     /// Observations stay on CPU.
     pub observations: Array2<f32>,
     /// Flat concat of `outflow_idx`, shape `(sum_g len(outflow_idx[g]),)`.
@@ -135,6 +141,16 @@ impl RoutingBatch {
             .0;
         let q_prime = Tensor::<B, 2>::from_data(TensorData::new(q_vec, [t_hours, n]), device);
 
+        // 3b. Lift q_prime_daily (D, N).
+        let (d_days, dn) = (self.q_prime_daily.shape()[0], self.q_prime_daily.shape()[1]);
+        let qd_vec: Vec<f32> = self
+            .q_prime_daily
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec_and_offset()
+            .0;
+        let q_prime_daily = Tensor::<B, 2>::from_data(TensorData::new(qd_vec, [d_days, dn]), device);
+
         // 4. Lift flat_indices + group_ids as Int tensors.
         let flat_indices = Tensor::<B, 1, Int>::from_data(TensorData::from(flat.as_slice()), device);
         let group_ids = Tensor::<B, 1, Int>::from_data(TensorData::from(group.as_slice()), device);
@@ -145,6 +161,7 @@ impl RoutingBatch {
             adjacency: self.adjacency,
             spatial_attributes,
             q_prime,
+            q_prime_daily,
             observations: self.observations,
             flat_indices,
             group_ids,
@@ -402,6 +419,24 @@ impl MeritGagesDataset {
             }
         }
 
+        // Daily q' (pre-trim) for the disaggregation head; same per-column
+        // flow_scale (a constant scale is mass-consistent at both resolutions).
+        let mut q_prime_daily = self.streamflow.read_window_daily(
+            window.window_start,
+            window.rho_days,
+            &compressed.divide_comids,
+        )?;
+        let n_days_q = q_prime_daily.shape()[0];
+        for col in 0..n {
+            let s = flow_scale[col];
+            if (s - 1.0).abs() < 1e-9 {
+                continue;
+            }
+            for t in 0..n_days_q {
+                q_prime_daily[(t, col)] *= s;
+            }
+        }
+
         // ----- 4. Attributes: slice + fill_nans + normalize + transpose -----
         let spatial_attributes_normalized = self.finalize_attrs(&compressed.divide_comids, n);
 
@@ -413,6 +448,7 @@ impl MeritGagesDataset {
             adjacency,
             spatial_attributes_normalized,
             q_prime,
+            q_prime_daily,
             observations,
             outflow_idx: compressed.outflow_idx,
             gauge_staids,
@@ -495,6 +531,23 @@ impl MeritGagesDataset {
             }
         }
 
+        // Daily q' for the disaggregation head (test window: all n_days).
+        let mut q_prime_daily = self.streamflow.read_window_daily(
+            window.window_start,
+            window.n_days,
+            &cache.divide_comids,
+        )?;
+        let n_days_q = q_prime_daily.shape()[0];
+        for col in 0..n {
+            let s = cache.flow_scale[col];
+            if (s - 1.0).abs() < 1e-9 {
+                continue;
+            }
+            for t in 0..n_days_q {
+                q_prime_daily[(t, col)] *= s;
+            }
+        }
+
         // Slice observations from the cached full-period array along axis 0.
         let obs = cache
             .full_observations
@@ -505,6 +558,7 @@ impl MeritGagesDataset {
             adjacency: cache.adjacency.clone(),
             spatial_attributes_normalized: cache.spatial_attributes_normalized.clone(),
             q_prime,
+            q_prime_daily,
             observations: obs,
             outflow_idx: cache.outflow_idx.clone(),
             gauge_staids: cache.gauge_staids.clone(),

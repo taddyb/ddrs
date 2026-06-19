@@ -102,10 +102,27 @@ pub struct Experiment {
 pub struct LossConfig {
     /// Which objective to optimize.
     pub kind: LossKind,
-    /// Weight on the `1 - NNSE` term (composite objective only).
+    /// Weight on the `1 - NNSE` term (composite `nnse-kge` objective, and the
+    /// optional NNSE guard of the component-weighted `kge` objective).
     pub nnse_weight: f32,
-    /// Weight on the `1 - KGE` term (composite objective only).
+    /// Weight on the `1 - KGE` Euclidean term (composite `nnse-kge` only).
     pub kge_weight: f32,
+    /// Weight on the `(r - 1)²` correlation term (component-weighted `kge` only).
+    pub r_weight: f32,
+    /// Weight on the `(α - 1)²` variance-ratio term (component-weighted `kge`
+    /// only). This is the restoring force against MC over-attenuation — raise
+    /// it to push `σ_sim/σ_obs` back toward 1.
+    pub alpha_weight: f32,
+    /// Weight on the `(β - 1)²` mean-ratio term (component-weighted `kge` only).
+    pub beta_weight: f32,
+    /// Per-gauge upper bound on the weighted KGE-component sum before averaging
+    /// (component-weighted `kge` only). Gauges with near-constant observed flow
+    /// have a collapsing `std_o`/`mean_o` denominator, so `(α-1)²`/`(β-1)²` can
+    /// explode and hijack the batch gradient (a single gauge drove batch loss to
+    /// ~1e4 in testing). Clamping each gauge's contribution — DDR's
+    /// `hydrograph_loss` uses the same trick at 10 — keeps the restoring signal
+    /// from well-posed gauges while bounding the pathological ones.
+    pub kge_clamp: f32,
     /// Stabilization constant added to variance denominators / mean-bias
     /// denominator so near-constant gauges don't produce NaN gradients.
     /// Matches DDR `hydrograph_loss`'s `eps=0.1`.
@@ -115,7 +132,16 @@ pub struct LossConfig {
 impl Default for LossConfig {
     fn default() -> Self {
         // L1 fallback preserves the prior training behavior exactly.
-        Self { kind: LossKind::L1, nnse_weight: 1.0, kge_weight: 1.0, eps: 0.1 }
+        Self {
+            kind: LossKind::L1,
+            nnse_weight: 1.0,
+            kge_weight: 1.0,
+            r_weight: 1.0,
+            alpha_weight: 1.0,
+            beta_weight: 1.0,
+            kge_clamp: 10.0,
+            eps: 0.1,
+        }
     }
 }
 
@@ -128,6 +154,11 @@ pub enum LossKind {
     /// `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)`, per gauge. The KGE term's
     /// `(α-1)²` restores the hydrograph variance L1/NSE shrink away.
     NnseKge,
+    /// Per gauge `r_w·(r-1)² + α_w·(α-1)² + β_w·(β-1)² + nnse_w·(1-NNSE)`.
+    /// The KGE components are weighted individually (no sqrt Euclidean term,
+    /// so no gradient singularity at perfect KGE), letting `α_w` up-weight the
+    /// anti-attenuation restoring force. See `src/training/loss.rs`.
+    Kge,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +173,45 @@ pub struct KanHeadConfigSection {
     pub k: usize,
     pub input_var_names: Vec<String>,
     pub learnable_parameters: Vec<String>,
+    /// Optional learnable daily→hourly forcing disaggregation. Absent ⇒ flat
+    /// `repeat-24` (current behavior). See `src/nn/disagg_head.rs`.
+    #[serde(default)]
+    pub disaggregation: Option<DisaggregationSection>,
+}
+
+/// YAML `kan_head.disaggregation:` block (presence enables the head).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DisaggregationSection {
+    #[serde(default = "default_disagg_hidden")]
+    pub hidden_size: usize,
+    #[serde(default = "default_true")]
+    pub use_attributes: bool,
+}
+
+/// Build a [`KanHeadConfig`] from a parsed YAML section + seed, threading the
+/// optional disaggregation settings. Single source of truth so every call site
+/// (train bootstrap, eval, dump) builds an identical head template — required
+/// for `load_record` to match a disagg-trained checkpoint.
+pub fn kan_config(
+    section: &KanHeadConfigSection,
+    seed: u64,
+) -> crate::nn::kan_head::KanHeadConfig {
+    let cfg = crate::nn::kan_head::KanHeadConfig::new(
+        section.input_var_names.clone(),
+        section.learnable_parameters.clone(),
+        seed,
+    )
+    .with_hidden_size(section.hidden_size)
+    .with_num_hidden_layers(section.num_hidden_layers)
+    .with_grid(section.grid)
+    .with_k(section.k);
+    match &section.disaggregation {
+        Some(d) => cfg
+            .with_disagg_enabled(true)
+            .with_disagg_hidden_size(d.hidden_size)
+            .with_disagg_use_attributes(d.use_attributes),
+        None => cfg,
+    }
 }
 
 fn default_grid() -> usize {
@@ -149,6 +219,12 @@ fn default_grid() -> usize {
 }
 fn default_k() -> usize {
     3
+}
+fn default_disagg_hidden() -> usize {
+    16
+}
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +260,9 @@ pub struct ParameterRanges {
     pub n: [f32; 2],
     pub q_spatial: [f32; 2],
     pub p_spatial: [f32; 2],
+    /// Muskingum storage weight X. Only consumed when `x_storage` is listed in
+    /// `kan_head.learnable_parameters`; otherwise routing uses a constant 0.3.
+    pub x_storage: [f32; 2],
 }
 
 impl Default for ParameterRanges {
@@ -192,6 +271,7 @@ impl Default for ParameterRanges {
             n: [0.015, 0.25],
             q_spatial: [0.0, 1.0],
             p_spatial: [1.0, 200.0],
+            x_storage: [0.0, 0.5],
         }
     }
 }
@@ -266,6 +346,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(v) = r.parameter_ranges.get("p_spatial") {
             p.parameter_ranges.p_spatial = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("x_storage") {
+            p.parameter_ranges.x_storage = *v;
         }
         // attribute_minimums — named field mapping.
         if let Some(&v) = r.attribute_minimums.get("discharge") {

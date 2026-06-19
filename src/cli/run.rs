@@ -15,7 +15,7 @@ use crate::cli::{
 use crate::config::{Config, ConfigMode};
 use crate::data::dataset::MeritGagesDataset;
 use crate::error::CliError;
-use crate::nn::kan_head::{KanHead, KanHeadConfig};
+use crate::nn::kan_head::KanHead;
 use crate::training::bootstrap::bootstrap_head_and_state;
 use crate::training::checkpoint::load_kan_head;
 use crate::training::driver::train as training_train;
@@ -269,17 +269,6 @@ fn dispatch(
                 let train_dataset = MeritGagesDataset::open(&train_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
-                let head_section = train_cfg.kan_head.as_ref().expect("kan_head config required");
-                let _head_cfg = KanHeadConfig::new(
-                    head_section.input_var_names.clone(),
-                    head_section.learnable_parameters.clone(),
-                    train_cfg.seed,
-                )
-                .with_hidden_size(head_section.hidden_size)
-                .with_num_hidden_layers(head_section.num_hidden_layers)
-                .with_grid(head_section.grid)
-                .with_k(head_section.k);
-
                 let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&train_cfg, &device)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -329,15 +318,7 @@ fn dispatch(
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
                 let head_section = train_cfg.kan_head.as_ref().expect("kan_head config required");
-                let head_cfg = KanHeadConfig::new(
-                    head_section.input_var_names.clone(),
-                    head_section.learnable_parameters.clone(),
-                    train_cfg.seed,
-                )
-                .with_hidden_size(head_section.hidden_size)
-                .with_num_hidden_layers(head_section.num_hidden_layers)
-                .with_grid(head_section.grid)
-                .with_k(head_section.k);
+                let head_cfg = crate::config::kan_config(head_section, train_cfg.seed);
 
                 let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&train_cfg, &device)
                     .map_err(|e| CliError::Other(Box::new(e)))?;

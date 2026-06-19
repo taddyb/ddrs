@@ -27,7 +27,7 @@ use clap::Parser;
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::data::TestWindow;
-use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
+use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::{evaluate, write_predictions_zarr, EvalParams, FrozenParams, ZarrAttrs};
 
@@ -97,15 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .kan_head
             .as_ref()
             .expect("kan_head config required for KAN-head eval");
-        let head_cfg = KanHeadConfig::new(
-            head_section.input_var_names.clone(),
-            head_section.learnable_parameters.clone(),
-            cfg.seed,
-        )
-        .with_hidden_size(head_section.hidden_size)
-        .with_num_hidden_layers(head_section.num_hidden_layers)
-        .with_grid(head_section.grid)
-        .with_k(head_section.k);
+        let head_cfg = ddrs::config::kan_config(head_section, cfg.seed);
         let head_template: KanHead<I> = head_cfg.init::<I>(&device);
         let head = load_kan_head::<I>(&head_base(cli.checkpoint.as_ref().unwrap()), head_template, &device)?;
         evaluate::<I>(&cfg, &dataset, EvalParams::KanHead(&head), &device, cli.batch_size_days)?

@@ -9,6 +9,7 @@ use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor};
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
 use crate::routing::mmc::{MuskingumCunge, RoutingInputs, SpatialParameters};
+use crate::routing::utils::denormalize;
 
 /// Gather + grouped sum: `output[g, t] = sum_{k : group_ids[k] == g} runoff[flat_indices[k], t]`.
 ///
@@ -172,12 +173,35 @@ pub fn forward<I: Backend>(
     let p_param = params_map.get("p_spatial").cloned();
 
     let n_active = tensors.adjacency.n;
-    let x_storage: Tensor<Autodiff<I>, 1> = Tensor::full([n_active], 0.3_f32, device);
+    // Learnable Muskingum X: when the KAN emits `x_storage`, denormalize its
+    // [0,1] output to the configured range so the routing learns its own
+    // attenuation-vs-translation per reach (gradient already flows via the
+    // custom sparse backward in mmc_op.rs). Otherwise hold the constant 0.3.
+    let x_storage: Tensor<Autodiff<I>, 1> = match params_map.get("x_storage") {
+        Some(x_norm) => denormalize(
+            x_norm.clone(),
+            cfg.params.parameter_ranges.x_storage,
+            cfg.params.log_space_parameters.iter().any(|s| s == "x_storage"),
+        ),
+        None => Tensor::full([n_active], 0.3_f32, device),
+    };
+
+    // Forcing: learnable mass-preserving disaggregation of the daily Q' when a
+    // disagg head is attached, else the flat repeat-24 already in `q_prime`.
+    let n_hourly = tensors.q_prime.dims()[0];
+    let q_prime_hourly = match &head.disagg {
+        Some(d) => d.forward(
+            tensors.q_prime_daily.clone(),
+            tensors.spatial_attributes.clone(),
+            n_hourly,
+        ),
+        None => tensors.q_prime.clone(),
+    };
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
-        tensors.q_prime.clone(),
+        q_prime_hourly,
         SpatialParameters { n: n_param, q_spatial: q_param, p_spatial: p_param },
         carry_state,
     );
@@ -213,12 +237,32 @@ pub fn forward_eval<I: Backend>(
     let p_param = params_map.get("p_spatial").cloned();
 
     let n_active = tensors.adjacency.n;
-    let x_storage: Tensor<I, 1> = Tensor::full([n_active], 0.3_f32, device);
+    // Learnable Muskingum X (eval path mirrors `forward`): denormalize the
+    // KAN's `x_storage` output when present, else the constant 0.3.
+    let x_storage: Tensor<I, 1> = match params_map.get("x_storage") {
+        Some(x_norm) => denormalize(
+            x_norm.clone(),
+            cfg.params.parameter_ranges.x_storage,
+            cfg.params.log_space_parameters.iter().any(|s| s == "x_storage"),
+        ),
+        None => Tensor::full([n_active], 0.3_f32, device),
+    };
+
+    // Forcing (inner backend): disaggregate when a head is attached, else the
+    // flat repeat-24. Mirrors `forward`.
+    let n_hourly = tensors.q_prime.dims()[0];
+    let q_prime_hourly: Tensor<I, 2> = match &head.disagg {
+        Some(d) => d.forward(
+            tensors.q_prime_daily.clone(),
+            tensors.spatial_attributes.clone(),
+            n_hourly,
+        ),
+        None => tensors.q_prime.clone(),
+    };
 
     // Wrap to Autodiff at the engine boundary (engine requires Autodiff
     // even for forward-only). Drop the graph immediately after with .inner().
-    let q_prime_ad: Tensor<Autodiff<I>, 2> =
-        Tensor::from_inner(tensors.q_prime.clone());
+    let q_prime_ad: Tensor<Autodiff<I>, 2> = Tensor::from_inner(q_prime_hourly);
     let n_ad = Tensor::<Autodiff<I>, 1>::from_inner(n_param);
     let q_ad = Tensor::<Autodiff<I>, 1>::from_inner(q_param);
     let p_ad = p_param.map(Tensor::<Autodiff<I>, 1>::from_inner);
