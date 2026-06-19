@@ -8,9 +8,30 @@ Cross-gauge distributions of model performance — NSE, KGE, bias, RMSE, FHV, FL
 
 Same schema as the hydrograph reference: `predictions (G,T)`, `observations (G,T)`, `gage_ids (G,)`, `time (T,)`.
 
-### Optional baseline zarr
+### Optional baseline (summed Q')
 
-Summed Q' baseline (no routing) — DDR's standard "is routing pulling its weight" comparison. Build with DDR's `scripts/summed_q_prime.py`. If provided, plots compare ddrs vs. baseline.
+Summed Q' baseline (no routing) — the standard "is routing pulling its weight" comparison. **Two on-disk formats exist; check the run dir first:**
+
+- **Raw f32 + manifest** (what `ddrs run --workflow train-and-test` writes into `<run_dir>/baseline/`): `predictions.f32`, `observations.f32` (both `(n_gauges, n_days)` little-endian f32, row-major) and `manifest.json` (keys `n_gauges`, `n_days`, `gage_ids`, `time_range_daily` = list of `YYYY-MM-DD` strings, `metrics`, `sources`). `load_baseline_zarr` does NOT read this — load it directly:
+
+  ```python
+  def load_baseline_f32(bdir):
+      import json, numpy as np, xarray as xr
+      from pathlib import Path
+      bdir = Path(bdir); man = json.load(open(bdir / "manifest.json"))
+      G, T = man["n_gauges"], man["n_days"]
+      pred = np.fromfile(bdir / "predictions.f32", dtype="<f4").reshape(G, T)
+      obs  = np.fromfile(bdir / "observations.f32", dtype="<f4").reshape(G, T)
+      time = np.array(man["time_range_daily"], dtype="datetime64[D]").astype("datetime64[ns]")
+      return xr.Dataset({"predictions": (("gage_ids","time"), pred),
+                         "observations": (("gage_ids","time"), obs)},
+                        coords={"gage_ids": np.array(man["gage_ids"]), "time": time})
+  ```
+  The manifest's per-gauge `metrics` are precomputed by ddrs's Rust code, but **recompute both series from raw arrays with the same numpy `Metrics`** so the baseline and the run use identical conventions and the comparison is apples-to-apples.
+
+- **Zarr** (DDR's `scripts/summed_q_prime.py` output): same schema as the predictions zarr → use `load_baseline_zarr`.
+
+If provided, plots compare ddrs vs. baseline.
 
 ### Optional gauges CSV
 
