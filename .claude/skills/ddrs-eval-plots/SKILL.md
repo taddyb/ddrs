@@ -43,6 +43,22 @@ Or open interactively: `cd ./ddrs-py && uv run jupyter notebook <absolute_notebo
 
 If `uv sync --extra plots` fails because `ddr` isn't at `file:///home/tbindas/projects/ddr` on this machine, update the `ddr @ file://...` line in `ddrs-py/pyproject.toml` to point at the local DDR checkout. Do NOT shell into `~/projects/ddr` and run from there — that's the old workflow and pollutes the ddrs project boundary.
 
+**Host where `uv` can't build `ddrs-py` (e.g. wukong).** On nodes where the
+Rust `burn-*` path deps are absent, `uv sync`/`uv run` abort trying to rebuild
+the maturin package, so `ddr` + `torch` never install. If the venv was synced
+once before the breakage it still has the plotting stack (xarray, zarr,
+geopandas, contextily, matplotlib, pyogrio, netCDF4 — but NOT `cartopy`,
+`torch`, or `ddr`). Two adjustments:
+1. **Skip `uv` and call the interpreter directly**: `.venv/bin/python`,
+   `.venv/bin/jupyter nbconvert --to notebook --execute ...`. This bypasses the
+   rebuild and runs against the already-installed packages.
+2. **The metrics family can't `from ddr.validation import Metrics, plot_*`** —
+   reimplement them inline (NSE/KGE/bias/RMSE in numpy; FHV top-2% / FLV
+   bottom-30% log-space per Yilmaz 2008; boxplot/CDF/gauge-map in
+   matplotlib+geopandas). Compute BOTH the run and the baseline from raw arrays
+   with the same numpy code so the two series stay apples-to-apples. Confirm
+   what's importable first: `for m in ("torch","ddr","cartopy","geopandas","pyogrio"): ...`.
+
 ## Workflow
 
 ### Step 1 — Identify the plot family
@@ -78,7 +94,31 @@ output/
 
 Tie-breaker hint when comparing two checkpoint dirs: KAN-head checkpoints (`rskan`) are typically ~20 KB; older MLP-placeholder checkpoints are ~3 KB. If the user's working with the current architecture, prefer the larger.
 
-If predictions zarr / parameter NetCDF don't exist yet, tell the user to run `eval` / `dump_parameters` first and quote the exact command from `src/bin/eval.rs` or `src/bin/dump_parameters.rs`.
+**Missing input artifacts — generate them, don't dead-end.** The plot families
+depend on two producible artifacts:
+
+- **Parameter NetCDF (`kan_parameters.nc`) for the parameter-map family.** This
+  is a single deterministic command whose output path you control, so when it's
+  absent **offer to run it and, on consent, run it for the user** — don't just
+  quote the command and stop. It IS a `cargo build` + CUDA GPU job (minutes, GPU
+  memory, writes ~70 MB), so confirm first unless the user already told you to
+  proceed; then launch it in the background and monitor. Command (resolve
+  `--config`/`--checkpoint` from the run dir; checkpoint base is the predictions
+  zarr's `model` attr without the `.mpk`):
+
+  ```bash
+  cargo run --release --bin dump_parameters -- \
+    --config <run_dir>/config.yaml \
+    --checkpoint <run_dir>/checkpoints/<epoch_E_mb_M>/head \
+    --output <run_dir>/kan_parameters.nc
+  ```
+  After it writes, execute the parameter-map notebook as usual. (If `cargo`
+  itself won't build on the host, fall back to quoting the command.)
+
+- **Predictions zarr for hydrograph/metrics.** Produced by the eval phase of
+  `ddrs run`. This is a much longer routing run (not a single forward pass), so
+  here it's correct to quote the command (`ddrs run --workflow eval`, or
+  `src/bin/eval.rs`) and let the user run it rather than launching it yourself.
 
 **Always save plots into `<CKPT_DIR>/plots/`** so artifacts travel with the run. Create the directory if it doesn't exist.
 
