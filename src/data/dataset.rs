@@ -753,9 +753,11 @@ fn normalize_precip(mut precip: Array2<f32>) -> Array2<f32> {
         return precip;
     }
     for col in 0..n {
-        // log1p in place.
+        // log1p in place. Clamp to ≥0 first: precip is non-negative (mm/hr),
+        // and log1p(x≤-1) is NaN/-Inf — a defensive guard in case the store
+        // ever surfaces a stray negative (NaN is already zeroed at read time).
         for row in 0..t {
-            precip[(row, col)] = precip[(row, col)].ln_1p();
+            precip[(row, col)] = precip[(row, col)].max(0.0).ln_1p();
         }
         let mean: f32 = (0..t).map(|r| precip[(r, col)]).sum::<f32>() / t as f32;
         let var: f32 =

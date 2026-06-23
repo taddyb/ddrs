@@ -219,7 +219,11 @@ impl AorcPrecipStore {
                 let r_local = row - row_min;
                 let base = r_local * blk;
                 for t in 0..blk {
-                    out[(out_row0 + t, out_col)] = raw[base + t];
+                    // The store carries real NaN (~14% of values: ocean / no
+                    // AORC coverage / missing hours) despite a 0.0 fill_value.
+                    // Treat NaN as dry-equivalent so it can't poison the head.
+                    let v = raw[base + t];
+                    out[(out_row0 + t, out_col)] = if v.is_finite() { v } else { 0.0 };
                 }
             }
             h = blk_end;
