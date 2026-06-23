@@ -88,6 +88,11 @@ pub struct KanHeadConfig {
     /// Whether the disaggregation head also conditions on static attributes.
     #[config(default = true)]
     pub disagg_use_attributes: bool,
+    /// Whether the disaggregation head conditions on hourly AORC precip (the
+    /// `[d-1,d,d+1]` 72-hour window per reach). Requires a precip store to be
+    /// wired into the dataset; off by default.
+    #[config(default = false)]
+    pub disagg_use_precip: bool,
 }
 
 impl KanHeadConfig {
@@ -149,6 +154,7 @@ impl KanHeadConfig {
                 DisaggHeadConfig::new(self.input_var_names.len(), self.seed)
                     .with_hidden_size(self.disagg_hidden_size)
                     .with_use_attributes(self.disagg_use_attributes)
+                    .with_use_precip(self.disagg_use_precip)
                     .init::<B>(device),
             )
         } else {

@@ -193,6 +193,7 @@ pub fn forward<I: Backend>(
         Some(d) => d.forward(
             tensors.q_prime_daily.clone(),
             tensors.spatial_attributes.clone(),
+            tensors.precip_hourly.clone(),
             n_hourly,
         ),
         None => tensors.q_prime.clone(),
@@ -255,6 +256,7 @@ pub fn forward_eval<I: Backend>(
         Some(d) => d.forward(
             tensors.q_prime_daily.clone(),
             tensors.spatial_attributes.clone(),
+            tensors.precip_hourly.clone(),
             n_hourly,
         ),
         None => tensors.q_prime.clone(),

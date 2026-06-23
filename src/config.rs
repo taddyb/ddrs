@@ -58,6 +58,12 @@ pub struct DataSources {
     pub streamflow: std::path::PathBuf,
     pub observations: std::path::PathBuf,
     pub gages: std::path::PathBuf,
+    /// Optional hourly AORC precipitation store (`merit_unit_catchments.zarr`,
+    /// zarr v3). CONUS-only; drives the precip-conditioned disaggregation head
+    /// (`kan_head.disaggregation.use_precip`). Absent ⇒ the head conditions on
+    /// daily Q' only (or, with disaggregation off, flat repeat-24).
+    #[serde(default)]
+    pub aorc_precip: Option<std::path::PathBuf>,
     /// Path to the MERIT flowlines fabric: `.shp` (sibling `.dbf` read),
     /// `.dbf`, or `.gpkg` (attribute columns read via SQL; geometry never
     /// opened in any format). Matches DDR's `geospatial_fabric_gpkg` artifact.
@@ -186,6 +192,11 @@ pub struct DisaggregationSection {
     pub hidden_size: usize,
     #[serde(default = "default_true")]
     pub use_attributes: bool,
+    /// Condition the within-day shape on hourly AORC precip (the full
+    /// `[d-1,d,d+1]` = 72-hour window per reach). Requires
+    /// `data_sources.aorc_precip` to be set. Default false ⇒ daily-Q-only head.
+    #[serde(default)]
+    pub use_precip: bool,
 }
 
 /// Build a [`KanHeadConfig`] from a parsed YAML section + seed, threading the
@@ -209,7 +220,8 @@ pub fn kan_config(
         Some(d) => cfg
             .with_disagg_enabled(true)
             .with_disagg_hidden_size(d.hidden_size)
-            .with_disagg_use_attributes(d.use_attributes),
+            .with_disagg_use_attributes(d.use_attributes)
+            .with_disagg_use_precip(d.use_precip),
         None => cfg,
     }
 }
