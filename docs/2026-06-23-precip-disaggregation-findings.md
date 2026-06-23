@@ -37,11 +37,44 @@ KGE (the `kge`/`nnse-kge` α-restoring loss) was deliberately excluded here for 
 clean L1 comparison; combining precip timing **with** that loss is the natural
 next experiment.
 
-**Caveat — no precip-off control in this exact CONUS setup.** The +0.037 NSE is
-vs this run's baseline (clean), but attributing it specifically to *precip*
-(vs the disaggregation mechanism generally) needs a `use_precip: false` CONUS
-control with everything else identical. That is the single most important
-follow-up.
+## Precip-off control (run `2026-06-23T13-03-35Z-train-and-test`)
+
+Identical config except `use_precip: false` + no `aorc_precip` (daily-Q-only
+disagg, the journal's Exp-3 mechanism); same seed → **same gauge batches**, so
+it's a paired comparison. Three-way, 2365 matched gauges, same metric code:
+
+| config | median NSE | median KGE |
+|---|---|---|
+| **precip-ON** (disagg + precip) | **0.7152** | **0.7106** |
+| **precip-OFF** (disagg only) | 0.6957 | 0.6926 |
+| baseline (summed-Q′) | 0.6781 | 0.7172 |
+
+Decomposition:
+
+| effect | Δ NSE | Δ KGE |
+|---|---|---|
+| **precip contribution** (ON − OFF) | **+0.0196** | **+0.0180** |
+| disagg alone vs baseline (OFF − base) | +0.0176 | **−0.0245** |
+| net vs baseline (ON − base) | +0.0372 | −0.0065 |
+
+Per-gauge **paired** precip effect: NSE median +0.0049 (**58%** of gauges
+improve), KGE median +0.0058 (**60%** improve) — a real, directional effect on
+both metrics, not median noise.
+
+### What the control reveals
+
+- **Real precip timing helps on BOTH metrics** (+0.020 NSE, +0.018 KGE). It is
+  not just the disaggregation mechanism doing the work.
+- **The bare daily-Q disaggregation trades KGE for NSE** (−0.025 KGE / +0.018
+  NSE vs baseline) — the journal's exact over-attenuation signature, from an
+  *invented* within-day shape.
+- **Precip rescues the KGE the bare disagg destroys** (0.6926 → 0.7106, +0.018),
+  bringing net KGE to within −0.007 of baseline. So the residual KGE gap is
+  **entirely the disaggregation's over-attenuation, not precip** — precip is the
+  one component pushing KGE the right way.
+- **Conclusion:** precip timing is genuinely valuable. To also beat baseline on
+  KGE, pair precip with the α-restoring `kge`/`nnse-kge` loss to remove the
+  disagg's residual over-attenuation — now strongly motivated.
 
 ## Critical bug found & fixed en route (commit a5972d9)
 
