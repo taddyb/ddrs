@@ -95,11 +95,54 @@ coverage-gap intent) + defensive `max(0.0)` before `log1p`. **Lesson:** with
 `cuda_graphs: true`, a finite printed loss is **not** proof of a finite forward
 — validate with graphs off, or trust the eval/checkpoints.
 
+## precip + nnse-kge loss (run `2026-06-24T00-03-01Z-conus-hourly-train-and-test`)
+
+Tested the prediction above (#2): swap L1→`nnse-kge` (balanced, nnse_weight =
+kge_weight = 1.0) to recover KGE via the `(α−1)²` restoring gradient. 4-way,
+2365 matched gauges, identical metric code:
+
+| config | median NSE | median KGE |
+|---|---|---|
+| precip + L1 | **0.7152** | **0.7106** |
+| precip + nnse-kge | 0.7095 | 0.7100 |
+| disagg-only + L1 (precip-off) | 0.6957 | 0.6926 |
+| baseline (summed-Q′) | 0.6771 | 0.7171 |
+
+precip+nnse-kge vs baseline: NSE **+0.032**, KGE **−0.007** — **not a dual win**.
+
+### The L1-over-attenuation hypothesis was REFUTED
+
+The prediction was that nnse-kge's α-term would lift KGE over baseline. It did
+not: KGE moved essentially nowhere (0.7106 → 0.7100) and NSE dropped slightly.
+For the precip-driven setup, **L1 stays the better objective** — nnse-kge did not
+earn its keep on either metric.
+
+**Corrected interpretation.** The residual ~−0.007 KGE gap is **not loss-fixable**
+(at least not with balanced nnse-kge) — it is **baseline-dominated / structural**:
+the summed-Q′ reference already has the highest KGE (0.717) of any config, and
+*any* routing trades a large NSE gain (+0.032…+0.038) for a small KGE give-back.
+This is the journal's "structural ceiling" showing up on the KGE axis: routing
+already-dHBV-UH-smoothed Q′ cannot beat the no-routing baseline's KGE. The win
+that *is* real and robust is **NSE via precip-driven timing** (+0.037), with the
+learned roughness rising 0.050→0.068 (precip-off→on) to attenuate precip's
+sharper sub-daily pulses.
+
+The one untested loss lever is the **α-weighted `kge` component loss**
+(`alpha_weight: 2`, the journal's Exp-1 setting) — now that the gradient actually
+flows (precip), it *might* push α/KGE where balanced nnse-kge could not. But the
+evidence leans toward the KGE ceiling being structural, not objective-driven.
+
 ## Next steps
 
-1. **precip-off CONUS control** (`use_precip: false`, else identical) — isolates
-   precip's contribution to the +0.037 NSE.
-2. **precip timing + `kge`/`nnse-kge` loss** — the α-restoring term to convert
-   the timing signal into a KGE win, not just NSE.
-3. Early-stopping sweep (epoch-mean rose after epoch 3 → likely an earlier
-   checkpoint generalizes better, à la the journal's Exp-4).
+1. **Per-gauge local-midnight daily aggregation.** `tau_trim_and_downsample`
+   uses a fixed `13+τ:−11+τ` offset for *all* gauges; USGS daily is local
+   standard time, so model vs obs daily bins are misaligned by the per-gauge
+   UTC offset (−5…−8 h), smearing the cross-day routing timing. Likely the
+   biggest remaining timing lever.
+2. **Temperature as a 2nd disagg channel** (AORC already carries `temperature`)
+   — snowmelt timing in western basins is temperature-, not precip-, driven.
+3. **Hourly USGS IV** for a CONUS subset — the only way to *directly* supervise
+   sub-daily timing (daily obs marginalize it away).
+4. α-weighted `kge` loss (`alpha_weight: 2`) — last objective lever before
+   accepting the KGE ceiling as structural.
+5. Early-stopping sweep (epoch-mean L1 rose after epoch 3).
