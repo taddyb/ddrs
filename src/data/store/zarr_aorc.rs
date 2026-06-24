@@ -59,6 +59,9 @@ pub struct AorcPrecipStore {
     /// COMID → catchment row index.
     by_comid: HashMap<Comid, usize>,
     precip: ZarrArray<dyn ReadableStorageTraits>,
+    /// Hourly 2-m air temperature (K), same `(catchment, time)` layout. Used by
+    /// the disaggregation head's optional temperature channel.
+    temperature: ZarrArray<dyn ReadableStorageTraits>,
 }
 
 impl AorcPrecipStore {
@@ -90,9 +93,21 @@ impl AorcPrecipStore {
         let n_time = shape[1] as usize;
         let time_chunk = precip.chunk_grid_shape()[1] as usize;
 
+        let temperature = ZarrArray::open(storage.clone(), "/temperature")
+            .map_err(|e| zarr_err(&path, e))?;
+        if temperature.shape() != shape {
+            return Err(DataError::Malformed {
+                path: path.clone(),
+                message: format!(
+                    "temperature shape {:?} != total_precipitation {shape:?}",
+                    temperature.shape()
+                ),
+            });
+        }
+
         // gauge_id: fixed_length_utf32 → decode the raw bytes ourselves
         // (zarrs has no String element mapping for this extension dtype).
-        let gid = ZarrArray::open(storage, "/gauge_id").map_err(|e| zarr_err(&path, e))?;
+        let gid = ZarrArray::open(storage.clone(), "/gauge_id").map_err(|e| zarr_err(&path, e))?;
         let gid_len = gid.shape()[0] as usize;
         if gid_len != n_catchments {
             return Err(DataError::Malformed {
@@ -132,6 +147,7 @@ impl AorcPrecipStore {
             time_chunk,
             by_comid,
             precip,
+            temperature,
         })
     }
 
@@ -149,12 +165,37 @@ impl AorcPrecipStore {
     /// Read hourly precip for `n_hourly` hours starting at `window_start`,
     /// gathered to `comids`. Returns `(n_hourly, N)` f32; COMIDs absent from
     /// the store are filled with `0.0` (dry-equivalent).
+    pub fn read_window_hourly(
+        &self,
+        window_start: NaiveDate,
+        n_hourly: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        self.read_var_hourly(&self.precip, window_start, n_hourly, comids)
+    }
+
+    /// Read hourly 2-m air temperature (K), same contract as
+    /// [`read_window_hourly`]. Non-coverage / NaN catchments → `0.0` (a
+    /// constant column → neutral after per-reach z-score in the data layer).
+    pub fn read_temp_hourly(
+        &self,
+        window_start: NaiveDate,
+        n_hourly: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        self.read_var_hourly(&self.temperature, window_start, n_hourly, comids)
+    }
+
+    /// Gather `n_hourly` hours from `array` (a `(catchment, time)` AORC field)
+    /// starting at `window_start`, to `comids`. Non-finite values and absent
+    /// COMIDs → `0.0`.
     ///
     /// The read is tiled over the time axis in `time_chunk`-sized blocks so a
     /// single retrieve never assembles more than one time-chunk of the
     /// (catchment-major) array.
-    pub fn read_window_hourly(
+    fn read_var_hourly(
         &self,
+        array: &ZarrArray<dyn ReadableStorageTraits>,
         window_start: NaiveDate,
         n_hourly: usize,
         comids: &[Comid],
@@ -208,8 +249,7 @@ impl AorcPrecipStore {
             ]);
             // Row-major over (row_span, blk): element (r_local, t) at
             // r_local * blk + t.
-            let raw: Vec<f32> = self
-                .precip
+            let raw: Vec<f32> = array
                 .retrieve_array_subset(&subset)
                 .map_err(|e| zarr_err(&self.path, e))?;
             debug_assert_eq!(raw.len(), row_span * blk);
@@ -219,9 +259,10 @@ impl AorcPrecipStore {
                 let r_local = row - row_min;
                 let base = r_local * blk;
                 for t in 0..blk {
-                    // The store carries real NaN (~14% of values: ocean / no
-                    // AORC coverage / missing hours) despite a 0.0 fill_value.
-                    // Treat NaN as dry-equivalent so it can't poison the head.
+                    // The store carries real NaN (~14% of values: whole-catchment
+                    // ocean / no AORC coverage) despite a 0.0 fill_value. Zero it
+                    // so it can't poison the head (a constant column → neutral
+                    // after per-reach normalization in the data layer).
                     let v = raw[base + t];
                     out[(out_row0 + t, out_col)] = if v.is_finite() { v } else { 0.0 };
                 }
@@ -239,6 +280,20 @@ impl AorcPrecipStore {
     /// Test-window read: `n_days·24` hours from `window_start`.
     pub fn read_test_window(&self, window: &TestWindow, comids: &[Comid]) -> Result<Array2<f32>> {
         self.read_window_hourly(window.window_start, window.n_hourly(), comids)
+    }
+
+    /// Temperature rho-window read (training): `(rho_days-1)·24` hours.
+    pub fn read_temp_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
+        self.read_temp_hourly(window.window_start, window.n_hourly(), comids)
+    }
+
+    /// Temperature test-window read: `n_days·24` hours.
+    pub fn read_temp_test_window(
+        &self,
+        window: &TestWindow,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        self.read_temp_hourly(window.window_start, window.n_hourly(), comids)
     }
 }
 

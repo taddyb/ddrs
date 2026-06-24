@@ -93,6 +93,10 @@ pub struct KanHeadConfig {
     /// wired into the dataset; off by default.
     #[config(default = false)]
     pub disagg_use_precip: bool,
+    /// Whether the disaggregation head conditions on hourly AORC temperature
+    /// (another `[d-1,d,d+1]` window). Requires the AORC store; off by default.
+    #[config(default = false)]
+    pub disagg_use_temp: bool,
 }
 
 impl KanHeadConfig {
@@ -155,6 +159,7 @@ impl KanHeadConfig {
                     .with_hidden_size(self.disagg_hidden_size)
                     .with_use_attributes(self.disagg_use_attributes)
                     .with_use_precip(self.disagg_use_precip)
+                    .with_use_temp(self.disagg_use_temp)
                     .init::<B>(device),
             )
         } else {

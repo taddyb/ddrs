@@ -197,6 +197,10 @@ pub struct DisaggregationSection {
     /// `data_sources.aorc_precip` to be set. Default false ⇒ daily-Q-only head.
     #[serde(default)]
     pub use_precip: bool,
+    /// Condition the within-day shape on hourly AORC temperature (another
+    /// `[d-1,d,d+1]` window). Also requires `data_sources.aorc_precip`.
+    #[serde(default)]
+    pub use_temp: bool,
 }
 
 /// Build a [`KanHeadConfig`] from a parsed YAML section + seed, threading the
@@ -221,7 +225,8 @@ pub fn kan_config(
             .with_disagg_enabled(true)
             .with_disagg_hidden_size(d.hidden_size)
             .with_disagg_use_attributes(d.use_attributes)
-            .with_disagg_use_precip(d.use_precip),
+            .with_disagg_use_precip(d.use_precip)
+            .with_disagg_use_temp(d.use_temp),
         None => cfg,
     }
 }
