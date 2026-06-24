@@ -411,4 +411,69 @@ mod tests {
         let gsum: f32 = g.abs().sum().into_scalar();
         assert!(gsum > 1e-6, "input-layer gradient vanished with precip: {gsum}");
     }
+
+    /// Mass balance across a 7-day window: the routing forcing carries the same
+    /// total water whether it is upsampled by the flat `repeat-24`
+    /// interpolation (no NN) or by the disaggregation head — with OR without
+    /// the precip-timing NN. The head only *redistributes* water within each
+    /// day; it must neither add nor remove any over the week.
+    #[test]
+    fn seven_day_mass_balance_interp_vs_disagg() {
+        use crate::data::store::icechunk::daily_to_hourly_trim;
+        let device = Default::default();
+
+        // 8 days of daily Q' for 2 reaches (day 7 only feeds the `d+1` window
+        // tap; `n_hourly = 7·24` disaggregates days 0..6).
+        let rows: [[f32; 2]; 8] = [
+            [5.0, 1.0], [20.0, 3.0], [8.0, 0.5], [2.0, 9.0],
+            [12.0, 4.0], [7.0, 6.0], [3.0, 2.0], [9.0, 1.5],
+        ];
+        let q = daily::<Bp>(&rows); // (8, 2)
+        let q_nd = Array2::<f32>::from_shape_vec(
+            (8, 2),
+            rows.iter().flatten().copied().collect(),
+        )
+        .unwrap();
+        let n_hourly = 7 * 24; // 168
+
+        // --- Path A: flat repeat-24 interpolation (no NN) ---
+        let interp = daily_to_hourly_trim(&q_nd, n_hourly); // (168, 2)
+        let interp_tot: [f64; 2] = [
+            (0..n_hourly).map(|h| interp[(h, 0)] as f64).sum(),
+            (0..n_hourly).map(|h| interp[(h, 1)] as f64).sum(),
+        ];
+        // Sanity: equals 24 · (7-day daily sum) per reach.
+        for r in 0..2 {
+            let want = 24.0 * (0..7).map(|d| rows[d][r] as f64).sum::<f64>();
+            assert!(
+                (interp_tot[r] - want).abs() < 1e-3,
+                "interp 7-day mass reach{r}: {} vs {want}",
+                interp_tot[r]
+            );
+        }
+
+        // --- Path B: disaggregation head, precip-OFF then precip-ON ---
+        for use_precip in [false, true] {
+            let cfg = DisaggHeadConfig::new(4, 13)
+                .with_use_attributes(false)
+                .with_use_precip(use_precip);
+            let head = cfg.init::<Bp>(&device);
+            // Non-trivial precip so the within-day shape is genuinely non-flat
+            // (ignored when use_precip is false).
+            let p = precip::<Bp>(n_hourly, |h, r| if h % 24 == 3 + 5 * r { 6.0 } else { 0.2 });
+            let attrs = Tensor::<Bp, 2>::zeros([2, 4], &device);
+            let hourly = head.forward(q.clone(), attrs, p, n_hourly); // (168, 2)
+            let v: Vec<f32> = hourly.into_data().to_vec().unwrap(); // row-major (168, 2)
+            for r in 0..2 {
+                let tot: f64 = (0..n_hourly).map(|h| v[h * 2 + r] as f64).sum();
+                let rel = (tot - interp_tot[r]).abs() / interp_tot[r];
+                assert!(
+                    rel < 1e-4,
+                    "7-day mass mismatch reach{r} (precip={use_precip}): \
+                     disagg {tot} vs interp {} (rel {rel:.2e})",
+                    interp_tot[r]
+                );
+            }
+        }
+    }
 }
