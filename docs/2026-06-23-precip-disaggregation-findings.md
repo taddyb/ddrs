@@ -132,6 +132,35 @@ The one untested loss lever is the **α-weighted `kge` component loss**
 flows (precip), it *might* push α/KGE where balanced nnse-kge could not. But the
 evidence leans toward the KGE ceiling being structural, not objective-driven.
 
+## Temperature channel + learned roughness (run `2026-06-24T02-10-49Z-conus-hourly-train-and-test`)
+
+Added an optional hourly AORC **temperature** channel (K, per-reach z-score, same
+`[d-1,d,d+1]` window) to the disagg head; ran precip+temp with L1. Also dumped
+the learned Manning's **n** (roughness) over all 346,321 reaches for all three
+forcing configs (same dump method, parameter bound [0.015, 0.25]):
+
+| config | median NSE | median KGE | median Manning n |
+|---|---|---|---|
+| precip + temp | 0.7155 | 0.7088 | **0.0699** |
+| precip only | 0.7152 | 0.7106 | 0.0684 |
+| none (disagg only) | 0.6957 | 0.6926 | 0.0499 |
+| baseline (summed-Q′) | 0.6781 | 0.7172 | — |
+
+**Roughness — the headline.** Clear monotonic ordering
+**none 0.050 < precip 0.068 < precip+temp 0.070**: *precipitation* forcing is
+what drives roughness up (+37% vs none) — the router raises n to attenuate
+precip's sharp sub-daily pulses — and temperature adds a small further push
+(+0.0015) in the *same* direction, not a reversal.
+
+**Temperature does not earn its keep on skill.** Held-out NSE is unchanged from
+precip-only (0.7155 vs 0.7152, noise) and KGE is marginally worse (0.7088 vs
+0.7106). The entire +0.037 NSE / −0.008 KGE-vs-baseline result is captured by
+precipitation; temperature is essentially neutral on accuracy while marginally
+raising inferred roughness. Likely because CONUS-median skill is rain-dominated —
+temperature's value (snowmelt/ET timing) would show, if anywhere, in a
+snowmelt-basin *subset*, not the all-gauge median. Worth a targeted
+western/snow-dominated-gauge slice before adopting it.
+
 ## Next steps
 
 1. **Per-gauge local-midnight daily aggregation.** `tau_trim_and_downsample`
