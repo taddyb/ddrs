@@ -280,6 +280,12 @@ pub struct ParameterRanges {
     /// Muskingum storage weight X. Only consumed when `x_storage` is listed in
     /// `kan_head.learnable_parameters`; otherwise routing uses a constant 0.3.
     pub x_storage: [f32; 2],
+    /// Leakance (GW–SW) ranges — verbatim from DDR `configs.py` (commit c2bd0f9).
+    /// Only consumed when `Params.use_leakance` and the params are listed in
+    /// `kan_head.learnable_parameters`.
+    pub k_d: [f32; 2],
+    pub d_gw: [f32; 2],
+    pub leakance_factor: [f32; 2],
 }
 
 impl Default for ParameterRanges {
@@ -289,6 +295,9 @@ impl Default for ParameterRanges {
             q_spatial: [0.0, 1.0],
             p_spatial: [1.0, 200.0],
             x_storage: [0.0, 0.5],
+            k_d: [1e-8, 1e-6],
+            d_gw: [-2.0, 2.0],
+            leakance_factor: [0.0, 1.0],
         }
     }
 }
@@ -317,6 +326,10 @@ pub struct Params {
     /// path. No effect on the CPU path. Defaults to `false`; flipped to
     /// `true` in `config/merit_training.yaml` only after V9/V10/V7a pass.
     pub use_cuda_graphs: bool,
+    /// Enable the leakance (GW–SW water-loss) term in routing. Off by default;
+    /// when on, `K_D`/`d_gw`/`leakance_factor` must be in
+    /// `kan_head.learnable_parameters`, and `use_cuda_graphs` must be false.
+    pub use_leakance: bool,
 }
 
 impl Default for Params {
@@ -331,6 +344,7 @@ impl Default for Params {
             tau: 3,
             sparse_solver: SparseSolver::default(),
             use_cuda_graphs: false,
+            use_leakance: false,
         }
     }
 }
@@ -349,6 +363,7 @@ struct ParamsRaw {
     tau: Option<u32>,
     sparse_solver: Option<String>,
     use_cuda_graphs: Option<bool>,
+    use_leakance: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -398,6 +413,18 @@ impl From<ParamsRaw> for Params {
         };
         if let Some(b) = r.use_cuda_graphs {
             p.use_cuda_graphs = b;
+        }
+        if let Some(v) = r.parameter_ranges.get("K_D") {
+            p.parameter_ranges.k_d = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("d_gw") {
+            p.parameter_ranges.d_gw = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("leakance_factor") {
+            p.parameter_ranges.leakance_factor = *v;
+        }
+        if let Some(b) = r.use_leakance {
+            p.use_leakance = b;
         }
         p
     }
@@ -964,6 +991,37 @@ data_sources:
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("no data_sources should be valid");
         assert!(cfg.data_sources.is_none());
+    }
+
+    #[test]
+    fn leakance_flag_and_ranges_parse() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  parameter_ranges:
+    K_D: [1.0e-8, 1.0e-6]
+    d_gw: [-2.0, 2.0]
+    leakance_factor: [0.0, 1.0]
+  log_space_parameters: [p_spatial, K_D]
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_cfg.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(cfg.params.use_leakance);
+        assert!((cfg.params.parameter_ranges.k_d[0] - 1e-8).abs() < 1e-12);
+        assert!((cfg.params.parameter_ranges.k_d[1] - 1e-6).abs() < 1e-12);
+        assert_eq!(cfg.params.parameter_ranges.d_gw, [-2.0, 2.0]);
+        assert_eq!(cfg.params.parameter_ranges.leakance_factor, [0.0, 1.0]);
+        assert!(cfg.params.log_space_parameters.iter().any(|s| s == "K_D"));
+    }
+
+    #[test]
+    fn use_leakance_defaults_false() {
+        assert!(!Params::default().use_leakance);
     }
 
     #[test]
