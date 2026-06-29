@@ -19,6 +19,26 @@ use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
 use crate::config::Config;
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
 
+/// Inner-backend leakance inputs threaded into `forward_chain_inner`.
+#[derive(Clone)]
+pub(crate) struct LeakanceTensors<I: Backend> {
+    pub k_d: Tensor<I, 1>,
+    pub d_gw: Tensor<I, 1>,
+    pub leakance_factor: Tensor<I, 1>,
+}
+
+/// Extra saved-state (inner-backend primitives) the leakance backward needs,
+/// beyond what `TimestepState` already saves (`depth`, `p_spatial`, `q_eps` are
+/// reused from there). This is the ONE leakance saved-state type — reused as the
+/// `leak` field of `TimestepLeakanceState` (do not introduce a second).
+#[derive(Clone, Debug)]
+pub(crate) struct LeakanceSaved<I: Backend> {
+    pub area_z: I::FloatTensorPrimitive,
+    pub k_d: I::FloatTensorPrimitive,
+    pub d_gw: I::FloatTensorPrimitive,
+    pub leakance_factor: I::FloatTensorPrimitive,
+}
+
 /// Saved primitives used by `TimestepOp::backward`.
 ///
 /// Forward inputs (the 5 autograd-tracked parents + the 3 constants) plus the
@@ -536,6 +556,7 @@ pub(crate) mod forward_saved_idx {
 /// The saved-state array is indexed by [`forward_saved_idx`], whose order
 /// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     cfg: &Config,
     pattern: &Arc<CsrPattern>,
@@ -547,6 +568,8 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     length_in: Tensor<I, 1>,
     slope_in: Tensor<I, 1>,
     xst_in: Tensor<I, 1>,
+    leakance: Option<LeakanceTensors<I>>,
+    leak_out: &mut Option<LeakanceSaved<I>>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -630,9 +653,35 @@ where
     let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
     let i_t = wrap(i_t_prim.clone());
 
-    // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t
-    let b_rhs =
+    // Leakance: compute zeta from the SHARED depth/q_eps (S6/S1) so it can be
+    // subtracted from b_rhs below. `None` ⇒ this block is skipped entirely and
+    // the kernel order is byte-identical to the pre-leakance path.
+    let zeta_opt = leakance.as_ref().map(|lk| {
+        let (_w, area_z, zeta) = crate::routing::leakance::zeta_forward::<I>(
+            depth.clone(),
+            psp_in.clone(),
+            q_eps.clone(),
+            length_in.clone(),
+            lk.k_d.clone(),
+            lk.d_gw.clone(),
+            lk.leakance_factor.clone(),
+        );
+        *leak_out = Some(LeakanceSaved {
+            area_z: unwrap(area_z.clone()),
+            k_d: unwrap(lk.k_d.clone()),
+            d_gw: unwrap(lk.d_gw.clone()),
+            leakance_factor: unwrap(lk.leakance_factor.clone()),
+        });
+        zeta
+    });
+
+    // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t  (− zeta when leakance active)
+    let b_rhs_base =
         c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
+    let b_rhs = match zeta_opt {
+        Some(zeta) => b_rhs_base - zeta,
+        None => b_rhs_base,
+    };
 
     // S26: A_values = assemble_primitive(c1)
     let c1_prim = unwrap(c1.clone());
@@ -1107,6 +1156,8 @@ where
         wrap(length_p.clone()),
         wrap(slope_p.clone()),
         wrap(xst_p.clone()),
+        None,
+        &mut None,
     );
 
     // Unpack saved-state array into named TimestepState fields. Indices MUST
@@ -1489,7 +1540,8 @@ where
     I::Device: 'static,
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
-        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in,
+        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
+        &mut None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -1551,7 +1603,8 @@ where
     I::Device: 'static,
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
-        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in,
+        cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
+        &mut None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {
