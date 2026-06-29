@@ -280,11 +280,13 @@ pub struct ParameterRanges {
     /// Muskingum storage weight X. Only consumed when `x_storage` is listed in
     /// `kan_head.learnable_parameters`; otherwise routing uses a constant 0.3.
     pub x_storage: [f32; 2],
-    /// Leakance (GW–SW) ranges — verbatim from DDR `configs.py` (commit c2bd0f9).
-    /// Only consumed when `Params.use_leakance` and the params are listed in
-    /// `kan_head.learnable_parameters`.
+    /// Hydraulic diffusivity coefficient — verbatim from DDR `configs.py`
+    /// (commit c2bd0f9). Only consumed when `Params.use_leakance` is true and
+    /// `K_D` is listed in `kan_head.learnable_parameters`.
     pub k_d: [f32; 2],
+    /// Groundwater depth parameter. Companion to `k_d`; same activation guard.
     pub d_gw: [f32; 2],
+    /// Fractional leakance weight [0, 1]. Companion to `k_d`; same activation guard.
     pub leakance_factor: [f32; 2],
 }
 
@@ -382,6 +384,16 @@ impl From<ParamsRaw> for Params {
         if let Some(v) = r.parameter_ranges.get("x_storage") {
             p.parameter_ranges.x_storage = *v;
         }
+        // DDR spells this uppercase (K_D); siblings are lowercase.
+        if let Some(v) = r.parameter_ranges.get("K_D") {
+            p.parameter_ranges.k_d = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("d_gw") {
+            p.parameter_ranges.d_gw = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("leakance_factor") {
+            p.parameter_ranges.leakance_factor = *v;
+        }
         // attribute_minimums — named field mapping.
         if let Some(&v) = r.attribute_minimums.get("discharge") {
             p.attribute_minimums.discharge = v;
@@ -413,15 +425,6 @@ impl From<ParamsRaw> for Params {
         };
         if let Some(b) = r.use_cuda_graphs {
             p.use_cuda_graphs = b;
-        }
-        if let Some(v) = r.parameter_ranges.get("K_D") {
-            p.parameter_ranges.k_d = *v;
-        }
-        if let Some(v) = r.parameter_ranges.get("d_gw") {
-            p.parameter_ranges.d_gw = *v;
-        }
-        if let Some(v) = r.parameter_ranges.get("leakance_factor") {
-            p.parameter_ranges.leakance_factor = *v;
         }
         if let Some(b) = r.use_leakance {
             p.use_leakance = b;
