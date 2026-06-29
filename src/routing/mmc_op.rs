@@ -556,7 +556,6 @@ pub(crate) mod forward_saved_idx {
 /// The saved-state array is indexed by [`forward_saved_idx`], whose order
 /// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     cfg: &Config,
     pattern: &Arc<CsrPattern>,
