@@ -85,36 +85,61 @@ KAN head (per reach)                 hourly disagg head
 
 ### Components touched (blast radius)
 
+**Wiring decision (revised after reading the routing core).** Since SP-8 the
+entire MC timestep is a **single fused custom-autodiff op** — `TimestepOp` in
+`src/routing/mmc_op.rs`, a hand-written analytical `Backward<I, 5>` over parents
+`[n, q_spatial, p_spatial, q_t, q_prime_t]` — *not* an autograd chain. `b_rhs`
+is assembled inside it. So `zeta` is **not** free for autograd; the chosen
+approach (**Option 1**) is to **extend the fused analytical backward**: a
+parallel `TimestepLeakanceOp` with `Backward<I, 8>` (the 3 extra parents
+`K_D, d_gw, leakance_factor`), sharing the base S1..S28 chain and adding the
+`zeta` forward + its analytical gradient terms. This is the most faithful and
+fastest path; its risk is concentrated in the backward derivation, which a
+finite-difference gradcheck guards. The 5-parent `TimestepOp` stays untouched
+and is the only path non-leakance runs use.
+
 | File | Change | Invariant guard |
 |---|---|---|
-| `src/config.rs` | add 3 param ranges + log-space flag for `K_D`, verbatim from DDR | additive; off by default |
-| `src/nn/kan_head.rs` | head output `P → P+3` **only when `use_leakance`** | default head byte-exact ⇒ KAN parity (#5/#7) pass |
-| `src/routing/mmc.rs` | port `_compute_zeta`; subtract `zeta` from `b` in `route_timestep` | `use_leakance=false` ⇒ RHS identical ⇒ DDR sandbox (#1) ABSOLUTE MATCH |
-| `src/training/loss.rs` | none — `zeta` acts through routed Q | — |
+| `src/config.rs` | add `use_leakance` flag + 3 param ranges (`K_D` log-space) verbatim from DDR; reject `use_cuda_graphs && use_leakance` | additive; off by default |
+| `src/nn/kan_head.rs` | **none** — head width `P = learnable_parameters.len()`, so listing `K_D/d_gw/leakance_factor` in YAML widens it automatically | non-leakance configs don't list them ⇒ `P` unchanged ⇒ KAN parity (#5/#7) byte-exact |
+| `src/routing/mmc_op.rs` | extend `forward_chain_inner` (gated `Option` leakance arg, `None` = byte-identical); add `TimestepLeakanceOp` (`Backward<I,8>`) + `zeta` forward/backward | `use_leakance=false` path runs the untouched 5-parent op ⇒ DDR sandbox (#1) ABSOLUTE MATCH |
+| `src/routing/mmc.rs`, `src/training/forward.rs` | thread `K_D/d_gw/leakance_factor` from the head HashMap into `SpatialParameters` → `route_timestep` | `Option` fields; absent ⇒ today's behavior |
 
 ### Invariants preserved
 
-- **#1 DDR sandbox** — leakance off → `b` unchanged → still ABSOLUTE MATCH
-  (`< 1e-3 m³/s`). Re-run `examples/compare_ddr_sandbox` after the routing edit.
-- **#2 f32 throughout** — `zeta` is f32; `depth`/`area` reuse the existing
-  geometry path.
-- **#4 hand-written sparse backward** — `zeta` is an additive RHS term; autograd
-  tapes it through the existing `b`. The `CsrSolveOp` backward in `src/sparse.rs`
-  is **not** touched. A dedicated `tests/` finite-difference gradcheck covers the
-  new `zeta` autograd path.
-- **#5/#7 KAN parity** — the default 4-output head is unchanged; the 7-output
-  head is a new config with **no DDR fixture to violate** (DDR reverted
-  leakance), so it needs only internal gradient/finite-diff checks.
+- **#1 DDR sandbox** — leakance off → the 5-parent `TimestepOp` and
+  `forward_chain_inner(None)` are byte-identical → still ABSOLUTE MATCH
+  (`< 1e-3 m³/s`). Re-run `examples/compare_ddr_sandbox`.
+- **#2 f32 throughout** — `zeta`, `width_z`, `area_z` are f32.
+- **#4 hand-written sparse backward** — the `CsrSolveOp`/`triangular_csr_solve`
+  backward in `src/sparse.rs` is **reused unchanged** (the `zeta` solve uses the
+  same `a_values`). We *extend* the fused `mmc_op` analytical backward (the
+  intended faithful design), we do **not** replace any sparse backward with
+  autograd-tape unrolling. A `tests/` finite-difference gradcheck (mirroring
+  `tests/sp8_gradcheck.rs`) covers every new gradient: `K_D, d_gw,
+  leakance_factor`, and `zeta`'s contributions back into `depth`/`p_spatial`/
+  `q_spatial`.
+- **#5/#7 KAN parity** — head untouched; the wider output is just a longer
+  `learnable_parameters` list, with **no DDR fixture to violate** (DDR reverted
+  leakance).
 
-### Assumptions (explicit)
+### Assumptions (now verified against the code)
 
 1. **`K_D` is log-space in ddrs** — its range spans two decades and DDR
-   denormalizes it through `log_space_params`. Port the log-space flag from DDR
-   rather than guess.
-2. **Depth expression is ported exactly from DDR's `_compute_zeta`**, not
-   silently reused from ddrs's existing geometry, unless the two are verified
-   equal. A subtle `depth` mismatch would invalidate the entire test. Finite-diff
-   the ported `zeta` (including its `depth`) against DDR before trusting any run.
+   denormalizes it through `log_space_params`. Port the log-space flag from DDR.
+2. **Depth is shared; `area` is not (VERIFIED).** ddrs's saved `depth`
+   (`mmc_op.rs` S6: `ratio^exponent`, `numerator = q_t·n·(q_eps+1)`,
+   `exponent = 3/(5+3·q_eps)`) **is exactly** DDR `_compute_zeta`'s depth — same
+   power law — so `zeta` reuses the saved `depth`. But DDR's zeta
+   `area = (p·depth)^q · length` is a **plan-view** area, *different* from
+   ddrs's trapezoidal cross-section `area` (S12). So `width_z = (p·depth)^q_eps`
+   and `area_z = width_z · length` are **ported fresh** for `zeta`; the
+   trapezoidal `area` is **not** reused. (`q_eps = q_spatial + 1e-6` used for
+   consistency with the shared depth; the 1e-6 offset is below f32 noise.)
+3. **CUDA graphs are disabled for leakance runs** — the SP-10 graph-capture
+   path bakes the old `b_rhs` math into a cuSPARSE graph. `use_leakance` forces
+   `use_cuda_graphs: false` (rejected at config load), matching the existing
+   precip-disagg runs which already set it false.
 
 ## Part B — The experiment
 
