@@ -549,6 +549,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_leakance(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
@@ -616,6 +620,17 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
             .to_string(),
         ),
     }
+}
+
+fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
+    if cfg.params.use_leakance && cfg.params.use_cuda_graphs {
+        return Err(
+            "params: `use_leakance: true` requires `use_cuda_graphs: false` — the \
+             CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_mode_workflow(cfg: &Config) -> std::result::Result<(), String> {
@@ -1025,6 +1040,27 @@ params:
     #[test]
     fn use_leakance_defaults_false() {
         assert!(!Params::default().use_leakance);
+    }
+
+    #[test]
+    fn leakance_with_cuda_graphs_rejected() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  use_cuda_graphs: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_graphs.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("use_leakance") && msg.contains("use_cuda_graphs"),
+            "expected leakance/graphs conflict, got: {msg}"
+        );
     }
 
     #[test]
