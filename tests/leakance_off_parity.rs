@@ -4,15 +4,25 @@
 //! `forward()` of a 5-reach chain over 24 steps with the shared `mock_*`
 //! fixtures); after the Phase-3 changes it must reproduce the SAME hydrograph
 //! bit-for-bit, proving the leakance-off path is untouched.
+//!
+//! Also contains a head-driven smoke test (`head_driven_leakance`) verifying
+//! that when `use_leakance=true` the head's `K_D/d_gw/leakance_factor` keys
+//! are threaded into `SpatialParameters` and change the routed output.
 
 mod common;
 
-use burn::tensor::Tensor;
+use burn::backend::Autodiff;
+use burn::tensor::{Int, Tensor, TensorData};
 use common::{
     mock_config, mock_routing_inputs, mock_spatial_parameters, mock_streamflow, InnerBackend,
     TestDevice,
 };
+use ddrs::data::{RhoWindow, Staid};
+use ddrs::data::dataset::RoutingTensors;
+use ddrs::nn::kan_head::KanHeadConfig;
 use ddrs::routing::{MuskingumCunge, SpatialParameters};
+use ddrs::sparse::SparseAdjacency;
+use ndarray::Array2;
 
 /// Committed expected hydrograph for the 5-reach × 24-step linear chain,
 /// captured from the unmodified `forward()` (row-major `[n, t]`). This is the
@@ -121,4 +131,168 @@ fn leakance_none_matches_baseline_chain() {
             "leakance-off routing diverged at idx {i}: got {got}, expected {exp}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Head-driven smoke test: K_D/d_gw/leakance_factor threaded from KAN head
+// ---------------------------------------------------------------------------
+
+/// Build a minimal `RoutingTensors<Autodiff<InnerBackend>>` for a linear chain
+/// of `n` reaches with `t` hourly steps and a single gauge at the outlet.
+/// This is a self-contained construction — no live data stores required.
+fn minimal_routing_tensors(
+    n: usize,
+    t: usize,
+    f_attrs: usize,
+    device: &TestDevice,
+) -> RoutingTensors<Autodiff<InnerBackend>> {
+    use chrono::NaiveDate;
+    type AB = Autodiff<InnerBackend>;
+
+    let adjacency = {
+        let mut dense = vec![0.0_f32; n * n];
+        for i in 0..n - 1 {
+            dense[(i + 1) * n + i] = 1.0;
+        }
+        SparseAdjacency::from_dense(n, &dense, vec![1000.0; n], vec![0.001; n])
+    };
+
+    // spatial_attributes: (N, F) normalized, all 0.5
+    let attrs_vec = vec![0.5_f32; n * f_attrs];
+    let spatial_attributes =
+        Tensor::<AB, 2>::from_data(TensorData::new(attrs_vec.clone(), [n, f_attrs]), device);
+
+    // q_prime: (T, N) — a mild sin sweep so depth > 0
+    let mut qp_data = vec![0.0_f32; t * n];
+    for ti in 0..t {
+        let phase = (ti as f32) / (t.max(2) - 1) as f32 * 4.0 * std::f32::consts::PI;
+        for ri in 0..n {
+            qp_data[ti * n + ri] = (5.0 + phase.sin() * 2.0).max(0.1);
+        }
+    }
+    let q_prime =
+        Tensor::<AB, 2>::from_data(TensorData::new(qp_data.clone(), [t, n]), device);
+
+    // q_prime_daily: empty (0, N) — no disagg head
+    let q_prime_daily =
+        Tensor::<AB, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, n]), device);
+
+    // precip_hourly / temp_hourly: empty (0, N)
+    let precip_hourly =
+        Tensor::<AB, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, n]), device);
+    let temp_hourly =
+        Tensor::<AB, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, n]), device);
+
+    // flat_indices + group_ids: outlet reach (n-1) feeds gauge 0
+    let flat_indices = Tensor::<AB, 1, Int>::from_data(
+        TensorData::from([(n - 1) as i32].as_slice()),
+        device,
+    );
+    let group_ids = Tensor::<AB, 1, Int>::from_data(
+        TensorData::from([0i32].as_slice()),
+        device,
+    );
+
+    // observations: dummy (1, 1) — not used by forward()
+    let observations = Array2::zeros((1, 1));
+
+    let gauge_staids = vec![Staid::new("dummy")];
+    let window = RhoWindow {
+        start_day_idx: 0,
+        rho_days: 1,
+        window_start: NaiveDate::from_ymd_opt(1990, 1, 1).unwrap(),
+    };
+
+    RoutingTensors {
+        adjacency,
+        spatial_attributes,
+        q_prime,
+        q_prime_daily,
+        precip_hourly,
+        temp_hourly,
+        observations,
+        flat_indices,
+        group_ids,
+        num_gauges: 1,
+        gauge_staids,
+        window,
+    }
+}
+
+/// Build a KAN head with `learnable_parameters = [n, q_spatial, p_spatial, K_D, d_gw, leakance_factor]`.
+fn leakance_head(f_attrs: usize, device: &TestDevice) -> ddrs::nn::kan_head::KanHead<Autodiff<InnerBackend>> {
+    KanHeadConfig::new(
+        (0..f_attrs).map(|i| format!("attr_{i}")).collect(),
+        vec![
+            "n".to_string(),
+            "q_spatial".to_string(),
+            "p_spatial".to_string(),
+            "K_D".to_string(),
+            "d_gw".to_string(),
+            "leakance_factor".to_string(),
+        ],
+        42,
+    )
+    .with_hidden_size(8)
+    .with_num_hidden_layers(1)
+    .init::<Autodiff<InnerBackend>>(device)
+}
+
+
+/// Head-driven smoke: when `use_leakance=true`, the `K_D/d_gw/leakance_factor`
+/// keys from the head HashMap are threaded into `SpatialParameters`, so the
+/// same head run with `use_leakance=true` must produce different output than
+/// the same head run with `use_leakance=false`.
+///
+/// **Pre-Task 9 behaviour:** `forward.rs` hardcodes `k_d: None` regardless of
+/// the flag — both runs are identical → `assert_ne!` FAILS.
+/// **Post-Task 9:** the flag gates look up the keys and thread them in → PASS.
+#[test]
+fn head_driven_leakance_changes_output() {
+    let device = TestDevice::default();
+    let n = 5usize;
+    let t = 24usize;
+    let f = 4usize; // number of spatial attributes
+
+    let tensors = minimal_routing_tensors(n, t, f, &device);
+
+    // Same head for both runs — includes K_D / d_gw / leakance_factor keys.
+    let head = leakance_head(f, &device);
+
+    // Config A: use_leakance = true — head params should be threaded in.
+    let mut cfg_leak = mock_config();
+    cfg_leak.params.use_leakance = true;
+    cfg_leak.params.use_cuda_graphs = false;
+
+    // Config B: use_leakance = false — leakance keys in the map are ignored.
+    let cfg_no_leak = mock_config();
+
+    // Run A: with leakance.
+    let out_leak = ddrs::training::forward::forward(
+        &cfg_leak,
+        &tensors,
+        &head,
+        &device,
+        false,
+    );
+    let sum_leak: f32 = out_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
+
+    // Run B: without leakance (same head, different config).
+    let out_no_leak = ddrs::training::forward::forward(
+        &cfg_no_leak,
+        &tensors,
+        &head,
+        &device,
+        false,
+    );
+    let sum_no_leak: f32 = out_no_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
+
+    assert!(sum_leak.is_finite(), "leakance run output is not finite");
+    assert!(sum_no_leak.is_finite(), "no-leakance run output is not finite");
+    assert_ne!(
+        sum_leak, sum_no_leak,
+        "leakance run must differ from no-leakance run — \
+         K_D/d_gw/leakance_factor not threaded into SpatialParameters \
+         (got sum_leak={sum_leak}, sum_no_leak={sum_no_leak})"
+    );
 }

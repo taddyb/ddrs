@@ -207,6 +207,24 @@ pub fn forward<I: Backend>(
         None => tensors.q_prime.clone(),
     };
 
+    let (k_d, d_gw, leakance_factor) = if cfg.params.use_leakance {
+        for key in &["K_D", "d_gw", "leakance_factor"] {
+            if !params_map.contains_key(*key) {
+                panic!(
+                    "use_leakance=true but KAN head is missing key '{key}' — \
+                     add it to kan_head.learnable_parameters in your config"
+                );
+            }
+        }
+        (
+            params_map.get("K_D").cloned(),
+            params_map.get("d_gw").cloned(),
+            params_map.get("leakance_factor").cloned(),
+        )
+    } else {
+        (None, None, None)
+    };
+
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
@@ -215,9 +233,9 @@ pub fn forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
-            k_d: None,
-            d_gw: None,
-            leakance_factor: None,
+            k_d,
+            d_gw,
+            leakance_factor,
         },
         carry_state,
     );
@@ -278,6 +296,24 @@ pub fn forward_eval<I: Backend>(
         None => tensors.q_prime.clone(),
     };
 
+    let (k_d_inner, d_gw_inner, leakance_factor_inner) = if cfg.params.use_leakance {
+        for key in &["K_D", "d_gw", "leakance_factor"] {
+            if !params_map.contains_key(*key) {
+                panic!(
+                    "use_leakance=true but KAN head is missing key '{key}' — \
+                     add it to kan_head.learnable_parameters in your config"
+                );
+            }
+        }
+        (
+            params_map.get("K_D").cloned(),
+            params_map.get("d_gw").cloned(),
+            params_map.get("leakance_factor").cloned(),
+        )
+    } else {
+        (None, None, None)
+    };
+
     // Wrap to Autodiff at the engine boundary (engine requires Autodiff
     // even for forward-only). Drop the graph immediately after with .inner().
     let q_prime_ad: Tensor<Autodiff<I>, 2> = Tensor::from_inner(q_prime_hourly);
@@ -285,6 +321,9 @@ pub fn forward_eval<I: Backend>(
     let q_ad = Tensor::<Autodiff<I>, 1>::from_inner(q_param);
     let p_ad = p_param.map(Tensor::<Autodiff<I>, 1>::from_inner);
     let x_ad = Tensor::<Autodiff<I>, 1>::from_inner(x_storage);
+    let k_d_ad = k_d_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
+    let d_gw_ad = d_gw_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
+    let leakance_factor_ad = leakance_factor_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
     engine.setup_inputs(
@@ -294,9 +333,9 @@ pub fn forward_eval<I: Backend>(
             n: n_ad,
             q_spatial: q_ad,
             p_spatial: p_ad,
-            k_d: None,
-            d_gw: None,
-            leakance_factor: None,
+            k_d: k_d_ad,
+            d_gw: d_gw_ad,
+            leakance_factor: leakance_factor_ad,
         },
         carry_state,
     );
