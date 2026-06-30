@@ -118,6 +118,14 @@ where
     let mut q_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut p_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut x_phys: Vec<f32> = Vec::with_capacity(n_reaches);
+    // Leakance params (populated only with use_leakance + the keys learnable).
+    let dump_leakance = cfg.params.use_leakance
+        && learn_has("K_D")
+        && learn_has("d_gw")
+        && learn_has("leakance_factor");
+    let mut kd_phys: Vec<f32> = Vec::new();
+    let mut dgw_phys: Vec<f32> = Vec::new();
+    let mut lfac_phys: Vec<f32> = Vec::new();
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -161,7 +169,46 @@ where
             x_phys.extend(std::iter::repeat(0.3_f32).take(rows));
         }
 
+        // Leakance — the identifiability evidence. K_D/leakance_factor pinned at
+        // their lower bound ⇒ the sub-0.01-m³/s collapse that caused DDR's
+        // revert; non-trivial values ⇒ the term is identifiable.
+        if dump_leakance {
+            let kd_d = denormalize(raw["K_D"].clone(), cfg.params.parameter_ranges.k_d, is_log("K_D"));
+            let dgw_d =
+                denormalize(raw["d_gw"].clone(), cfg.params.parameter_ranges.d_gw, is_log("d_gw"));
+            let lfac_d = denormalize(
+                raw["leakance_factor"].clone(),
+                cfg.params.parameter_ranges.leakance_factor,
+                is_log("leakance_factor"),
+            );
+            kd_phys.extend(kd_d.into_data().to_vec::<f32>().unwrap());
+            dgw_phys.extend(dgw_d.into_data().to_vec::<f32>().unwrap());
+            lfac_phys.extend(lfac_d.into_data().to_vec::<f32>().unwrap());
+        }
+
         eprintln!("  batch {start:>7}..{end:<7}  ({} reaches)", end - start);
+    }
+
+    // Summarize the learned leakance distribution — the decisive identifiability
+    // check (the revert criterion: values must clear ~0.01, not collapse to ~0).
+    if dump_leakance {
+        let summarize = |label: &str, v: &[f32], lo: f32, hi: f32| {
+            let mut s = v.to_vec();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pct = |p: f64| s[((p * (s.len() - 1) as f64).round() as usize).min(s.len() - 1)];
+            let at_floor = v.iter().filter(|&&x| x <= lo * 1.001).count() as f64 / v.len() as f64;
+            let at_ceil = v.iter().filter(|&&x| x >= hi * 0.999).count() as f64 / v.len() as f64;
+            eprintln!(
+                "learned {label}: min={:.4e} p10={:.4e} median={:.4e} p90={:.4e} max={:.4e}  \
+                 frac@floor={:.1}%  frac@ceil={:.1}%",
+                s[0], pct(0.10), pct(0.50), pct(0.90), s[s.len() - 1],
+                at_floor * 100.0, at_ceil * 100.0
+            );
+        };
+        let r = &cfg.params.parameter_ranges;
+        summarize("K_D (1/s)", &kd_phys, r.k_d[0], r.k_d[1]);
+        summarize("d_gw (m)", &dgw_phys, r.d_gw[0], r.d_gw[1]);
+        summarize("leakance_factor", &lfac_phys, r.leakance_factor[0], r.leakance_factor[1]);
     }
 
     // Summarize the learned X distribution — the decisive check on whether the
@@ -197,6 +244,11 @@ where
         &x_phys,
         &slope_clamped,
         &checkpoint.display().to_string(),
+        if dump_leakance {
+            Some((kd_phys.as_slice(), dgw_phys.as_slice(), lfac_phys.as_slice()))
+        } else {
+            None
+        },
     )
     .map_err(CliError::Other)?;
 
@@ -307,6 +359,14 @@ where
     let mut q_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut p_phys: Vec<f32> = Vec::with_capacity(n_reaches);
     let mut x_phys: Vec<f32> = Vec::with_capacity(n_reaches);
+    // Leakance params (populated only with use_leakance + the keys learnable).
+    let dump_leakance = cfg.params.use_leakance
+        && learn_has("K_D")
+        && learn_has("d_gw")
+        && learn_has("leakance_factor");
+    let mut kd_phys: Vec<f32> = Vec::new();
+    let mut dgw_phys: Vec<f32> = Vec::new();
+    let mut lfac_phys: Vec<f32> = Vec::new();
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -350,7 +410,46 @@ where
             x_phys.extend(std::iter::repeat(0.3_f32).take(rows));
         }
 
+        // Leakance — the identifiability evidence. K_D/leakance_factor pinned at
+        // their lower bound ⇒ the sub-0.01-m³/s collapse that caused DDR's
+        // revert; non-trivial values ⇒ the term is identifiable.
+        if dump_leakance {
+            let kd_d = denormalize(raw["K_D"].clone(), cfg.params.parameter_ranges.k_d, is_log("K_D"));
+            let dgw_d =
+                denormalize(raw["d_gw"].clone(), cfg.params.parameter_ranges.d_gw, is_log("d_gw"));
+            let lfac_d = denormalize(
+                raw["leakance_factor"].clone(),
+                cfg.params.parameter_ranges.leakance_factor,
+                is_log("leakance_factor"),
+            );
+            kd_phys.extend(kd_d.into_data().to_vec::<f32>().unwrap());
+            dgw_phys.extend(dgw_d.into_data().to_vec::<f32>().unwrap());
+            lfac_phys.extend(lfac_d.into_data().to_vec::<f32>().unwrap());
+        }
+
         eprintln!("  batch {start:>7}..{end:<7}  ({} reaches)", end - start);
+    }
+
+    // Summarize the learned leakance distribution — the decisive identifiability
+    // check (the revert criterion: values must clear ~0.01, not collapse to ~0).
+    if dump_leakance {
+        let summarize = |label: &str, v: &[f32], lo: f32, hi: f32| {
+            let mut s = v.to_vec();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let pct = |p: f64| s[((p * (s.len() - 1) as f64).round() as usize).min(s.len() - 1)];
+            let at_floor = v.iter().filter(|&&x| x <= lo * 1.001).count() as f64 / v.len() as f64;
+            let at_ceil = v.iter().filter(|&&x| x >= hi * 0.999).count() as f64 / v.len() as f64;
+            eprintln!(
+                "learned {label}: min={:.4e} p10={:.4e} median={:.4e} p90={:.4e} max={:.4e}  \
+                 frac@floor={:.1}%  frac@ceil={:.1}%",
+                s[0], pct(0.10), pct(0.50), pct(0.90), s[s.len() - 1],
+                at_floor * 100.0, at_ceil * 100.0
+            );
+        };
+        let r = &cfg.params.parameter_ranges;
+        summarize("K_D (1/s)", &kd_phys, r.k_d[0], r.k_d[1]);
+        summarize("d_gw (m)", &dgw_phys, r.d_gw[0], r.d_gw[1]);
+        summarize("leakance_factor", &lfac_phys, r.leakance_factor[0], r.leakance_factor[1]);
     }
 
     // Summarize the learned X distribution — the decisive check on whether the
@@ -386,6 +485,11 @@ where
         &x_phys,
         &slope_clamped,
         "init-only (no checkpoint)",
+        if dump_leakance {
+            Some((kd_phys.as_slice(), dgw_phys.as_slice(), lfac_phys.as_slice()))
+        } else {
+            None
+        },
     )
     .map_err(CliError::Other)?;
 
@@ -405,6 +509,7 @@ fn write_netcdf(
     x_vals: &[f32],
     slope: &[f32],
     checkpoint: &str,
+    leakance: Option<(&[f32], &[f32], &[f32])>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut file = netcdf::create(path)?;
 
@@ -446,6 +551,24 @@ fn write_netcdf(
     v.put_values(slope, ..)?;
     v.put_attribute("long_name", "channel slope (clamped to attribute_minimums.slope)")?;
     v.put_attribute("units", "m/m")?;
+
+    // Leakance (GW–SW water-loss) learned params — only when use_leakance.
+    if let Some((k_d, d_gw, leakance_factor)) = leakance {
+        let mut v = file.add_variable::<f32>("K_D", &["COMID"])?;
+        v.put_values(k_d, ..)?;
+        v.put_attribute("long_name", "leakance hydraulic exchange rate")?;
+        v.put_attribute("units", "1/s")?;
+
+        let mut v = file.add_variable::<f32>("d_gw", &["COMID"])?;
+        v.put_values(d_gw, ..)?;
+        v.put_attribute("long_name", "leakance groundwater depth threshold")?;
+        v.put_attribute("units", "m")?;
+
+        let mut v = file.add_variable::<f32>("leakance_factor", &["COMID"])?;
+        v.put_values(leakance_factor, ..)?;
+        v.put_attribute("long_name", "leakance gating/scaling factor")?;
+        v.put_attribute("units", "dimensionless")?;
+    }
 
     Ok(())
 }
