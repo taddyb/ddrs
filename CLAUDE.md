@@ -297,6 +297,50 @@ per-gauge masked (the driver already drops NaN gauges) then averaged, with
 Autograd is unchanged — it's a drop-in scalar on the routed predictions, so
 invariant 4 (the sparse backward) is untouched.
 
+## Leakance (experimental GW–SW water-loss term, off by default)
+
+**What it is.** A losing-stream correction subtracted from the routing RHS `b`
+at every timestep:
+
+```
+zeta = leakance_factor · area_z · K_D · (depth − d_gw)
+area_z = (p · depth)^q_eps · length          (plan-view wetted area, m²)
+b ← b − zeta                                 (positive zeta = losing reach)
+```
+
+Ported from DDR `_compute_zeta` (commit c2bd0f9), later reverted on DDR master.
+Implementation: `src/routing/leakance.rs`. Gradient is analytical via
+`TimestepLeakanceOp: Backward<I,8>` — one extra autograd node per timestep,
+gradient-exact against finite differences.
+
+**How to enable.** Three config changes are required together:
+
+1. `params.use_leakance: true` — activates the term and forces
+   `use_cuda_graphs: false` (config load rejects the combination; CUDA
+   Graphs cannot capture the extra leakance kernel without a separate
+   capture path).
+2. Add `K_D`, `d_gw`, `leakance_factor` to `kan_head.learnable_parameters`
+   so the KAN head emits them.
+3. Add matching ranges to `params.parameter_ranges`:
+   - `K_D`: `[1e-8, 1e-6]` (log-space; hydraulic conductivity, m/s)
+   - `d_gw`: `[-2, 2]` (groundwater depth offset, m)
+   - `leakance_factor`: `[0, 1]` (dimensionless scale)
+
+**Gradient-exactness guard.** Any change to `src/routing/leakance.rs` or the
+leakance backward op must pass:
+
+```bash
+cargo test --test leakance_gradcheck       # analytical ≈ finite-difference
+cargo test --test leakance_off_parity      # byte-identical to no-leakance when off
+cargo run --release --example compare_ddr_sandbox  # must still report ABSOLUTE MATCH
+```
+
+**Status.** Experimental feasibility testbed. The 2×2 experiment (leakance ×
+loss function) is pending; results will determine whether this term earns a
+permanent place in the routing core. Spec:
+`docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`.
+Plan: `docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md`.
+
 ## Baseline
 
 `ddrs plan` and `ddrs run --workflow train-and-test` compute a **summed Q'**

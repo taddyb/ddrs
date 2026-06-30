@@ -44,6 +44,25 @@ Algorithm reference: `~/projects/ddr/CLAUDE.md`.
           Q_{t+1} = clamp(x, discharge_lb)
 ```
 
+### Leakance (optional extra RHS term)
+
+When `params.use_leakance: true`, a GW–SW water-loss correction is subtracted
+from `b` before the triangular solve:
+
+```
+area_z = (p · depth)^q_eps · length       plan-view wetted area (m²)
+zeta   = leakance_factor · area_z · K_D · (depth − d_gw)
+b      ← b − zeta                         positive zeta = losing reach
+```
+
+`depth` is the same value computed by `compute_trapezoidal_geometry`; `area_z`
+is a separate plan-view area not used elsewhere in the routing chain. The
+backward is handled by `TimestepLeakanceOp: Backward<I,8>` in
+`src/routing/leakance.rs` — analytical gradients for all 8 inputs, verified by
+`tests/leakance_gradcheck.rs`. The term is off by default; enabling it forces
+`use_cuda_graphs: false` (the CUDA Graphs capture path does not yet include
+the leakance kernel).
+
 ## Cold start (hot-start at t=0)
 
 ```
