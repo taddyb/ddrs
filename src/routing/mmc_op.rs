@@ -93,23 +93,45 @@ pub(crate) struct TimestepState<B: Backend> {
 #[derive(Debug)]
 pub(crate) struct TimestepOp;
 
-impl<I: Backend + 'static> Backward<I, 5> for TimestepOp
+/// Zeta's geometry-side gradient contributions, folded into the shared backward
+/// core at the three accumulation points (`gd_total`, `gq_spatial`, `gp_total`).
+/// All tensors live on the inner backend `I` (no autograd tape).
+pub(crate) struct ZetaGeomGrads<I: Backend> {
+    pub g_depth: Tensor<I, 1>,
+    pub g_q_eps: Tensor<I, 1>,
+    pub g_p_spatial: Tensor<I, 1>,
+}
+
+/// The five accumulated parent gradients produced by [`timestep_backward_core`],
+/// in parent order `[n, q_spatial, p_spatial, q_t, q_prime_t]`.
+pub(crate) struct FiveGrads<I: Backend> {
+    pub gn_total: Tensor<I, 1>,
+    pub gq_spatial: Tensor<I, 1>,
+    pub gp_total: Tensor<I, 1>,
+    pub gq_t_total: Tensor<I, 1>,
+    pub gq_prime_t: Tensor<I, 1>,
+}
+
+/// Shared analytical backward body for both [`TimestepOp`] (5 parents) and
+/// [`TimestepLeakanceOp`] (8 parents). Computes the five parent gradients from
+/// the saved `TimestepState`.
+///
+/// The leakance op subtracts `zeta` from `b_rhs` in the forward, so its backward
+/// must (a) read `gb_rhs` to compute zeta's parent grads and (b) fold zeta's
+/// geometry-side grads (`g_depth`, `g_q_eps`, `g_p_spatial`) into the existing
+/// accumulators. Both halves of that circular dependency are resolved by the
+/// `zeta_hook` closure: it is called with `gb_rhs` the moment it is available
+/// (right after B27) and returns the geometry grads to inject. The 5-parent op
+/// passes a hook that returns `None`, recovering the pre-leakance math exactly.
+pub(crate) fn timestep_backward_core<I: Backend + 'static>(
+    state: &TimestepState<I>,
+    grad_out: I::FloatTensorPrimitive,
+    zeta_hook: impl FnOnce(&Tensor<I, 1>) -> Option<ZetaGeomGrads<I>>,
+) -> FiveGrads<I>
 where
     I::FloatTensorPrimitive: 'static,
 {
-    type State = TimestepState<I>;
-
-    fn backward(
-        self,
-        ops: Ops<Self::State, 5>,
-        grads: &mut Gradients,
-        _checkpointer: &mut Checkpointer,
-    ) {
-        let state = ops.state;
-        let [p_n, p_qsp, p_psp, p_qt, p_qpt] = ops.parents;
-
-        // ∂L/∂q_next  (shape [N])  — inner-backend primitive.
-        let grad_out = grads.consume::<I>(&ops.node);
+    {
         let device = I::float_device(&grad_out);
 
         // Wrap saved primitives as inner-backend Tensors. These are non-autodiff
@@ -187,6 +209,13 @@ where
 
         // gA_values via direct gather+multiply on primitives (mirrors dispatch::grada_primitive).
         let gb_rhs = wrap(gb_rhs_prim.clone());
+
+        // Leakance fold-in: zeta = ... was subtracted from b_rhs, so its
+        // parent grads derive from `gb_rhs`. The hook computes zeta_backward
+        // (with the 3 leakance parents registered by the caller) and returns
+        // the geometry-side grads to inject below. `None` ⇒ pre-leakance math.
+        let zeta_geom = zeta_hook(&gb_rhs);
+
         let g_a_values_prim = {
             // -gb[row] * x[col]
             let gradb_host: Vec<f32> = primitive_to_vec::<I>(gb_rhs_prim.clone());
@@ -427,7 +456,10 @@ where
         //   ∂d/∂ratio = exponent · ratio^(exponent-1) = d · exponent / ratio
         //   ∂d/∂exponent = d · ln(ratio)
         // ===========================================================
-        let gd_total = gd_from_s13 + gd_from_s12 + gd_from_s10 + gd_from_s8 + gdepth_from_s7;
+        let mut gd_total = gd_from_s13 + gd_from_s12 + gd_from_s10 + gd_from_s8 + gdepth_from_s7;
+        if let Some(zg) = zeta_geom.as_ref() {
+            gd_total = gd_total + zg.g_depth.clone();
+        }
         // depth saturates when ratio^exp == depth_lb (clamped). Gradient passes through
         // when depth > depth_lb. depth itself is the saved post-clamp value, so use
         // depth > depth_lb as the mask (when the clamp is inactive, depth > depth_lb).
@@ -478,33 +510,189 @@ where
         // ===========================================================
         // B1. q_eps = q_spatial + 1e-6  →  ∂q_eps/∂q_spatial = 1
         // ===========================================================
-        let gq_spatial = gqeps_from_s8 + gqeps_from_s7 + gqeps_from_s5 + gqeps_from_s2;
+        let mut gq_spatial = gqeps_from_s8 + gqeps_from_s7 + gqeps_from_s5 + gqeps_from_s2;
+        if let Some(zg) = zeta_geom.as_ref() {
+            gq_spatial = gq_spatial + zg.g_q_eps.clone();
+        }
 
         // ===========================================================
         // Final accumulations on the 5 parents:
         // ===========================================================
         let gn_total = gn_from_s15 + gn_from_s2;
-        let gp_total = gp_from_s7 + gp_from_s3;
+        let mut gp_total = gp_from_s7 + gp_from_s3;
+        if let Some(zg) = zeta_geom.as_ref() {
+            gp_total = gp_total + zg.g_p_spatial.clone();
+        }
         let gq_t_total = gq_t_from_s25 + gq_t_from_s24 + gq_t_from_s2;
-
-        if let Some(node) = p_n {
-            grads.register::<I>(node.id, unwrap(gn_total));
-        }
-        if let Some(node) = p_qsp {
-            grads.register::<I>(node.id, unwrap(gq_spatial));
-        }
-        if let Some(node) = p_psp {
-            grads.register::<I>(node.id, unwrap(gp_total));
-        }
-        if let Some(node) = p_qt {
-            grads.register::<I>(node.id, unwrap(gq_t_total));
-        }
-        if let Some(node) = p_qpt {
-            grads.register::<I>(node.id, unwrap(gq_prime_t));
-        }
 
         // Touch unused intermediate bindings to silence dead-code warnings.
         let _ = (_q_spatial, _velocity_cl);
+
+        FiveGrads {
+            gn_total,
+            gq_spatial,
+            gp_total,
+            gq_t_total,
+            gq_prime_t,
+        }
+    }
+}
+
+impl<I: Backend + 'static> Backward<I, 5> for TimestepOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 5>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt] = ops.parents;
+
+        let grad_out = grads.consume::<I>(&ops.node);
+
+        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+            match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }
+        };
+
+        // No leakance ⇒ hook returns None ⇒ pre-leakance math, byte-identical.
+        let g = timestep_backward_core::<I>(&state, grad_out, |_gb_rhs| None);
+
+        if let Some(node) = p_n {
+            grads.register::<I>(node.id, unwrap(g.gn_total));
+        }
+        if let Some(node) = p_qsp {
+            grads.register::<I>(node.id, unwrap(g.gq_spatial));
+        }
+        if let Some(node) = p_psp {
+            grads.register::<I>(node.id, unwrap(g.gp_total));
+        }
+        if let Some(node) = p_qt {
+            grads.register::<I>(node.id, unwrap(g.gq_t_total));
+        }
+        if let Some(node) = p_qpt {
+            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
+        }
+    }
+}
+
+/// Saved primitives for the leakance op: the base `TimestepState` plus the
+/// extra leakance intermediates ([`LeakanceSaved`]). Reuses the SAME
+/// `LeakanceSaved` type produced by `forward_chain_inner` (no second type).
+#[derive(Clone, Debug)]
+pub(crate) struct TimestepLeakanceState<I: Backend> {
+    pub base: TimestepState<I>,
+    pub leak: LeakanceSaved<I>,
+}
+
+#[derive(Debug)]
+pub(crate) struct TimestepLeakanceOp;
+
+impl<I: Backend + 'static> Backward<I, 8> for TimestepLeakanceOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepLeakanceState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 8>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac] = ops.parents;
+
+        let grad_out = grads.consume::<I>(&ops.node);
+
+        let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+            Tensor::from_primitive(TensorPrimitive::Float(p))
+        };
+        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+            match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }
+        };
+
+        // Geometry inputs zeta depends on, read from the SHARED base state.
+        let depth = wrap(state.base.depth.clone());
+        let p_spatial = wrap(state.base.p_spatial.clone());
+        let q_eps = wrap(state.base.q_eps.clone());
+        // Leakance-only saved intermediates.
+        let area_z = wrap(state.leak.area_z.clone());
+        let k_d = wrap(state.leak.k_d.clone());
+        let d_gw = wrap(state.leak.d_gw.clone());
+        let leakance_factor = wrap(state.leak.leakance_factor.clone());
+
+        // Capture zeta's 3 leakance-parent grads out of the hook so we can
+        // register them after `core` returns. The hook runs zeta_backward with
+        // `gb_rhs` (no pre-negation — zeta_backward negates internally) and
+        // returns the geometry grads for `core` to fold into the 5 base grads.
+        let mut zeta_param_grads: Option<(
+            I::FloatTensorPrimitive,
+            I::FloatTensorPrimitive,
+            I::FloatTensorPrimitive,
+        )> = None;
+        let g = timestep_backward_core::<I>(&state.base, grad_out, |gb_rhs| {
+            let zg = crate::routing::leakance::zeta_backward::<I>(
+                gb_rhs.clone(),
+                depth.clone(),
+                p_spatial.clone(),
+                q_eps.clone(),
+                area_z.clone(),
+                k_d.clone(),
+                d_gw.clone(),
+                leakance_factor.clone(),
+            );
+            zeta_param_grads = Some((
+                unwrap(zg.g_k_d),
+                unwrap(zg.g_d_gw),
+                unwrap(zg.g_leakance_factor),
+            ));
+            Some(ZetaGeomGrads {
+                g_depth: zg.g_depth,
+                g_q_eps: zg.g_q_eps,
+                g_p_spatial: zg.g_p_spatial,
+            })
+        });
+
+        // Register the 5 base parents (zeta geom already folded in by `core`).
+        if let Some(node) = p_n {
+            grads.register::<I>(node.id, unwrap(g.gn_total));
+        }
+        if let Some(node) = p_qsp {
+            grads.register::<I>(node.id, unwrap(g.gq_spatial));
+        }
+        if let Some(node) = p_psp {
+            grads.register::<I>(node.id, unwrap(g.gp_total));
+        }
+        if let Some(node) = p_qt {
+            grads.register::<I>(node.id, unwrap(g.gq_t_total));
+        }
+        if let Some(node) = p_qpt {
+            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
+        }
+
+        // Register the 3 leakance parents.
+        let (g_k_d, g_d_gw, g_fac) =
+            zeta_param_grads.expect("zeta_hook always runs in the leakance backward");
+        if let Some(node) = p_kd {
+            grads.register::<I>(node.id, g_k_d);
+        }
+        if let Some(node) = p_dgw {
+            grads.register::<I>(node.id, g_d_gw);
+        }
+        if let Some(node) = p_fac {
+            grads.register::<I>(node.id, g_fac);
+        }
     }
 }
 
@@ -1223,6 +1411,170 @@ where
             psp_aut.node.clone(),
             qt_aut.node.clone(),
             qpt_aut.node.clone(),
+        ])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    };
+
+    Tensor::from_primitive(TensorPrimitive::Float(result_prim))
+}
+
+/// Leakance variant of [`timestep_forward`]. Identical to it, plus three extra
+/// autograd-tracked parents (`K_D`, `d_gw`, `leakance_factor`) threaded into
+/// `forward_chain_inner`'s leakance gate so `zeta` is subtracted from `b_rhs`.
+/// Registers a [`TimestepLeakanceOp`] node (8 parents). Never uses CUDA graphs
+/// (leakance forces `use_cuda_graphs: false`).
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_leakance<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    _assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    k_d_at: Tensor<Autodiff<I>, 1>,
+    d_gw_at: Tensor<Autodiff<I>, 1>,
+    leakance_factor_at: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    use crate::config::SparseSolver;
+
+    let dt = crate::routing::mmc::DT_SECONDS;
+    let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let velocity_lb = cfg.params.attribute_minimums.velocity;
+    let discharge_lb = cfg.params.attribute_minimums.discharge;
+    let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+
+    let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        _ => panic!("expected float tensor"),
+    };
+    let n_aut = unwrap_at(n_at);
+    let qsp_aut = unwrap_at(q_spatial_at);
+    let psp_aut = unwrap_at(p_spatial_at);
+    let qt_aut = unwrap_at(q_t_at);
+    let qpt_aut = unwrap_at(q_prime_t_at);
+    let length_aut = unwrap_at(length_at);
+    let slope_aut = unwrap_at(slope_at);
+    let xst_aut = unwrap_at(x_storage_at);
+    let kd_aut = unwrap_at(k_d_at);
+    let dgw_aut = unwrap_at(d_gw_at);
+    let fac_aut = unwrap_at(leakance_factor_at);
+
+    let n_p = n_aut.primitive.clone();
+    let qsp_p = qsp_aut.primitive.clone();
+    let psp_p = psp_aut.primitive.clone();
+    let qt_p = qt_aut.primitive.clone();
+    let qpt_p = qpt_aut.primitive.clone();
+    let length_p = length_aut.primitive.clone();
+    let slope_p = slope_aut.primitive.clone();
+    let xst_p = xst_aut.primitive.clone();
+    let kd_p = kd_aut.primitive.clone();
+    let dgw_p = dgw_aut.primitive.clone();
+    let fac_p = fac_aut.primitive.clone();
+
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+
+    let leakance = LeakanceTensors {
+        k_d: wrap(kd_p.clone()),
+        d_gw: wrap(dgw_p.clone()),
+        leakance_factor: wrap(fac_p.clone()),
+    };
+    let mut leak_out: Option<LeakanceSaved<I>> = None;
+
+    let (q_next_prim, saved) = forward_chain_inner::<I>(
+        cfg,
+        pattern,
+        wrap(n_p.clone()),
+        wrap(qsp_p.clone()),
+        wrap(psp_p.clone()),
+        wrap(qt_p.clone()),
+        wrap(qpt_p.clone()),
+        wrap(length_p.clone()),
+        wrap(slope_p.clone()),
+        wrap(xst_p.clone()),
+        Some(leakance),
+        &mut leak_out,
+    );
+    let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
+
+    use forward_saved_idx as fsi;
+    let [
+        depth_p, top_width_p, side_slope_p, bottom_width_p,
+        hyd_radius_p, velocity_un_p, velocity_cl_p, celerity_p,
+        k_muskingum_p, denom_p, c1_prim, c2_p, c3_p, c4_p,
+        a_values_prim, b_rhs_prim, i_t_prim, x_sol_prim,
+        ratio_p, denominator_p, q_eps_p, side_slope_raw_p, bw_raw_p,
+    ] = saved;
+    let _ = (fsi::DEPTH, fsi::BW_RAW);
+
+    let base = TimestepState::<I> {
+        pattern: pattern.clone(),
+        n: n_p,
+        q_spatial: qsp_p,
+        p_spatial: psp_p,
+        q_t: qt_p,
+        q_prime_t: qpt_p,
+        length: length_p,
+        slope: slope_p,
+        x_storage: xst_p,
+        depth: depth_p,
+        top_width: top_width_p,
+        side_slope: side_slope_p,
+        bottom_width: bottom_width_p,
+        hydraulic_radius: hyd_radius_p,
+        velocity_unclamped: velocity_un_p,
+        velocity_clamped: velocity_cl_p,
+        celerity: celerity_p,
+        k_muskingum: k_muskingum_p,
+        denom: denom_p,
+        c1: c1_prim,
+        c2: c2_p,
+        c3: c3_p,
+        c4: c4_p,
+        a_values: a_values_prim,
+        b_rhs: b_rhs_prim,
+        i_t: i_t_prim,
+        x_sol: x_sol_prim,
+        ratio: ratio_p,
+        denominator: denominator_p,
+        q_eps: q_eps_p,
+        side_slope_raw: side_slope_raw_p,
+        bw_raw: bw_raw_p,
+        bottom_width_lb,
+        depth_lb,
+        velocity_lb,
+        discharge_lb,
+        dt,
+        use_cuda,
+    };
+
+    let state = TimestepLeakanceState::<I> { base, leak };
+
+    let result_prim = match TimestepLeakanceOp
+        .prepare::<NoCheckpointing>([
+            n_aut.node.clone(),
+            qsp_aut.node.clone(),
+            psp_aut.node.clone(),
+            qt_aut.node.clone(),
+            qpt_aut.node.clone(),
+            kd_aut.node.clone(),
+            dgw_aut.node.clone(),
+            fac_aut.node.clone(),
         ])
         .compute_bound()
         .stateful()
