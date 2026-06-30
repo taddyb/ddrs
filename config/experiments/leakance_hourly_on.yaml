@@ -1,0 +1,104 @@
+# leakance_hourly_on.yaml — 2×2 experiment cell: HOURLY-ON
+#
+# Role in the 2×2 (forcing × leakance):
+#   - forcing: hourly precip-driven disaggregation (same as the 2026-06-23 precip+L1 control)
+#   - leakance: ON  (K_D / d_gw / leakance_factor added to KAN head + routing)
+#
+# This cell answers whether the sub-daily forcing signal makes the GW–SW water-loss
+# term identifiable. Paired against leakance_hourly_off (=the 2026-06-23T02-49-12Z run)
+# for the subset NSE/KGE delta.
+#
+# Spec: docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md
+# Plan task 12: docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md
+#
+# Derived verbatim from:
+#   .ddrs/runs/2026-06-23T02-49-12Z-conus-hourly-train-and-test/config.yaml
+# Additions ONLY: leakance parameter keys + use_leakance: true.
+# Seed kept at 42 for paired mini-batch draws vs the OFF control.
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+seed: 42
+np_seed: 42
+
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  # Hourly AORC precip — required by the precip-conditioned disaggregation head below.
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+
+experiment:
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 5
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    3: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+    - K_D
+    - d_gw
+    - leakance_factor
+  # Precip-conditioned mass-preserving daily->hourly disaggregation head.
+  disaggregation:
+    hidden_size: 16
+    use_attributes: true
+    use_precip: true
+
+params:
+  use_leakance: true
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+    K_D: [1.0e-8, 1.0e-6]
+    d_gw: [-2.0, 2.0]
+    leakance_factor: [0.0, 1.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+    - K_D
+  sparse_solver: cuda
+  use_cuda_graphs: false
+
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15
+  rho: null
