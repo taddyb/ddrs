@@ -322,7 +322,7 @@ gradient-exact against finite differences.
 2. Add `K_D`, `d_gw`, `leakance_factor` to `kan_head.learnable_parameters`
    so the KAN head emits them.
 3. Add matching ranges to `params.parameter_ranges`:
-   - `K_D`: `[1e-8, 1e-6]` (log-space; hydraulic conductivity, m/s)
+   - `K_D`: `[1e-8, 1e-6]` (log-space; hydraulic exchange rate, 1/s)
    - `d_gw`: `[-2, 2]` (groundwater depth offset, m)
    - `leakance_factor`: `[0, 1]` (dimensionless scale)
 
@@ -336,8 +336,10 @@ cargo run --release --example compare_ddr_sandbox  # must still report ABSOLUTE 
 ```
 
 **Status.** Experimental feasibility testbed. The 2×2 experiment (leakance ×
-loss function) is pending; results will determine whether this term earns a
-permanent place in the routing core. Spec:
+forcing — hourly precip-disaggregation vs flat daily) is pending; its
+losing-stream-subset go/no-go (NSE-or-KGE gain **and** learned `|zeta| > 0.01`
+m³/s) determines whether this term earns a permanent place in the routing core.
+Spec:
 `docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`.
 Plan: `docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md`.
 
