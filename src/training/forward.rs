@@ -130,7 +130,14 @@ pub fn forward_with_frozen_params<I: Backend>(
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
         q_prime_autodiff,
-        SpatialParameters { n: n_t, q_spatial: q_t, p_spatial: Some(p_t) },
+        SpatialParameters {
+            n: n_t,
+            q_spatial: q_t,
+            p_spatial: Some(p_t),
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
+        },
         carry_state,
     );
 
@@ -204,7 +211,14 @@ pub fn forward<I: Backend>(
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
         q_prime_hourly,
-        SpatialParameters { n: n_param, q_spatial: q_param, p_spatial: p_param },
+        SpatialParameters {
+            n: n_param,
+            q_spatial: q_param,
+            p_spatial: p_param,
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
+        },
         carry_state,
     );
 
@@ -276,7 +290,14 @@ pub fn forward_eval<I: Backend>(
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage: x_ad },
         q_prime_ad,
-        SpatialParameters { n: n_ad, q_spatial: q_ad, p_spatial: p_ad },
+        SpatialParameters {
+            n: n_ad,
+            q_spatial: q_ad,
+            p_spatial: p_ad,
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
+        },
         carry_state,
     );
     let runoff_ad = engine.forward();

@@ -7,11 +7,12 @@
 
 mod common;
 
+use burn::tensor::Tensor;
 use common::{
     mock_config, mock_routing_inputs, mock_spatial_parameters, mock_streamflow, InnerBackend,
     TestDevice,
 };
-use ddrs::routing::MuskingumCunge;
+use ddrs::routing::{MuskingumCunge, SpatialParameters};
 
 /// Committed expected hydrograph for the 5-reach × 24-step linear chain,
 /// captured from the unmodified `forward()` (row-major `[n, t]`). This is the
@@ -38,6 +39,63 @@ const EXPECTED: [f32; 120] = [
     19.157803, 23.740326, 28.819405, 32.771797, 34.323105, 33.04499,
     29.419636, 24.590364, 19.96302, 16.790401, 15.8782215, 17.484375,
 ];
+
+/// Build losing-config leakance tensors for `n` reaches on `device`.
+/// Normalized values chosen so denormalization produces a strong losing regime:
+///   K_D   = 1.0 → top of log range → ~1e-6 m/s/m
+///   d_gw  = 0.0 → bottom of linear range [-2, 2] → -2.0 m  (always below any depth)
+///   factor = 1.0 → top of linear range [0, 1]  → 1.0 (full gate)
+fn losing_config_params(
+    n: usize,
+    device: &TestDevice,
+) -> SpatialParameters<InnerBackend> {
+    use burn::backend::Autodiff;
+    SpatialParameters {
+        n: Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 0.5,
+        q_spatial: Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 0.5,
+        p_spatial: None,
+        k_d: Some(Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 1.0),
+        d_gw: Some(Tensor::<Autodiff<InnerBackend>, 1>::zeros([n], device)),
+        leakance_factor: Some(Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 1.0),
+    }
+}
+
+#[test]
+fn leakance_removes_water_on_losing_config() {
+    let device = TestDevice::default();
+    let n = 5usize;
+    let t = 24usize;
+
+    // Run 1: no leakance.
+    let cfg = mock_config();
+    let mut mc_no_leak = MuskingumCunge::<InnerBackend>::new(cfg.clone(), device.clone());
+    mc_no_leak.setup_inputs(
+        mock_routing_inputs(n, &device),
+        mock_streamflow(t, n, &device),
+        mock_spatial_parameters(n, &device),
+        false,
+    );
+    let out_no_leak = mc_no_leak.forward();
+    let sum_no_leak: f32 = out_no_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
+
+    // Run 2: losing-config leakance (K_D high, d_gw at floor, factor=1).
+    let mut mc_leak = MuskingumCunge::<InnerBackend>::new(cfg.clone(), device.clone());
+    mc_leak.setup_inputs(
+        mock_routing_inputs(n, &device),
+        mock_streamflow(t, n, &device),
+        losing_config_params(n, &device),
+        false,
+    );
+    let out_leak = mc_leak.forward();
+    let sum_leak: f32 = out_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
+
+    assert!(sum_leak.is_finite(), "with-leakance output is not finite");
+    assert!(sum_no_leak.is_finite(), "no-leakance output is not finite");
+    assert!(
+        sum_leak < sum_no_leak,
+        "expected leakance to remove water (sum_leak={sum_leak} < sum_no_leak={sum_no_leak})"
+    );
+}
 
 #[test]
 fn leakance_none_matches_baseline_chain() {

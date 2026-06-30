@@ -177,6 +177,9 @@ fn kan_head_to_muskingum_cunge_gradient_flow() {
         n: params_map["n"].clone(),
         q_spatial: params_map["q_spatial"].clone(),
         p_spatial: Some(params_map["p_spatial"].clone()),
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     };
 
     let mut mc = MuskingumCunge::<InnerBackend>::new(common::mock_config(), device.clone());

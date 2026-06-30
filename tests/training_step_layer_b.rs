@@ -319,6 +319,9 @@ fn layer_b_step2_hotstart_matches_ddr() {
             n: n_t,
             q_spatial: q_t,
             p_spatial: Some(p_t),
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
         },
         false, // carry_state = false
     );
@@ -443,6 +446,9 @@ fn layer_b_step3_mc_forward_matches_ddr() {
             n: n_t,
             q_spatial: q_t,
             p_spatial: Some(p_t),
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
         },
         false, // carry_state = false
     );

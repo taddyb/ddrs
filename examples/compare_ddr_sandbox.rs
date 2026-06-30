@@ -81,6 +81,9 @@ where
         n: Tensor::ones([N_REACHES], device) * 0.5,
         q_spatial: Tensor::ones([N_REACHES], device) * 0.5,
         p_spatial: None,
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     };
 
     let mut mc = MuskingumCunge::<Inner>::new(inputs.config.clone(), device.clone());

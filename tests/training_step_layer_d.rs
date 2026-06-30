@@ -265,6 +265,9 @@ fn full_forward(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
         },
         false,
     );
