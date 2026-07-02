@@ -109,10 +109,20 @@ Per spec the GO gate is three-fold:
      manifest's 0.7145 / 0.7150 — CUDA scatter-add nondeterminism + f16
      checkpoint noise)
 
-**Verdict: GO (marginal) — 3 of 3 criteria met.** The magnitude bar passes at
-10.4% vs the 10% proxy threshold; treat it as a pass-with-asterisk until the
-binding `K_D` ceiling is lifted (§3 — a clipped K_D suppresses |zeta|, so the
-true fraction is plausibly higher).
+   **daily-ON zeta, for contrast:** median 8.1e-4, |zeta| > 0.01 on **14.2%**,
+   net-losing 56.8%. Under daily forcing leakance is *more* active yet
+   *degrades* skill (§2) — magnitude alone is not identifiability. Consistent
+   with the fudge-factor reading: flat forcing gives `(depth − d_gw)` a
+   mis-specified signal, so the exchange trains larger but points the wrong
+   way, while the sub-daily depth range under hourly forcing yields a smaller,
+   *skill-improving* correction.
+
+**Verdict: GO — 3 of 3 criteria met**, confirmed by the analysis script
+(`scripts/leakance_subset_analysis.py` prints `VERDICT: GO` with the four
+valid arms + both zeta exports). Marginal: the magnitude bar passes at 10.4%
+vs the 10% proxy threshold; treat it as a pass-with-asterisk until the binding
+`K_D` ceiling is lifted (§3 — a clipped K_D suppresses |zeta|, so the true
+fraction is plausibly higher).
 
 ## 5. Remaining work
 
