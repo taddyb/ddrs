@@ -222,27 +222,7 @@ impl StreamflowStore {
                 time_epoch + chrono::Duration::days(time_i64[0])
             }
             Frequency::Hourly => {
-                // Contract: hourly axes start at hour 0 of a day and are
-                // contiguous (docs/nh-qprime-store-contract.md). The full
-                // scan is cheap (~2.8 MB of i64 for 40 years of hours).
-                if time_i64[0] % 24 != 0 {
-                    return Err(DataError::Malformed {
-                        path: path.clone(),
-                        message: format!(
-                            "hourly store must start at hour 0 of a day; \
-                             first time value is {}",
-                            time_i64[0]
-                        ),
-                    });
-                }
-                if let Some(i) =
-                    (1..time_i64.len()).find(|&i| time_i64[i] - time_i64[i - 1] != 1)
-                {
-                    return Err(DataError::Malformed {
-                        path: path.clone(),
-                        message: format!("hourly time axis has a gap at index {i}"),
-                    });
-                }
+                validate_hourly_axis(&time_i64, &path)?;
                 time_epoch + chrono::Duration::days(time_i64[0] / 24)
             }
         };
@@ -262,6 +242,29 @@ impl StreamflowStore {
 
         Ok(Self { path, index, time_start, n_time, resolution, storage, qr })
     }
+}
+
+/// Contract checks for an hourly time axis (docs/nh-qprime-store-contract.md):
+/// must start at hour 0 of a calendar day and step by exactly 1 hour.
+/// The full scan is cheap (~2.8 MB of i64 for 40 years of hours).
+fn validate_hourly_axis(time_i64: &[i64], path: &Path) -> Result<()> {
+    if time_i64[0] % 24 != 0 {
+        return Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!(
+                "hourly store must start at hour 0 of a day; \
+                 first time value is {}",
+                time_i64[0]
+            ),
+        });
+    }
+    if let Some(i) = (1..time_i64.len()).find(|&i| time_i64[i] - time_i64[i - 1] != 1) {
+        return Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!("hourly time axis has a gap at index {i}"),
+        });
+    }
+    Ok(())
 }
 
 /// Parse the CF `units` attribute of a time coordinate and return the epoch
@@ -351,12 +354,14 @@ pub(crate) fn hourly_to_daily_mean(hourly: &Array2<f32>) -> Array2<f32> {
     let n_days = n_hours / 24;
     let mut daily = Array2::<f32>::zeros((n_days, n_div));
     for d in 0..n_days {
-        for j in 0..n_div {
-            let mut acc = 0.0f32;
-            for h in 0..24 {
-                acc += hourly[(d * 24 + h, j)];
+        for h in 0..24 {
+            let row = hourly.row(d * 24 + h);
+            for j in 0..n_div {
+                daily[(d, j)] += row[j];
             }
-            daily[(d, j)] = acc / 24.0;
+        }
+        for j in 0..n_div {
+            daily[(d, j)] /= 24.0;
         }
     }
     daily
@@ -477,8 +482,26 @@ impl StreamflowStore {
         match self.resolution {
             Frequency::Daily => self.read_slab(start, n_days, comids),
             Frequency::Hourly => {
-                let hourly = self.read_slab(start, n_days * 24, comids)?;
-                Ok(hourly_to_daily_mean(&hourly))
+                // Chunk the hourly read in day blocks to bound the transient
+                // allocation: the summed-Q' baseline asks for ~15-year windows,
+                // and a single (n_days*24, N) read would be multi-GB at CONUS
+                // scale (plus the raw divide-span buffer inside read_slab).
+                const CHUNK_DAYS: usize = 32;
+                let n_out = comids.len();
+                let mut daily = Array2::<f32>::zeros((n_days, n_out));
+                let mut day = 0usize;
+                while day < n_days {
+                    let chunk = CHUNK_DAYS.min(n_days - day);
+                    let hourly = self.read_slab(start + day * 24, chunk * 24, comids)?;
+                    let mean = hourly_to_daily_mean(&hourly);
+                    for local_d in 0..chunk {
+                        for j in 0..n_out {
+                            daily[(day + local_d, j)] = mean[(local_d, j)];
+                        }
+                    }
+                    day += chunk;
+                }
+                Ok(daily)
             }
         }
     }
@@ -766,6 +789,17 @@ fn read_gage_id_coord(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn hourly_axis_validation_rejects_misalignment_and_gaps() {
+        let p = Path::new("/t");
+        assert!(validate_hourly_axis(&[0, 1, 2, 3], p).is_ok());
+        assert!(validate_hourly_axis(&[24, 25, 26], p).is_ok());
+        let err = validate_hourly_axis(&[5, 6, 7], p).unwrap_err();
+        assert!(err.to_string().contains("hour 0"), "got: {err}");
+        let err = validate_hourly_axis(&[0, 1, 3], p).unwrap_err();
+        assert!(err.to_string().contains("gap at index 2"), "got: {err}");
+    }
 
     #[test]
     fn daily_to_hourly_trim_repeats_and_truncates() {

@@ -32,6 +32,7 @@ fn hourly_store_opens_with_hourly_resolution() {
     assert_eq!(s.time_start, d(1981, 1, 1));
     assert_eq!(s.n_time, 240);
     assert_eq!(s.index.len(), 4);
+    assert_eq!(s.qr_units().as_deref(), Some("m^3/s"));
 }
 
 #[test]
