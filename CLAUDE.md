@@ -124,7 +124,7 @@ ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 
 **Data-source groups** (`src/cli/sources.rs`): named "save files" for the
 `data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
-`conus`, `conus-hourly`, and `global` ship in-repo). Switching datasets never
+`conus`, `conus-hourly`, `global`, `daily-lstm`, and `hourly-lstm` ship in-repo). Switching datasets never
 requires hand-editing `ddrs.yaml`:
 
 `conus-hourly` = `conus` + `aorc_precip:
@@ -150,6 +150,24 @@ config parses before committing, then re-locks `sources.lock` (when `.ddrs`
 exists) so `ddrs plan` sees no drift. Starting a global train from a CONUS
 workspace is therefore: `ddrs sources use global && ddrs plan --workflow
 train && ddrs run --workflow train`.
+
+**Importing a Q' store** (`src/cli/import.rs`): any store meeting the DDR Q'
+contract (`docs/nh-qprime-store-contract.md` — `Qr(divide_id, time)` f32
+m³/s, CF `days since`/`hours since` axis) registers as a source group in one
+command:
+
+```bash
+ddrs import <store> --dry-run          # validate + coverage report only
+ddrs import <store> --name <group>     # validate + register config/sources/<group>.yaml
+```
+
+The icechunk reader sniffs daily vs **hourly-native** resolution from the CF
+time units (`StreamflowStore.resolution`); hourly stores are sliced natively
+(no repeat-24, no disagg — `kan_head.disaggregation` + hourly source is a
+config error). `daily-lstm` / `hourly-lstm` groups (NH CudaLSTM / MTS-LSTM
+forwards) ship in-repo; the hourly store starts **1981-01-01**, so experiment
+windows must not reach into 1980. Dataset open logs
+`streamflow resolution: Daily|Hourly` — check it when validating runs.
 
 **Bootstrap source prompt** (`src/cli/plan_bootstrap.rs`): when `ddrs plan`
 materializes a missing `ddrs.yaml` and a previous successful run exists, it
