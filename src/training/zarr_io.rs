@@ -312,6 +312,9 @@ mod tests {
             },
             zeta_abs_mean: None,
             zeta_net_mean: None,
+            zeta_depth_mean: None,
+            zeta_area_z_mean: None,
+            zeta_q_mean: None,
             zeta_comids: None,
         };
 

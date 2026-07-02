@@ -502,17 +502,23 @@ where
 /// variable from `<run_dir>/kan_parameters.nc`).
 ///
 /// `zeta` = eval-window mean |zeta| per reach; `zeta_net` = mean signed zeta
-/// (positive = losing reach). Both live on the `COMID_eval` dimension — the
+/// (positive = losing reach); `depth_mean`, `area_z_mean`, and `q_mean` are
+/// eval-window means of routed flow depth (m), plan-view wetted area (m²),
+/// and routed discharge (m³/s). All live on the `COMID_eval` dimension — the
 /// EVAL network (gauge-subgraph union), NOT full CONUS — so they can coexist
 /// with `dump_parameters`' full-CONUS `COMID` variables in the same file:
 /// when `path` exists (e.g. a prior dump into the run dir), the zeta
 /// variables are APPENDED, preserving everything already there; existing
 /// zeta variables of matching length are overwritten in place.
+#[allow(clippy::too_many_arguments)]
 pub fn write_zeta_netcdf(
     path: &Path,
     comids: &[i64],
     zeta_abs_mean: &[f32],
     zeta_net_mean: &[f32],
+    depth_mean: &[f32],
+    area_z_mean: &[f32],
+    q_mean: &[f32],
     model_label: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut file = if path.exists() {
@@ -569,6 +575,33 @@ pub fn write_zeta_netcdf(
         let mut v = file.add_variable::<f32>("zeta_net", &["COMID_eval"])?;
         v.put_values(zeta_net_mean, ..)?;
         v.put_attribute("long_name", "eval-window mean signed zeta (positive = losing reach)")?;
+        v.put_attribute("units", "m^3/s")?;
+    }
+
+    if let Some(mut v) = file.variable_mut("depth_mean") {
+        v.put_values(depth_mean, ..)?;
+    } else {
+        let mut v = file.add_variable::<f32>("depth_mean", &["COMID_eval"])?;
+        v.put_values(depth_mean, ..)?;
+        v.put_attribute("long_name", "eval-window mean routed flow depth")?;
+        v.put_attribute("units", "m")?;
+    }
+
+    if let Some(mut v) = file.variable_mut("area_z_mean") {
+        v.put_values(area_z_mean, ..)?;
+    } else {
+        let mut v = file.add_variable::<f32>("area_z_mean", &["COMID_eval"])?;
+        v.put_values(area_z_mean, ..)?;
+        v.put_attribute("long_name", "eval-window mean plan-view wetted area (leakance area_z)")?;
+        v.put_attribute("units", "m^2")?;
+    }
+
+    if let Some(mut v) = file.variable_mut("q_mean") {
+        v.put_values(q_mean, ..)?;
+    } else {
+        let mut v = file.add_variable::<f32>("q_mean", &["COMID_eval"])?;
+        v.put_values(q_mean, ..)?;
+        v.put_attribute("long_name", "eval-window mean routed discharge")?;
         v.put_attribute("units", "m^3/s")?;
     }
 
