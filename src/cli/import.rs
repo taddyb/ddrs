@@ -81,13 +81,13 @@ pub fn run_import(
 
             // ---- 2. Contract checks ----
             match s.qr_units() {
-                Some(u) if u == "m^3/s" => println!("Qr units    m^3/s"),
+                Some(u) if u == "m^3/s" => println!("units       m^3/s"),
                 Some(u) => println!(
-                    "Qr units    WARNING: {u:?} (contract expects \"m^3/s\"; \
+                    "units       WARNING: {u:?} (contract expects \"m^3/s\"; \
                      the solver will treat values as m³/s regardless)"
                 ),
                 None => println!(
-                    "Qr units    WARNING: no units attribute (contract expects \
+                    "units       WARNING: no units attribute (contract expects \
                      \"m^3/s\")"
                 ),
             }
@@ -113,7 +113,7 @@ pub fn run_import(
     }
     let name = input.name.expect("checked at entry");
     let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
-        path: ".".into(),
+        path: std::path::PathBuf::from("ddrs.yaml"),
         source: "no ddrs.yaml found — registration copies its data_sources \
                  block. Run inside a ddrs workspace or pass --config."
             .into(),
@@ -128,7 +128,7 @@ pub fn run_import(
 }
 
 /// Read a tiny sample (first 5 divides × up to 3 days) and require finite,
-/// positive values — catches unit disasters and all-NaN stores.
+/// positive values — catches unit disasters and all-NaN or all-zero stores.
 fn sample_read(s: &crate::data::store::StreamflowStore) -> Result<(), CliError> {
     let comids: Vec<_> = s.index.ids().iter().take(5).copied().collect();
     let n_days_native = match s.resolution {

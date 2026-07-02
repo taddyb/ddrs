@@ -106,6 +106,7 @@ pub(crate) fn extract_block(cfg_text: &str, cfg_path: &Path) -> Result<String, C
 
 /// Save the current config's `data_sources:` block as group `name`.
 pub fn run_save(cfg_path: &Path, name: &str, force: bool) -> Result<PathBuf, CliError> {
+    validate_name(name)?;
     let cfg_text = fs::read_to_string(cfg_path)?;
     let block = extract_block(&cfg_text, cfg_path)?;
     save_block(cfg_path, name, &block, force)
