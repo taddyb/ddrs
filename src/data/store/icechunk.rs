@@ -231,12 +231,19 @@ impl StreamflowStore {
     }
 }
 
-/// Parse `units` CF attribute of the form `"days since YYYY-MM-DD"` and
-/// return the epoch as a `NaiveDate`.
-pub(crate) fn parse_cf_epoch(
+/// Parse the CF `units` attribute of a time coordinate and return the epoch
+/// plus the native axis resolution. Supported forms (see
+/// docs/nh-qprime-store-contract.md):
+///   "days since YYYY-MM-DD[ HH:MM:SS]"  → Daily
+///   "hours since YYYY-MM-DD[ HH:MM:SS]" → Hourly
+/// Anything else is a hard error naming the store and the units string — a
+/// mis-scaled time axis must never be silently accepted.
+pub(crate) fn parse_cf_units(
     attrs: &serde_json::Map<String, serde_json::Value>,
     path: &Path,
-) -> Result<NaiveDate> {
+) -> Result<(NaiveDate, crate::data::dates::Frequency)> {
+    use crate::data::dates::Frequency;
+
     let units = attrs
         .get("units")
         .and_then(|v| v.as_str())
@@ -244,21 +251,42 @@ pub(crate) fn parse_cf_epoch(
             path: path.to_path_buf(),
             message: "time array missing 'units' attribute".into(),
         })?;
-    // Expected: "days since YYYY-MM-DD" (CF convention).
-    let date_str = units
-        .strip_prefix("days since ")
-        .ok_or_else(|| DataError::Malformed {
+    let (date_str, resolution) = if let Some(rest) = units.strip_prefix("days since ") {
+        (rest, Frequency::Daily)
+    } else if let Some(rest) = units.strip_prefix("hours since ") {
+        (rest, Frequency::Hourly)
+    } else {
+        return Err(DataError::Malformed {
             path: path.to_path_buf(),
-            message: format!("unexpected time units format: {units:?}"),
-        })?;
+            message: format!(
+                "unsupported time units {units:?}: expected \"days since …\" \
+                 or \"hours since …\""
+            ),
+        });
+    };
     // The date portion may be followed by a time-of-day component, e.g.
-    // "1980-01-01 00:00:00" (USGS store) vs "1980-01-01" (streamflow store).
-    // Take only the first token.
+    // "1981-01-01 00:00:00" — take only the first token.
     let date_part = date_str.split_whitespace().next().unwrap_or("");
-    NaiveDate::parse_from_str(date_part, "%Y-%m-%d").map_err(|e| DataError::Malformed {
-        path: path.to_path_buf(),
-        message: format!("cannot parse epoch from units {units:?}: {e}"),
-    })
+    let epoch =
+        NaiveDate::parse_from_str(date_part, "%Y-%m-%d").map_err(|e| DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!("cannot parse epoch from units {units:?}: {e}"),
+        })?;
+    Ok((epoch, resolution))
+}
+
+/// Daily-only wrapper for stores whose axis MUST be daily (USGS observations).
+pub(crate) fn parse_cf_epoch(
+    attrs: &serde_json::Map<String, serde_json::Value>,
+    path: &Path,
+) -> Result<NaiveDate> {
+    match parse_cf_units(attrs, path)? {
+        (epoch, crate::data::dates::Frequency::Daily) => Ok(epoch),
+        (_, crate::data::dates::Frequency::Hourly) => Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: "expected a daily time axis (\"days since …\"), got hourly".into(),
+        }),
+    }
 }
 
 /// Repeat a `(rho_days, N)` daily slab to `(n_hourly, N)` by replicating
@@ -749,5 +777,57 @@ mod tests {
             "first STAID should be 01011000 (per design-time probe), got {}",
             first
         );
+    }
+
+    fn attrs_with_units(u: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("units".into(), serde_json::Value::String(u.into()));
+        m
+    }
+
+    #[test]
+    fn parse_cf_units_daily() {
+        let (epoch, res) =
+            parse_cf_units(&attrs_with_units("days since 1980-01-01"), Path::new("/t")).unwrap();
+        assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
+        assert_eq!(res, crate::data::dates::Frequency::Daily);
+    }
+
+    #[test]
+    fn parse_cf_units_daily_with_time_of_day() {
+        // daily_lstm store encodes "days since 1981-01-01 00:00:00".
+        let (epoch, res) =
+            parse_cf_units(&attrs_with_units("days since 1981-01-01 00:00:00"), Path::new("/t"))
+                .unwrap();
+        assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1981, 1, 1).unwrap());
+        assert_eq!(res, crate::data::dates::Frequency::Daily);
+    }
+
+    #[test]
+    fn parse_cf_units_hourly() {
+        // hourly_lstm store encodes "hours since 1981-01-01 00:00:00".
+        let (epoch, res) =
+            parse_cf_units(&attrs_with_units("hours since 1981-01-01 00:00:00"), Path::new("/t"))
+                .unwrap();
+        assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1981, 1, 1).unwrap());
+        assert_eq!(res, crate::data::dates::Frequency::Hourly);
+    }
+
+    #[test]
+    fn parse_cf_units_rejects_other_resolutions() {
+        let err = parse_cf_units(&attrs_with_units("minutes since 1981-01-01"), Path::new("/t"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("minutes since"), "error must name the units: {msg}");
+        assert!(msg.contains("days since"), "error must name what IS supported: {msg}");
+    }
+
+    #[test]
+    fn parse_cf_epoch_rejects_hourly_axis() {
+        // The daily-only wrapper (used by the USGS observations store) must
+        // refuse an hourly axis rather than silently mis-scaling.
+        let err = parse_cf_epoch(&attrs_with_units("hours since 1980-01-01"), Path::new("/t"))
+            .unwrap_err();
+        assert!(err.to_string().contains("daily"), "got: {err}");
     }
 }
