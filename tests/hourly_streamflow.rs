@@ -136,6 +136,14 @@ fn hourly_out_of_range_windows_hard_error() {
 }
 
 #[test]
+fn streamflow_source_reports_resolution() {
+    let daily = StreamflowSource::open(fixture("qr_daily.ic")).expect("open daily");
+    assert_eq!(daily.resolution(), Frequency::Daily);
+    let hourly = StreamflowSource::open(fixture("qr_hourly.ic")).expect("open hourly");
+    assert_eq!(hourly.resolution(), Frequency::Hourly);
+}
+
+#[test]
 fn daily_fixture_read_window_keeps_repeat24_semantics() {
     // Pins the daily path: values repeat 24x per day with the trailing-day trim.
     let s = StreamflowStore::open(fixture("qr_daily.ic")).expect("open");

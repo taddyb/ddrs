@@ -109,6 +109,15 @@ impl StreamflowSource {
         }
     }
 
+    /// Native time-axis resolution of the underlying store. The global
+    /// zarr v2 layout is daily by construction.
+    pub fn resolution(&self) -> crate::data::dates::Frequency {
+        match self {
+            Self::Icechunk(s) => s.resolution,
+            Self::GlobalZarr(_) => crate::data::dates::Frequency::Daily,
+        }
+    }
+
     pub fn read_window_daily(
         &self,
         window_start: chrono::NaiveDate,
