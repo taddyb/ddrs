@@ -8,6 +8,10 @@
 //!      `q_no_leak[0] − q_leak[0] == zeta[0]` on a single routed timestep.
 //!   3. zeta is linear in `leakance_factor` on a single timestep (depth at
 //!      t=1 depends only on the hotstart Q0, which is leakance-independent).
+//!   4. The accumulated `q` sum equals the summed routed discharge columns
+//!      (`q_next` is the same tensor that becomes the output column).
+//!   5. `depth`/`area_z` are the raw geometry primitives: invariant to
+//!      `leakance_factor`, and `zeta/(area_z·(depth − d_gw))` is uniform.
 
 mod common;
 

@@ -504,7 +504,9 @@ where
 /// `zeta` = eval-window mean |zeta| per reach; `zeta_net` = mean signed zeta
 /// (positive = losing reach); `depth_mean`, `area_z_mean`, and `q_mean` are
 /// eval-window means of routed flow depth (m), plan-view wetted area (m²),
-/// and routed discharge (m³/s). All live on the `COMID_eval` dimension — the
+/// and routed discharge (m³/s); note depth/area_z are start-of-step (from
+/// `Q_t`) while q is end-of-step (`Q_{t+1}`), offset by one timestep.
+/// All live on the `COMID_eval` dimension — the
 /// EVAL network (gauge-subgraph union), NOT full CONUS — so they can coexist
 /// with `dump_parameters`' full-CONUS `COMID` variables in the same file:
 /// when `path` exists (e.g. a prior dump into the run dir), the zeta
