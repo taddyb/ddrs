@@ -496,14 +496,18 @@ where
     Ok(n_reaches)
 }
 
-/// Write the eval-time per-reach zeta diagnostic NetCDF — the `|zeta| > 0.01
-/// m³/s` GO/NO-GO magnitude bar for the leakance experiment
+/// Write the eval-time per-reach zeta diagnostic — the `|zeta| > 0.01 m³/s`
+/// GO/NO-GO magnitude bar for the leakance experiment
 /// (`scripts/leakance_subset_analysis.py::maybe_load_zeta` reads the `zeta`
 /// variable from `<run_dir>/kan_parameters.nc`).
 ///
 /// `zeta` = eval-window mean |zeta| per reach; `zeta_net` = mean signed zeta
-/// (positive = losing reach). COMIDs are the EVAL network (gauge-subgraph
-/// union), not full CONUS — only these reaches were routed.
+/// (positive = losing reach). Both live on the `COMID_eval` dimension — the
+/// EVAL network (gauge-subgraph union), NOT full CONUS — so they can coexist
+/// with `dump_parameters`' full-CONUS `COMID` variables in the same file:
+/// when `path` exists (e.g. a prior dump into the run dir), the zeta
+/// variables are APPENDED, preserving everything already there; existing
+/// zeta variables of matching length are overwritten in place.
 pub fn write_zeta_netcdf(
     path: &Path,
     comids: &[i64],
@@ -511,32 +515,62 @@ pub fn write_zeta_netcdf(
     zeta_net_mean: &[f32],
     model_label: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut file = netcdf::create(path)?;
+    let mut file = if path.exists() {
+        netcdf::append(path)?
+    } else {
+        netcdf::create(path)?
+    };
 
-    file.add_attribute("checkpoint", model_label)?;
-    file.add_attribute("ddrs_version", env!("CARGO_PKG_VERSION"))?;
-    file.add_attribute("n_reaches", comids.len() as i64)?;
+    file.add_attribute("zeta_checkpoint", model_label)?;
+    file.add_attribute("zeta_ddrs_version", env!("CARGO_PKG_VERSION"))?;
     file.add_attribute(
-        "note",
-        "eval-time leakance zeta diagnostic; COMID dimension is the eval \
+        "zeta_note",
+        "eval-time leakance zeta diagnostic; COMID_eval is the eval \
          (gauge-subgraph union) network, not full CONUS",
     )?;
 
-    file.add_dimension("COMID", comids.len())?;
+    match file.dimension("COMID_eval") {
+        Some(d) if d.len() != comids.len() => {
+            return Err(format!(
+                "{}: existing COMID_eval dimension has {} reaches but this eval \
+                 routed {}; delete the file (or the stale zeta vars) and re-run",
+                path.display(),
+                d.len(),
+                comids.len()
+            )
+            .into());
+        }
+        Some(_) => {}
+        None => {
+            file.add_dimension("COMID_eval", comids.len())?;
+        }
+    }
 
-    let mut v = file.add_variable::<i64>("COMID", &["COMID"])?;
-    v.put_values(comids, ..)?;
-    v.put_attribute("long_name", "MERIT reach identifier (eval network)")?;
+    if let Some(mut v) = file.variable_mut("COMID_eval") {
+        v.put_values(comids, ..)?;
+    } else {
+        let mut v = file.add_variable::<i64>("COMID_eval", &["COMID_eval"])?;
+        v.put_values(comids, ..)?;
+        v.put_attribute("long_name", "MERIT reach identifier (eval network)")?;
+    }
 
-    let mut v = file.add_variable::<f32>("zeta", &["COMID"])?;
-    v.put_values(zeta_abs_mean, ..)?;
-    v.put_attribute("long_name", "eval-window mean |zeta| (leakance GW-SW exchange magnitude)")?;
-    v.put_attribute("units", "m^3/s")?;
+    if let Some(mut v) = file.variable_mut("zeta") {
+        v.put_values(zeta_abs_mean, ..)?;
+    } else {
+        let mut v = file.add_variable::<f32>("zeta", &["COMID_eval"])?;
+        v.put_values(zeta_abs_mean, ..)?;
+        v.put_attribute("long_name", "eval-window mean |zeta| (leakance GW-SW exchange magnitude)")?;
+        v.put_attribute("units", "m^3/s")?;
+    }
 
-    let mut v = file.add_variable::<f32>("zeta_net", &["COMID"])?;
-    v.put_values(zeta_net_mean, ..)?;
-    v.put_attribute("long_name", "eval-window mean signed zeta (positive = losing reach)")?;
-    v.put_attribute("units", "m^3/s")?;
+    if let Some(mut v) = file.variable_mut("zeta_net") {
+        v.put_values(zeta_net_mean, ..)?;
+    } else {
+        let mut v = file.add_variable::<f32>("zeta_net", &["COMID_eval"])?;
+        v.put_values(zeta_net_mean, ..)?;
+        v.put_attribute("long_name", "eval-window mean signed zeta (positive = losing reach)")?;
+        v.put_attribute("units", "m^3/s")?;
+    }
 
     Ok(())
 }

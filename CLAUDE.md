@@ -83,6 +83,30 @@ Install once:
 cargo install --path .   # puts `ddrs` in ~/.cargo/bin/
 ```
 
+> **⚠️ STALE-BINARY TRAP — re-install after every `src/` change.**
+> `ddrs` on your PATH is the binary in `~/.cargo/bin/ddrs`, **not** the working
+> tree. `cargo build` / `cargo run` do **not** update it. If you edit `src/`
+> and then type `ddrs run …`, you silently run the *old* binary. The manifest's
+> `git.sha` is stamped from `.git` at runtime, **not** from the binary, so a run
+> can *look* like current code while a weeks-old binary actually executed.
+> This bit the 2026-07-01 leakance×hourly 2×2: the installed `ddrs` was from
+> **before** the disaggregation feature, so the hourly cell silently ran flat
+> repeat-24 (both cells byte-identical — a false "disagg no-op"; see
+> `docs/2026-07-01-leakance-hourly-experiment-handoff.md`).
+>
+> After touching `src/`, do ONE of:
+> ```bash
+> cargo install --path .                 # refresh ~/.cargo/bin/ddrs (canonical)
+> # or, faster if target/release is current:
+> cargo build --release --bin ddrs && cp target/release/ddrs ~/.cargo/bin/ddrs
+> # or bypass the installed copy entirely:
+> cargo run --release --bin ddrs -- run --workflow …
+> ```
+> **Quick self-check that the right binary ran:** current checkpoints are
+> **directories** (`.ddrs/runs/<id>/checkpoints/epoch_E_mb_M/head.mpk`); a stale
+> pre-checkpoint-resume binary writes **flat** files (`epoch_E_mb_M.mpk`). Flat
+> files ⇒ you ran an old `ddrs`.
+
 First-time flow `plan → run`:
 
 ```bash
@@ -100,8 +124,19 @@ ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 
 **Data-source groups** (`src/cli/sources.rs`): named "save files" for the
 `data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
-`conus` and `global` ship in-repo). Switching datasets never requires
-hand-editing `ddrs.yaml`:
+`conus`, `conus-hourly`, and `global` ship in-repo). Switching datasets never
+requires hand-editing `ddrs.yaml`:
+
+`conus-hourly` = `conus` + `aorc_precip:
+/mnt/ssd1/data/aorc/merit_unit_catchments.zarr`, the hourly AORC precip store
+that drives the precip-conditioned daily→hourly **disaggregation** head. To do
+hourly forcing you need BOTH: the `aorc_precip` source (so precip is read) AND a
+`kan_head.disaggregation:` block with `use_precip: true` (so the head consumes
+it). `ddrs sources use conus-hourly` splices in only the source; the disagg
+block lives in the experiment config. The `config/experiments/leakance_hourly_*`
+configs inline both, so they don't need a source group. Without `aorc_precip`,
+`MeritGagesDataset::open` errors when `use_precip: true` (`src/data/dataset.rs`
+:355) — a missing precip source can't silently degrade to flat-daily.
 
 ```bash
 ddrs sources list                # '*' marks the group matching ddrs.yaml
@@ -170,7 +205,8 @@ implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`
 | `.ddrs/runs/<id>/config.yaml` | `ddrs run` | **Snapshot of the config that produced this run** (the `plan_bootstrap` source) |
 | `.ddrs/runs/<id>/run.log` | `ddrs run` (`cli::tee`) | Timestamped tee of the run's stdout+stderr (fd-level, so CUDA stderr and child processes are captured) |
 | `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*.mpk` | `ddrs run` train phase | KAN checkpoints |
-| `.ddrs/runs/<id>/kan_parameters.nc` | `dump_parameters` | Per-COMID denormalised KAN outputs |
+| `.ddrs/runs/<id>/plot/kan_parameters.nc` | `ddrs run --plot` (`dump_parameters`) | Per-COMID denormalised KAN outputs (full CONUS) |
+| `.ddrs/runs/<id>/kan_parameters.nc` | `ddrs run` eval phase (leakance only), or `eval --zeta-output` | Eval-window per-reach `zeta`/`zeta_net` diagnostic (eval-network COMIDs) |
 
 Run `<id>` format: `<UTC ts>-[<group>-]<workflow>` — the `[<group>-]` segment
 is the active data-source group (`sources::active_group`), present when the
@@ -332,13 +368,50 @@ leakance backward op must pass:
 ```bash
 cargo test --test leakance_gradcheck       # analytical ≈ finite-difference
 cargo test --test leakance_off_parity      # byte-identical to no-leakance when off
+cargo test --test zeta_accum               # eval zeta diagnostic == what's subtracted from b
 cargo run --release --example compare_ddr_sandbox  # must still report ABSOLUTE MATCH
 ```
 
-**Status.** Experimental feasibility testbed. The 2×2 experiment (leakance ×
-forcing — hourly precip-disaggregation vs flat daily) is pending; its
-losing-stream-subset go/no-go (NSE-or-KGE gain **and** learned `|zeta| > 0.01`
-m³/s) determines whether this term earns a permanent place in the routing core.
+**Eval-time zeta diagnostic (the `|zeta| > 0.01 m³/s` GO/NO-GO bar).**
+`dump_parameters` exports the three *raw* leakance params, but zeta needs the
+routed per-timestep **depth** — so it can only be measured during eval. When
+leakance is active, `evaluate` accumulates per-reach `Σ|zeta|` and `Σzeta`
+across all eval timesteps (`MuskingumCunge::enable_zeta_accumulation`; the
+per-step zeta is recomputed inside `timestep_forward_leakance` from the SAME
+saved primitives the backward reads, so the reported value is exactly what was
+subtracted from `b_rhs` — `tests/zeta_accum.rs` proves this via the headwater
+identity `q_no_leak[0] − q_leak[0] == zeta[0]`). Means land in
+`<run_dir>/kan_parameters.nc` as `zeta` (mean |zeta|, m³/s) and `zeta_net`
+(signed; positive = losing reach), dimensioned by the EVAL network's COMIDs
+(gauge-subgraph union, not full CONUS) — exactly what
+`scripts/leakance_subset_analysis.py::maybe_load_zeta` reads. Writers:
+`ddrs run --workflow train-and-test` does it automatically in Phase 2; for an
+EXISTING checkpoint use the legacy eval binary (~10 min, no retrain):
+
+```bash
+cargo build --release --bin eval
+target/release/eval --config config/experiments/leakance_hourly_on.yaml \
+  --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
+  --output /tmp/eval.zarr \
+  --zeta-output .ddrs/runs/<id>/kan_parameters.nc
+```
+
+The training path never enables accumulation — zero overhead, autograd
+untouched (invariant 4 intact).
+
+**Status (2026-07-01).** The 2×2 (leakance × forcing) is DONE on valid
+binaries — see `docs/2026-07-01-leakance-hourly-findings.md`. The interaction
+came out hypothesis-consistent: on the losing-stream subset leakance helps
+under hourly forcing (ΔNSE +0.0005, ΔKGE +0.0018, 55.5% of gauges improve) and
+hurts under daily (ΔNSE −0.0017, ΔKGE −0.0009, 35.6%). Leakance is
+identifiable (K_D pinned at the `1e-6` CEILING — the inverse of DDR's
+sub-floor collapse; `leakance_factor` interior ≈0.33). The zeta export
+measured the third gate criterion: **|zeta| > 0.01 m³/s on 10.4% of the
+64,892 eval reaches** (median 6.4e-4; 53.7% net-losing) — clears the ≥10%
+proxy bar with no headroom. Verdict: **GO, marginal** — all three criteria
+met. Top follow-up: widen the `K_D` range past `1e-6` (it's binding and
+likely clips both zeta magnitude and the skill delta), then promote or
+document NO-GO.
 Spec:
 `docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`.
 Plan: `docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md`.

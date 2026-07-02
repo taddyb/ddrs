@@ -72,6 +72,7 @@ stores, drop `geospatial_fabric` and set both `conus_adjacency` and
 | `.ddrs/runs/<id>/run.log` | `ddrs run` | Timestamped tee of everything the run printed (stdout + stderr, incl. CUDA messages) |
 | `.ddrs/runs/<id>/eval/predictions.zarr` | `ddrs run --workflow eval` / `train-and-test` Phase 2 | Predictions for plotting |
 | `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*/` | `ddrs run --workflow train` / `train-and-test` Phase 1 | KAN checkpoints |
+| `.ddrs/runs/<id>/kan_parameters.nc` | `train-and-test` Phase 2 (leakance runs only) | Per-reach eval-window `zeta` diagnostic (see Leakance below) |
 
 Run ids are `<UTC timestamp>-[<group>-]<workflow>` — e.g.
 `2026-06-12T14-02-10Z-global-train-and-test`. The `<group>` segment appears
@@ -97,8 +98,10 @@ The top-level `device:` key in `ddrs.yaml` selects the CUDA device ordinal
 ### Data-source groups
 
 Named "save files" for the `data_sources:` block, stored under
-`config/sources/<name>.yaml` (tracked in git; `conus` and `global` ship
-in-repo). Switching datasets never requires hand-editing `ddrs.yaml`:
+`config/sources/<name>.yaml` (tracked in git; `conus`, `conus-hourly`, and
+`global` ship in-repo — `conus-hourly` adds the hourly AORC precip store that
+drives the daily→hourly disaggregation head). Switching datasets never
+requires hand-editing `ddrs.yaml`:
 
 ```bash
 ddrs sources list                # '*' marks the group matching ddrs.yaml
@@ -108,6 +111,24 @@ ddrs sources use  <name>         # splice group into ddrs.yaml + refresh sources
 
 Starting a global train from a CONUS workspace is just
 `ddrs sources use global && ddrs plan && ddrs run`.
+
+### Leakance (experimental)
+
+An optional groundwater–surface-water loss term
+`zeta = leakance_factor · area_z · K_D · (depth − d_gw)` subtracted from the
+routing right-hand side each timestep (positive zeta = losing stream), with
+the three parameters learned per reach by the KAN head. Off by default;
+enabling it takes `params.use_leakance: true`, the three extra
+`learnable_parameters`, and their `parameter_ranges` — see the "Leakance"
+section in `CLAUDE.md` for the exact keys, and
+`config/experiments/leakance_hourly_on.yaml` for a complete working config.
+
+On leakance runs, the eval phase also writes a per-reach zeta diagnostic to
+`.ddrs/runs/<id>/kan_parameters.nc`: `zeta` (eval-window mean |zeta|, m³/s)
+and `zeta_net` (signed mean; positive = losing reach). For an existing
+checkpoint, the standalone eval binary produces the same file via
+`--zeta-output` without retraining. Experiment findings:
+`docs/2026-07-01-leakance-hourly-findings.md`.
 
 ### Advanced
 

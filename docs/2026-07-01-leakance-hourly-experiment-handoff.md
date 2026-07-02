@@ -9,6 +9,62 @@ Branch: `hourly-forcings`   HEAD at handoff: `2cdd341`
 
 ---
 
+## 0. RESOLUTION (2026-07-01, later session) — the "disagg no-op" was a STALE BINARY
+
+**Root cause of §5c is NOT in the forcing plumbing.** The July runs invoked the
+**installed** `~/.cargo/bin/ddrs`, which was dated **June 3** — *before* the
+disaggregation feature (June 19, `04aef30`) and *before* leakance (June 29,
+`496c8b1`). So the hourly-ON cell silently:
+- ignored the `disaggregation:` block (serde skips unknown fields) → flat repeat-24,
+- ignored `use_leakance` → no leakance,
+- wrote **flat** `.mpk` checkpoints (the pre-resume format).
+
+That makes hourly-ON == daily-ON byte-identical (both flat-daily, both no leakance).
+The manifest's `git.sha = 2cdd341` was stamped from `.git` at runtime, **not** the
+binary — which is exactly why §5c looked like a code bug at HEAD.
+
+**Three independent confirmations:**
+1. `~/.cargo/bin/ddrs` mtime = **2026-06-03**; disagg landed 2026-06-19.
+2. July checkpoints are **flat files** (`epoch_5_mb_35.mpk`); current code
+   (`driver::train`) writes **directories** (`epoch_5_mb_9/head.mpk`, as the
+   June-23 working-disagg run did).
+3. July head = **103459 B** (no disagg); June disagg head = 107178 B. After the
+   fix, a fresh head = **107320 B** = disagg + 6 leakance params (June's 107178
+   + 3 extra output cols for K_D/d_gw/leakance_factor). All accounted for.
+
+**The fix:** refresh the installed binary — `cargo install --path .` (or
+`cp target/release/ddrs ~/.cargo/bin/ddrs`). Documented as the "STALE-BINARY
+TRAP" in `CLAUDE.md` (§`ddrs` CLI). The config files (`leakance_hourly_on.yaml`
+/ `leakance_daily_on.yaml`) were **correct all along**.
+
+**Re-run DONE** — `2026-07-01T13-43-32Z-train-and-test` (current binary, precip
+verified: `AORC precip store: 290878 catchments`, directory checkpoints,
+head 107320 B with disagg). Valid paired comparison vs the June leakance-OFF
+control `2026-06-23T02-49-12Z-conus-hourly` (same seed 42, same eval window
+1995/10–2010/09, same 2365 gauges, **both with active disagg**):
+
+| | NSE (med) | KGE (med) | NSE (mean) |
+|---|---|---|---|
+| leakance OFF (June) | 0.7153 | 0.7104 | 0.5761 |
+| leakance ON  (new)  | 0.7145 | 0.7150 | 0.5773 |
+| Δ (ON − OFF)        | **−0.0008** | **+0.0046** | +0.0012 |
+
+**NSE does not improve** (flat, within noise); **KGE +0.0046** — the volume/
+variance-correction signature leakance is meant to give. And leakance is
+**identifiable & active, not collapsed** (`dump_parameters` on the new head):
+`K_D` median 1.003e-6 **frac@ceil=100%** (wants more exchange), `leakance_factor`
+median 0.327 (interior, nowhere near 0), `d_gw` median 0.294 m (spatially
+varying −0.02…0.78). So the §5a "identifiable" picture reproduces on a *valid*
+run, and the KGE gain is backed by real leakance — but the all-gauge NSE verdict
+is neutral. Next: re-run **daily-ON** (also stale-binary-tainted) for the true
+2×2 interaction, then the losing-stream subset GO/NO-GO (§7 steps 3–6).
+
+**Tooling note:** `dump_parameters --checkpoint` appends `.mpk`, so for the
+directory checkpoint format pass the **head base** (`…/epoch_E_mb_M/head`), not
+the directory (`…/epoch_E_mb_M`).
+
+---
+
 ## 1. The hypothesis we tried to test
 
 DDR added a **leakance** term (groundwater–surface-water water loss) to routing, then
@@ -185,10 +241,14 @@ Bottom line: leakance is worth continuing — it is identifiable and volume-corr
    (byte-compare as in §4).
 3. **Re-run the 2×2** with corrected forcing:
    `leakance_hourly_on.yaml` and `leakance_daily_on.yaml` (both use `--workspace …/.ddrs`).
-4. **(Recommended) add an eval-time per-reach `zeta` accumulator** (DDR's `_zeta_sum` analog) so
-   the `|zeta| > 0.01 m³/s` bar is reported in m³/s directly, not proxied by the K_D-ceiling
-   diagnostic. The analysis script already has a `maybe_load_zeta` hook expecting a `zeta`
-   variable in `kan_parameters.nc`.
+4. ~~**(Recommended) add an eval-time per-reach `zeta` accumulator**~~ **DONE (2026-07-01,
+   later session).** `evaluate` now accumulates per-reach mean `|zeta|` + signed `zeta_net`
+   when leakance is active and writes them to `<run_dir>/kan_parameters.nc` (the exact file
+   `maybe_load_zeta` reads). Automatic in `ddrs run --workflow train-and-test`; for existing
+   checkpoints: `target/release/eval --config <cfg> --checkpoint <ckpt_dir> --output <zarr>
+   --zeta-output <run_dir>/kan_parameters.nc`. Correctness: `tests/zeta_accum.rs` (the
+   accumulated zeta equals the headwater `q_next` difference exactly). See CLAUDE.md
+   §Leakance "Eval-time zeta diagnostic".
 5. **Run the subset analysis** (under DDR's uv venv):
    ```bash
    cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/leakance_subset_analysis.py \
