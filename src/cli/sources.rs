@@ -49,7 +49,7 @@ struct GroupFile {
     data_sources: DataSources,
 }
 
-fn validate_name(name: &str) -> Result<(), CliError> {
+pub(crate) fn validate_name(name: &str) -> Result<(), CliError> {
     let ok = !name.is_empty()
         && name
             .chars()
@@ -93,7 +93,7 @@ fn block_range(lines: &[&str]) -> Option<(usize, usize)> {
 }
 
 /// Extract the `data_sources:` block from the config, verbatim.
-fn extract_block(cfg_text: &str, cfg_path: &Path) -> Result<String, CliError> {
+pub(crate) fn extract_block(cfg_text: &str, cfg_path: &Path) -> Result<String, CliError> {
     let lines: Vec<&str> = cfg_text.lines().collect();
     let (start, end) = block_range(&lines).ok_or_else(|| CliError::ConfigInvalid {
         path: cfg_path.to_path_buf(),
@@ -106,11 +106,22 @@ fn extract_block(cfg_text: &str, cfg_path: &Path) -> Result<String, CliError> {
 
 /// Save the current config's `data_sources:` block as group `name`.
 pub fn run_save(cfg_path: &Path, name: &str, force: bool) -> Result<PathBuf, CliError> {
-    validate_name(name)?;
     let cfg_text = fs::read_to_string(cfg_path)?;
     let block = extract_block(&cfg_text, cfg_path)?;
-    // Validate before persisting.
-    serde_yaml::from_str::<GroupFile>(&block).map_err(|e| CliError::ConfigInvalid {
+    save_block(cfg_path, name, &block, force)
+}
+
+/// Persist `block` (a full `data_sources:` block) as group `name`, after
+/// validating it deserializes to `DataSources`. Shared by `ddrs sources save`
+/// (verbatim block) and `ddrs import` (block with `streamflow:` swapped).
+pub(crate) fn save_block(
+    cfg_path: &Path,
+    name: &str,
+    block: &str,
+    force: bool,
+) -> Result<PathBuf, CliError> {
+    validate_name(name)?;
+    serde_yaml::from_str::<GroupFile>(block).map_err(|e| CliError::ConfigInvalid {
         path: cfg_path.to_path_buf(),
         source: Box::new(e),
     })?;
