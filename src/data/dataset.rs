@@ -11,7 +11,7 @@ use ndarray::{Array1, Array2};
 
 use crate::config::Config;
 use crate::data::collate::{build_flow_scale, compress, union_subgraphs};
-use crate::data::dates::{RhoWindow, TimeAxis};
+use crate::data::dates::{Frequency, RhoWindow, TimeAxis};
 use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
@@ -239,6 +239,27 @@ pub struct MeritGagesDataset {
     static_network: OnceCell<StaticNetworkCache>,
 }
 
+/// Reject the disaggregation head when the streamflow store is hourly-native:
+/// disaggregating an already-hourly signal is a config contradiction, and
+/// after the 2026-07-01 stale-binary incident nothing in the forcing path is
+/// allowed to silently degrade.
+fn validate_disagg_vs_resolution(
+    resolution: Frequency,
+    has_disagg: bool,
+    streamflow_path: &std::path::Path,
+) -> Result<()> {
+    if resolution == Frequency::Hourly && has_disagg {
+        return Err(DataError::Malformed {
+            path: streamflow_path.to_path_buf(),
+            message: "kan_head.disaggregation is set but the streamflow store is \
+                      hourly-native; remove the disaggregation block (an hourly \
+                      store needs no daily→hourly head)"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 impl MeritGagesDataset {
     /// Open all five stores and apply the training-mode filter pipeline.
     /// Mirrors `Merit.__init__` + `_init_training` in `geodatazoo/merit.py`.
@@ -330,6 +351,13 @@ impl MeritGagesDataset {
 
         // ---------- 3. Icechunk stores ----------
         let streamflow = Arc::new(StreamflowSource::open(&ds.streamflow)?);
+        // The smoke-train self-check line: proves which read path executed.
+        eprintln!("streamflow resolution: {:?}", streamflow.resolution());
+        validate_disagg_vs_resolution(
+            streamflow.resolution(),
+            head_cfg.disaggregation.is_some(),
+            &ds.streamflow,
+        )?;
         let observations = Arc::new(ObservationsStore::open(&ds.observations)?);
 
         // Optional hourly precip store for the precip-driven disaggregation
@@ -1046,5 +1074,16 @@ mod tests {
         assert_eq!(b2.q_prime.nrows(), 15 * 24);
         assert_eq!(b1.observations.nrows(), 15, "observations sliced per window");
         assert_eq!(b2.observations.nrows(), 15);
+    }
+
+    #[test]
+    fn disagg_rejected_on_hourly_native_source() {
+        use crate::data::dates::Frequency;
+        let p = std::path::Path::new("/mnt/fake/qr_hourly.ic");
+        let err = validate_disagg_vs_resolution(Frequency::Hourly, true, p).unwrap_err();
+        assert!(err.to_string().contains("hourly-native"), "got: {err}");
+        assert!(validate_disagg_vs_resolution(Frequency::Hourly, false, p).is_ok());
+        assert!(validate_disagg_vs_resolution(Frequency::Daily, true, p).is_ok());
+        assert!(validate_disagg_vs_resolution(Frequency::Daily, false, p).is_ok());
     }
 }

@@ -285,7 +285,7 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
 ///   (cheap fs checks; the actual open happens downstream as today).
 /// - Keys absent (fabric-only) → content-addressed cache lookup; hit reuses,
 ///   miss builds. `adjacency::cache::resolve_or_build` prints its own progress.
-fn resolve_adjacency(
+pub(crate) fn resolve_adjacency(
     config: &Config,
     config_path: &Path,
     workspace: &Workspace,
