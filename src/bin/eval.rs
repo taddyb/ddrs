@@ -27,7 +27,7 @@ use clap::Parser;
 use ddrs::config::{Config, ConfigMode};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::data::TestWindow;
-use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
+use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::{evaluate, write_predictions_zarr, EvalParams, FrozenParams, ZarrAttrs};
 
@@ -52,6 +52,11 @@ struct Cli {
     /// Use FROZEN_N/Q_SPATIAL/P_SPATIAL constants instead of an MLP.
     #[arg(long)]
     frozen: bool,
+
+    /// Write the per-reach leakance zeta diagnostic NetCDF here (e.g.
+    /// `<run_dir>/kan_parameters.nc`). Requires `params.use_leakance: true`.
+    #[arg(long)]
+    zeta_output: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -97,15 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .kan_head
             .as_ref()
             .expect("kan_head config required for KAN-head eval");
-        let head_cfg = KanHeadConfig::new(
-            head_section.input_var_names.clone(),
-            head_section.learnable_parameters.clone(),
-            cfg.seed,
-        )
-        .with_hidden_size(head_section.hidden_size)
-        .with_num_hidden_layers(head_section.num_hidden_layers)
-        .with_grid(head_section.grid)
-        .with_k(head_section.k);
+        let head_cfg = ddrs::config::kan_config(head_section, cfg.seed);
         let head_template: KanHead<I> = head_cfg.init::<I>(&device);
         let head = load_kan_head::<I>(&head_base(cli.checkpoint.as_ref().unwrap()), head_template, &device)?;
         evaluate::<I>(&cfg, &dataset, EvalParams::KanHead(&head), &device, cli.batch_size_days)?
@@ -129,6 +126,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_label: &model_label,
         },
     )?;
+
+    // Leakance zeta diagnostic.
+    if let Some(zpath) = &cli.zeta_output {
+        match (&output.zeta_abs_mean, &output.zeta_net_mean, &output.zeta_comids) {
+            (Some(za), Some(zn), Some(zc)) => {
+                ddrs::dump_parameters::write_zeta_netcdf(zpath, zc, za, zn, &model_label)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                let frac_above = za.iter().filter(|&&z| z > 0.01).count() as f64 / za.len() as f64;
+                let mut sorted = za.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!(
+                    "zeta → {} ({} reaches; median |zeta|={:.4e} m³/s; |zeta|>0.01 on {:.1}%)",
+                    zpath.display(),
+                    zc.len(),
+                    sorted[sorted.len() / 2],
+                    frac_above * 100.0,
+                );
+            }
+            _ => eprintln!(
+                "warning: --zeta-output requested but no zeta was accumulated \
+                 (params.use_leakance off, or --frozen)"
+            ),
+        }
+    }
 
     // Metrics summary. Per-gauge mean is misleading on right-skewed NSE
     // distributions (a few bad gauges drag the mean); only median is reported.

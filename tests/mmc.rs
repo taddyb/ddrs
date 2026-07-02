@@ -269,6 +269,9 @@ fn forward_gradients_flow_to_spatial_params() {
         n: n_param.clone(),
         q_spatial: q_param.clone(),
         p_spatial: None,
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     };
     mc.setup_inputs(inputs, streamflow_ad, params, false);
     let out = mc.forward();
@@ -358,6 +361,9 @@ fn carry_state_preserves_discharge_across_setup_inputs_calls() {
         n: n_param.clone(),
         q_spatial: q_param.clone(),
         p_spatial: None,
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     };
     mc.setup_inputs(inputs1, q_window_1, params1, false);
     let _ = mc.forward();
@@ -377,6 +383,9 @@ fn carry_state_preserves_discharge_across_setup_inputs_calls() {
         n: n_param,
         q_spatial: q_param,
         p_spatial: None,
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     };
     mc.setup_inputs(inputs2, q_window_2, params2, true);
     let state_after_carry_setup: Vec<f32> = mc

@@ -77,5 +77,8 @@ pub fn mock_spatial_parameters(n: usize, device: &TestDevice) -> SpatialParamete
         n: Tensor::ones([n], device) * 0.5,
         q_spatial: Tensor::ones([n], device) * 0.5,
         p_spatial: None,
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     }
 }

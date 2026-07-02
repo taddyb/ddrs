@@ -15,7 +15,7 @@ use rand_chacha::ChaCha12Rng;
 
 use crate::config::Config;
 use crate::data::error::Result;
-use crate::nn::kan_head::{KanHead, KanHeadConfig};
+use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
     head_base, load_kan_head, load_optimizer, load_train_state, optim_base, state_path,
 };
@@ -53,15 +53,7 @@ where
     Autodiff<I>: AutodiffBackend<InnerBackend = I>,
 {
     let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
-    let head_cfg = KanHeadConfig::new(
-        head_section.input_var_names.clone(),
-        head_section.learnable_parameters.clone(),
-        cfg.seed,
-    )
-    .with_hidden_size(head_section.hidden_size)
-    .with_num_hidden_layers(head_section.num_hidden_layers)
-    .with_grid(head_section.grid)
-    .with_k(head_section.k);
+    let head_cfg = crate::config::kan_config(head_section, cfg.seed);
 
     <Autodiff<I> as Backend>::seed(device, cfg.seed);
     let head: KanHead<Autodiff<I>> = head_cfg.init::<Autodiff<I>>(device);

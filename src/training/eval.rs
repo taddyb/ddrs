@@ -16,6 +16,7 @@ use crate::data::TestWindow;
 use crate::nn::kan_head::KanHead;
 use crate::training::{
     forward_eval, forward_with_frozen_params, tau_trim_and_downsample, FrozenParams, Metrics,
+    ZetaSums,
 };
 
 /// Source of MC parameters at eval time.
@@ -30,6 +31,13 @@ pub struct EvalOutput {
     pub gage_ids: Vec<String>,
     pub time_range_daily: Vec<NaiveDate>,
     pub metrics: Metrics,
+    /// Eval-window mean |zeta| per eval-network reach (m³/s). `Some` only when
+    /// leakance was active (KanHead params + `use_leakance`).
+    pub zeta_abs_mean: Option<Vec<f32>>,
+    /// Eval-window mean signed zeta per reach (m³/s; positive = losing).
+    pub zeta_net_mean: Option<Vec<f32>>,
+    /// COMIDs aligned to the zeta vectors (eval-network topological order).
+    pub zeta_comids: Option<Vec<i64>>,
 }
 
 pub fn evaluate<I: Backend>(
@@ -49,13 +57,18 @@ pub fn evaluate<I: Backend>(
     let probe_batch = dataset.collate_window(&probe)?;
     let n_all_gauges = probe_batch.gauge_staids.len();
     let gauge_staids = probe_batch.gauge_staids.clone();
+    let reach_comids: Vec<i64> = probe_batch.divide_comids.iter().map(|c| c.0).collect();
     let n_hours_full = n_days_total * 24;
 
     // Accumulator: (n_all_gauges, n_hours_full) — written per chunk.
     let mut predictions_full = Array2::<f32>::zeros((n_all_gauges, n_hours_full));
 
+    // Leakance diagnostic: accumulate per-reach zeta sums across chunks.
+    // Stays empty (steps == 0) when leakance is off or params are Frozen.
+    let mut zeta_sums: ZetaSums<I> = ZetaSums::new();
+
     // Helper: dispatch the forward based on EvalParams. Returns (n_all_gauges, chunk_hours).
-    let run_chunk = |window: &TestWindow, carry_state: bool| -> Result<Array2<f32>> {
+    let mut run_chunk = |window: &TestWindow, carry_state: bool| -> Result<Array2<f32>> {
         let batch = dataset.collate_window(window)?;
         let tensors = batch.to_tensors::<I>(device);
         let pred = match &params {
@@ -63,7 +76,7 @@ pub fn evaluate<I: Backend>(
                 forward_with_frozen_params::<I>(cfg, &tensors, frozen, device, carry_state)
             }
             EvalParams::KanHead(head) => {
-                forward_eval::<I>(cfg, &tensors, head, device, carry_state)
+                forward_eval::<I>(cfg, &tensors, head, device, carry_state, Some(&mut zeta_sums))
             }
         };
         let dims = pred.dims();
@@ -155,11 +168,26 @@ pub fn evaluate<I: Backend>(
         .map(|s| s.as_str().to_string())
         .collect();
 
+    // Leakance diagnostic: sums → per-reach means over the routed timesteps.
+    let (zeta_abs_mean, zeta_net_mean, zeta_comids) =
+        match (zeta_sums.abs_sum, zeta_sums.net_sum, zeta_sums.steps) {
+            (Some(abs), Some(net), steps) if steps > 0 => {
+                let scale = 1.0_f32 / steps as f32;
+                let abs_mean: Vec<f32> = (abs * scale).into_data().into_vec().unwrap();
+                let net_mean: Vec<f32> = (net * scale).into_data().into_vec().unwrap();
+                (Some(abs_mean), Some(net_mean), Some(reach_comids))
+            }
+            _ => (None, None, None),
+        };
+
     Ok(EvalOutput {
         predictions_daily,
         observations_daily,
         gage_ids,
         time_range_daily,
         metrics,
+        zeta_abs_mean,
+        zeta_net_mean,
+        zeta_comids,
     })
 }

@@ -310,6 +310,9 @@ mod tests {
                 fhv: vec![0.0, 0.0],
                 flv: vec![0.0, 0.0],
             },
+            zeta_abs_mean: None,
+            zeta_net_mean: None,
+            zeta_comids: None,
         };
 
         let mut zpath = std::env::temp_dir();

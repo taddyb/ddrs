@@ -1,0 +1,13 @@
+data_sources:
+  # CONUS MERIT inputs + hourly AORC precip (local workstation paths).
+  # Same as `conus` but adds `aorc_precip` to drive the precip-conditioned
+  # mass-preserving daily->hourly disaggregation head
+  # (kan_head.disaggregation.use_precip: true).
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  # Hourly AORC precip on MERIT unit catchments (zarr v3, CONUS-only).
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr

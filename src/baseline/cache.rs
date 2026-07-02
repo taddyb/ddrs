@@ -362,6 +362,7 @@ mod tests {
             streamflow: PathBuf::from("/dev/null/sf.ic"),
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),
+            aorc_precip: None,
         });
         cfg.experiment = Some(Experiment {
             batch_size: 1,
@@ -457,6 +458,7 @@ mod tests {
             streamflow: PathBuf::from("/dev/null/sf.ic"),
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),
+            aorc_precip: None,
         });
         cfg.experiment = Some(Experiment {
             batch_size: 1,

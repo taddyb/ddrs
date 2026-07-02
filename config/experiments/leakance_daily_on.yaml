@@ -1,0 +1,99 @@
+# leakance_daily_on.yaml — 2×2 experiment cell: DAILY-ON
+#
+# Role in the 2×2 (forcing × leakance):
+#   - forcing: flat repeat-24 daily (NO disaggregation block — same as pre-hourly runs)
+#   - leakance: ON  (K_D / d_gw / leakance_factor added to KAN head + routing)
+#
+# This cell is the failure-regime control: if leakance appears beneficial here
+# (daily forcing, no sub-daily signal), it is a false positive from a fudge
+# factor rather than true GW–SW identification. The GO verdict in the 2×2
+# requires the daily-ON arm to show NO benefit or weaker benefit vs hourly-ON.
+#
+# Spec: docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md
+# Plan task 12: docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md
+#
+# Derived from leakance_hourly_on.yaml — ONLY change: disaggregation block removed
+# (flat repeat-24 forcing). aorc_precip entry removed (not consumed without disagg).
+# All leakance keys, seed, and other hyperparameters are IDENTICAL to hourly-ON
+# to isolate forcing as the sole variable.
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+seed: 42
+np_seed: 42
+
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+
+experiment:
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 5
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    3: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+    - K_D
+    - d_gw
+    - leakance_factor
+  # No disaggregation block → flat repeat-24 daily forcing (pre-hourly behavior).
+
+params:
+  use_leakance: true
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+    K_D: [1.0e-8, 1.0e-6]
+    d_gw: [-2.0, 2.0]
+    leakance_factor: [0.0, 1.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+    - K_D
+  sparse_solver: cuda
+  use_cuda_graphs: false
+
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15
+  rho: null

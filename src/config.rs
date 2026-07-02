@@ -58,6 +58,12 @@ pub struct DataSources {
     pub streamflow: std::path::PathBuf,
     pub observations: std::path::PathBuf,
     pub gages: std::path::PathBuf,
+    /// Optional hourly AORC precipitation store (`merit_unit_catchments.zarr`,
+    /// zarr v3). CONUS-only; drives the precip-conditioned disaggregation head
+    /// (`kan_head.disaggregation.use_precip`). Absent ⇒ the head conditions on
+    /// daily Q' only (or, with disaggregation off, flat repeat-24).
+    #[serde(default)]
+    pub aorc_precip: Option<std::path::PathBuf>,
     /// Path to the MERIT flowlines fabric: `.shp` (sibling `.dbf` read),
     /// `.dbf`, or `.gpkg` (attribute columns read via SQL; geometry never
     /// opened in any format). Matches DDR's `geospatial_fabric_gpkg` artifact.
@@ -102,10 +108,27 @@ pub struct Experiment {
 pub struct LossConfig {
     /// Which objective to optimize.
     pub kind: LossKind,
-    /// Weight on the `1 - NNSE` term (composite objective only).
+    /// Weight on the `1 - NNSE` term (composite `nnse-kge` objective, and the
+    /// optional NNSE guard of the component-weighted `kge` objective).
     pub nnse_weight: f32,
-    /// Weight on the `1 - KGE` term (composite objective only).
+    /// Weight on the `1 - KGE` Euclidean term (composite `nnse-kge` only).
     pub kge_weight: f32,
+    /// Weight on the `(r - 1)²` correlation term (component-weighted `kge` only).
+    pub r_weight: f32,
+    /// Weight on the `(α - 1)²` variance-ratio term (component-weighted `kge`
+    /// only). This is the restoring force against MC over-attenuation — raise
+    /// it to push `σ_sim/σ_obs` back toward 1.
+    pub alpha_weight: f32,
+    /// Weight on the `(β - 1)²` mean-ratio term (component-weighted `kge` only).
+    pub beta_weight: f32,
+    /// Per-gauge upper bound on the weighted KGE-component sum before averaging
+    /// (component-weighted `kge` only). Gauges with near-constant observed flow
+    /// have a collapsing `std_o`/`mean_o` denominator, so `(α-1)²`/`(β-1)²` can
+    /// explode and hijack the batch gradient (a single gauge drove batch loss to
+    /// ~1e4 in testing). Clamping each gauge's contribution — DDR's
+    /// `hydrograph_loss` uses the same trick at 10 — keeps the restoring signal
+    /// from well-posed gauges while bounding the pathological ones.
+    pub kge_clamp: f32,
     /// Stabilization constant added to variance denominators / mean-bias
     /// denominator so near-constant gauges don't produce NaN gradients.
     /// Matches DDR `hydrograph_loss`'s `eps=0.1`.
@@ -115,7 +138,16 @@ pub struct LossConfig {
 impl Default for LossConfig {
     fn default() -> Self {
         // L1 fallback preserves the prior training behavior exactly.
-        Self { kind: LossKind::L1, nnse_weight: 1.0, kge_weight: 1.0, eps: 0.1 }
+        Self {
+            kind: LossKind::L1,
+            nnse_weight: 1.0,
+            kge_weight: 1.0,
+            r_weight: 1.0,
+            alpha_weight: 1.0,
+            beta_weight: 1.0,
+            kge_clamp: 10.0,
+            eps: 0.1,
+        }
     }
 }
 
@@ -128,6 +160,11 @@ pub enum LossKind {
     /// `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)`, per gauge. The KGE term's
     /// `(α-1)²` restores the hydrograph variance L1/NSE shrink away.
     NnseKge,
+    /// Per gauge `r_w·(r-1)² + α_w·(α-1)² + β_w·(β-1)² + nnse_w·(1-NNSE)`.
+    /// The KGE components are weighted individually (no sqrt Euclidean term,
+    /// so no gradient singularity at perfect KGE), letting `α_w` up-weight the
+    /// anti-attenuation restoring force. See `src/training/loss.rs`.
+    Kge,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +179,56 @@ pub struct KanHeadConfigSection {
     pub k: usize,
     pub input_var_names: Vec<String>,
     pub learnable_parameters: Vec<String>,
+    /// Optional learnable daily→hourly forcing disaggregation. Absent ⇒ flat
+    /// `repeat-24` (current behavior). See `src/nn/disagg_head.rs`.
+    #[serde(default)]
+    pub disaggregation: Option<DisaggregationSection>,
+}
+
+/// YAML `kan_head.disaggregation:` block (presence enables the head).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DisaggregationSection {
+    #[serde(default = "default_disagg_hidden")]
+    pub hidden_size: usize,
+    #[serde(default = "default_true")]
+    pub use_attributes: bool,
+    /// Condition the within-day shape on hourly AORC precip (the full
+    /// `[d-1,d,d+1]` = 72-hour window per reach). Requires
+    /// `data_sources.aorc_precip` to be set. Default false ⇒ daily-Q-only head.
+    #[serde(default)]
+    pub use_precip: bool,
+    /// Condition the within-day shape on hourly AORC temperature (another
+    /// `[d-1,d,d+1]` window). Also requires `data_sources.aorc_precip`.
+    #[serde(default)]
+    pub use_temp: bool,
+}
+
+/// Build a [`KanHeadConfig`] from a parsed YAML section + seed, threading the
+/// optional disaggregation settings. Single source of truth so every call site
+/// (train bootstrap, eval, dump) builds an identical head template — required
+/// for `load_record` to match a disagg-trained checkpoint.
+pub fn kan_config(
+    section: &KanHeadConfigSection,
+    seed: u64,
+) -> crate::nn::kan_head::KanHeadConfig {
+    let cfg = crate::nn::kan_head::KanHeadConfig::new(
+        section.input_var_names.clone(),
+        section.learnable_parameters.clone(),
+        seed,
+    )
+    .with_hidden_size(section.hidden_size)
+    .with_num_hidden_layers(section.num_hidden_layers)
+    .with_grid(section.grid)
+    .with_k(section.k);
+    match &section.disaggregation {
+        Some(d) => cfg
+            .with_disagg_enabled(true)
+            .with_disagg_hidden_size(d.hidden_size)
+            .with_disagg_use_attributes(d.use_attributes)
+            .with_disagg_use_precip(d.use_precip)
+            .with_disagg_use_temp(d.use_temp),
+        None => cfg,
+    }
 }
 
 fn default_grid() -> usize {
@@ -149,6 +236,12 @@ fn default_grid() -> usize {
 }
 fn default_k() -> usize {
     3
+}
+fn default_disagg_hidden() -> usize {
+    16
+}
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +277,17 @@ pub struct ParameterRanges {
     pub n: [f32; 2],
     pub q_spatial: [f32; 2],
     pub p_spatial: [f32; 2],
+    /// Muskingum storage weight X. Only consumed when `x_storage` is listed in
+    /// `kan_head.learnable_parameters`; otherwise routing uses a constant 0.3.
+    pub x_storage: [f32; 2],
+    /// Hydraulic diffusivity coefficient — verbatim from DDR `configs.py`
+    /// (commit c2bd0f9). Only consumed when `Params.use_leakance` is true and
+    /// `K_D` is listed in `kan_head.learnable_parameters`.
+    pub k_d: [f32; 2],
+    /// Groundwater depth parameter. Companion to `k_d`; same activation guard.
+    pub d_gw: [f32; 2],
+    /// Fractional leakance weight [0, 1]. Companion to `k_d`; same activation guard.
+    pub leakance_factor: [f32; 2],
 }
 
 impl Default for ParameterRanges {
@@ -192,6 +296,10 @@ impl Default for ParameterRanges {
             n: [0.015, 0.25],
             q_spatial: [0.0, 1.0],
             p_spatial: [1.0, 200.0],
+            x_storage: [0.0, 0.5],
+            k_d: [1e-8, 1e-6],
+            d_gw: [-2.0, 2.0],
+            leakance_factor: [0.0, 1.0],
         }
     }
 }
@@ -220,6 +328,10 @@ pub struct Params {
     /// path. No effect on the CPU path. Defaults to `false`; flipped to
     /// `true` in `config/merit_training.yaml` only after V9/V10/V7a pass.
     pub use_cuda_graphs: bool,
+    /// Enable the leakance (GW–SW water-loss) term in routing. Off by default;
+    /// when on, `K_D`/`d_gw`/`leakance_factor` must be in
+    /// `kan_head.learnable_parameters`, and `use_cuda_graphs` must be false.
+    pub use_leakance: bool,
 }
 
 impl Default for Params {
@@ -234,6 +346,7 @@ impl Default for Params {
             tau: 3,
             sparse_solver: SparseSolver::default(),
             use_cuda_graphs: false,
+            use_leakance: false,
         }
     }
 }
@@ -252,6 +365,7 @@ struct ParamsRaw {
     tau: Option<u32>,
     sparse_solver: Option<String>,
     use_cuda_graphs: Option<bool>,
+    use_leakance: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -266,6 +380,19 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(v) = r.parameter_ranges.get("p_spatial") {
             p.parameter_ranges.p_spatial = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("x_storage") {
+            p.parameter_ranges.x_storage = *v;
+        }
+        // DDR spells this uppercase (K_D); siblings are lowercase.
+        if let Some(v) = r.parameter_ranges.get("K_D") {
+            p.parameter_ranges.k_d = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("d_gw") {
+            p.parameter_ranges.d_gw = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("leakance_factor") {
+            p.parameter_ranges.leakance_factor = *v;
         }
         // attribute_minimums — named field mapping.
         if let Some(&v) = r.attribute_minimums.get("discharge") {
@@ -298,6 +425,9 @@ impl From<ParamsRaw> for Params {
         };
         if let Some(b) = r.use_cuda_graphs {
             p.use_cuda_graphs = b;
+        }
+        if let Some(b) = r.use_leakance {
+            p.use_leakance = b;
         }
         p
     }
@@ -419,6 +549,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_leakance(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
@@ -486,6 +620,17 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
             .to_string(),
         ),
     }
+}
+
+fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
+    if cfg.params.use_leakance && cfg.params.use_cuda_graphs {
+        return Err(
+            "params: `use_leakance: true` requires `use_cuda_graphs: false` — the \
+             CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_mode_workflow(cfg: &Config) -> std::result::Result<(), String> {
@@ -864,6 +1009,58 @@ data_sources:
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("no data_sources should be valid");
         assert!(cfg.data_sources.is_none());
+    }
+
+    #[test]
+    fn leakance_flag_and_ranges_parse() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  parameter_ranges:
+    K_D: [1.0e-8, 1.0e-6]
+    d_gw: [-2.0, 2.0]
+    leakance_factor: [0.0, 1.0]
+  log_space_parameters: [p_spatial, K_D]
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_cfg.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(cfg.params.use_leakance);
+        assert!((cfg.params.parameter_ranges.k_d[0] - 1e-8).abs() < 1e-12);
+        assert!((cfg.params.parameter_ranges.k_d[1] - 1e-6).abs() < 1e-12);
+        assert_eq!(cfg.params.parameter_ranges.d_gw, [-2.0, 2.0]);
+        assert_eq!(cfg.params.parameter_ranges.leakance_factor, [0.0, 1.0]);
+        assert!(cfg.params.log_space_parameters.iter().any(|s| s == "K_D"));
+    }
+
+    #[test]
+    fn use_leakance_defaults_false() {
+        assert!(!Params::default().use_leakance);
+    }
+
+    #[test]
+    fn leakance_with_cuda_graphs_rejected() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  use_cuda_graphs: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_graphs.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("use_leakance") && msg.contains("use_cuda_graphs"),
+            "expected leakance/graphs conflict, got: {msg}"
+        );
     }
 
     #[test]

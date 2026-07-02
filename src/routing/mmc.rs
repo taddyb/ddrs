@@ -49,6 +49,12 @@ pub struct SpatialParameters<I: Backend> {
     pub n: Tensor<Autodiff<I>, 1>,
     pub q_spatial: Tensor<Autodiff<I>, 1>,
     pub p_spatial: Option<Tensor<Autodiff<I>, 1>>,
+    /// Leakance params (all-or-nothing). Present ⇒ route via `TimestepLeakanceOp`.
+    /// All three must be `Some` or all `None`; partial presence routes the
+    /// non-leakance path (any `None` ⇒ leakance disabled).
+    pub k_d: Option<Tensor<Autodiff<I>, 1>>,
+    pub d_gw: Option<Tensor<Autodiff<I>, 1>>,
+    pub leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
 }
 
 /// Differentiable Muskingum-Cunge routing engine.
@@ -61,6 +67,11 @@ pub struct MuskingumCunge<I: Backend> {
     length: Option<Tensor<Autodiff<I>, 1>>,
     slope: Option<Tensor<Autodiff<I>, 1>>,
     x_storage: Option<Tensor<Autodiff<I>, 1>>,
+    /// Denormalized leakance params. All-or-nothing: when all three are `Some`,
+    /// `route_timestep` dispatches to `timestep_forward_leakance`.
+    k_d: Option<Tensor<Autodiff<I>, 1>>,
+    d_gw: Option<Tensor<Autodiff<I>, 1>>,
+    leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -75,6 +86,14 @@ pub struct MuskingumCunge<I: Backend> {
 
     q_prime: Option<Tensor<Autodiff<I>, 2>>,
     discharge_t: Option<Tensor<Autodiff<I>, 1>>,
+
+    /// Eval-time zeta accumulation (leakance diagnostics). Off by default;
+    /// `enable_zeta_accumulation` turns it on. Sums live on the inner backend
+    /// (no autograd tape) and grow by one elementwise add per timestep.
+    collect_zeta: bool,
+    zeta_abs_sum: Option<Tensor<I, 1>>,
+    zeta_net_sum: Option<Tensor<I, 1>>,
+    zeta_steps: usize,
 
     dt: f32,
     device: I::Device,
@@ -98,11 +117,18 @@ impl<I: Backend> MuskingumCunge<I> {
             length: None,
             slope: None,
             x_storage: None,
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
             n_segments: None,
             pattern: None,
             assembler: None,
             q_prime: None,
             discharge_t: None,
+            collect_zeta: false,
+            zeta_abs_sum: None,
+            zeta_net_sum: None,
+            zeta_steps: 0,
             dt: DT_SECONDS,
             device,
             sparse_solver,
@@ -167,6 +193,12 @@ impl<I: Backend> MuskingumCunge<I> {
                 log_space.iter().any(|s| s == "p_spatial"),
             );
         }
+
+        // Leakance params: denormalize when present, clear otherwise.
+        self.k_d = params.k_d.map(|t| denormalize(t, ranges.k_d, log_space.iter().any(|s| s == "K_D")));
+        self.d_gw = params.d_gw.map(|t| denormalize(t, ranges.d_gw, log_space.iter().any(|s| s == "d_gw")));
+        self.leakance_factor = params.leakance_factor
+            .map(|t| denormalize(t, ranges.leakance_factor, log_space.iter().any(|s| s == "leakance_factor")));
 
         if !carry_state || self.discharge_t.is_none() {
             let q_prime_0 = self
@@ -269,7 +301,7 @@ impl<I: Backend> MuskingumCunge<I> {
     }
 
     /// Advance one timestep. Returns next-step discharge `Q_{t+1}` (shape `[n]`).
-    pub fn route_timestep(&self, q_prime_clamp: Tensor<Autodiff<I>, 1>) -> Tensor<Autodiff<I>, 1>
+    pub fn route_timestep(&mut self, q_prime_clamp: Tensor<Autodiff<I>, 1>) -> Tensor<Autodiff<I>, 1>
     where
         I::FloatTensorPrimitive: 'static,
         I::Device: 'static,
@@ -283,6 +315,37 @@ impl<I: Backend> MuskingumCunge<I> {
         let q_t = self.discharge_t.as_ref().unwrap().clone();
         let pattern = self.pattern.as_ref().unwrap();
         let assembler = self.assembler.as_ref().unwrap();
+
+        // Leakance dispatch: when all three leakance params are present, use the
+        // leakance op (never via CUDA graphs — leakance forces use_cuda_graphs=false).
+        if let (Some(k_d), Some(d_gw), Some(leakance_factor)) = (
+            self.k_d.as_ref().cloned(),
+            self.d_gw.as_ref().cloned(),
+            self.leakance_factor.as_ref().cloned(),
+        ) {
+            let mut zeta_step: Option<Tensor<I, 1>> = None;
+            let q_next = crate::routing::mmc_op::timestep_forward_leakance::<I>(
+                &self.cfg, pattern, assembler,
+                n, q_spatial, p_spatial,
+                q_t, q_prime_clamp,
+                length, slope, x_storage,
+                k_d, d_gw, leakance_factor,
+                if self.collect_zeta { Some(&mut zeta_step) } else { None },
+            );
+            if let Some(zeta) = zeta_step {
+                let abs = zeta.clone().abs();
+                self.zeta_abs_sum = Some(match self.zeta_abs_sum.take() {
+                    Some(s) => s + abs,
+                    None => abs,
+                });
+                self.zeta_net_sum = Some(match self.zeta_net_sum.take() {
+                    Some(s) => s + zeta,
+                    None => zeta,
+                });
+                self.zeta_steps += 1;
+            }
+            return q_next;
+        }
 
         // SP-10: dispatch to the graph-replay path when graphs are on, we
         // are running on the CUDA sparse solver, AND the inner backend is
@@ -368,6 +431,23 @@ impl<I: Backend> MuskingumCunge<I> {
         }
 
         Tensor::cat(columns, 1)
+    }
+
+    /// Turn on per-timestep zeta accumulation (leakance diagnostics). Only
+    /// meaningful when leakance params are bound; otherwise `zeta_sums`
+    /// stays `None`. Eval-time use — the training path never enables this.
+    pub fn enable_zeta_accumulation(&mut self) {
+        self.collect_zeta = true;
+    }
+
+    /// `(Σ|zeta|, Σzeta, n_steps)` accumulated across `route_timestep` calls
+    /// since construction (positive net = losing reach). `None` until the
+    /// first accumulated step.
+    pub fn zeta_sums(&self) -> Option<(Tensor<I, 1>, Tensor<I, 1>, usize)> {
+        match (&self.zeta_abs_sum, &self.zeta_net_sum) {
+            (Some(a), Some(n)) => Some((a.clone(), n.clone(), self.zeta_steps)),
+            _ => None,
+        }
     }
 
     pub fn discharge_state(&self) -> Option<Tensor<Autodiff<I>, 1>> {

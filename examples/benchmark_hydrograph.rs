@@ -162,6 +162,9 @@ fn main() -> std::io::Result<()> {
         n: Tensor::<B, 1>::ones([n_reaches], &device) * 0.5,
         q_spatial: Tensor::<B, 1>::ones([n_reaches], &device) * 0.5,
         p_spatial: None,
+        k_d: None,
+        d_gw: None,
+        leakance_factor: None,
     };
 
     let t_start = std::time::Instant::now();

@@ -12,10 +12,12 @@ pub mod gage_csv;
 pub mod icechunk;
 pub mod netcdf;
 pub mod zarr;
+pub mod zarr_aorc;
 pub mod zarr_obs;
 pub mod zarr_qprime;
 
 pub use gage_csv::{GageMetadata, GageRow};
+pub use zarr_aorc::AorcPrecipStore;
 pub use icechunk::{StreamflowStore, UsgsObservationsStore};
 pub use netcdf::AttributesStore;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};

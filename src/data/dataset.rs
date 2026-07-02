@@ -16,8 +16,8 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
-    AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore, ObservationsStore,
-    StreamflowSource,
+    AorcPrecipStore, AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore,
+    ObservationsStore, StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -32,8 +32,19 @@ pub struct RoutingBatch {
     /// KAN head input contract (`src/nn/kan_head.rs::KanHead::forward`).
     pub spatial_attributes_normalized: Array2<f32>,
     /// q' streamflow forcing, shape `(T_hours, N)`. Already multiplied by
-    /// `flow_scale` per column.
+    /// `flow_scale` per column. The flat `repeat-24` upsampling of
+    /// `q_prime_daily`; used by the no-disaggregation path.
     pub q_prime: Array2<f32>,
+    /// Daily q' forcing, shape `(D, N)` (pre-trim, flow-scaled). Input to the
+    /// learnable disaggregation head; `None` of it is upsampled here.
+    pub q_prime_daily: Array2<f32>,
+    /// Hourly AORC precip, shape `(T_hours, N)`, **already normalized** per
+    /// reach (z-scored `log1p`). Empty `(0, N)` when no precip store is wired.
+    /// Conditions the precip-driven disaggregation head.
+    pub precip_hourly: Array2<f32>,
+    /// Hourly AORC temperature, shape `(T_hours, N)`, **already normalized**
+    /// per reach (z-score). Empty `(0, N)` when temp conditioning is off.
+    pub temp_hourly: Array2<f32>,
     /// USGS observations, shape `(T_days, G)`. NaN-tolerant.
     pub observations: Array2<f32>,
     /// For each gauge in `gauge_staids`, list of compressed-cols whose row
@@ -86,6 +97,13 @@ pub struct RoutingTensors<B: Backend> {
     pub spatial_attributes: Tensor<B, 2>,
     /// q' streamflow, shape `(T_hours, N)`. Not yet Autodiff-wrapped.
     pub q_prime: Tensor<B, 2>,
+    /// Daily q' forcing, shape `(D, N)`. Input to the disaggregation head.
+    pub q_prime_daily: Tensor<B, 2>,
+    /// Hourly normalized precip, shape `(T_hours, N)` (empty `(0, N)` when no
+    /// precip store). Input to the precip-driven disaggregation head.
+    pub precip_hourly: Tensor<B, 2>,
+    /// Hourly normalized temperature, shape `(T_hours, N)` (empty when off).
+    pub temp_hourly: Tensor<B, 2>,
     /// Observations stay on CPU.
     pub observations: Array2<f32>,
     /// Flat concat of `outflow_idx`, shape `(sum_g len(outflow_idx[g]),)`.
@@ -135,6 +153,36 @@ impl RoutingBatch {
             .0;
         let q_prime = Tensor::<B, 2>::from_data(TensorData::new(q_vec, [t_hours, n]), device);
 
+        // 3b. Lift q_prime_daily (D, N).
+        let (d_days, dn) = (self.q_prime_daily.shape()[0], self.q_prime_daily.shape()[1]);
+        let qd_vec: Vec<f32> = self
+            .q_prime_daily
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec_and_offset()
+            .0;
+        let q_prime_daily = Tensor::<B, 2>::from_data(TensorData::new(qd_vec, [d_days, dn]), device);
+
+        // 3c. Lift precip_hourly (T_hours, N) — empty (0, N) when no store.
+        let (p_hours, pn) = (self.precip_hourly.shape()[0], self.precip_hourly.shape()[1]);
+        let p_vec: Vec<f32> = self
+            .precip_hourly
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec_and_offset()
+            .0;
+        let precip_hourly = Tensor::<B, 2>::from_data(TensorData::new(p_vec, [p_hours, pn]), device);
+
+        // 3d. Lift temp_hourly (T_hours, N) — empty (0, N) when temp off.
+        let (te_hours, ten) = (self.temp_hourly.shape()[0], self.temp_hourly.shape()[1]);
+        let te_vec: Vec<f32> = self
+            .temp_hourly
+            .as_standard_layout()
+            .to_owned()
+            .into_raw_vec_and_offset()
+            .0;
+        let temp_hourly = Tensor::<B, 2>::from_data(TensorData::new(te_vec, [te_hours, ten]), device);
+
         // 4. Lift flat_indices + group_ids as Int tensors.
         let flat_indices = Tensor::<B, 1, Int>::from_data(TensorData::from(flat.as_slice()), device);
         let group_ids = Tensor::<B, 1, Int>::from_data(TensorData::from(group.as_slice()), device);
@@ -145,6 +193,9 @@ impl RoutingBatch {
             adjacency: self.adjacency,
             spatial_attributes,
             q_prime,
+            q_prime_daily,
+            precip_hourly,
+            temp_hourly,
             observations: self.observations,
             flat_indices,
             group_ids,
@@ -167,6 +218,14 @@ pub struct MeritGagesDataset {
     pub(crate) stats: Arc<AttrStats>,
     pub(crate) gages: Arc<GageMetadata>,
     pub(crate) streamflow: Arc<StreamflowSource>,
+    /// Optional hourly AORC store (precip + temperature) for the disaggregation
+    /// head. `None` ⇒ the head conditions on daily Q' only (or disagg is off).
+    pub(crate) precip: Option<Arc<AorcPrecipStore>>,
+    /// Whether to read+carry the precip / temperature channels (mirrors the
+    /// head's `use_precip` / `use_temp`). Avoids reading a channel the head
+    /// would ignore.
+    pub(crate) want_precip: bool,
+    pub(crate) want_temp: bool,
     pub(crate) observations: Arc<ObservationsStore>,
     pub(crate) time_axis: TimeAxis,
     pub(crate) attr_names: Vec<String>,
@@ -273,6 +332,33 @@ impl MeritGagesDataset {
         let streamflow = Arc::new(StreamflowSource::open(&ds.streamflow)?);
         let observations = Arc::new(ObservationsStore::open(&ds.observations)?);
 
+        // Optional hourly precip store for the precip-driven disaggregation
+        // head. Validate the use_precip ⇔ aorc_precip coupling up front.
+        let (want_precip, want_temp) = head_cfg
+            .disaggregation
+            .as_ref()
+            .map(|d| (d.use_precip, d.use_temp))
+            .unwrap_or((false, false));
+        let precip = match (&ds.aorc_precip, want_precip || want_temp) {
+            (Some(p), _) => {
+                let store = AorcPrecipStore::open(p)?;
+                eprintln!(
+                    "AORC precip store: {} catchments, hourly {}..",
+                    store.n_catchments(),
+                    store.time_start
+                );
+                Some(Arc::new(store))
+            }
+            (None, true) => {
+                return Err(DataError::Malformed {
+                    path: std::path::PathBuf::from("<config>"),
+                    message: "kan_head.disaggregation.use_precip/use_temp is true but \
+                              data_sources.aorc_precip is not set".into(),
+                });
+            }
+            (None, false) => None,
+        };
+
         // Filter 4: drop gauges the observation store has no series for —
         // observation reads hard-error on missing STAIDs, and the global
         // v3.1 gage CSVs list a few dozen gauges absent from the obs zarr.
@@ -298,6 +384,9 @@ impl MeritGagesDataset {
             stats,
             gages: Arc::new(gage_meta),
             streamflow,
+            precip,
+            want_precip,
+            want_temp,
             observations,
             time_axis,
             attr_names,
@@ -402,6 +491,28 @@ impl MeritGagesDataset {
             }
         }
 
+        // Daily q' (pre-trim) for the disaggregation head; same per-column
+        // flow_scale (a constant scale is mass-consistent at both resolutions).
+        let mut q_prime_daily = self.streamflow.read_window_daily(
+            window.window_start,
+            window.rho_days,
+            &compressed.divide_comids,
+        )?;
+        let n_days_q = q_prime_daily.shape()[0];
+        for col in 0..n {
+            let s = flow_scale[col];
+            if (s - 1.0).abs() < 1e-9 {
+                continue;
+            }
+            for t in 0..n_days_q {
+                q_prime_daily[(t, col)] *= s;
+            }
+        }
+
+        // ----- 3c. Hourly precip + temperature for the disagg head -----
+        let precip_hourly = self.read_precip_window(window, &compressed.divide_comids, n)?;
+        let temp_hourly = self.read_temp_window(window, &compressed.divide_comids, n)?;
+
         // ----- 4. Attributes: slice + fill_nans + normalize + transpose -----
         let spatial_attributes_normalized = self.finalize_attrs(&compressed.divide_comids, n);
 
@@ -413,6 +524,9 @@ impl MeritGagesDataset {
             adjacency,
             spatial_attributes_normalized,
             q_prime,
+            q_prime_daily,
+            precip_hourly,
+            temp_hourly,
             observations,
             outflow_idx: compressed.outflow_idx,
             gauge_staids,
@@ -420,6 +534,64 @@ impl MeritGagesDataset {
             flow_scale,
             window: *window,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Precip read helpers (precip-driven disaggregation head)
+    // -----------------------------------------------------------------------
+
+    /// Read + normalize hourly precip for a training rho-window. Returns
+    /// `(n_hourly, N)`, or empty `(0, N)` when precip conditioning is off.
+    fn read_precip_window(
+        &self,
+        window: &RhoWindow,
+        comids: &[Comid],
+        n: usize,
+    ) -> Result<Array2<f32>> {
+        match (&self.precip, self.want_precip) {
+            (Some(store), true) => Ok(normalize_precip(store.read_window(window, comids)?)),
+            _ => Ok(Array2::<f32>::zeros((0, n))),
+        }
+    }
+
+    /// Read + normalize hourly precip for a test window.
+    fn read_precip_test_window(
+        &self,
+        window: &crate::data::TestWindow,
+        comids: &[Comid],
+        n: usize,
+    ) -> Result<Array2<f32>> {
+        match (&self.precip, self.want_precip) {
+            (Some(store), true) => Ok(normalize_precip(store.read_test_window(window, comids)?)),
+            _ => Ok(Array2::<f32>::zeros((0, n))),
+        }
+    }
+
+    /// Read + normalize hourly temperature for a training rho-window. Returns
+    /// `(n_hourly, N)`, or empty `(0, N)` when temperature conditioning is off.
+    fn read_temp_window(
+        &self,
+        window: &RhoWindow,
+        comids: &[Comid],
+        n: usize,
+    ) -> Result<Array2<f32>> {
+        match (&self.precip, self.want_temp) {
+            (Some(store), true) => Ok(normalize_temp(store.read_temp_window(window, comids)?)),
+            _ => Ok(Array2::<f32>::zeros((0, n))),
+        }
+    }
+
+    /// Read + normalize hourly temperature for a test window.
+    fn read_temp_test_window(
+        &self,
+        window: &crate::data::TestWindow,
+        comids: &[Comid],
+        n: usize,
+    ) -> Result<Array2<f32>> {
+        match (&self.precip, self.want_temp) {
+            (Some(store), true) => Ok(normalize_temp(store.read_temp_test_window(window, comids)?)),
+            _ => Ok(Array2::<f32>::zeros((0, n))),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -495,6 +667,27 @@ impl MeritGagesDataset {
             }
         }
 
+        // Daily q' for the disaggregation head (test window: all n_days).
+        let mut q_prime_daily = self.streamflow.read_window_daily(
+            window.window_start,
+            window.n_days,
+            &cache.divide_comids,
+        )?;
+        let n_days_q = q_prime_daily.shape()[0];
+        for col in 0..n {
+            let s = cache.flow_scale[col];
+            if (s - 1.0).abs() < 1e-9 {
+                continue;
+            }
+            for t in 0..n_days_q {
+                q_prime_daily[(t, col)] *= s;
+            }
+        }
+
+        // Hourly precip + temperature for the disagg head (test window).
+        let precip_hourly = self.read_precip_test_window(window, &cache.divide_comids, n)?;
+        let temp_hourly = self.read_temp_test_window(window, &cache.divide_comids, n)?;
+
         // Slice observations from the cached full-period array along axis 0.
         let obs = cache
             .full_observations
@@ -505,6 +698,9 @@ impl MeritGagesDataset {
             adjacency: cache.adjacency.clone(),
             spatial_attributes_normalized: cache.spatial_attributes_normalized.clone(),
             q_prime,
+            q_prime_daily,
+            precip_hourly,
+            temp_hourly,
             observations: obs,
             outflow_idx: cache.outflow_idx.clone(),
             gauge_staids: cache.gauge_staids.clone(),
@@ -598,6 +794,67 @@ impl MeritGagesDataset {
 }
 
 /// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
+/// Pre-head precip normalization: per-reach (column) z-score of `log1p(precip)`
+/// over the window's hours. The disaggregation head only cares about the
+/// *within-day shape*, not a reach's absolute precip magnitude, so each column
+/// is centered and scaled independently; all-dry / constant columns (std≈0,
+/// including the ~55k AORC-coverage-gap reaches that read as 0.0) map to 0,
+/// giving the head a flat precip window for those reaches (→ daily-Q fallback).
+fn normalize_precip(mut precip: Array2<f32>) -> Array2<f32> {
+    let (t, n) = precip.dim();
+    if t == 0 {
+        return precip;
+    }
+    for col in 0..n {
+        // log1p in place. Clamp to ≥0 first: precip is non-negative (mm/hr),
+        // and log1p(x≤-1) is NaN/-Inf — a defensive guard in case the store
+        // ever surfaces a stray negative (NaN is already zeroed at read time).
+        for row in 0..t {
+            precip[(row, col)] = precip[(row, col)].max(0.0).ln_1p();
+        }
+        let mean: f32 = (0..t).map(|r| precip[(r, col)]).sum::<f32>() / t as f32;
+        let var: f32 =
+            (0..t).map(|r| (precip[(r, col)] - mean).powi(2)).sum::<f32>() / t as f32;
+        let std = var.sqrt();
+        if std < 1e-6 {
+            for row in 0..t {
+                precip[(row, col)] = 0.0;
+            }
+        } else {
+            for row in 0..t {
+                precip[(row, col)] = (precip[(row, col)] - mean) / std;
+            }
+        }
+    }
+    precip
+}
+
+/// Pre-head temperature normalization: per-reach (column) z-score over the
+/// window's hours — like [`normalize_precip`] but WITHOUT `log1p` (temperature
+/// in K is not a non-negative flux). No-coverage reaches read as a constant 0
+/// (std≈0) and map to 0 (neutral), so they fall back to the daily-Q shape.
+fn normalize_temp(mut temp: Array2<f32>) -> Array2<f32> {
+    let (t, n) = temp.dim();
+    if t == 0 {
+        return temp;
+    }
+    for col in 0..n {
+        let mean: f32 = (0..t).map(|r| temp[(r, col)]).sum::<f32>() / t as f32;
+        let var: f32 = (0..t).map(|r| (temp[(r, col)] - mean).powi(2)).sum::<f32>() / t as f32;
+        let std = var.sqrt();
+        if std < 1e-6 {
+            for row in 0..t {
+                temp[(row, col)] = 0.0;
+            }
+        } else {
+            for row in 0..t {
+                temp[(row, col)] = (temp[(row, col)] - mean) / std;
+            }
+        }
+    }
+    temp
+}
+
 fn stats_path_from_attrs(attrs_path: &std::path::Path) -> std::path::PathBuf {
     let dir = attrs_path
         .parent()
