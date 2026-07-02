@@ -31,7 +31,7 @@ use zarrs::storage::{
 
 use ndarray::Array2;
 
-use crate::data::dates::RhoWindow;
+use crate::data::dates::{Frequency, RhoWindow};
 use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, IdIndex, Staid};
 
@@ -241,9 +241,7 @@ impl StreamflowStore {
 pub(crate) fn parse_cf_units(
     attrs: &serde_json::Map<String, serde_json::Value>,
     path: &Path,
-) -> Result<(NaiveDate, crate::data::dates::Frequency)> {
-    use crate::data::dates::Frequency;
-
+) -> Result<(NaiveDate, Frequency)> {
     let units = attrs
         .get("units")
         .and_then(|v| v.as_str())
@@ -275,14 +273,14 @@ pub(crate) fn parse_cf_units(
     Ok((epoch, resolution))
 }
 
-/// Daily-only wrapper for stores whose axis MUST be daily (USGS observations).
+/// Daily-only wrapper for stores whose axis MUST be daily (USGS observations, global Q' zarr).
 pub(crate) fn parse_cf_epoch(
     attrs: &serde_json::Map<String, serde_json::Value>,
     path: &Path,
 ) -> Result<NaiveDate> {
     match parse_cf_units(attrs, path)? {
-        (epoch, crate::data::dates::Frequency::Daily) => Ok(epoch),
-        (_, crate::data::dates::Frequency::Hourly) => Err(DataError::Malformed {
+        (epoch, Frequency::Daily) => Ok(epoch),
+        (_, Frequency::Hourly) => Err(DataError::Malformed {
             path: path.to_path_buf(),
             message: "expected a daily time axis (\"days since …\"), got hourly".into(),
         }),
@@ -790,7 +788,7 @@ mod tests {
         let (epoch, res) =
             parse_cf_units(&attrs_with_units("days since 1980-01-01"), Path::new("/t")).unwrap();
         assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
-        assert_eq!(res, crate::data::dates::Frequency::Daily);
+        assert_eq!(res, Frequency::Daily);
     }
 
     #[test]
@@ -800,7 +798,7 @@ mod tests {
             parse_cf_units(&attrs_with_units("days since 1981-01-01 00:00:00"), Path::new("/t"))
                 .unwrap();
         assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1981, 1, 1).unwrap());
-        assert_eq!(res, crate::data::dates::Frequency::Daily);
+        assert_eq!(res, Frequency::Daily);
     }
 
     #[test]
@@ -810,7 +808,14 @@ mod tests {
             parse_cf_units(&attrs_with_units("hours since 1981-01-01 00:00:00"), Path::new("/t"))
                 .unwrap();
         assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1981, 1, 1).unwrap());
-        assert_eq!(res, crate::data::dates::Frequency::Hourly);
+        assert_eq!(res, Frequency::Hourly);
+    }
+
+    #[test]
+    fn parse_cf_units_rejects_missing_units() {
+        let empty = serde_json::Map::new();
+        let err = parse_cf_units(&empty, Path::new("/t")).unwrap_err();
+        assert!(err.to_string().contains("missing"), "got: {err}");
     }
 
     #[test]
