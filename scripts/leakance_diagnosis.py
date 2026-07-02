@@ -211,6 +211,8 @@ def main() -> None:
                 continue
             a, b = on.ds[pname].values, off.ds[pname].values
             d = a - b
+            # Denominator is p75 of |b − median(b)| (robust half-spread), not the
+            # literal IQR — "IQR" in the label/output is shorthand for this.
             shift = abs(np.median(d)) / max(np.nanpercentile(np.abs(b - np.median(b)), 75), 1e-30)
             any_shift |= bool(shift > 0.5)
             print(f"  {pair:6s} Δ{pname:9s} median={np.median(d):+.4g}  IQR={np.percentile(d, 75) - np.percentile(d, 25):.4g}  "

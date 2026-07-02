@@ -216,10 +216,13 @@ SUMMARY (suggested verdicts — final judgment in the findings doc)
   [REFUTED] H7 model-form error: 0.0% of dry-tercile reaches pin d_gw at a bound — the linear connected-regime law is straining toward the saturating (disconnected) regime
 ```
 
-Note on H7's verdict string: the trailing clause ("…is straining toward the
-saturating regime") is the template's supported-case wording; with 0.0%
-pinning the correct reading is the opposite — the model is NOT straining
-against the d_gw bounds.
+Note on verdict strings: each hypothesis's detail clause is a fixed template
+written for the supported case, so on REFUTED lines the framing can read
+backwards — H1's "only 71.5% CAN exceed" (71.5% is the *refuting* fact),
+H6's "under/over-states the term's activity" (the finding is that both
+yardsticks *agree*), and H7's "…is straining toward the saturating regime"
+(with 0.0% pinning the model is NOT straining against the d_gw bounds). The
+numbers are authoritative; §§1–2 give the correct readings.
 
 ## 6. Reproduce
 
