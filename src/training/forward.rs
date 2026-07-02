@@ -382,8 +382,8 @@ pub fn forward_eval<I: Backend>(
     let runoff_ad = engine.forward();
     let runoff = runoff_ad.inner();
     if let Some(sink) = zeta {
-        if let Some((abs, net, steps)) = engine.zeta_sums() {
-            sink.merge(abs, net, steps);
+        if let Some(sums) = engine.zeta_sums() {
+            sink.merge(sums.abs, sums.net, sums.steps);
         }
     }
 
