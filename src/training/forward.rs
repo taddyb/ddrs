@@ -251,18 +251,55 @@ pub fn forward<I: Backend>(
     )
 }
 
+/// Running zeta accumulation across chunked `forward_eval` calls (eval builds
+/// a fresh engine per chunk, so the sums merge here). `steps` counts routed
+/// timesteps; mean |zeta| per reach = `abs_sum / steps`.
+pub struct ZetaSums<I: Backend> {
+    pub abs_sum: Option<Tensor<I, 1>>,
+    pub net_sum: Option<Tensor<I, 1>>,
+    pub steps: usize,
+}
+
+impl<I: Backend> ZetaSums<I> {
+    pub fn new() -> Self {
+        Self { abs_sum: None, net_sum: None, steps: 0 }
+    }
+
+    fn merge(&mut self, abs: Tensor<I, 1>, net: Tensor<I, 1>, steps: usize) {
+        self.abs_sum = Some(match self.abs_sum.take() {
+            Some(s) => s + abs,
+            None => abs,
+        });
+        self.net_sum = Some(match self.net_sum.take() {
+            Some(s) => s + net,
+            None => net,
+        });
+        self.steps += steps;
+    }
+}
+
+impl<I: Backend> Default for ZetaSums<I> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// MLP inference forward — no autograd anywhere. Used by `bin/eval` and
 /// the KanHead arm of `EvalParams`.
 ///
 /// Mirrors `forward` (production training path) but operates on the inner
 /// backend `I` throughout. Caller passes an `KanHead<I>` loaded via
 /// `checkpoint::load_kan_head`.
+///
+/// `zeta` — optional leakance-diagnostic sink; when `Some` and leakance is
+/// active, the engine's per-timestep zeta sums are merged into it.
 pub fn forward_eval<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
     head: &KanHead<I>,
     device: &I::Device,
     carry_state: bool,
+    zeta: Option<&mut ZetaSums<I>>,
 ) -> Tensor<I, 2> {
     let params_map = head.forward(tensors.spatial_attributes.clone());
 
@@ -339,8 +376,16 @@ pub fn forward_eval<I: Backend>(
         },
         carry_state,
     );
+    if zeta.is_some() {
+        engine.enable_zeta_accumulation();
+    }
     let runoff_ad = engine.forward();
     let runoff = runoff_ad.inner();
+    if let Some(sink) = zeta {
+        if let Some((abs, net, steps)) = engine.zeta_sums() {
+            sink.merge(abs, net, steps);
+        }
+    }
 
     scatter_add_by_group(
         runoff,

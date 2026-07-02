@@ -25,7 +25,7 @@ pub use checkpoint::{
     save_optimizer, save_train_state, state_path, TrainCkptState,
 };
 pub use forward::{
-    scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams,
+    scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams, ZetaSums,
     FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
 pub use loss::{

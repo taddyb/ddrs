@@ -1427,6 +1427,11 @@ where
 /// `forward_chain_inner`'s leakance gate so `zeta` is subtracted from `b_rhs`.
 /// Registers a [`TimestepLeakanceOp`] node (8 parents). Never uses CUDA graphs
 /// (leakance forces `use_cuda_graphs: false`).
+///
+/// `zeta_out`: eval-time diagnostic sink. When `Some`, receives this step's
+/// zeta (inner backend, no tape), recomputed from the SAME saved primitives
+/// the backward reads — so the reported value is exactly what was subtracted
+/// from `b_rhs`. `None` (the training path) adds zero kernels.
 #[allow(clippy::too_many_arguments)]
 pub fn timestep_forward_leakance<I: Backend + 'static>(
     cfg: &Config,
@@ -1443,6 +1448,7 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     k_d_at: Tensor<Autodiff<I>, 1>,
     d_gw_at: Tensor<Autodiff<I>, 1>,
     leakance_factor_at: Tensor<Autodiff<I>, 1>,
+    zeta_out: Option<&mut Option<Tensor<I, 1>>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -1521,6 +1527,16 @@ where
         ratio_p, denominator_p, q_eps_p, side_slope_raw_p, bw_raw_p,
     ] = saved;
     let _ = (fsi::DEPTH, fsi::BW_RAW);
+
+    // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · (depth − d_gw),
+    // recomputed from the saved primitives (cheap: 3 elementwise kernels,
+    // only when a sink is supplied).
+    if let Some(out) = zeta_out {
+        let m = wrap(depth_p.clone()) - wrap(leak.d_gw.clone());
+        *out = Some(
+            wrap(leak.leakance_factor.clone()) * wrap(leak.area_z.clone()) * wrap(leak.k_d.clone()) * m,
+        );
+    }
 
     let base = TimestepState::<I> {
         pattern: pattern.clone(),

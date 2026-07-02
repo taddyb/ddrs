@@ -52,6 +52,11 @@ struct Cli {
     /// Use FROZEN_N/Q_SPATIAL/P_SPATIAL constants instead of an MLP.
     #[arg(long)]
     frozen: bool,
+
+    /// Write the per-reach leakance zeta diagnostic NetCDF here (e.g.
+    /// `<run_dir>/kan_parameters.nc`). Requires `params.use_leakance: true`.
+    #[arg(long)]
+    zeta_output: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -121,6 +126,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model_label: &model_label,
         },
     )?;
+
+    // Leakance zeta diagnostic.
+    if let Some(zpath) = &cli.zeta_output {
+        match (&output.zeta_abs_mean, &output.zeta_net_mean, &output.zeta_comids) {
+            (Some(za), Some(zn), Some(zc)) => {
+                ddrs::dump_parameters::write_zeta_netcdf(zpath, zc, za, zn, &model_label)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                let frac_above = za.iter().filter(|&&z| z > 0.01).count() as f64 / za.len() as f64;
+                let mut sorted = za.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!(
+                    "zeta → {} ({} reaches; median |zeta|={:.4e} m³/s; |zeta|>0.01 on {:.1}%)",
+                    zpath.display(),
+                    zc.len(),
+                    sorted[sorted.len() / 2],
+                    frac_above * 100.0,
+                );
+            }
+            _ => eprintln!(
+                "warning: --zeta-output requested but no zeta was accumulated \
+                 (params.use_leakance off, or --frozen)"
+            ),
+        }
+    }
 
     // Metrics summary. Per-gauge mean is misleading on right-skewed NSE
     // distributions (a few bad gauges drag the mean); only median is reported.

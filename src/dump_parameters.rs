@@ -496,6 +496,51 @@ where
     Ok(n_reaches)
 }
 
+/// Write the eval-time per-reach zeta diagnostic NetCDF — the `|zeta| > 0.01
+/// m³/s` GO/NO-GO magnitude bar for the leakance experiment
+/// (`scripts/leakance_subset_analysis.py::maybe_load_zeta` reads the `zeta`
+/// variable from `<run_dir>/kan_parameters.nc`).
+///
+/// `zeta` = eval-window mean |zeta| per reach; `zeta_net` = mean signed zeta
+/// (positive = losing reach). COMIDs are the EVAL network (gauge-subgraph
+/// union), not full CONUS — only these reaches were routed.
+pub fn write_zeta_netcdf(
+    path: &Path,
+    comids: &[i64],
+    zeta_abs_mean: &[f32],
+    zeta_net_mean: &[f32],
+    model_label: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut file = netcdf::create(path)?;
+
+    file.add_attribute("checkpoint", model_label)?;
+    file.add_attribute("ddrs_version", env!("CARGO_PKG_VERSION"))?;
+    file.add_attribute("n_reaches", comids.len() as i64)?;
+    file.add_attribute(
+        "note",
+        "eval-time leakance zeta diagnostic; COMID dimension is the eval \
+         (gauge-subgraph union) network, not full CONUS",
+    )?;
+
+    file.add_dimension("COMID", comids.len())?;
+
+    let mut v = file.add_variable::<i64>("COMID", &["COMID"])?;
+    v.put_values(comids, ..)?;
+    v.put_attribute("long_name", "MERIT reach identifier (eval network)")?;
+
+    let mut v = file.add_variable::<f32>("zeta", &["COMID"])?;
+    v.put_values(zeta_abs_mean, ..)?;
+    v.put_attribute("long_name", "eval-window mean |zeta| (leakance GW-SW exchange magnitude)")?;
+    v.put_attribute("units", "m^3/s")?;
+
+    let mut v = file.add_variable::<f32>("zeta_net", &["COMID"])?;
+    v.put_values(zeta_net_mean, ..)?;
+    v.put_attribute("long_name", "eval-window mean signed zeta (positive = losing reach)")?;
+    v.put_attribute("units", "m^3/s")?;
+
+    Ok(())
+}
+
 /// Write a NetCDF4 file with the COMID-keyed KAN parameter schema. Each var
 /// carries a `long_name` + `units` attribute so xarray-based plotting code
 /// (e.g. DDR's `plot_parameter_map.ipynb`) gets self-describing axes.

@@ -398,6 +398,23 @@ fn dispatch(
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 
+                // Leakance diagnostic: per-reach eval-window mean |zeta| →
+                // <run_dir>/kan_parameters.nc (the `zeta` variable the subset
+                // analysis script reads for the GO/NO-GO magnitude bar).
+                if let (Some(za), Some(zn), Some(zc)) = (
+                    &output.zeta_abs_mean,
+                    &output.zeta_net_mean,
+                    &output.zeta_comids,
+                ) {
+                    let nc = run_dir.join("kan_parameters.nc");
+                    match crate::dump_parameters::write_zeta_netcdf(
+                        &nc, zc, za, zn, &latest.display().to_string(),
+                    ) {
+                        Ok(()) => eprintln!("zeta diagnostic → {}", nc.display()),
+                        Err(e) => eprintln!("warning: zeta netcdf write failed: {e}"),
+                    }
+                }
+
                 let median = |xs: &[f32]| -> f32 {
                     let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
                     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
