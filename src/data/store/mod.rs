@@ -139,3 +139,12 @@ impl StreamflowSource {
         }
     }
 }
+
+impl std::fmt::Debug for StreamflowSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Icechunk(_) => write!(f, "StreamflowSource::Icechunk(..)"),
+            Self::GlobalZarr(_) => write!(f, "StreamflowSource::GlobalZarr(..)"),
+        }
+    }
+}
