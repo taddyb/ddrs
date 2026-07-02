@@ -26,7 +26,7 @@ pub use zarr_qprime::GlobalStreamflowStore;
 
 use ndarray::Array2;
 
-use crate::data::dates::RhoWindow;
+use crate::data::dates::{Frequency, RhoWindow};
 use crate::data::error::Result;
 use crate::data::ids::{Comid, Staid};
 
@@ -111,10 +111,11 @@ impl StreamflowSource {
 
     /// Native time-axis resolution of the underlying store. The global
     /// zarr v2 layout is daily by construction.
-    pub fn resolution(&self) -> crate::data::dates::Frequency {
+    /// (GlobalZarr arm has no zarr-v2 fixture; covered by real-store smoke runs.)
+    pub fn resolution(&self) -> Frequency {
         match self {
             Self::Icechunk(s) => s.resolution,
-            Self::GlobalZarr(_) => crate::data::dates::Frequency::Daily,
+            Self::GlobalZarr(_) => Frequency::Daily,
         }
     }
 
