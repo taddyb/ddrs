@@ -124,6 +124,8 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     }
 
     // 6. Finalize manifest.json.
+    let failed = matches!(status, RunStatus::Failed);
+    let failure_reason = if failed { exit_reason.clone() } else { None };
     let manifest = Manifest {
         run_id: run_id.clone(),
         ddrs_version: env!("CARGO_PKG_VERSION").into(),
@@ -155,6 +157,14 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
         max_mini_batches: input.max_mini_batches,
     };
     manifest.write_atomic(&run_dir.join("manifest.json"))?;
+    // Propagate workflow failures as a non-zero exit. The manifest is always
+    // written first so the run directory and exit_reason are preserved. The
+    // `catch_unwind` in `dispatch` ensures panics also land here as Failed.
+    if failed {
+        return Err(CliError::Runtime(
+            failure_reason.unwrap_or_else(|| "workflow failed (no exit reason captured)".into()),
+        ));
+    }
     Ok(run_dir)
 }
 
