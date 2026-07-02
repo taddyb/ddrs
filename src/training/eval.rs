@@ -36,6 +36,12 @@ pub struct EvalOutput {
     pub zeta_abs_mean: Option<Vec<f32>>,
     /// Eval-window mean signed zeta per reach (m³/s; positive = losing).
     pub zeta_net_mean: Option<Vec<f32>>,
+    /// Eval-window mean routed depth per reach (m). Same gating as zeta.
+    pub zeta_depth_mean: Option<Vec<f32>>,
+    /// Eval-window mean plan-view wetted area `area_z` per reach (m²).
+    pub zeta_area_z_mean: Option<Vec<f32>>,
+    /// Eval-window mean routed discharge per reach (m³/s).
+    pub zeta_q_mean: Option<Vec<f32>>,
     /// COMIDs aligned to the zeta vectors (eval-network topological order).
     pub zeta_comids: Option<Vec<i64>>,
 }
@@ -169,15 +175,30 @@ pub fn evaluate<I: Backend>(
         .collect();
 
     // Leakance diagnostic: sums → per-reach means over the routed timesteps.
-    let (zeta_abs_mean, zeta_net_mean, zeta_comids) =
-        match (zeta_sums.abs_sum, zeta_sums.net_sum, zeta_sums.steps) {
-            (Some(abs), Some(net), steps) if steps > 0 => {
+    let (zeta_abs_mean, zeta_net_mean, zeta_depth_mean, zeta_area_z_mean, zeta_q_mean, zeta_comids) =
+        match (
+            zeta_sums.abs_sum,
+            zeta_sums.net_sum,
+            zeta_sums.depth_sum,
+            zeta_sums.area_z_sum,
+            zeta_sums.q_sum,
+            zeta_sums.steps,
+        ) {
+            (Some(abs), Some(net), Some(depth), Some(area_z), Some(q), steps) if steps > 0 => {
                 let scale = 1.0_f32 / steps as f32;
-                let abs_mean: Vec<f32> = (abs * scale).into_data().into_vec().unwrap();
-                let net_mean: Vec<f32> = (net * scale).into_data().into_vec().unwrap();
-                (Some(abs_mean), Some(net_mean), Some(reach_comids))
+                let mean = |t: burn::tensor::Tensor<I, 1>| -> Vec<f32> {
+                    (t * scale).into_data().into_vec().unwrap()
+                };
+                (
+                    Some(mean(abs)),
+                    Some(mean(net)),
+                    Some(mean(depth)),
+                    Some(mean(area_z)),
+                    Some(mean(q)),
+                    Some(reach_comids),
+                )
             }
-            _ => (None, None, None),
+            _ => (None, None, None, None, None, None),
         };
 
     Ok(EvalOutput {
@@ -188,6 +209,9 @@ pub fn evaluate<I: Backend>(
         metrics,
         zeta_abs_mean,
         zeta_net_mean,
+        zeta_depth_mean,
+        zeta_area_z_mean,
+        zeta_q_mean,
         zeta_comids,
     })
 }
