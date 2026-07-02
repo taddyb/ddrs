@@ -1,6 +1,6 @@
 """Write tiny icechunk Qr fixture stores for ddrs integration tests.
 
-Run under DDR's uv venv (it has icechunk + xarray):
+Run under DDR's uv venv (it has icechunk + xarray + zarr):
 
     cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/make_streamflow_fixtures.py
 
@@ -57,6 +57,7 @@ def write_store(
     )
     # Patch the on-disk units attr if xarray normalised it (e.g. strips
     # " 00:00:00" from "hours since 1981-01-01 00:00:00").
+    # Note: icechunk places the prior repo ref in overwritten/ on ANY write; this is normal.
     if time_units_on_disk is not None:
         z = zarr.open_group(session.store, mode="r+")
         z["time"].attrs["units"] = time_units_on_disk
