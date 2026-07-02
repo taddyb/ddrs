@@ -85,6 +85,13 @@ fn import_registers_group_with_swapped_streamflow() {
         force: false,
     };
     assert!(run_import(Some(&cfg), &ws, again).is_err());
+    let force = ImportInput {
+        store_path: fixture("qr_daily.ic"),
+        name: Some("test-daily".into()),
+        dry_run: false,
+        force: true,
+    };
+    run_import(Some(&cfg), &ws, force).expect("--force overwrites the existing group");
 }
 
 #[test]
