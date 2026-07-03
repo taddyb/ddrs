@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
             cfg.params.sparse_solver = SparseSolver::Cpu;
             cfg.params.use_cuda_graphs = false;
-            eprintln!("backend: cpu (NdArray; sparse_solver forced to cpu)");
+            eprintln!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
             run::<I>(cfg, cli, device)
         }
         "cuda" => {

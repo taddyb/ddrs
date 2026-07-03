@@ -63,11 +63,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
             cfg.params.sparse_solver = SparseSolver::Cpu;
             cfg.params.use_cuda_graphs = false;
-            eprintln!("backend: cpu (NdArray; sparse_solver forced to cpu)");
+            eprintln!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
             run::<I>(cfg, cli, device)
         }
         "cuda" => {
             type I = burn_cuda::Cuda<f32, i32>;
+            // Config-selected CUDA ordinal (top-level `device:` key).
             let device = cubecl::cuda::CudaDevice::new(cfg.device);
             run::<I>(cfg, cli, device)
         }
@@ -79,6 +80,9 @@ fn run<I>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<dyn std::e
 where
     I: Backend,
     Autodiff<I>: AutodiffBackend<InnerBackend = I>,
+    // Autodiff<I>::Device == I::Device in BURN 0.21 (driver.rs:58); required to
+    // pass `device: I::Device` to bootstrap_head_and_state, which takes
+    // `&<Autodiff<I> as BackendTypes>::Device`.
     I: BackendTypes<Device = <Autodiff<I> as BackendTypes>::Device>,
 {
     let start = Instant::now();
