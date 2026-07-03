@@ -11,6 +11,7 @@
 pub mod gage_csv;
 pub mod icechunk;
 pub mod netcdf;
+pub mod obs_writer;
 pub mod zarr;
 pub mod zarr_aorc;
 pub mod zarr_obs;
