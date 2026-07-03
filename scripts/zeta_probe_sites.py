@@ -132,6 +132,30 @@ def main() -> None:
     plan = pd.concat(picked + [nonref]).drop_duplicates("comid")
     print(f"picked {len(plan)} probe reaches ({(plan['class']=='Ref').sum()} Ref)")
 
+    # Cap reaches per measurement gauge: probes sharing a nearest gauge can never
+    # share a round (each lies in the other's measurement subgraph), so per-gauge
+    # count × n_deltas is a hard floor on rounds. Keep the 2 most stratum-diverse
+    # reaches per gauge (greedy: first-seen distinct (s_up, s_ar, s_re) combos).
+    MAX_PER_GAUGE = 2
+    capped = []
+    for staid, grp in plan.groupby("staid_nearest", sort=False):
+        if len(grp) <= MAX_PER_GAUGE:
+            capped.append(grp)
+            continue
+        seen_strata: set[tuple] = set()
+        keep_rows = []
+        for _, row in grp.sort_values(["s_up", "s_ar", "s_re"]).iterrows():
+            key = (row["s_up"], row["s_ar"], row["s_re"])
+            if key not in seen_strata or len(keep_rows) < 1:
+                seen_strata.add(key)
+                keep_rows.append(row)
+            if len(keep_rows) == MAX_PER_GAUGE:
+                break
+        capped.append(pd.DataFrame(keep_rows))
+    plan = pd.concat(capped)
+    print(f"after per-gauge cap ({MAX_PER_GAUGE}): {len(plan)} probe reaches "
+          f"({(plan['class'] == 'Ref').sum()} Ref) on {plan['staid_nearest'].nunique()} gauges")
+
     # 6. Round packing (first-fit-decreasing): build the combined probe list for
     #    both deltas first, sort by gauge-footprint size DESCENDING (big footprints
     #    placed first pack tighter), then greedy first-fit.  Stable secondary key
