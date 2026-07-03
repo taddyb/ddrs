@@ -11,6 +11,10 @@ Zarr layout (verified 2026-07-02):
       indices_0  [...]        # adjacency row indices
       indices_1  [...]        # adjacency col indices
       values     [...]        # adjacency values
+
+Round packing: conflicts are nearest-gauge containment — probes A and B conflict
+iff A.comid lies inside B's staid_nearest subgraph or B.comid lies inside A's,
+because the downstream analysis measures each probe only at its staid_nearest gauge.
 """
 
 from __future__ import annotations
@@ -132,6 +136,11 @@ def main() -> None:
     #    both deltas first, sort by gauge-footprint size DESCENDING (big footprints
     #    placed first pack tighter), then greedy first-fit.  Stable secondary key
     #    (comid, delta) provides deterministic tie-breaking.
+    #
+    #    Conflict relation: A and B conflict iff A.comid ∈ nearest_set[B] or
+    #    B.comid ∈ nearest_set[A], where nearest_set[X] is the COMID set of X's
+    #    staid_nearest gauge subgraph.  Two probes sharing only a far-downstream
+    #    gauge are independent because each is measured only at its staid_nearest.
     probe_list = [
         (int(r["comid"]), delta, r["staid_nearest"], r["class"],
          int(r["s_up"]), int(r["s_ar"]), int(r["s_re"]))
@@ -140,18 +149,35 @@ def main() -> None:
     ]
     probe_list.sort(key=lambda x: (-len(reach_gauges[x[0]]), x[0], x[1]))
 
+    # Precompute nearest-gauge COMID set for each probe entry.
+    # gauge_comids keys are zero-padded STAIDs; staid_nearest is also zero-padded.
+    nearest_set_map: list[frozenset[int]] = [
+        frozenset(int(c) for c in gauge_comids.get(staid_nearest, np.array([], dtype=np.int64)))
+        for _, _, staid_nearest, *_ in probe_list
+    ]
+
     plan_rows = []
-    rounds: list[set[str]] = []
-    for comid, delta, staid_nearest, cls, s_up, s_ar, s_re in probe_list:
-        gset = set(reach_gauges[comid])
-        for k, used in enumerate(rounds):
-            if not (used & gset):
-                used |= gset
+    rounds_nearest_union: list[set[int]] = []   # union of nearest_sets for round members
+    rounds_member_comids: list[set[int]] = []   # comids of probes already in the round
+
+    for idx, (comid, delta, staid_nearest, cls, s_up, s_ar, s_re) in enumerate(probe_list):
+        ns = nearest_set_map[idx]
+        assigned_round = None
+        for k in range(len(rounds_nearest_union)):
+            # Candidate conflicts with this round iff its comid falls inside any
+            # member's nearest-gauge subgraph, OR any member comid falls inside
+            # the candidate's nearest-gauge subgraph.
+            if comid not in rounds_nearest_union[k] and rounds_member_comids[k].isdisjoint(ns):
+                rounds_nearest_union[k].update(ns)
+                rounds_member_comids[k].add(comid)
+                assigned_round = k
                 break
-        else:
-            k = len(rounds)
-            rounds.append(set(gset))
-        plan_rows.append((k, comid, delta, staid_nearest, cls, s_up, s_ar, s_re))
+        if assigned_round is None:
+            assigned_round = len(rounds_nearest_union)
+            rounds_nearest_union.append(set(ns))
+            rounds_member_comids.append({comid})
+        plan_rows.append((assigned_round, comid, delta, staid_nearest, cls, s_up, s_ar, s_re))
+
     out = pd.DataFrame(plan_rows, columns=["round", "comid", "delta", "staid_nearest",
                                            "class", "stratum_uparea", "stratum_aridity",
                                            "stratum_reach"])
@@ -159,6 +185,23 @@ def main() -> None:
     rpc = out.groupby("round").size()
     print(f"\n=== PROBE PLAN: {len(out)} probes packed into {n_rounds} ROUNDS ===")
     print(f"probes-per-round: min={rpc.min()}  median={int(rpc.median())}  max={rpc.max()}")
+
+    # Verification: assert no conflicts within any round under the new relation.
+    nearest_set_by_staid: dict[str, frozenset[int]] = {
+        g: frozenset(int(c) for c in comids)
+        for g, comids in gauge_comids.items()
+    }
+    violations = 0
+    for _, grp in out.groupby("round"):
+        comids_r = grp["comid"].tolist()
+        ns_r = [nearest_set_by_staid.get(g, frozenset()) for g in grp["staid_nearest"]]
+        n = len(comids_r)
+        for i in range(n):
+            for j in range(i + 1, n):
+                if comids_r[i] in ns_r[j] or comids_r[j] in ns_r[i]:
+                    violations += 1
+    print(f"verification: {violations} violations")
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.out, index=False)
     print("wrote", args.out)
