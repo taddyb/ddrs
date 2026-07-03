@@ -1,23 +1,6 @@
 # recoverability_student_b.yaml — synthetic losing-reach recoverability (positive control).
 # GENERATED from leakance_hourly_on.yaml — student B: warm-start, leakance OFF (H5 absorption control)
 # Spec: docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md
-# leakance_hourly_on.yaml — 2×2 experiment cell: HOURLY-ON
-#
-# Role in the 2×2 (forcing × leakance):
-#   - forcing: hourly precip-driven disaggregation (same as the 2026-06-23 precip+L1 control)
-#   - leakance: ON  (K_D / d_gw / leakance_factor added to KAN head + routing)
-#
-# This cell answers whether the sub-daily forcing signal makes the GW–SW water-loss
-# term identifiable. Paired against leakance_hourly_off (=the 2026-06-23T02-49-12Z run)
-# for the subset NSE/KGE delta.
-#
-# Spec: docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md
-# Plan task 12: docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md
-#
-# Derived verbatim from:
-#   .ddrs/runs/2026-06-23T02-49-12Z-conus-hourly-train-and-test/config.yaml
-# Additions ONLY: leakance parameter keys + use_leakance: true.
-# Seed kept at 42 for paired mini-batch draws vs the OFF control.
 
 mode: training
 workflow: train-and-test
@@ -65,6 +48,10 @@ kan_head:
     - SoilGrids1km_sand
     - ETPOT_Hargr
     - Porosity
+  # INTENTIONAL: K_D/d_gw/leakance_factor stay in the head outputs so the
+  # warm-start checkpoint (trained with them) loads; params.use_leakance: false
+  # means routing ignores them. B measures how well n/q_spatial alone absorb
+  # the planted losses (H5 absorption control).
   learnable_parameters:
     - n
     - q_spatial
