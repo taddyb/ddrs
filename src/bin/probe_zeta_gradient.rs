@@ -723,16 +723,29 @@ fn parse_plant_file(
         (col("comid")?, col("k_d_norm")?, col("d_gw_norm")?, col("factor_norm")?);
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
-    for rec in rdr.records() {
+    for (row_idx, rec) in rdr.records().enumerate() {
         let rec = rec?;
-        let comid: i64 = rec[ci_c].parse()?;
+        let ctx = |e: String| format!("{} row {}: {e}", path.display(), row_idx + 2);
+        let comid: i64 = rec[ci_c].parse().map_err(|e| ctx(format!("{e}")))?;
         if !seen.insert(comid) {
-            return Err(format!("duplicate plant comid {comid}").into());
+            return Err(
+                format!("{} row {}: duplicate plant comid {comid}", path.display(), row_idx + 2)
+                    .into(),
+            );
         }
         let norm = |s: &str, name: &str| -> Result<f32, Box<dyn std::error::Error>> {
-            let v: f32 = s.parse()?;
+            let v: f32 = s.parse().map_err(|e| -> Box<dyn std::error::Error> {
+                format!("{} row {}: {e}", path.display(), row_idx + 2).into()
+            })?;
             if !(0.0..=1.0).contains(&v) {
-                return Err(format!("{name} {v} outside [0,1] for comid {comid}").into());
+                return Err(
+                    format!(
+                        "{} row {}: {name} {v} outside [0,1] for comid {comid}",
+                        path.display(),
+                        row_idx + 2
+                    )
+                    .into(),
+                );
             }
             Ok(v)
         };
@@ -765,7 +778,22 @@ fn run_teacher<I: Backend>(
         cli.plant_file.as_ref().ok_or("--plant-file is required in teacher mode")?,
     )?;
     let obs_dir = cli.obs_output.as_ref().ok_or("--obs-output is required in teacher mode")?;
+    if obs_dir.exists() && obs_dir.read_dir()?.next().is_some() {
+        return Err(format!(
+            "--obs-output {} already exists and is non-empty; remove it before \
+             re-running teacher mode to prevent stale gauge data",
+            obs_dir.display()
+        )
+        .into());
+    }
     let zeta_path = cli.zeta_output.as_ref().ok_or("--zeta-output is required in teacher mode")?;
+    if let Some(p) = zeta_path.parent() {
+        if !p.as_os_str().is_empty() && !p.exists() {
+            return Err(
+                format!("--zeta-output parent dir does not exist: {}", p.display()).into(),
+            );
+        }
+    }
     let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint is required in teacher mode")?;
 
     let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
@@ -874,10 +902,10 @@ fn run_teacher<I: Backend>(
         Tensor::<I, 1>::from_floats(pred_full_vec.as_slice(), &device)
             .reshape([n_all_gauges, n_hours]);
     let daily_t = tau_trim_and_downsample(pred_full_t, cfg.params.tau);
-    let dd = daily_t.dims();
+    let daily_dims = daily_t.dims();
     let daily_vec: Vec<f32> = daily_t.into_data().into_vec().unwrap();
-    let daily_all = Array2::from_shape_vec((dd[0], dd[1]), daily_vec).unwrap();
-    let daily = daily_all.slice(ndarray::s![.., 0..dd[1] - 1]).to_owned();
+    let daily_all = Array2::from_shape_vec((daily_dims[0], daily_dims[1]), daily_vec).unwrap();
+    let daily = daily_all.slice(ndarray::s![.., 0..daily_dims[1] - 1]).to_owned();
 
     // Synthetic obs: day0 = axis.start + 1 (tau-trim drops day 0).
     let epoch = chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap();
