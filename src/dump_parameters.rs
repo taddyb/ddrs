@@ -610,6 +610,96 @@ pub fn write_zeta_netcdf(
     Ok(())
 }
 
+/// Write the stage-1 adjoint reachability map: per-reach mean |g| and mean
+/// signed g of the training L1 loss w.r.t. the NORMALIZED leakance params,
+/// plus the window-coverage count. Dimension `COMID_probe` = union of reaches
+/// covered by the sampled batches.
+#[allow(clippy::too_many_arguments)]
+pub fn write_grad_netcdf(
+    path: &Path,
+    comids: &[i64],
+    grad_factor_abs: &[f32],
+    grad_factor_net: &[f32],
+    grad_dgw_abs: &[f32],
+    grad_dgw_net: &[f32],
+    grad_kd_abs: &[f32],
+    grad_kd_net: &[f32],
+    n_windows: &[i32],
+    checkpoint_label: &str,
+    n_batches: usize,
+    seed: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut file = if path.exists() {
+        netcdf::append(path)?
+    } else {
+        netcdf::create(path)?
+    };
+
+    file.add_attribute("probe_checkpoint", checkpoint_label)?;
+    file.add_attribute("probe_n_batches", n_batches as i64)?;
+    file.add_attribute("probe_seed", seed as i64)?;
+    file.add_attribute("probe_ddrs_version", env!("CARGO_PKG_VERSION"))?;
+    file.add_attribute(
+        "probe_note",
+        "adjoint reachability: d(L1)/d(normalized leakance params), mean over covering windows",
+    )?;
+
+    match file.dimension("COMID_probe") {
+        Some(d) if d.len() != comids.len() => {
+            return Err(format!(
+                "{}: existing COMID_probe has {} reaches, this probe covered {}",
+                path.display(),
+                d.len(),
+                comids.len()
+            )
+            .into());
+        }
+        Some(_) => {}
+        None => {
+            file.add_dimension("COMID_probe", comids.len())?;
+        }
+    }
+
+    if let Some(mut v) = file.variable_mut("COMID_probe") {
+        v.put_values(comids, ..)?;
+    } else {
+        let mut v = file.add_variable::<i64>("COMID_probe", &["COMID_probe"])?;
+        v.put_values(comids, ..)?;
+        v.put_attribute("long_name", "MERIT reach identifier (probe-covered network)")?;
+    }
+
+    let mut put = |name: &str,
+                   vals: &[f32],
+                   long_name: &str|
+     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(mut v) = file.variable_mut(name) {
+            v.put_values(vals, ..)?;
+        } else {
+            let mut v = file.add_variable::<f32>(name, &["COMID_probe"])?;
+            v.put_values(vals, ..)?;
+            v.put_attribute("long_name", long_name)?;
+            v.put_attribute("units", "dimensionless (per normalized param)")?;
+        }
+        Ok(())
+    };
+    put("grad_factor_abs", grad_factor_abs, "mean |dL1/d leakance_factor| per covering window")?;
+    put("grad_factor_net", grad_factor_net, "mean signed dL1/d leakance_factor")?;
+    put("grad_dgw_abs", grad_dgw_abs, "mean |dL1/d d_gw|")?;
+    put("grad_dgw_net", grad_dgw_net, "mean signed dL1/d d_gw")?;
+    put("grad_kd_abs", grad_kd_abs, "mean |dL1/d K_D|")?;
+    put("grad_kd_net", grad_kd_net, "mean signed dL1/d K_D")?;
+
+    if let Some(mut v) = file.variable_mut("n_windows") {
+        v.put_values(n_windows, ..)?;
+    } else {
+        let mut v = file.add_variable::<i32>("n_windows", &["COMID_probe"])?;
+        v.put_values(n_windows, ..)?;
+        v.put_attribute("long_name", "number of sampled windows covering this reach")?;
+    }
+
+    Ok(())
+}
+
 /// Write a NetCDF4 file with the COMID-keyed KAN parameter schema. Each var
 /// carries a `long_name` + `units` attribute so xarray-based plotting code
 /// (e.g. DDR's `plot_parameter_map.ipynb`) gets self-describing axes.
