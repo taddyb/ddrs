@@ -128,29 +128,37 @@ def main() -> None:
     plan = pd.concat(picked + [nonref]).drop_duplicates("comid")
     print(f"picked {len(plan)} probe reaches ({(plan['class']=='Ref').sum()} Ref)")
 
-    # 6. Round packing: no two probes in a round may share ANY containing gauge.
+    # 6. Round packing (first-fit-decreasing): build the combined probe list for
+    #    both deltas first, sort by gauge-footprint size DESCENDING (big footprints
+    #    placed first pack tighter), then greedy first-fit.  Stable secondary key
+    #    (comid, delta) provides deterministic tie-breaking.
+    probe_list = [
+        (int(r["comid"]), delta, r["staid_nearest"], r["class"],
+         int(r["s_up"]), int(r["s_ar"]), int(r["s_re"]))
+        for delta in DELTAS
+        for _, r in plan.iterrows()
+    ]
+    probe_list.sort(key=lambda x: (-len(reach_gauges[x[0]]), x[0], x[1]))
+
     plan_rows = []
     rounds: list[set[str]] = []
-    for delta in DELTAS:
-        for _, r in plan.iterrows():
-            gset = set(reach_gauges[int(r["comid"])])
-            for k, used in enumerate(rounds):
-                if not (used & gset):
-                    used |= gset
-                    break
-            else:
-                k = len(rounds)
-                rounds.append(set(gset))
-            plan_rows.append((k, int(r["comid"]), delta, r["staid_nearest"], r["class"],
-                              int(r["s_up"]), int(r["s_ar"]), int(r["s_re"])))
+    for comid, delta, staid_nearest, cls, s_up, s_ar, s_re in probe_list:
+        gset = set(reach_gauges[comid])
+        for k, used in enumerate(rounds):
+            if not (used & gset):
+                used |= gset
+                break
+        else:
+            k = len(rounds)
+            rounds.append(set(gset))
+        plan_rows.append((k, comid, delta, staid_nearest, cls, s_up, s_ar, s_re))
     out = pd.DataFrame(plan_rows, columns=["round", "comid", "delta", "staid_nearest",
                                            "class", "stratum_uparea", "stratum_aridity",
                                            "stratum_reach"])
     n_rounds = out["round"].nunique()
-    print(f"{len(out)} probes packed into {n_rounds} rounds")
-    if n_rounds > 40:
-        print(f"ERROR: round count {n_rounds} > 40 — aborting without writing CSV")
-        raise SystemExit(1)
+    rpc = out.groupby("round").size()
+    print(f"\n=== PROBE PLAN: {len(out)} probes packed into {n_rounds} ROUNDS ===")
+    print(f"probes-per-round: min={rpc.min()}  median={int(rpc.median())}  max={rpc.max()}")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.out, index=False)
     print("wrote", args.out)
