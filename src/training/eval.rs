@@ -82,7 +82,7 @@ pub fn evaluate<I: Backend>(
                 forward_with_frozen_params::<I>(cfg, &tensors, frozen, device, carry_state)
             }
             EvalParams::KanHead(head) => {
-                forward_eval::<I>(cfg, &tensors, head, device, carry_state, Some(&mut zeta_sums))
+                forward_eval::<I>(cfg, &tensors, head, device, carry_state, Some(&mut zeta_sums), None)
             }
         };
         let dims = pred.dims();

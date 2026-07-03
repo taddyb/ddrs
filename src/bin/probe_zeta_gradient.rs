@@ -566,7 +566,7 @@ fn run_perturb<I: Backend>(
                 RoutingTensors::<I> { q_prime, q_prime_daily, ..tensors }
             };
 
-            let pred = forward_eval::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0, None);
+            let pred = forward_eval::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0, None, None);
             let dims = pred.dims();
             debug_assert_eq!(dims[0], n_all_gauges);
             debug_assert_eq!(dims[1], win.n_hourly());

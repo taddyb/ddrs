@@ -4,7 +4,7 @@
 //! `outflow_idx`-derived `flat_indices` + `group_ids`.
 
 use burn::backend::Autodiff;
-use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor};
+use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
@@ -297,6 +297,36 @@ impl<I: Backend> Default for ZetaSums<I> {
     }
 }
 
+/// Per-reach override of the NORMALIZED leakance head outputs, applied inside
+/// `forward_eval` between `head.forward` and denormalization (which happens
+/// in `setup_inputs`). Vectors are dense over the network's reach columns
+/// (same order as `divide_comids`): `mask[i] == 1.0` replaces reach i's
+/// normalized K_D/d_gw/factor with the corresponding value; `mask[i] == 0.0`
+/// leaves the head's output untouched. Eval-path only — the training
+/// `forward` never sees this type.
+pub struct LeakanceOverride {
+    pub mask: Vec<f32>,
+    pub k_d: Vec<f32>,
+    pub d_gw: Vec<f32>,
+    pub factor: Vec<f32>,
+}
+
+impl LeakanceOverride {
+    fn apply<I: Backend>(
+        &self,
+        param: Tensor<I, 1>,
+        vals: &[f32],
+        device: &I::Device,
+    ) -> Tensor<I, 1> {
+        let n = self.mask.len();
+        let mask_t: Tensor<I, 1> =
+            Tensor::from_data(TensorData::new(self.mask.clone(), [n]), device);
+        let vals_t: Tensor<I, 1> =
+            Tensor::from_data(TensorData::new(vals.to_vec(), [n]), device);
+        param * (mask_t.ones_like() - mask_t.clone()) + vals_t * mask_t
+    }
+}
+
 /// MLP inference forward — no autograd anywhere. Used by `bin/eval` and
 /// the KanHead arm of `EvalParams`.
 ///
@@ -306,6 +336,10 @@ impl<I: Backend> Default for ZetaSums<I> {
 ///
 /// `zeta` — optional leakance-diagnostic sink; when `Some` and leakance is
 /// active, the engine's per-timestep zeta sums are merged into it.
+///
+/// `overrides` — optional per-reach override of the NORMALIZED leakance head
+/// outputs; applied after `head.forward` and before denormalization. `None`
+/// is the normal eval path (no override).
 pub fn forward_eval<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
@@ -313,6 +347,7 @@ pub fn forward_eval<I: Backend>(
     device: &I::Device,
     carry_state: bool,
     zeta: Option<&mut ZetaSums<I>>,
+    overrides: Option<&LeakanceOverride>,
 ) -> Tensor<I, 2> {
     let params_map = head.forward(tensors.spatial_attributes.clone());
 
@@ -355,11 +390,24 @@ pub fn forward_eval<I: Backend>(
                 );
             }
         }
-        (
-            params_map.get("K_D").cloned(),
-            params_map.get("d_gw").cloned(),
-            params_map.get("leakance_factor").cloned(),
-        )
+        let (mut k_d_t, mut d_gw_t, mut factor_t) = (
+            params_map.get("K_D").expect("checked above").clone(),
+            params_map.get("d_gw").expect("checked above").clone(),
+            params_map.get("leakance_factor").expect("checked above").clone(),
+        );
+        if let Some(ov) = overrides {
+            assert_eq!(
+                ov.mask.len(),
+                k_d_t.dims()[0],
+                "LeakanceOverride length {} != network reaches {}",
+                ov.mask.len(),
+                k_d_t.dims()[0]
+            );
+            k_d_t = ov.apply::<I>(k_d_t, &ov.k_d, device);
+            d_gw_t = ov.apply::<I>(d_gw_t, &ov.d_gw, device);
+            factor_t = ov.apply::<I>(factor_t, &ov.factor, device);
+        }
+        (Some(k_d_t), Some(d_gw_t), Some(factor_t))
     } else {
         (None, None, None)
     };
@@ -451,6 +499,31 @@ mod tests {
             "log round-trip failed: {} != 21.0",
             p_recovered[0]
         );
+    }
+
+    #[test]
+    fn leakance_override_apply_replaces_masked_entries_only() {
+        let device = <B as burn::tensor::backend::BackendTypes>::Device::default();
+        let ov = LeakanceOverride {
+            mask: vec![0.0, 1.0, 0.0, 1.0],
+            k_d: vec![0.0, 1.0, 0.0, 0.5],
+            d_gw: vec![0.0, 0.0, 0.0, 0.25],
+            factor: vec![0.0, 0.9, 0.0, 0.1],
+        };
+        let param: Tensor<B, 1> =
+            Tensor::from_floats([0.7, 0.7, 0.7, 0.7], &device);
+        let out: Vec<f32> = ov
+            .apply(param.clone(), &ov.k_d, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out, vec![0.7, 1.0, 0.7, 0.5]);
+        let out_f: Vec<f32> = ov
+            .apply(param, &ov.factor, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out_f, vec![0.7, 0.9, 0.7, 0.1]);
     }
 
     #[test]
