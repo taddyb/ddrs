@@ -16,6 +16,24 @@ space — grads are dimensionless. This is strictly better than the spec's
 denormalized-units assumption; the within-parameter spatial analysis is
 unchanged.)
 
+**CPU-ONLY EXECUTION (2026-07-02 amendment):** the GPU is occupied by another
+training task — ALL probe runs execute on the CPU (`NdArray<f32>` backend).
+Consequences threaded through the tasks below:
+- The probe binary takes `--backend {cpu,cuda}` (default `cpu`). On `cpu` it
+  forces `cfg.params.sparse_solver = SparseSolver::Cpu` and ignores the
+  config's CUDA `device:` ordinal (`burn::backend::ndarray::NdArrayDevice::Cpu`).
+  `bin/eval.rs` stays untouched — only the new binary dispatches.
+- CPU NdArray is DETERMINISTIC: the two stage-2 baselines must be
+  byte-identical (noise floor ≡ 0). Detectability then reduces to the
+  observational-uncertainty band alone; the second baseline becomes a
+  determinism assertion, not a noise estimate.
+- Runtimes are unknown a priori on CPU — Tasks 4 and 7 each start with a
+  TIMING GATE (one unit of work, extrapolate, scale N accordingly). Stage 2
+  gains an `--eval-days` flag (default 1095 = 3 years) — a constant planted
+  delta does not need the 15-year window.
+- Be a polite neighbor to the GPU job's data loaders: run probe commands
+  under `nice -n 10`.
+
 **Working directories:** Rust work in this worktree
 (`/home/tbindas/projects/ddrs/.claude/worktrees/zeta-sensitivity`, branch
 `worktree-zeta-sensitivity`). GPU runs execute with
@@ -530,8 +548,41 @@ struct Cli {
     /// Stage 2 only: probe plan CSV (round,comid,delta).
     #[arg(long)]
     probe_plan: Option<PathBuf>,
+    /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
+    #[arg(long, default_value = "cpu")]
+    backend: String,
+    /// Stage 2 only: route only the first D days of the eval period.
+    #[arg(long, default_value_t = 1095)]
+    eval_days: usize,
 }
 ```
+
+Backend dispatch in `main` (model on `src/cli/system.rs:166`'s NdArray usage):
+
+```rust
+match cli.backend.as_str() {
+    "cpu" => {
+        type I = burn::backend::NdArray<f32>;
+        let device = burn::backend::ndarray::NdArrayDevice::Cpu;
+        cfg.params.sparse_solver = ddrs::config::SparseSolver::Cpu;
+        eprintln!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
+        <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
+        run::<I>(cfg, cli, device)
+    }
+    "cuda" => {
+        type I = burn_cuda::Cuda<f32, i32>;
+        let device = cubecl::cuda::CudaDevice::new(cfg.device);
+        <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
+        run::<I>(cfg, cli, device)
+    }
+    other => return Err(format!("unknown --backend {other}").into()),
+}
+```
+
+(`run<I>` is the shared generic body dispatching `--mode grad`/`perturb`. If
+`cfg.params` fields are not `pub`-mutable, add a setter or construct the
+override before `Config` freezes — check `src/config.rs` and follow its
+idiom.)
 
 Stage-1 body (inside a `fn run_grad<I: Backend>(...)` mirroring eval.rs's
 backend dispatch):
@@ -583,33 +634,49 @@ git add src/dump_parameters.rs src/bin/probe_zeta_gradient.rs Cargo.toml
 git commit -m "feat(probe): stage-1 adjoint reachability binary + grad netCDF writer"
 ```
 
-### Task 4: Stage-1 GPU runs (trained + cold)
+### Task 4: Stage-1 CPU runs (trained + cold)
 
-No code. GPU, sequential, main-tree cwd, worktree binary by ABSOLUTE path.
+No code. CPU, sequential, main-tree cwd, worktree binary by ABSOLUTE path.
 
-- [ ] **Step 1: trained point (~30-60 min: 32 training-shaped fwd+bwd)**
+- [ ] **Step 0: TIMING GATE — one window on CPU**
 
 ```bash
 cd /home/tbindas/projects/ddrs
 WT=/home/tbindas/projects/ddrs/.claude/worktrees/zeta-sensitivity
 mkdir -p output/zeta_probe
-$WT/target/release/probe_zeta_gradient \
+time nice -n 10 $WT/target/release/probe_zeta_gradient \
   --config config/experiments/leakance_hourly_on.yaml \
   --checkpoint .ddrs/runs/2026-07-01T13-43-32Z-train-and-test/checkpoints/epoch_5_mb_9 \
-  --windows 32 --seed 42 \
+  --windows 1 --seed 42 \
+  --output /tmp/grad_timing.nc
+```
+
+Decide N from the measured per-window time T_w: `N = min(32, floor(10h / (2·T_w)))`,
+floored at 8 (below 8 windows, coverage is too thin — report to the user
+instead of proceeding). Record T_w and the chosen N in the task report; use
+the SAME N and seed for both runs.
+
+- [ ] **Step 1: trained point (background; ~N × T_w)**
+
+```bash
+cd /home/tbindas/projects/ddrs
+nice -n 10 $WT/target/release/probe_zeta_gradient \
+  --config config/experiments/leakance_hourly_on.yaml \
+  --checkpoint .ddrs/runs/2026-07-01T13-43-32Z-train-and-test/checkpoints/epoch_5_mb_9 \
+  --windows <N> --seed 42 \
   --output output/zeta_probe/grad_trained.nc
 ```
 
-Expected: 32 batch lines with finite losses (order 1–10 for L1 on m³/s), then
+Expected: N batch lines with finite losses (order 1–10 for L1 on m³/s), then
 a netCDF write. Run in background; wait for completion before step 2.
 
 - [ ] **Step 2: cold point (identical windows: same seed/windows flags)**
 
 ```bash
 cd /home/tbindas/projects/ddrs
-$WT/target/release/probe_zeta_gradient \
+nice -n 10 $WT/target/release/probe_zeta_gradient \
   --config config/experiments/leakance_hourly_on.yaml \
-  --windows 32 --seed 42 \
+  --windows <N> --seed 42 \
   --output output/zeta_probe/grad_cold.nc
 ```
 
@@ -628,10 +695,11 @@ for f in ("grad_trained", "grad_cold"):
 EOF
 ```
 
-Expected: tens of thousands of reaches, median coverage ≥ 3, frac zero < 50%.
-The two files must have overlapping (not necessarily identical) COMID sets —
-identical seeds give identical batches, so identical sets. If coverage is
-thin (< 2 median), re-run with `--windows 64` (flag exists for this).
+Expected: tens of thousands of reaches, median coverage ≥ 2 (N is CPU-budget
+bound), frac zero < 50%. The two files must have IDENTICAL COMID sets (same
+seed ⇒ same batches). If median coverage < 2 at the budgeted N, report the
+coverage histogram to the user before proceeding — don't silently burn
+another day of CPU.
 
 ### Task 5: Site selection + round packing (Python)
 
@@ -672,7 +740,7 @@ ATTRS_NC = Path("/home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc")
 GAGES_ADJ = Path("/home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr")
 GRAD_NC = DDRS / "output/zeta_probe/grad_trained.nc"
 DELTAS = [0.01, 0.1]
-N_PROBES = 500  # per delta ⇒ ~1000 rows total
+N_PROBES = 250  # per delta (CPU budget); each extra ROUND costs a full eval
 
 
 def tercile_labels(x: np.ndarray) -> np.ndarray:
@@ -829,8 +897,13 @@ per-round q′ perturbation, NO autograd anywhere, NO zeta sink:
    with the `csv` crate (already a dependency of the gage reader; check
    `Cargo.toml`, add if absent).
 2. `let rounds: BTreeMap<usize, Vec<(i64, f32)>>` grouping the plan.
-3. For round IDs `usize::MAX-1` and `usize::MAX` run two UNPERTURBED baselines
-   (empty perturbation vec) — these measure the CUDA rerun-noise floor.
+3. Run two UNPERTURBED baselines (empty perturbation vec) first. On the CPU
+   backend these MUST be byte-identical (NdArray is deterministic) — the
+   binary asserts max|baseline_1 − baseline_2| == 0 and prints it; a nonzero
+   value is a bug, not a noise floor.
+3b. Respect `--eval-days`: route only the first `eval_days` days of the eval
+   period (cap the chunk loop's `n_days_total`; default 1095). All rounds and
+   baselines use the same cap.
 4. Per round: chunked eval loop; per chunk, after
    `let tensors = batch.to_tensors::<I>(device);`:
 
@@ -898,26 +971,36 @@ git add src/bin/probe_zeta_gradient.rs Cargo.toml
 git commit -m "feat(probe): stage-2 q' perturbation rounds + noise-floor baselines"
 ```
 
-### Task 7: Stage-2 GPU runs
+### Task 7: Stage-2 CPU runs
 
-No code. Sequential; each round is a full-window eval (~7–10 min); with ~25
-rounds + 2 baselines expect ~3–4.5 h wall-clock. Use one background command
-that loops rounds, so a single completion notification covers the sweep.
+No code. Sequential CPU evals over the `--eval-days` window. Use one
+background command for the whole sweep (single completion notification).
+
+- [ ] **Step 0: TIMING GATE — baselines only**
+
+The binary runs the 2 baselines before any round; time the FIRST baseline
+(watch the `round` progress lines). Per-round cost ≈ baseline cost. If
+`(n_rounds + 2) × T_round` exceeds ~36 h, cut scope in this order and record
+the decision: (1) drop the δ=0.1 rows from `probe_plan.csv` (halves rounds;
+δ=0.01 is the decisive bound), (2) reduce `--eval-days` to 730, (3) report to
+the user with the numbers. Determinism check: the binary's
+baseline_1 == baseline_2 assertion must pass (CPU is deterministic).
 
 - [ ] **Step 1: run the sweep**
 
 ```bash
 cd /home/tbindas/projects/ddrs
 WT=/home/tbindas/projects/ddrs/.claude/worktrees/zeta-sensitivity
-$WT/target/release/probe_zeta_gradient \
+nice -n 10 $WT/target/release/probe_zeta_gradient \
   --config config/experiments/leakance_hourly_on.yaml \
   --checkpoint .ddrs/runs/2026-07-01T13-43-32Z-train-and-test/checkpoints/epoch_5_mb_9 \
   --mode perturb \
   --probe-plan output/zeta_probe/probe_plan.csv \
+  --eval-days 1095 \
   --output output/zeta_probe/perturb
 ```
 
-(The binary iterates all rounds + the 2 baselines internally, printing
+(The binary iterates the 2 baselines + all rounds internally, printing
 `round k/K` progress.)
 
 - [ ] **Step 2: verify**
@@ -929,13 +1012,14 @@ import xarray as xr, numpy as np
 b1 = xr.open_dataset("/home/tbindas/projects/ddrs/output/zeta_probe/perturb/baseline_1.nc")
 b2 = xr.open_dataset("/home/tbindas/projects/ddrs/output/zeta_probe/perturb/baseline_2.nc")
 noise = np.abs(b1.predictions.values - b2.predictions.values)
-print("noise floor: median", np.median(noise), "p99", np.percentile(noise, 99))
+print("determinism check (must be 0 on CPU): max", noise.max())
 EOF
 ```
 
-Expected: `round_*.nc` for every plan round + both baselines; noise median
-well below 0.01 m³/s (if it is NOT, the detectability criterion still works —
-it just fails more probes; report the number).
+Expected: `round_*.nc` for every plan round + both baselines; on the CPU
+backend the baseline diff must be exactly 0 (determinism). If it is nonzero,
+STOP — that's a bug in the perturb loop (e.g. rng consumed unevenly), not a
+noise floor.
 
 ### Task 8: Analysis script + verdicts
 
@@ -1062,7 +1146,11 @@ def main() -> None:
     b1, gids = load_preds(args.probe_dir / "perturb/baseline_1.nc")
     b2, _ = load_preds(args.probe_dir / "perturb/baseline_2.nc")
     gid_ix = {g.lstrip("0"): i for i, g in enumerate(gids)}
+    # CPU backend is deterministic: noise should be exactly 0 and detection
+    # reduces to the obs-uncertainty band. The noise term stays in the
+    # criterion so the same script scores CUDA-produced runs unchanged.
     noise = np.abs(b1 - b2)
+    print("baseline determinism: max |b1-b2| =", float(noise.max()))
 
     rows = []
     for rnd, grp in plan.groupby("round"):
@@ -1235,7 +1323,10 @@ git commit -m "docs: zeta gradient probe findings — <verdict summary>"
 - Rust: this worktree only. GPU: `cd /home/tbindas/projects/ddrs` + ABSOLUTE
   worktree binary paths (stale-binary memory). Python analysis: ddr venv;
   site-selection + notebooks: `./ddrs-py` venv.
-- GPU jobs strictly sequential; long sweeps as ONE background command.
+- ALL runs are CPU (`--backend cpu`, the default) — the GPU belongs to another
+  training job. Long jobs strictly sequential, `nice -n 10`, launched as ONE
+  background command per sweep. Every heavy task starts with its TIMING GATE;
+  never extrapolate past ~36 h without reporting to the user first.
 - If any guard (gradcheck / off-parity / zeta_accum / sandbox) fails: STOP.
 - The probe binary must never take an optimizer step — if you find yourself
   importing `optimizer.rs`, you've drifted from the spec.
