@@ -31,7 +31,7 @@
 //!       --probe-plan output/probe_plan.csv --eval-days 1095 \
 //!       --output output/perturb_runs/
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -379,12 +379,18 @@ fn parse_probe_plan(
     let (ci_round, ci_comid, ci_delta) = (col("round")?, col("comid")?, col("delta")?);
 
     let mut rounds: BTreeMap<usize, Vec<(i64, f32)>> = BTreeMap::new();
+    let mut seen: BTreeMap<usize, HashSet<i64>> = BTreeMap::new();
     for (row_idx, rec) in rdr.records().enumerate() {
         let rec = rec?;
         let ctx = |e| format!("{} row {}: {e}", path.display(), row_idx + 2);
         let round: usize = rec[ci_round].parse().map_err(|e| ctx(format!("{e}")))?;
         let comid: i64 = rec[ci_comid].parse().map_err(|e| ctx(format!("{e}")))?;
         let delta: f32 = rec[ci_delta].parse().map_err(|e| ctx(format!("{e}")))?;
+        if !seen.entry(round).or_default().insert(comid) {
+            return Err(
+                format!("{}: duplicate comid {comid} in round {round}", path.display()).into(),
+            );
+        }
         rounds.entry(round).or_default().push((comid, delta));
     }
     if rounds.is_empty() {
@@ -400,12 +406,16 @@ fn write_round_netcdf(
     path: &Path,
     gauge_staids: &[String],
     preds: &Array2<f32>,
+    day0: &str,
+    eval_days: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (g, d) = preds.dim();
     debug_assert_eq!(g, gauge_staids.len());
     let mut file = netcdf::create(path)?;
     file.add_dimension("gauge", g)?;
     file.add_dimension("day", d)?;
+    file.add_attribute("day0", day0)?;
+    file.add_attribute("eval_days", eval_days)?;
     {
         let mut v = file.add_variable::<f32>("predictions", &["gauge", "day"])?;
         let flat: Vec<f32> = preds.iter().copied().collect();
@@ -476,6 +486,36 @@ fn run_perturb<I: Backend>(
         n_days.div_ceil(BATCH_SIZE_DAYS)
     );
 
+    // Validate all plan COMIDs against the eval network before any compute
+    // (fail in seconds, not after a 30h sweep).
+    {
+        let network_comids: HashSet<i64> =
+            probe_batch.divide_comids.iter().map(|c| c.0).collect();
+        let mut missing: Vec<(usize, i64)> = Vec::new();
+        for (&round, probes) in &rounds {
+            for &(comid, _) in probes {
+                if !network_comids.contains(&comid) {
+                    missing.push((round, comid));
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let msg = missing
+                .iter()
+                .map(|(r, c)| format!("(round={r}, comid={c})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(
+                format!("probe plan COMIDs not in eval network: {msg}").into(),
+            );
+        }
+    }
+
+    // day0 = ISO date of prediction column 0 (axis.start + 1 day, post-trim).
+    let day0 = (axis.start + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+
     std::fs::create_dir_all(&cli.output)?;
 
     // One full chunked eval (mirrors evaluate's loop, eval.rs:97-151) with a
@@ -506,19 +546,10 @@ fn run_perturb<I: Backend>(
                     .collect();
                 let n_reaches = tensors.q_prime.dims()[1];
                 let mut delta_row = vec![0.0f32; n_reaches];
-                let mut n_hit = 0usize;
                 for &(comid, delta) in probes {
                     if let Some(&col) = comid_col.get(&comid) {
                         delta_row[col] = delta;
-                        n_hit += 1;
                     }
-                }
-                if chunk_idx == 0 && n_hit < probes.len() {
-                    eprintln!(
-                        "  warning: {}/{} probe COMIDs not in the eval network — skipped",
-                        probes.len() - n_hit,
-                        probes.len()
-                    );
                 }
                 let delta_t: Tensor<I, 1> =
                     Tensor::from_data(TensorData::new(delta_row, [n_reaches]), &device);
@@ -583,10 +614,10 @@ fn run_perturb<I: Backend>(
     // perturbation alone.
     eprintln!("baseline 1/2 (0 probes)");
     let b1 = run_one(&[])?;
-    write_round_netcdf(&cli.output.join("baseline_1.nc"), &gauge_staids, &b1)?;
+    write_round_netcdf(&cli.output.join("baseline_1.nc"), &gauge_staids, &b1, &day0, n_days as i64)?;
     eprintln!("baseline 2/2 (0 probes)");
     let b2 = run_one(&[])?;
-    write_round_netcdf(&cli.output.join("baseline_2.nc"), &gauge_staids, &b2)?;
+    write_round_netcdf(&cli.output.join("baseline_2.nc"), &gauge_staids, &b2, &day0, n_days as i64)?;
 
     let max_diff = b1
         .iter()
@@ -618,6 +649,8 @@ fn run_perturb<I: Backend>(
             &cli.output.join(format!("round_{round}.nc")),
             &gauge_staids,
             &preds,
+            &day0,
+            n_days as i64,
         )?;
     }
 
@@ -648,7 +681,7 @@ mod tests {
         let preds =
             Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
         let staids = vec!["01010000".to_string(), "USGS__02020000".to_string()];
-        write_round_netcdf(&path, &staids, &preds).unwrap();
+        write_round_netcdf(&path, &staids, &preds, "1981-10-02", 1095).unwrap();
 
         let f = netcdf::open(&path).unwrap();
         let v = f.variable("predictions").unwrap();
