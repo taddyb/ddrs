@@ -318,6 +318,13 @@ impl LeakanceOverride {
         vals: &[f32],
         device: &I::Device,
     ) -> Tensor<I, 1> {
+        debug_assert_eq!(
+            vals.len(),
+            self.mask.len(),
+            "override vals length {} != mask length {}",
+            vals.len(),
+            self.mask.len()
+        );
         let n = self.mask.len();
         let mask_t: Tensor<I, 1> =
             Tensor::from_data(TensorData::new(self.mask.clone(), [n]), device);
@@ -399,9 +406,7 @@ pub fn forward_eval<I: Backend>(
             assert_eq!(
                 ov.mask.len(),
                 k_d_t.dims()[0],
-                "LeakanceOverride length {} != network reaches {}",
-                ov.mask.len(),
-                k_d_t.dims()[0]
+                "LeakanceOverride mask length doesn't match network reaches"
             );
             k_d_t = ov.apply::<I>(k_d_t, &ov.k_d, device);
             d_gw_t = ov.apply::<I>(d_gw_t, &ov.d_gw, device);
@@ -524,6 +529,30 @@ mod tests {
             .into_vec()
             .unwrap();
         assert_eq!(out_f, vec![0.7, 0.9, 0.7, 0.1]);
+
+        // d_gw: masked positions (1, 3) take the d_gw values; unmasked stay 0.7.
+        let param2: Tensor<B, 1> = Tensor::from_floats([0.7, 0.7, 0.7, 0.7], &device);
+        let out_dgw: Vec<f32> = ov
+            .apply(param2, &ov.d_gw, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out_dgw, vec![0.7, 0.0, 0.7, 0.25]);
+
+        // All-zero mask is identity: output equals input param exactly.
+        let ov_zero = LeakanceOverride {
+            mask: vec![0.0; 4],
+            k_d: vec![1.0, 2.0, 3.0, 4.0],
+            d_gw: vec![1.0, 2.0, 3.0, 4.0],
+            factor: vec![1.0, 2.0, 3.0, 4.0],
+        };
+        let param3: Tensor<B, 1> = Tensor::from_floats([0.1, 0.2, 0.3, 0.4], &device);
+        let out_id: Vec<f32> = ov_zero
+            .apply(param3, &ov_zero.k_d, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out_id, vec![0.1, 0.2, 0.3, 0.4]);
     }
 
     #[test]
