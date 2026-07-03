@@ -18,10 +18,12 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use burn_cuda::Cuda;
 use clap::Parser;
 
-use ddrs::config::{Config, ConfigMode};
+use burn::backend::Autodiff;
+use burn::tensor::backend::{AutodiffBackend, Backend, BackendTypes};
+
+use ddrs::config::{Config, ConfigMode, SparseSolver};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::training::bootstrap::bootstrap_head_and_state;
 use ddrs::training::driver::train;
@@ -40,6 +42,10 @@ struct Cli {
     /// Default: full per-epoch sweep per cfg.experiment.batch_size.
     #[arg(long)]
     max_mini_batches: Option<usize>,
+
+    /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
+    #[arg(long, default_value = "cuda")]
+    backend: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,13 +56,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     std::fs::create_dir_all(&cli.checkpoint_dir)?;
 
-    type I = Cuda<f32, i32>;
+    let mut cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Training)?;
+    match cli.backend.as_str() {
+        "cpu" => {
+            type I = burn::backend::NdArray<f32>;
+            let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+            cfg.params.sparse_solver = SparseSolver::Cpu;
+            cfg.params.use_cuda_graphs = false;
+            eprintln!("backend: cpu (NdArray; sparse_solver forced to cpu)");
+            run::<I>(cfg, cli, device)
+        }
+        "cuda" => {
+            type I = burn_cuda::Cuda<f32, i32>;
+            let device = cubecl::cuda::CudaDevice::new(cfg.device);
+            run::<I>(cfg, cli, device)
+        }
+        other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
+    }
+}
 
+fn run<I>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<dyn std::error::Error>>
+where
+    I: Backend,
+    Autodiff<I>: AutodiffBackend<InnerBackend = I>,
+    I: BackendTypes<Device = <Autodiff<I> as BackendTypes>::Device>,
+{
     let start = Instant::now();
     println!("=== Training ===");
-    let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Training)?;
-    // Config-selected CUDA ordinal (top-level `device:` key).
-    let device = cubecl::cuda::CudaDevice::new(cfg.device);
     let dataset = MeritGagesDataset::open(&cfg)?;
     println!(
         "training: {} gauges, dates {} .. {}, epochs={}",

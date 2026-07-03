@@ -5,10 +5,11 @@
 
 use std::path::PathBuf;
 
-use burn_cuda::Cuda;
 use clap::Parser;
 
-use ddrs::config::{Config, ConfigMode};
+use burn::tensor::backend::Backend;
+
+use ddrs::config::{Config, ConfigMode, SparseSolver};
 
 #[derive(Parser, Debug)]
 #[command(name = "dump_parameters", about = "Dump trained KAN parameter predictions per CONUS reach")]
@@ -30,14 +31,35 @@ struct Cli {
     /// `geometry_predictor.py` and fits comfortably on a 24 GB GPU.
     #[arg(long, default_value_t = 50_000)]
     batch_size: usize,
+
+    /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
+    #[arg(long, default_value = "cuda")]
+    backend: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
-    type I = Cuda<f32, i32>;
-    // Config-selected CUDA ordinal (top-level `device:` key).
-    let device = cubecl::cuda::CudaDevice::new(cfg.device);
+    let mut cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
+    match cli.backend.as_str() {
+        "cpu" => {
+            type I = burn::backend::NdArray<f32>;
+            let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+            cfg.params.sparse_solver = SparseSolver::Cpu;
+            cfg.params.use_cuda_graphs = false;
+            eprintln!("backend: cpu (NdArray; sparse_solver forced to cpu)");
+            run::<I>(cfg, cli, device)
+        }
+        "cuda" => {
+            type I = burn_cuda::Cuda<f32, i32>;
+            // Config-selected CUDA ordinal (top-level `device:` key).
+            let device = cubecl::cuda::CudaDevice::new(cfg.device);
+            run::<I>(cfg, cli, device)
+        }
+        other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
+    }
+}
+
+fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<dyn std::error::Error>> {
     let n = ddrs::dump_parameters::dump::<I>(&cfg, &cli.checkpoint, &cli.output, cli.batch_size, &device)?;
     println!("wrote {n} reaches → {}", cli.output.display());
     Ok(())
