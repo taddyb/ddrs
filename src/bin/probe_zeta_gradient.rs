@@ -16,8 +16,23 @@
 //!       --output output/grad_probe_trained.nc
 //!
 //! Omit --checkpoint for the cold (fresh-init) probe point.
+//!
+//! Stage 2 (`--mode perturb`): forward-only q'-perturbation rounds. Each round
+//! of the `--probe-plan` CSV adds a constant +delta m³/s to the lateral-inflow
+//! forcing at the round's probe reaches, runs the chunked eval loop over the
+//! first `--eval-days` days, and writes daily gauge predictions to
+//! `<output_dir>/round_<k>.nc`. Two unperturbed baselines run first
+//! (`baseline_1.nc`, `baseline_2.nc`) and must be byte-identical on the CPU
+//! backend (asserted in-binary):
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode perturb \
+//!       --config config/experiments/leakance_hourly_on.yaml \
+//!       --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
+//!       --probe-plan output/probe_plan.csv --eval-days 1095 \
+//!       --output output/perturb_runs/
 
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use rand::SeedableRng;
@@ -26,15 +41,17 @@ use rand_chacha::ChaCha12Rng;
 use burn::backend::Autodiff;
 use burn::prelude::ElementConversion;
 use burn::tensor::{backend::Backend, Tensor, TensorData};
+use ndarray::Array2;
 
 use ddrs::config::{kan_config, Config, ConfigMode, SparseSolver};
-use ddrs::data::dataset::MeritGagesDataset;
+use ddrs::data::dataset::{MeritGagesDataset, RoutingTensors};
 use ddrs::data::sampler::{BatchSource, RandomSampler};
+use ddrs::data::TestWindow;
 use ddrs::dump_parameters::write_grad_netcdf;
 use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::probe::{probe_forward, GradAccum};
-use ddrs::training::{batch_loss, tau_trim_and_downsample};
+use ddrs::training::{batch_loss, forward_eval, tau_trim_and_downsample};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe_zeta_gradient", about = "leakance zeta gradient probe (stage 1)")]
@@ -57,12 +74,13 @@ struct Cli {
     #[arg(long, default_value_t = 42)]
     seed: u64,
 
+    /// grad mode: output netCDF FILE. perturb mode: output DIRECTORY
+    /// (created; receives baseline_{1,2}.nc + round_<k>.nc).
     #[arg(long)]
     output: PathBuf,
 
-    /// Stage 2 only: probe plan CSV (round,comid,delta) — implemented in a LATER task.
+    /// Stage 2 only: probe plan CSV (round,comid,delta,...). REQUIRED in perturb mode.
     #[arg(long)]
-    #[allow(dead_code)]
     probe_plan: Option<PathBuf>,
 
     /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
@@ -71,21 +89,36 @@ struct Cli {
 
     /// Stage 2 only: route only the first D days of the eval period.
     #[arg(long, default_value_t = 1095)]
-    #[allow(dead_code)]
     eval_days: usize,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum Mode {
+    Grad,
+    Perturb,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    match cli.mode.as_str() {
-        "grad" => {}
-        "perturb" => return Err("perturb mode lands in a later task".into()),
-        other => return Err(format!("unknown --mode {other} (expected \"grad\")").into()),
-    }
+    let mode = match cli.mode.as_str() {
+        "grad" => Mode::Grad,
+        "perturb" => Mode::Perturb,
+        other => {
+            return Err(
+                format!("unknown --mode {other} (expected \"grad\" or \"perturb\")").into(),
+            )
+        }
+    };
 
-    // Training-mode config: probe batches replicate the training sampler.
-    let mut cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Training)?;
+    // grad: training-mode config (probe batches replicate the training
+    // sampler). perturb: testing-mode config (replicates the eval loop over
+    // the test window).
+    let cfg_mode = match mode {
+        Mode::Grad => ConfigMode::Training,
+        Mode::Perturb => ConfigMode::Testing,
+    };
+    let mut cfg = Config::from_yaml_file_with_mode(&cli.config, cfg_mode)?;
 
     match cli.backend.as_str() {
         "cpu" => {
@@ -94,14 +127,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.params.sparse_solver = SparseSolver::Cpu;
             eprintln!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
             <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
-            run::<I>(cfg, cli, device)
+            match mode {
+                Mode::Grad => run::<I>(cfg, cli, device),
+                Mode::Perturb => run_perturb::<I>(cfg, cli, device),
+            }
         }
         "cuda" => {
             type I = burn_cuda::Cuda<f32, i32>;
             // Config-selected CUDA ordinal (top-level `device:` key).
             let device = cubecl::cuda::CudaDevice::new(cfg.device);
             <I as burn::tensor::backend::Backend>::seed(&device, cfg.seed);
-            run::<I>(cfg, cli, device)
+            match mode {
+                Mode::Grad => run::<I>(cfg, cli, device),
+                Mode::Perturb => run_perturb::<I>(cfg, cli, device),
+            }
         }
         other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
     }
@@ -318,4 +357,307 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: --mode perturb
+// ---------------------------------------------------------------------------
+
+/// Parse the probe-plan CSV. Only `round`, `comid`, `delta` are consumed; the
+/// stratification columns are for the analysis script.
+fn parse_probe_plan(
+    path: &Path,
+) -> Result<BTreeMap<usize, Vec<(i64, f32)>>, Box<dyn std::error::Error>> {
+    let mut rdr = csv::Reader::from_path(path)?;
+    let headers = rdr.headers()?.clone();
+    let col = |name: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        headers
+            .iter()
+            .position(|h| h == name)
+            .ok_or_else(|| format!("{}: missing column '{name}'", path.display()).into())
+    };
+    let (ci_round, ci_comid, ci_delta) = (col("round")?, col("comid")?, col("delta")?);
+
+    let mut rounds: BTreeMap<usize, Vec<(i64, f32)>> = BTreeMap::new();
+    for (row_idx, rec) in rdr.records().enumerate() {
+        let rec = rec?;
+        let ctx = |e| format!("{} row {}: {e}", path.display(), row_idx + 2);
+        let round: usize = rec[ci_round].parse().map_err(|e| ctx(format!("{e}")))?;
+        let comid: i64 = rec[ci_comid].parse().map_err(|e| ctx(format!("{e}")))?;
+        let delta: f32 = rec[ci_delta].parse().map_err(|e| ctx(format!("{e}")))?;
+        rounds.entry(round).or_default().push((comid, delta));
+    }
+    if rounds.is_empty() {
+        return Err(format!("{}: probe plan has no data rows", path.display()).into());
+    }
+    Ok(rounds)
+}
+
+/// Write one run's daily gauge predictions: dims `(gauge, day)`, f32
+/// `predictions`, plus a `gauge_staid` NC_STRING coordinate (file is
+/// netCDF-4, which supports string variables natively).
+fn write_round_netcdf(
+    path: &Path,
+    gauge_staids: &[String],
+    preds: &Array2<f32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (g, d) = preds.dim();
+    debug_assert_eq!(g, gauge_staids.len());
+    let mut file = netcdf::create(path)?;
+    file.add_dimension("gauge", g)?;
+    file.add_dimension("day", d)?;
+    {
+        let mut v = file.add_variable::<f32>("predictions", &["gauge", "day"])?;
+        let flat: Vec<f32> = preds.iter().copied().collect();
+        v.put_values(&flat, ..)?;
+        v.put_attribute("units", "m^3/s")?;
+        v.put_attribute(
+            "long_name",
+            "daily routed gauge predictions (tau-trimmed, last day dropped)",
+        )?;
+    }
+    {
+        let mut v = file.add_string_variable("gauge_staid", &["gauge"])?;
+        for (i, s) in gauge_staids.iter().enumerate() {
+            v.put_string(s, i)?;
+        }
+    }
+    Ok(())
+}
+
+/// Stage-2 driver: forward-only q'-perturbation rounds against two
+/// deterministic baselines. Replicates `evaluate`'s chunk loop
+/// (src/training/eval.rs:56-151) — it can't call `evaluate` directly because
+/// the forcing tensors must be perturbed between `to_tensors` and the forward.
+fn run_perturb<I: Backend>(
+    cfg: Config,
+    cli: Cli,
+    device: I::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const BATCH_SIZE_DAYS: usize = 15; // eval default (bin/eval.rs --batch-size-days)
+
+    let plan_path = cli
+        .probe_plan
+        .as_ref()
+        .ok_or("--probe-plan is required in perturb mode")?;
+    let rounds = parse_probe_plan(plan_path)?;
+    let checkpoint = cli
+        .checkpoint
+        .as_ref()
+        .ok_or("--checkpoint is required in perturb mode")?;
+
+    // Head on the INNER backend I — forward-only, no autograd (bin/eval.rs:106-107).
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = kan_config(head_section, cfg.seed);
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+    eprintln!("loaded checkpoint: {}", head_base(checkpoint).display());
+
+    let dataset = MeritGagesDataset::open(&cfg)?;
+    let axis = dataset.time_axis().clone();
+    let n_days = axis.num_days.min(cli.eval_days);
+    assert!(
+        n_days >= 3,
+        "eval window too short: {n_days} days (need >= 3 for tau-trim + last-day drop)"
+    );
+    let n_hours = n_days * 24;
+
+    // 1-day probe window: sizes gauges + forces the static-network cache.
+    let probe = TestWindow::new(&axis, 0, 1);
+    let probe_batch = dataset.collate_window(&probe)?;
+    let n_all_gauges = probe_batch.gauge_staids.len();
+    let gauge_staids: Vec<String> = probe_batch
+        .gauge_staids
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+    eprintln!(
+        "perturb eval: {n_all_gauges} gauges, {n_days} days ({} chunks of {BATCH_SIZE_DAYS})",
+        n_days.div_ceil(BATCH_SIZE_DAYS)
+    );
+
+    std::fs::create_dir_all(&cli.output)?;
+
+    // One full chunked eval (mirrors evaluate's loop, eval.rs:97-151) with a
+    // constant +delta added to the q' forcing at the run's probe reaches.
+    let run_one = |probes: &[(i64, f32)]| -> Result<Array2<f32>, Box<dyn std::error::Error>> {
+        let mut predictions_full = Array2::<f32>::zeros((n_all_gauges, n_hours));
+        let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
+        let mut day_offset = 0usize;
+        let mut chunk_idx = 0usize;
+        while day_offset < n_days {
+            let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
+            let win = TestWindow::new(&axis, day_offset, chunk_n);
+            let batch = dataset.collate_window(&win)?;
+            // Capture COMIDs before to_tensors consumes the batch (eval.rs:66).
+            let batch_divide_comids = batch.divide_comids.clone();
+            let tensors = batch.to_tensors::<I>(&device);
+
+            // Perturbation: +delta on both forcing fields (hourly repeat-24
+            // AND daily disagg input — forward_eval consumes whichever the
+            // head config selects). Baselines skip the tensor ops entirely.
+            let tensors = if probes.is_empty() {
+                tensors
+            } else {
+                let comid_col: HashMap<i64, usize> = batch_divide_comids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (c.0, i))
+                    .collect();
+                let n_reaches = tensors.q_prime.dims()[1];
+                let mut delta_row = vec![0.0f32; n_reaches];
+                let mut n_hit = 0usize;
+                for &(comid, delta) in probes {
+                    if let Some(&col) = comid_col.get(&comid) {
+                        delta_row[col] = delta;
+                        n_hit += 1;
+                    }
+                }
+                if chunk_idx == 0 && n_hit < probes.len() {
+                    eprintln!(
+                        "  warning: {}/{} probe COMIDs not in the eval network — skipped",
+                        probes.len() - n_hit,
+                        probes.len()
+                    );
+                }
+                let delta_t: Tensor<I, 1> =
+                    Tensor::from_data(TensorData::new(delta_row, [n_reaches]), &device);
+                // Clone the two forcing fields first, then functional-record-
+                // update — moving a field inside the same FRU expression is
+                // E0382 (partially moved value). Materialize the broadcast
+                // per-tensor with each tensor's own dim-0.
+                let t_rows = tensors.q_prime.dims()[0];
+                let d_rows = tensors.q_prime_daily.dims()[0];
+                let q_prime = tensors.q_prime.clone()
+                    + delta_t.clone().unsqueeze_dim::<2>(0).expand([t_rows, n_reaches]);
+                let q_prime_daily = tensors.q_prime_daily.clone()
+                    + delta_t.unsqueeze_dim::<2>(0).expand([d_rows, n_reaches]);
+                RoutingTensors::<I> { q_prime, q_prime_daily, ..tensors }
+            };
+
+            let pred = forward_eval::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0, None);
+            let dims = pred.dims();
+            debug_assert_eq!(dims[0], n_all_gauges);
+            debug_assert_eq!(dims[1], win.n_hourly());
+            let v: Vec<f32> = pred.into_data().into_vec().unwrap();
+            let pred_arr = Array2::from_shape_vec((dims[0], dims[1]), v).unwrap();
+
+            let h_start = day_offset * 24;
+            let h_end = h_start + win.n_hourly();
+            predictions_full
+                .slice_mut(ndarray::s![.., h_start..h_end])
+                .assign(&pred_arr);
+            eprintln!(
+                "  chunk {}/{}: days {}..{} ({} days)",
+                chunk_idx + 1,
+                n_chunks_total,
+                day_offset,
+                day_offset + chunk_n,
+                chunk_n,
+            );
+            day_offset += chunk_n;
+            chunk_idx += 1;
+        }
+
+        // End-of-pipeline tau-trim + daily downsample (eval.rs:119-129), then
+        // drop the LAST day (eval.rs:143-151) → (G, n_days - 2).
+        let pred_full_vec: Vec<f32> = predictions_full.iter().copied().collect();
+        let pred_full_t: Tensor<I, 2> =
+            Tensor::<I, 1>::from_floats(pred_full_vec.as_slice(), &device)
+                .reshape([n_all_gauges, n_hours]);
+        let daily_t = tau_trim_and_downsample(pred_full_t, cfg.params.tau);
+        let daily_dims = daily_t.dims();
+        let daily_vec: Vec<f32> = daily_t.into_data().into_vec().unwrap();
+        let predictions_daily =
+            Array2::from_shape_vec((daily_dims[0], daily_dims[1]), daily_vec).unwrap();
+        let pd_dims = predictions_daily.dim();
+        Ok(predictions_daily
+            .slice(ndarray::s![.., 0..pd_dims.1 - 1])
+            .to_owned())
+    };
+
+    let n_rounds = rounds.len();
+
+    // Two unperturbed baselines: byte-identity on the CPU backend proves the
+    // whole forward is deterministic, so round deltas are attributable to the
+    // perturbation alone.
+    eprintln!("baseline 1/2 (0 probes)");
+    let b1 = run_one(&[])?;
+    write_round_netcdf(&cli.output.join("baseline_1.nc"), &gauge_staids, &b1)?;
+    eprintln!("baseline 2/2 (0 probes)");
+    let b2 = run_one(&[])?;
+    write_round_netcdf(&cli.output.join("baseline_2.nc"), &gauge_staids, &b2)?;
+
+    let max_diff = b1
+        .iter()
+        .zip(b2.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    if max_diff == 0.0 {
+        eprintln!("determinism check: max |b1-b2| = 0");
+    } else if cli.backend == "cpu" {
+        eprintln!(
+            "determinism check FAILED: max |b1-b2| = {max_diff:e} (expected 0 on cpu backend)"
+        );
+        std::process::exit(1);
+    } else {
+        eprintln!(
+            "determinism check: max |b1-b2| = {max_diff:e} — non-zero is expected on the \
+             cuda backend (atomic scatter_add); use --backend cpu for attributable deltas"
+        );
+    }
+
+    for (k_idx, (round, round_probes)) in rounds.iter().enumerate() {
+        eprintln!(
+            "round {}/{n_rounds} (round id {round}, {} probes)",
+            k_idx + 1,
+            round_probes.len()
+        );
+        let preds = run_one(round_probes)?;
+        write_round_netcdf(
+            &cli.output.join(format!("round_{round}.nc")),
+            &gauge_staids,
+            &preds,
+        )?;
+    }
+
+    println!(
+        "wrote {} runs (2 baselines + {n_rounds} rounds) to {} ({} gauges x {} days)",
+        n_rounds + 2,
+        cli.output.display(),
+        n_all_gauges,
+        n_days - 2,
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The task-6 design note flagged NC_STRING support as the one uncertain
+    /// API — prove the round file round-trips (f32 grid + string coordinate).
+    #[test]
+    fn round_netcdf_roundtrip_with_string_gauges() {
+        let dir = std::env::temp_dir().join("probe_perturb_nc_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("round_test.nc");
+        let _ = std::fs::remove_file(&path);
+
+        let preds =
+            Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let staids = vec!["01010000".to_string(), "USGS__02020000".to_string()];
+        write_round_netcdf(&path, &staids, &preds).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        let v = f.variable("predictions").unwrap();
+        assert_eq!(v.dimensions()[0].len(), 2);
+        assert_eq!(v.dimensions()[1].len(), 3);
+        let vals: Vec<f32> = v.get_values(..).unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let g = f.variable("gauge_staid").unwrap();
+        assert_eq!(g.get_string(0).unwrap(), "01010000");
+        assert_eq!(g.get_string(1).unwrap(), "USGS__02020000");
+    }
 }
