@@ -8,6 +8,10 @@
 //!      `q_no_leak[0] − q_leak[0] == zeta[0]` on a single routed timestep.
 //!   3. zeta is linear in `leakance_factor` on a single timestep (depth at
 //!      t=1 depends only on the hotstart Q0, which is leakance-independent).
+//!   4. The accumulated `q` sum equals the summed routed discharge columns
+//!      (`q_next` is the same tensor that becomes the output column).
+//!   5. `depth`/`area_z` are the raw geometry primitives: invariant to
+//!      `leakance_factor`, and `zeta/(area_z·(depth − d_gw))` is uniform.
 
 mod common;
 
@@ -96,10 +100,10 @@ fn accumulation_does_not_perturb_discharge() {
 
     assert_eq!(out_plain, out_accum, "accumulation must not change routing");
 
-    let (abs, net, steps) = mc_accum.zeta_sums().expect("zeta sums present");
-    assert_eq!(steps, t - 1, "one accumulated step per routed timestep");
-    let abs_v: Vec<f32> = abs.into_data().to_vec().unwrap();
-    let net_v: Vec<f32> = net.into_data().to_vec().unwrap();
+    let sums = mc_accum.zeta_sums().expect("zeta sums present");
+    assert_eq!(sums.steps, t - 1, "one accumulated step per routed timestep");
+    let abs_v: Vec<f32> = sums.abs.into_data().to_vec().unwrap();
+    let net_v: Vec<f32> = sums.net.into_data().to_vec().unwrap();
     assert_eq!(abs_v.len(), n);
     // Losing regime (d_gw = −2 m < depth) ⇒ zeta > 0 everywhere ⇒ |Σzeta| = Σ|zeta|.
     for (a, m) in abs_v.iter().zip(net_v.iter()) {
@@ -138,9 +142,9 @@ fn accumulated_zeta_equals_headwater_qnext_difference() {
     );
     let out_on = forward_vec(&mut mc_on);
 
-    let (abs, _, steps) = mc_on.zeta_sums().expect("zeta sums present");
-    assert_eq!(steps, 1);
-    let zeta: Vec<f32> = abs.into_data().to_vec().unwrap();
+    let sums = mc_on.zeta_sums().expect("zeta sums present");
+    assert_eq!(sums.steps, 1);
+    let zeta: Vec<f32> = sums.abs.into_data().to_vec().unwrap();
 
     // Column t=1 of reach 0 lives at index 0*t + 1.
     let diff = out_off[1] - out_on[1];
@@ -167,8 +171,8 @@ fn zeta_is_linear_in_leakance_factor_on_single_step() {
             false,
         );
         let _ = mc.forward();
-        let (abs, _, _) = mc.zeta_sums().expect("zeta sums present");
-        abs.into_data().to_vec().unwrap()
+        let sums = mc.zeta_sums().expect("zeta sums present");
+        sums.abs.into_data().to_vec().unwrap()
     };
 
     let z_full = run(1.0);
@@ -177,6 +181,85 @@ fn zeta_is_linear_in_leakance_factor_on_single_step() {
         assert!(
             (f - 2.0 * h).abs() < 1e-6 * f.abs().max(1e-12),
             "zeta must be linear in leakance_factor: full={f}, half={h}"
+        );
+    }
+}
+
+#[test]
+fn q_mean_matches_routed_discharge() {
+    let device = TestDevice::default();
+    let (n, t) = (5usize, 24usize);
+    let cfg = mock_config();
+
+    let mut mc = MuskingumCunge::<InnerBackend>::new(cfg, device.clone());
+    mc.enable_zeta_accumulation();
+    mc.setup_inputs(
+        mock_routing_inputs(n, &device),
+        mock_streamflow(t, n, &device),
+        leakance_params(n, 1.0, &device),
+        false,
+    );
+    let out = forward_vec(&mut mc); // [n, t] row-major
+
+    // q_sum accumulates the SAME q_next tensors that become output columns
+    // 1..t, in the same order, so the sums match to f32 addition noise.
+    let sums = mc.zeta_sums().expect("zeta sums present");
+    assert_eq!(sums.steps, t - 1);
+    let q_sum: Vec<f32> = sums.q.into_data().to_vec().unwrap();
+    assert_eq!(q_sum.len(), n);
+    for i in 0..n {
+        let expected: f32 = (1..t).map(|j| out[i * t + j]).sum();
+        assert!(
+            (q_sum[i] - expected).abs() <= 1e-5 * expected.abs().max(1.0),
+            "reach {i}: q_sum ({}) must equal summed routed discharge ({expected})",
+            q_sum[i]
+        );
+    }
+}
+
+#[test]
+fn depth_and_area_z_are_leakance_independent_primitives() {
+    let device = TestDevice::default();
+    let (n, t) = (5usize, 2usize); // single routed timestep
+
+    // Depth at t=1 is a function of the hotstart Q0 only, so depth and area_z
+    // must be identical across leakance_factor values while zeta scales.
+    let cfg = mock_config();
+    let run = |factor_norm: f32| {
+        let mut mc = MuskingumCunge::<InnerBackend>::new(cfg.clone(), device.clone());
+        mc.enable_zeta_accumulation();
+        mc.setup_inputs(
+            mock_routing_inputs(n, &device),
+            mock_streamflow(t, n, &device),
+            leakance_params(n, factor_norm, &device),
+            false,
+        );
+        let _ = mc.forward();
+        mc.zeta_sums().expect("zeta sums present")
+    };
+
+    let full = run(1.0);
+    let half = run(0.5);
+
+    let depth_f: Vec<f32> = full.depth.into_data().to_vec().unwrap();
+    let depth_h: Vec<f32> = half.depth.into_data().to_vec().unwrap();
+    let area_f: Vec<f32> = full.area_z.into_data().to_vec().unwrap();
+    let area_h: Vec<f32> = half.area_z.into_data().to_vec().unwrap();
+    assert_eq!(depth_f, depth_h, "depth must not depend on leakance_factor");
+    assert_eq!(area_f, area_h, "area_z must not depend on leakance_factor");
+
+    // Structural identity: zeta = factor·area_z·K_D·(depth − d_gw). With
+    // uniform factor/K_D and d_gw = −2 m (leakance_params denormalizes to the
+    // bottom of [-2, 2]), zeta/(area_z·(depth+2)) is the SAME for every reach.
+    let abs_f: Vec<f32> = full.abs.into_data().to_vec().unwrap();
+    let ratios: Vec<f32> = (0..n)
+        .map(|i| abs_f[i] / (area_f[i] * (depth_f[i] + 2.0)))
+        .collect();
+    for r in &ratios {
+        assert!(r.is_finite() && *r > 0.0, "ratio must be positive finite, got {r}");
+        assert!(
+            (r - ratios[0]).abs() <= 1e-5 * ratios[0],
+            "zeta/(area_z·(depth−d_gw)) must be uniform across reaches: {ratios:?}"
         );
     }
 }

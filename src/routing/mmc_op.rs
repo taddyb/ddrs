@@ -27,6 +27,15 @@ pub(crate) struct LeakanceTensors<I: Backend> {
     pub leakance_factor: Tensor<I, 1>,
 }
 
+/// Per-step eval-time leakance diagnostics captured by the zeta sink: this
+/// step's zeta plus the primitives needed to interpret it (routed depth and
+/// plan-view wetted area). Inner backend, no tape.
+pub struct ZetaStepDiag<I: Backend> {
+    pub zeta: Tensor<I, 1>,
+    pub depth: Tensor<I, 1>,
+    pub area_z: Tensor<I, 1>,
+}
+
 /// Extra saved-state (inner-backend primitives) the leakance backward needs,
 /// beyond what `TimestepState` already saves (`depth`, `p_spatial`, `q_eps` are
 /// reused from there). This is the ONE leakance saved-state type — reused as the
@@ -1429,9 +1438,9 @@ where
 /// (leakance forces `use_cuda_graphs: false`).
 ///
 /// `zeta_out`: eval-time diagnostic sink. When `Some`, receives this step's
-/// zeta (inner backend, no tape), recomputed from the SAME saved primitives
-/// the backward reads — so the reported value is exactly what was subtracted
-/// from `b_rhs`. `None` (the training path) adds zero kernels.
+/// zeta, routed depth, and area_z (inner backend, no tape), recomputed from the
+/// SAME saved primitives the backward reads — so the reported value is exactly
+/// what was subtracted from `b_rhs`. `None` (the training path) adds zero kernels.
 #[allow(clippy::too_many_arguments)]
 pub fn timestep_forward_leakance<I: Backend + 'static>(
     cfg: &Config,
@@ -1448,7 +1457,7 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     k_d_at: Tensor<Autodiff<I>, 1>,
     d_gw_at: Tensor<Autodiff<I>, 1>,
     leakance_factor_at: Tensor<Autodiff<I>, 1>,
-    zeta_out: Option<&mut Option<Tensor<I, 1>>>,
+    zeta_out: Option<&mut Option<ZetaStepDiag<I>>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -1530,12 +1539,17 @@ where
 
     // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · (depth − d_gw),
     // recomputed from the saved primitives (cheap: 3 elementwise kernels,
-    // only when a sink is supplied).
+    // only when a sink is supplied). Depth and area_z ride along for the
+    // low-zeta diagnosis (driving head + structural-ceiling analyses).
     if let Some(out) = zeta_out {
-        let m = wrap(depth_p.clone()) - wrap(leak.d_gw.clone());
-        *out = Some(
-            wrap(leak.leakance_factor.clone()) * wrap(leak.area_z.clone()) * wrap(leak.k_d.clone()) * m,
-        );
+        let depth = wrap(depth_p.clone());
+        let area_z = wrap(leak.area_z.clone());
+        let m = depth.clone() - wrap(leak.d_gw.clone());
+        *out = Some(ZetaStepDiag {
+            zeta: wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * m,
+            depth,
+            area_z,
+        });
     }
 
     let base = TimestepState::<I> {

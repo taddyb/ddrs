@@ -257,24 +257,37 @@ pub fn forward<I: Backend>(
 pub struct ZetaSums<I: Backend> {
     pub abs_sum: Option<Tensor<I, 1>>,
     pub net_sum: Option<Tensor<I, 1>>,
+    pub depth_sum: Option<Tensor<I, 1>>,
+    pub area_z_sum: Option<Tensor<I, 1>>,
+    pub q_sum: Option<Tensor<I, 1>>,
     pub steps: usize,
 }
 
 impl<I: Backend> ZetaSums<I> {
     pub fn new() -> Self {
-        Self { abs_sum: None, net_sum: None, steps: 0 }
+        Self {
+            abs_sum: None,
+            net_sum: None,
+            depth_sum: None,
+            area_z_sum: None,
+            q_sum: None,
+            steps: 0,
+        }
     }
 
-    fn merge(&mut self, abs: Tensor<I, 1>, net: Tensor<I, 1>, steps: usize) {
-        self.abs_sum = Some(match self.abs_sum.take() {
-            Some(s) => s + abs,
-            None => abs,
-        });
-        self.net_sum = Some(match self.net_sum.take() {
-            Some(s) => s + net,
-            None => net,
-        });
-        self.steps += steps;
+    fn merge(&mut self, sums: crate::routing::ZetaSumTensors<I>) {
+        fn add<I: Backend>(slot: &mut Option<Tensor<I, 1>>, v: Tensor<I, 1>) {
+            *slot = Some(match slot.take() {
+                Some(s) => s + v,
+                None => v,
+            });
+        }
+        add(&mut self.abs_sum, sums.abs);
+        add(&mut self.net_sum, sums.net);
+        add(&mut self.depth_sum, sums.depth);
+        add(&mut self.area_z_sum, sums.area_z);
+        add(&mut self.q_sum, sums.q);
+        self.steps += sums.steps;
     }
 }
 
@@ -382,8 +395,8 @@ pub fn forward_eval<I: Backend>(
     let runoff_ad = engine.forward();
     let runoff = runoff_ad.inner();
     if let Some(sink) = zeta {
-        if let Some((abs, net, steps)) = engine.zeta_sums() {
-            sink.merge(abs, net, steps);
+        if let Some(sums) = engine.zeta_sums() {
+            sink.merge(sums);
         }
     }
 

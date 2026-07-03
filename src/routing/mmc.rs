@@ -93,11 +93,32 @@ pub struct MuskingumCunge<I: Backend> {
     collect_zeta: bool,
     zeta_abs_sum: Option<Tensor<I, 1>>,
     zeta_net_sum: Option<Tensor<I, 1>>,
+    depth_sum: Option<Tensor<I, 1>>,
+    area_z_sum: Option<Tensor<I, 1>>,
+    q_sum: Option<Tensor<I, 1>>,
     zeta_steps: usize,
 
     dt: f32,
     device: I::Device,
     sparse_solver: SparseSolver,
+}
+
+/// Accumulated eval-time leakance diagnostics (inner backend, no tape).
+/// All fields are per-reach sums over the accumulated timesteps; divide by
+/// `steps` for eval-window means.
+pub struct ZetaSumTensors<I: Backend> {
+    /// Σ|zeta| (m³/s · steps).
+    pub abs: Tensor<I, 1>,
+    /// Σ zeta, signed (positive = losing reach).
+    pub net: Tensor<I, 1>,
+    /// Σ routed depth (m · steps).
+    pub depth: Tensor<I, 1>,
+    /// Σ plan-view wetted area `area_z` (m² · steps).
+    pub area_z: Tensor<I, 1>,
+    /// Σ routed discharge `q_next` (m³/s · steps).
+    pub q: Tensor<I, 1>,
+    /// Number of accumulated timesteps.
+    pub steps: usize,
 }
 
 impl<I: Backend> MuskingumCunge<I> {
@@ -128,6 +149,9 @@ impl<I: Backend> MuskingumCunge<I> {
             collect_zeta: false,
             zeta_abs_sum: None,
             zeta_net_sum: None,
+            depth_sum: None,
+            area_z_sum: None,
+            q_sum: None,
             zeta_steps: 0,
             dt: DT_SECONDS,
             device,
@@ -323,7 +347,7 @@ impl<I: Backend> MuskingumCunge<I> {
             self.d_gw.as_ref().cloned(),
             self.leakance_factor.as_ref().cloned(),
         ) {
-            let mut zeta_step: Option<Tensor<I, 1>> = None;
+            let mut zeta_step: Option<crate::routing::mmc_op::ZetaStepDiag<I>> = None;
             let q_next = crate::routing::mmc_op::timestep_forward_leakance::<I>(
                 &self.cfg, pattern, assembler,
                 n, q_spatial, p_spatial,
@@ -332,16 +356,18 @@ impl<I: Backend> MuskingumCunge<I> {
                 k_d, d_gw, leakance_factor,
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
             );
-            if let Some(zeta) = zeta_step {
-                let abs = zeta.clone().abs();
-                self.zeta_abs_sum = Some(match self.zeta_abs_sum.take() {
-                    Some(s) => s + abs,
-                    None => abs,
-                });
-                self.zeta_net_sum = Some(match self.zeta_net_sum.take() {
-                    Some(s) => s + zeta,
-                    None => zeta,
-                });
+            if let Some(diag) = zeta_step {
+                fn add<I: Backend>(slot: &mut Option<Tensor<I, 1>>, v: Tensor<I, 1>) {
+                    *slot = Some(match slot.take() {
+                        Some(s) => s + v,
+                        None => v,
+                    });
+                }
+                add(&mut self.zeta_abs_sum, diag.zeta.clone().abs());
+                add(&mut self.zeta_net_sum, diag.zeta);
+                add(&mut self.depth_sum, diag.depth);
+                add(&mut self.area_z_sum, diag.area_z);
+                add(&mut self.q_sum, q_next.clone().inner());
                 self.zeta_steps += 1;
             }
             return q_next;
@@ -440,12 +466,24 @@ impl<I: Backend> MuskingumCunge<I> {
         self.collect_zeta = true;
     }
 
-    /// `(Σ|zeta|, Σzeta, n_steps)` accumulated across `route_timestep` calls
-    /// since construction (positive net = losing reach). `None` until the
-    /// first accumulated step.
-    pub fn zeta_sums(&self) -> Option<(Tensor<I, 1>, Tensor<I, 1>, usize)> {
-        match (&self.zeta_abs_sum, &self.zeta_net_sum) {
-            (Some(a), Some(n)) => Some((a.clone(), n.clone(), self.zeta_steps)),
+    /// Eval-time leakance diagnostic sums accumulated across `route_timestep`
+    /// calls since construction. `None` until the first accumulated step.
+    pub fn zeta_sums(&self) -> Option<ZetaSumTensors<I>> {
+        match (
+            &self.zeta_abs_sum,
+            &self.zeta_net_sum,
+            &self.depth_sum,
+            &self.area_z_sum,
+            &self.q_sum,
+        ) {
+            (Some(a), Some(n), Some(d), Some(az), Some(q)) => Some(ZetaSumTensors {
+                abs: a.clone(),
+                net: n.clone(),
+                depth: d.clone(),
+                area_z: az.clone(),
+                q: q.clone(),
+                steps: self.zeta_steps,
+            }),
             _ => None,
         }
     }

@@ -129,9 +129,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Leakance zeta diagnostic.
     if let Some(zpath) = &cli.zeta_output {
-        match (&output.zeta_abs_mean, &output.zeta_net_mean, &output.zeta_comids) {
-            (Some(za), Some(zn), Some(zc)) => {
-                ddrs::dump_parameters::write_zeta_netcdf(zpath, zc, za, zn, &model_label)
+        match (
+            &output.zeta_abs_mean,
+            &output.zeta_net_mean,
+            &output.zeta_depth_mean,
+            &output.zeta_area_z_mean,
+            &output.zeta_q_mean,
+            &output.zeta_comids,
+        ) {
+            (Some(za), Some(zn), Some(zd), Some(zaz), Some(zq), Some(zc)) => {
+                ddrs::dump_parameters::write_zeta_netcdf(zpath, zc, za, zn, zd, zaz, zq, &model_label)
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 let frac_above = za.iter().filter(|&&z| z > 0.01).count() as f64 / za.len() as f64;
                 let mut sorted = za.clone();
