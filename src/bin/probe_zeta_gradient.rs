@@ -30,6 +30,20 @@
 //!       --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
 //!       --probe-plan output/probe_plan.csv --eval-days 1095 \
 //!       --output output/perturb_runs/
+//!
+//! Stage 3 (`--mode teacher`): planted-leakance world — overrides the KAN
+//! head's normalized leakance outputs at specified reaches with values from a
+//! CSV, then runs the chunked eval loop and writes (a) synthetic daily gauge
+//! observations as a zarr-v2 store and (b) a per-reach zeta answer key netCDF.
+//! `--output` is not used in teacher mode.
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode teacher \
+//!       --config config/experiments/leakance_hourly_on.yaml \
+//!       --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
+//!       --eval-days 1095 \
+//!       --plant-file output/plant_sites.csv \
+//!       --obs-output output/teacher_obs/ \
+//!       --zeta-output output/teacher_zeta.nc
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -47,11 +61,11 @@ use ddrs::config::{kan_config, Config, ConfigMode, SparseSolver};
 use ddrs::data::dataset::{MeritGagesDataset, RoutingTensors};
 use ddrs::data::sampler::{BatchSource, RandomSampler};
 use ddrs::data::TestWindow;
-use ddrs::dump_parameters::write_grad_netcdf;
+use ddrs::dump_parameters::{write_grad_netcdf, write_zeta_netcdf};
 use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::probe::{probe_forward, GradAccum};
-use ddrs::training::{batch_loss, forward_eval, tau_trim_and_downsample};
+use ddrs::training::{batch_loss, forward_eval, tau_trim_and_downsample, LeakanceOverride, ZetaSums};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe_zeta_gradient", about = "leakance zeta gradient probe (stage 1)")]
@@ -76,12 +90,25 @@ struct Cli {
 
     /// grad mode: output netCDF FILE. perturb mode: output DIRECTORY
     /// (created; receives baseline_{1,2}.nc + round_<k>.nc).
+    /// Not used in teacher mode (teacher writes via --obs-output / --zeta-output).
     #[arg(long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
     /// Stage 2 only: probe plan CSV (round,comid,delta,...). REQUIRED in perturb mode.
     #[arg(long)]
     probe_plan: Option<PathBuf>,
+
+    /// teacher mode: plant CSV (comid,k_d_norm,d_gw_norm,factor_norm,...).
+    #[arg(long)]
+    plant_file: Option<PathBuf>,
+
+    /// teacher mode: directory for the synthetic-obs zarr-v2 store.
+    #[arg(long)]
+    obs_output: Option<PathBuf>,
+
+    /// teacher mode: answer-key netCDF (zeta accumulation over the window).
+    #[arg(long)]
+    zeta_output: Option<PathBuf>,
 
     /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
     #[arg(long, default_value = "cpu")]
@@ -96,6 +123,7 @@ struct Cli {
 enum Mode {
     Grad,
     Perturb,
+    Teacher,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -104,19 +132,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = match cli.mode.as_str() {
         "grad" => Mode::Grad,
         "perturb" => Mode::Perturb,
+        "teacher" => Mode::Teacher,
         other => {
             return Err(
-                format!("unknown --mode {other} (expected \"grad\" or \"perturb\")").into(),
+                format!(
+                    "unknown --mode {other} (expected \"grad\", \"perturb\", or \"teacher\")"
+                )
+                .into(),
             )
         }
     };
 
     // grad: training-mode config (probe batches replicate the training
-    // sampler). perturb: testing-mode config (replicates the eval loop over
-    // the test window).
+    // sampler). perturb/teacher: testing-mode config (replicates the eval
+    // loop over the test window).
     let cfg_mode = match mode {
         Mode::Grad => ConfigMode::Training,
-        Mode::Perturb => ConfigMode::Testing,
+        Mode::Perturb | Mode::Teacher => ConfigMode::Testing,
     };
     let mut cfg = Config::from_yaml_file_with_mode(&cli.config, cfg_mode)?;
 
@@ -130,6 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match mode {
                 Mode::Grad => run::<I>(cfg, cli, device),
                 Mode::Perturb => run_perturb::<I>(cfg, cli, device),
+                Mode::Teacher => run_teacher::<I>(cfg, cli, device),
             }
         }
         "cuda" => {
@@ -140,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match mode {
                 Mode::Grad => run::<I>(cfg, cli, device),
                 Mode::Perturb => run_perturb::<I>(cfg, cli, device),
+                Mode::Teacher => run_teacher::<I>(cfg, cli, device),
             }
         }
         other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
@@ -151,6 +185,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         cfg.params.use_leakance,
         "probe requires params.use_leakance: true — use a leakance experiment config"
     );
+    let output = cli.output.ok_or("--output is required in grad mode")?;
 
     let dataset = MeritGagesDataset::open(&cfg)?;
     let exp = cfg.experiment.as_ref().expect("experiment section required");
@@ -333,7 +368,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
     };
 
     write_grad_netcdf(
-        &cli.output,
+        &output,
         &comids,
         &mean_abs(&rows_factor),
         &mean_net(&rows_factor),
@@ -350,7 +385,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
 
     println!(
         "wrote {} ({} reaches, {} batches, seed {})",
-        cli.output.display(),
+        output.display(),
         comids.len(),
         cli.windows,
         cli.seed
@@ -446,6 +481,7 @@ fn run_perturb<I: Backend>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     const BATCH_SIZE_DAYS: usize = 15; // eval default (bin/eval.rs --batch-size-days)
 
+    let output = cli.output.ok_or("--output is required in perturb mode")?;
     let plan_path = cli
         .probe_plan
         .as_ref()
@@ -516,7 +552,7 @@ fn run_perturb<I: Backend>(
         .format("%Y-%m-%d")
         .to_string();
 
-    std::fs::create_dir_all(&cli.output)?;
+    std::fs::create_dir_all(&output)?;
 
     // One full chunked eval (mirrors evaluate's loop, eval.rs:97-151) with a
     // constant +delta added to the q' forcing at the run's probe reaches.
@@ -614,10 +650,10 @@ fn run_perturb<I: Backend>(
     // perturbation alone.
     eprintln!("baseline 1/2 (0 probes)");
     let b1 = run_one(&[])?;
-    write_round_netcdf(&cli.output.join("baseline_1.nc"), &gauge_staids, &b1, &day0, n_days as i64)?;
+    write_round_netcdf(&output.join("baseline_1.nc"), &gauge_staids, &b1, &day0, n_days as i64)?;
     eprintln!("baseline 2/2 (0 probes)");
     let b2 = run_one(&[])?;
-    write_round_netcdf(&cli.output.join("baseline_2.nc"), &gauge_staids, &b2, &day0, n_days as i64)?;
+    write_round_netcdf(&output.join("baseline_2.nc"), &gauge_staids, &b2, &day0, n_days as i64)?;
 
     let max_diff = b1
         .iter()
@@ -646,7 +682,7 @@ fn run_perturb<I: Backend>(
         );
         let preds = run_one(round_probes)?;
         write_round_netcdf(
-            &cli.output.join(format!("round_{round}.nc")),
+            &output.join(format!("round_{round}.nc")),
             &gauge_staids,
             &preds,
             &day0,
@@ -657,11 +693,220 @@ fn run_perturb<I: Backend>(
     println!(
         "wrote {} runs (2 baselines + {n_rounds} rounds) to {} ({} gauges x {} days)",
         n_rounds + 2,
-        cli.output.display(),
+        output.display(),
         n_all_gauges,
         n_days - 2,
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3: --mode teacher
+// ---------------------------------------------------------------------------
+
+/// Parse the plant-file CSV. Required columns: comid, k_d_norm, d_gw_norm,
+/// factor_norm. All three norm columns must be in [0, 1]. Duplicate COMIDs
+/// are rejected.
+fn parse_plant_file(
+    path: &Path,
+) -> Result<Vec<(i64, f32, f32, f32)>, Box<dyn std::error::Error>> {
+    let mut rdr = csv::Reader::from_path(path)?;
+    let headers = rdr.headers()?.clone();
+    let col = |name: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        headers
+            .iter()
+            .position(|h| h == name)
+            .ok_or_else(|| format!("{}: missing column '{name}'", path.display()).into())
+    };
+    let (ci_c, ci_k, ci_d, ci_f) =
+        (col("comid")?, col("k_d_norm")?, col("d_gw_norm")?, col("factor_norm")?);
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+    for rec in rdr.records() {
+        let rec = rec?;
+        let comid: i64 = rec[ci_c].parse()?;
+        if !seen.insert(comid) {
+            return Err(format!("duplicate plant comid {comid}").into());
+        }
+        let norm = |s: &str, name: &str| -> Result<f32, Box<dyn std::error::Error>> {
+            let v: f32 = s.parse()?;
+            if !(0.0..=1.0).contains(&v) {
+                return Err(format!("{name} {v} outside [0,1] for comid {comid}").into());
+            }
+            Ok(v)
+        };
+        rows.push((
+            comid,
+            norm(&rec[ci_k], "k_d_norm")?,
+            norm(&rec[ci_d], "d_gw_norm")?,
+            norm(&rec[ci_f], "factor_norm")?,
+        ));
+    }
+    if rows.is_empty() {
+        return Err(format!("{}: no plant rows", path.display()).into());
+    }
+    Ok(rows)
+}
+
+/// Stage-3 driver: planted-leakance world. Overrides the KAN head's
+/// normalized leakance outputs at specified reaches, runs the chunked eval
+/// loop, and writes synthetic daily gauge observations (zarr-v2) plus a
+/// per-reach zeta answer key (netCDF).
+fn run_teacher<I: Backend>(
+    cfg: Config,
+    cli: Cli,
+    device: I::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const BATCH_SIZE_DAYS: usize = 15;
+    assert!(cfg.params.use_leakance, "teacher requires params.use_leakance: true");
+
+    let plants = parse_plant_file(
+        cli.plant_file.as_ref().ok_or("--plant-file is required in teacher mode")?,
+    )?;
+    let obs_dir = cli.obs_output.as_ref().ok_or("--obs-output is required in teacher mode")?;
+    let zeta_path = cli.zeta_output.as_ref().ok_or("--zeta-output is required in teacher mode")?;
+    let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint is required in teacher mode")?;
+
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = kan_config(head_section, cfg.seed);
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+    eprintln!("loaded checkpoint: {}", head_base(checkpoint).display());
+
+    let dataset = MeritGagesDataset::open(&cfg)?;
+    let axis = dataset.time_axis().clone();
+    let n_days = axis.num_days.min(cli.eval_days);
+    assert!(
+        n_days >= 3,
+        "eval window too short: {n_days} days (need >= 3 for tau-trim + last-day drop)"
+    );
+    if n_days < axis.num_days {
+        eprintln!(
+            "WARNING: truncated teacher window ({n_days}/{} days via --eval-days) — \
+             synthetic obs will NOT cover the student training axis; timing-gate use only",
+            axis.num_days
+        );
+    }
+    let n_hours = n_days * 24;
+
+    // 1-day probe window: sizes gauges + forces the static-network cache.
+    let probe = TestWindow::new(&axis, 0, 1);
+    let probe_batch = dataset.collate_window(&probe)?;
+    let n_all_gauges = probe_batch.gauge_staids.len();
+    let gauge_staids: Vec<String> =
+        probe_batch.gauge_staids.iter().map(|s| s.as_str().to_string()).collect();
+    let network_comids: Vec<i64> = probe_batch.divide_comids.iter().map(|c| c.0).collect();
+
+    // Fail fast: every plant COMID must be in the eval network.
+    {
+        let set: HashSet<i64> = network_comids.iter().copied().collect();
+        let missing: Vec<i64> =
+            plants.iter().map(|p| p.0).filter(|c| !set.contains(c)).collect();
+        if !missing.is_empty() {
+            return Err(format!("plant COMIDs not in eval network: {missing:?}").into());
+        }
+    }
+    eprintln!(
+        "teacher: {} plants, {n_all_gauges} gauges, {} reaches, {n_days} days",
+        plants.len(),
+        network_comids.len()
+    );
+
+    // Dense override vectors over the network's reach columns.
+    let comid_col: HashMap<i64, usize> =
+        network_comids.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let n_reaches = network_comids.len();
+    let mut ov = LeakanceOverride {
+        mask: vec![0.0; n_reaches],
+        k_d: vec![0.0; n_reaches],
+        d_gw: vec![0.0; n_reaches],
+        factor: vec![0.0; n_reaches],
+    };
+    for &(comid, k, d, f) in &plants {
+        let col = comid_col[&comid];
+        ov.mask[col] = 1.0;
+        ov.k_d[col] = k;
+        ov.d_gw[col] = d;
+        ov.factor[col] = f;
+    }
+
+    // Chunked forward with overrides + zeta accumulation (mirrors run_perturb's
+    // run_one; column order is asserted stable across chunks).
+    let mut zeta_sink = ZetaSums::<I>::new();
+    let mut predictions_full = Array2::<f32>::zeros((n_all_gauges, n_hours));
+    let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
+    let mut day_offset = 0usize;
+    let mut chunk_idx = 0usize;
+    while day_offset < n_days {
+        let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
+        let win = TestWindow::new(&axis, day_offset, chunk_n);
+        let batch = dataset.collate_window(&win)?;
+        assert!(
+            batch.divide_comids.iter().map(|c| c.0).eq(network_comids.iter().copied()),
+            "reach column order changed between chunks — override vectors invalid"
+        );
+        let tensors = batch.to_tensors::<I>(&device);
+        let pred = forward_eval::<I>(
+            &cfg,
+            &tensors,
+            &head,
+            &device,
+            chunk_idx > 0,
+            Some(&mut zeta_sink),
+            Some(&ov),
+        );
+        let dims = pred.dims();
+        let v: Vec<f32> = pred.into_data().into_vec().unwrap();
+        let pred_arr = Array2::from_shape_vec((dims[0], dims[1]), v).unwrap();
+        let h_start = day_offset * 24;
+        predictions_full
+            .slice_mut(ndarray::s![.., h_start..h_start + win.n_hourly()])
+            .assign(&pred_arr);
+        eprintln!("  chunk {}/{n_chunks_total}", chunk_idx + 1);
+        day_offset += chunk_n;
+        chunk_idx += 1;
+    }
+
+    // tau-trim + daily downsample + drop last day (same as run_perturb).
+    let pred_full_vec: Vec<f32> = predictions_full.iter().copied().collect();
+    let pred_full_t: Tensor<I, 2> =
+        Tensor::<I, 1>::from_floats(pred_full_vec.as_slice(), &device)
+            .reshape([n_all_gauges, n_hours]);
+    let daily_t = tau_trim_and_downsample(pred_full_t, cfg.params.tau);
+    let dd = daily_t.dims();
+    let daily_vec: Vec<f32> = daily_t.into_data().into_vec().unwrap();
+    let daily_all = Array2::from_shape_vec((dd[0], dd[1]), daily_vec).unwrap();
+    let daily = daily_all.slice(ndarray::s![.., 0..dd[1] - 1]).to_owned();
+
+    // Synthetic obs: day0 = axis.start + 1 (tau-trim drops day 0).
+    let epoch = chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap();
+    let day0 = axis.start + chrono::Duration::days(1);
+    ddrs::data::store::obs_writer::write_obs_zarr_v2(obs_dir, &gauge_staids, epoch, day0, &daily)?;
+    eprintln!(
+        "synthetic obs → {} ({n_all_gauges} gauges, {} days from {day0})",
+        obs_dir.display(),
+        daily.dim().1
+    );
+
+    // Answer key: zeta means over the routed window.
+    let scale = 1.0_f32 / zeta_sink.steps as f32;
+    assert!(scale.is_finite() && scale > 0.0, "zeta accumulation empty — leakance inactive?");
+    let mean_vec = |t: Option<Tensor<I, 1>>| -> Vec<f32> {
+        (t.expect("zeta sums present") * scale).into_data().into_vec().unwrap()
+    };
+    write_zeta_netcdf(
+        zeta_path,
+        &network_comids,
+        &mean_vec(zeta_sink.abs_sum),
+        &mean_vec(zeta_sink.net_sum),
+        &mean_vec(zeta_sink.depth_sum),
+        &mean_vec(zeta_sink.area_z_sum),
+        &mean_vec(zeta_sink.q_sum),
+        &format!("teacher:{}", checkpoint.display()),
+    )
+    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    println!("answer key → {} ({} reaches)", zeta_path.display(), network_comids.len());
     Ok(())
 }
 
