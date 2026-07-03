@@ -17,6 +17,7 @@ pub mod forward;
 pub mod loss;
 pub mod metrics;
 pub mod optimizer;
+pub mod probe;
 pub mod zarr_io;
 
 pub use bootstrap::bootstrap_head_and_state;
