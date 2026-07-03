@@ -5,139 +5,162 @@ Plan: `docs/superpowers/plans/2026-07-02-zeta-gradient-probe.md`
 Prior experiment: `docs/2026-07-02-leakance-diagnosis-findings.md` (whose §5
 item 1 this executes, reshaped from a twin experiment into two no-training
 instruments after the recoverability discussion).
-Scripts: `src/bin/probe_zeta_gradient.rs`, `scripts/zeta_probe_sites.py`,
-`scripts/zeta_gradient_analysis.py`; maps notebook
+Code: `src/bin/probe_zeta_gradient.rs`, `src/training/probe.rs`,
+`scripts/zeta_probe_sites.py`, `scripts/zeta_gradient_analysis.py`,
 `scripts/notebooks/gradient_maps.ipynb`.
 
-**One-line answer: the leakance gradient is alive everywhere (H4-starvation
-REFUTED — gauged/ungauged |g| ratio 1.5–2.9 vs the ≥10 bar), and the reason
-learned zeta stays small is now measured, not inferred: a literature-magnitude
-reach loss (0.01 m³/s) arrives at its measurement gauge at ~95% fidelity but
-is 53× smaller than the median reference gauge's 5% discharge-uncertainty
-band — detectability NO-GO (4.2% of Ref probes detectable). Gauge-only
-discharge supervision cannot see real-world leakance; auxiliary spatial
-supervision is the only viable path.**
+**One-line answer: the leakance gradient is alive everywhere (starvation
+REFUTED — gauged/ungauged |g| ratio only 1.5–2.9 vs the ≥10 bar), and the
+reason learned zeta stays small is now measured, not inferred: a
+literature-magnitude reach loss (0.01 m³/s) arrives at its measurement gauge
+at ~95% fidelity but is 53× smaller than the median reference gauge's 5%
+discharge-uncertainty band — detectability NO-GO (4.2% of Ref probes
+detectable). Gauge-only discharge supervision cannot see real-world leakance;
+auxiliary spatial supervision is the only viable path.**
 
 ---
 
-## 1. Motivating question and the two rival mechanisms
+## 1. Hypotheses
 
 The low-zeta diagnosis (2026-07-02) attributed the tiny learned leakance flux
-to driving-head throttling plus a gauge-shaped training signal — but its H4
-evidence was correlational (zeta is small where gauges aren't). Two rival
-mechanisms fit that pattern and demand different remedies:
+(median |zeta| 6.4e-4 m³/s) partly to "H4: gauge bias / gradient starvation" —
+but its evidence was correlational (zeta is small where gauges aren't). Two
+rival mechanisms fit that correlation and demand different remedies, plus a
+third hypothesis every gauge-trained rescue silently depends on:
 
-- **Starvation** — `∂Loss/∂zeta` is effectively dead away from gauges; the
-  optimizer never receives a signal there. Remedy: auxiliary supervision.
-- **Rejection** — the gradient is alive off-gauge but points toward smaller
-  zeta; the discharge objective actively dislikes leakance there. Remedy: the
-  objective (or physics) is mis-specified; auxiliary supervision would fight
-  the loss.
+| # | Hypothesis | Prediction if true | Remedy if true |
+|---|---|---|---|
+| P1 | **Starvation** — `∂Loss/∂zeta` is effectively dead away from gauges; the optimizer never receives a signal there | median \|∂L/∂factor\| on ungauged (and arid) reaches ≥ 1–2 orders of magnitude below gauged, at BOTH parameter points | auxiliary supervision fills a genuine gap |
+| P2 | **Rejection** — the gradient is alive off-gauge but consistently points toward smaller zeta; the objective actively dislikes leakance there | off-gauge magnitudes comparable, but > 67% of dry-tercile signed grads push zeta down at the trained point | the objective (or physics) is mis-specified; auxiliary supervision would fight the loss |
+| P3 | **Detectability** — a real-magnitude reach loss produces a gauge signal large enough for ANY discharge objective to reward | ≥ 10% of probes planted on reference-quality basins at δ = 0.01 m³/s clear both the rerun-noise floor and the 5% observational band | if false, no gauge-only objective can learn leakance and auxiliary supervision is *forced*, not optional |
 
-A recover-planted-zeta twin experiment cannot separate these (parameter
-degeneracy, routing-parameter absorption, training stochasticity), so the
-probe uses two **no-training** instruments with pre-registered verdicts.
+A recover-planted-zeta twin experiment was considered and rejected: the
+parameter triple `(K_D, d_gw, factor)` is internally degenerate (only the
+flux is identifiable), routing parameters absorb planted losses (the
+diagnosis's H5 finding), and training stochasticity smears the endpoint. The
+hypotheses above are instead testable with **zero training** — pre-registered
+thresholds, spec §Analysis.
 
-## 2. Methods
+## 2. What was changed to test them
 
-**Stage 1 — adjoint reachability map.** A new binary
-(`probe_zeta_gradient --mode grad`) replicates the training mini-batch
-distribution exactly (64-gauge batches, rho=90-day windows, the run's L1
-objective, seed-fixed sampler) but takes no optimizer step: the KAN head's
-three per-reach leakance outputs are detached and re-lifted as autograd
-leaves (`lift_leaf`; the analytical `TimestepLeakanceOp` backward supplies
-exact gradients — no Backward impl touched, guard suites + DDR-sandbox
-ABSOLUTE MATCH all green), and per-batch leaf gradients are accumulated by
-COMID. N=96 windows covered the **full 64,892-reach eval network** (median
-coverage 4 windows/reach; first pass at N=32 had median 1 and was re-run —
-each window costs only 23 s on CPU). Run twice with identical windows:
-the **trained** hourly-ON checkpoint (`epoch_5_mb_9`) and the **cold**
-seed-42 initialization — the pair separates "converged-so-flat" from
-"never-saw-a-signal". Gradients are w.r.t. the NORMALIZED [0,1] parameters
-(denormalization happens inside `setup_inputs`), so magnitudes are
-dimensionless and spatially comparable within a parameter.
+All changes are read-only with respect to training; no autograd Backward
+impl was touched (repo invariant 4), and the DDR-parity regression stayed at
+ABSOLUTE MATCH throughout.
 
-**Stage 2 — detectability bound.** Forward-only (no autograd): plant a
-constant `+δ` m³/s of lateral inflow (`q_prime` + `q_prime_daily`, so the
-disaggregation head carries it) at selected reaches and measure ΔQ at each
-probe's nearest downstream gauge over the first 3 years of the eval window
-(`--eval-days 1095`), δ ∈ {0.01, 0.1} (the Shanafield & Cook
-transmission-loss range). **Site selection with the dam/lake control**:
-gauges joined to GAGES-II `CLASS` (point-shapefile DBF); the primary
-population is reaches whose *every* containing gauge is `Ref`
-(least-disturbed); Non-ref kept as a labeled contrast. 146 reaches
-(96 Ref-only) on 104 measurement gauges, stratified by upstream-area ×
-aridity × stage-1-reachability terciles, capped at 2 reaches per measurement
-gauge. **Packing lesson (methods evolution, recorded):** the initial
-"no two probes share any gauge" constraint stalled at 64 rounds (median 1
-probe/round) because probes sharing a measurement gauge can never share a
-round; relaxing conflicts to *nearest-gauge contamination only* and capping
-per-gauge probes collapsed the plan to **8 rounds** (292 probes) + 2
-baselines. Everything ran on **CPU** (GPU occupied by another training job;
-`NdArray<f32>`, `sparse_solver` forced to `cpu`): the two unperturbed
-baselines came out **byte-identical** (`max|b1−b2| = 0`), so the noise floor
-is exactly zero and detection reduces to the observational-uncertainty band —
-detection criterion: `|mean ΔQ|` > 99th-pct rerun noise (=0) AND > 5% of the
-gauge's mean flow (the differential-gauging detectability band, McCallum
-2012).
+1. **`src/training/probe.rs`** (new): `lift_leaf` — detach a KAN head output
+   from its graph and re-register it as a `require_grad` autograd leaf
+   (values bit-identical, tape topology only); `probe_forward` — a faithful
+   mirror of the training `forward` whose ONLY difference is that the three
+   per-reach leakance vectors pass through `lift_leaf`, so
+   `loss.backward()` yields exact per-reach gradients via the existing
+   analytical `TimestepLeakanceOp` backward; `GradAccum` — COMID-keyed
+   accumulation across batches (batches route different gauge-subgraph
+   unions).
+2. **`src/bin/probe_zeta_gradient.rs`** (new binary), two modes:
+   - `--mode grad`: replicates the training mini-batch loop exactly
+     (sampler, rho-windows, obs alignment, NaN gauge filter, L1 loss) minus
+     the optimizer step; accumulates per-reach `Σ|g|`/`Σg`/coverage; writes
+     `write_grad_netcdf` (new, `src/dump_parameters.rs`). Fail-fast guards:
+     non-finite-gradient abort, COMID key-set alignment asserts, retry cap.
+   - `--mode perturb`: forward-only chunked eval (replica of `evaluate`)
+     with `+δ` m³/s added to the lateral-inflow forcing (`q_prime` AND
+     `q_prime_daily`, so the disaggregation head carries it) at planned
+     reaches; validates the plan against the network up front; writes
+     per-round daily gauge predictions.
+   - `--backend {cpu,cuda}` (cpu default, forces `sparse_solver: cpu`) —
+     the GPU was occupied by another training job, so the entire experiment
+     ran on CPU (`NdArray<f32>`), which is deterministic: the two
+     unperturbed baselines came out byte-identical (`max|b1−b2| = 0`),
+     reducing detection to the observational band alone.
+3. **`scripts/zeta_probe_sites.py`** (new): GAGES-II `CLASS` join (the
+   dam/lake control — probes measured only at least-disturbed `Ref` gauges;
+   `Non-ref` kept as a labeled contrast), stratified sampling
+   (upstream-area × aridity × stage-1-reachability terciles), and round
+   packing. **Methods evolution, recorded:** the initial "no two probes
+   share any gauge" constraint stalled at 64 rounds (median 1 probe/round);
+   the fix was (a) conflicts = *nearest-gauge contamination only* (the
+   analysis measures each probe solely at its nearest gauge) and (b) a cap
+   of 2 reaches per measurement gauge (per-gauge count × deltas is a hard
+   round floor) → **8 rounds**.
+4. **`scripts/zeta_gradient_analysis.py`** (new): the pre-registered
+   verdicts; **`scripts/notebooks/gradient_maps.ipynb`** (new): CONUS
+   per-gauge (4-panel trained/cold × magnitude/sign) and per-reach maps per
+   the `ddrs-eval-plots` conventions.
+5. **Tests** (`tests/zeta_gradient_probe.rs`): leaf-lifting leaves the
+   routed forward byte-identical; leaf grads finite and nonzero on a losing
+   chain; COMID accumulation exact. Guard suites (`leakance_gradcheck` 8/8,
+   `leakance_off_parity` 3/3, `zeta_accum` 6/6, lib 172) green throughout.
 
-## 3. Results
+## 3. The experiment
 
-| Verdict | Criterion (pre-registered) | Measured |
-|---|---|---|
-| **H4-starvation REFUTED** | gauged/ungauged median \|∂L/∂factor\| ≥ 10× at both points | ratio **1.5** (trained), **2.9** (cold) |
-| **H4-rejection REFUTED** (trained point) | >67% of dry-tercile signed grads push zeta down with comparable magnitudes | **52.5%** (≈ converged neutrality) |
-| **Detectability NO-GO** | <10% of Ref probes at δ=0.01 clear noise + 5% band | **4.2%** (4/96); δ=0.1: 16.7%; Non-ref: 0.0%/2.1% |
-| **Cross-check SUSPECT** | stage-1 reachability rank-predicts detectability (ρ > 0.3) | ρ = **−0.02** (explained below) |
+**Stage 1 — adjoint reachability map (tests P1, P2).** 96 training-style
+windows (seed 42; a timing gate measured 23 s/window on CPU, so N was raised
+from the plan's 32 after the first pass left median coverage at 1 window),
+covering the **full 64,892-reach eval network** with median coverage 4.
+Run twice with identical windows: the trained hourly-ON checkpoint
+(`2026-07-01T13-43-32Z…/epoch_5_mb_9`) and the cold seed-42 head init — the
+pair separates "converged-so-flat" from "never-saw-a-signal". Gradients are
+w.r.t. the NORMALIZED [0,1] parameters (denormalization happens inside
+`setup_inputs`), hence dimensionless and spatially comparable.
 
-**The gradient reaches everywhere.** The eval network's gauge coverage is
-dense enough that autograd carries loss signal to essentially every reach:
-ungauged reaches see gradients only 1.5–2.9× weaker than gauged ones. The
-diagnosis's "gradient starvation" reading of H4 is dead — zeta's
-gauge-proximity pattern is not caused by missing gradients.
+**Stage 2 — detectability bound (tests P3).** 292 probes = 146 reaches
+(96 Ref-only) × 2 deltas on 104 measurement gauges, 8 rounds + 2 baselines,
+each a forward-only eval over the first 3 years (`--eval-days 1095`) of the
+eval window. Detection criterion per probe, at its nearest downstream gauge:
+`|mean ΔQ|` > 99th-pct rerun noise (= 0 on CPU) AND > 5% of the gauge's mean
+flow (the differential-gauging detectability band, McCallum 2012).
 
-**Discovered mechanism (post-hoc, labeled as such): initial-signal
-rejection.** At the cold point, **80.5% of ungauged and 66.2% of dry-tercile
-gradients push zeta DOWN**, with a **15.9× wet/dry gradient-magnitude
-asymmetry** (trained: 1.4×) — per-basin, the median sign-fraction is 0.98
-(CONUS map, cold panels ~uniformly "push down"). Early training actively
-suppressed leakance almost everywhere — hardest in wet, well-observed
-basins — before converging to a balanced field. The **trained** sign map has
-coherent regional structure: "wants MORE leakance" (∂L/∂factor < 0) clusters
-in the interior West / High Plains — physically the right losing-stream
-country — while "wants less" persists along the East/Gulf. The term is not
-misbehaving at convergence; it differentiated regions correctly but at
-magnitudes the objective cannot reward further.
+## 4. Did the tests pass or fail?
 
-**Why: the detectability floor (the headline number).** The planted flux is
-NOT lost in routing — the median Ref probe's `|mean ΔQ|/δ = 0.946`: the
-gauge receives ~95% of the planted loss. But the median Ref measurement
-gauge's 5% band is **0.53 m³/s — 53× the 0.01 m³/s literature-magnitude
-loss**. The 4 detected probes all sat on tiny gauges (median band
-7e-4 m³/s). Even δ=0.1 (an extreme, upper-literature loss) clears the band
-at only 16.7% of Ref gauges. Non-ref (regulated) gauges are worse (0–2%) —
-they sit on larger rivers. **Detection fails on dilution, not transmission**:
-the discharge objective is signal-starved not in gradient topology but in
-signal-to-uncertainty at the gauges themselves.
+| # | Hypothesis | Pre-registered bar | Measured | Verdict |
+|---|---|---|---|---|
+| P1 | Starvation | gauged/ungauged \|g\| ≥ 10× at both points | **1.5×** (trained), **2.9×** (cold) | **FAILED (refuted)** |
+| P2 | Rejection (trained point) | >67% dry-tercile push-down | **52.5%** (≈ neutral) | **FAILED (refuted)** |
+| P3 | Detectability | ≥10% of Ref δ=0.01 probes detectable | **4.2%** (4/96); δ=0.1: 16.7%; Non-ref: 0.0%/2.1% | **FAILED (NO-GO)** |
+| — | Cross-check (stage-1 ↔ stage-2, ρ > 0.3) | — | ρ = **−0.02** | SUSPECT — explained below |
 
-**Cross-check post-mortem (ρ = −0.02, SUSPECT as pre-registered).** The
-failure is explainable and methodological, not evidence against either
-stage: `|∂L/∂factor|` embeds the reach's local flux capacity
+**P1 failed — the gradient reaches everywhere.** The eval network's gauge
+coverage is dense enough that autograd carries loss signal to essentially
+every reach; ungauged reaches see gradients only 1.5–2.9× weaker. The
+"gradient starvation" reading of the diagnosis's H4 is dead.
+
+**P2 failed at the trained point but revealed the discovered mechanism
+(post-hoc, labeled as such): initial-signal rejection.** At the cold point,
+**80.5% of ungauged and 66.2% of dry-tercile gradients push zeta DOWN**,
+with a **15.9× wet/dry gradient-magnitude asymmetry** (trained: 1.4×);
+per-basin the median cold sign-fraction is **0.98** (the CONUS map's cold
+panels are near-uniformly "push down"). Early training actively suppressed
+leakance almost everywhere before converging to a balanced field. The
+**trained** sign map is regionally coherent: "wants MORE leakance"
+(∂L/∂factor < 0) clusters in the interior West / High Plains — physically
+the right losing-stream country — with "wants less" persisting along the
+East/Gulf. The term differentiated regions correctly; it simply cannot be
+rewarded further.
+
+**P3 failed — and the failure decomposes cleanly.** The planted flux is NOT
+lost in routing: the median Ref probe's `|mean ΔQ|/δ = 0.946` — the gauge
+receives ~95% of the planted loss. But the median Ref measurement gauge's 5%
+band is **0.53 m³/s — 53× the 0.01 m³/s literature-magnitude loss**. The 4
+detections all sat on tiny gauges (median band 7e-4 m³/s). Even δ = 0.1 (an
+extreme upper-literature loss) clears the band at only 16.7% of Ref gauges;
+regulated (Non-ref) gauges are worse (0–2%) because they sit on larger
+rivers. **Detection fails on dilution, not transmission.**
+
+**Cross-check post-mortem (ρ = −0.02).** Explainable and methodological:
+`|∂L/∂factor|` embeds the reach's local flux capacity
 (`area_z·K_D·(depth−d_gw)`), whereas detectability of a FIXED δ is pure
-hydraulic dilution at the measurement gauge (band ∝ gauge mean flow). The
-two instruments answer different questions by construction; a comparable
-cross-check would use `∂L/∂zeta` (capacity-normalized) against a
-band-normalized ΔQ. Recorded as a design improvement, not rerun (the NO-GO
-does not depend on it). Also noted: 4/292 probes had no matching gauge row
-in the eval outputs (their nearest gauge fell to the eval network's
-DA_VALID/headwater filters) — excluded, immaterial at this n.
+hydraulic dilution at the measurement gauge. The two instruments answer
+different questions by construction; a comparable check would use
+capacity-normalized `∂L/∂zeta` against band-normalized ΔQ. Recorded as a
+design improvement, not rerun — the NO-GO does not depend on it. Also
+noted: 4/292 probes had no matching gauge row (their nearest gauge fell to
+the eval network's DA_VALID/headwater filters) — excluded, immaterial.
 
-CONUS maps: `output/zeta_probe/plots/gradient_gauge_map.png` (4 panels:
-trained/cold × log10|g|/sign-fraction), `gradient_reach_map.png` (per-reach
-log10|∂L/∂factor| on MERIT flowlines). Notebook committed at
-`scripts/notebooks/gradient_maps.ipynb`.
+CONUS maps: `output/zeta_probe/plots/gradient_gauge_map.png`,
+`gradient_reach_map.png` (method notebook committed at
+`scripts/notebooks/gradient_maps.ipynb`).
 
-## 4. Conclusions
+## 5. Conclusions
 
 1. **Gauge-only discharge supervision cannot learn real-world leakance —
    measured, not argued.** Real-magnitude losses transmit to gauges nearly
@@ -146,40 +169,34 @@ log10|∂L/∂factor| on MERIT flowlines). Notebook committed at
    computed from gauged discharge alone (L1, NSE, KGE, or otherwise) can
    reward what it cannot distinguish from measurement uncertainty.
 2. **The diagnosis's H4 is re-mechanized.** Not gradient starvation
-   (gradients reach everywhere) but signal starvation at the sensor: the
-   optimizer keeps zeta small because, within the detectable band, small is
-   optimal — and at initialization the objective actively pushed leakance
-   down nearly everywhere (0.98 of basins).
-3. **The term itself is healthy.** At convergence the gradient field wants
-   more leakance exactly in the High Plains / interior West and less in the
-   humid East — the physically correct spatial reading. The physics
-   parameterization is not the obstacle; the supervision is.
-4. **The auxiliary-supervision remedy is now the only path** (diagnosis
-   findings §5 item 2), upgraded from literature-recommended to empirically
-   forced. Regularizing `d_gw`/`zeta_net` against an independent
-   losing-potential signal (Jasechko-style well-vs-stream levels,
-   water-table-depth attributes) supplies exactly the constraint the gauges
-   cannot.
-5. **The dam/lake filter mattered less than expected for this question**
-   (Non-ref probes were undetectable for size reasons before regulation
-   noise even enters), but remains mandatory for any future real-data
-   differential-gauging validation.
+   (gradients reach everywhere) but signal starvation at the sensor — plus
+   an initial-training regime in which the objective pushed leakance down in
+   ~98% of basins before equilibrating.
+3. **The physics term is healthy.** At convergence the gradient field wants
+   more leakance exactly where losing streams live. The parameterization is
+   not the obstacle; the supervision is.
+4. **The dam/lake filter mattered less than expected for this question**
+   (Non-ref probes were undetectable for river-size reasons before
+   regulation noise even enters) but remains mandatory for any future
+   real-data differential-gauging validation.
 
-## 5. Next steps
+## 6. Next steps
 
-1. **Auxiliary-constraint experiment** (now the top follow-up): add a
-   spatial regularizer on `zeta_net` (or `d_gw`) toward a losing-potential
-   map; hourly forcing; evaluate whether the losing-subset skill gain from
-   the 2×2 grows beyond its marginal +0.0018 KGE while zeta magnitudes move
-   toward literature values.
-2. **Keep leakance hourly-gated and experimental** — unchanged from the
-   diagnosis; nothing here justifies promotion, and the NO-GO sharpens the
-   documentation of *why*.
-3. Optional methodological cleanup if the probe is reused: capacity-normalized
-   reachability (`∂L/∂zeta`) for a meaningful stage-1↔stage-2 cross-check;
-   band-normalized detectability scores.
+1. **Auxiliary-constraint experiment** (top follow-up, now empirically
+   forced rather than literature-recommended): regularize `zeta_net` (or
+   `d_gw`) toward an independent losing-potential signal (Jasechko-style
+   well-vs-stream levels, water-table-depth attributes); hourly forcing;
+   evaluate whether the 2×2's marginal losing-subset gain (+0.0018 KGE)
+   grows while zeta magnitudes move toward literature values.
+2. **Keep leakance hourly-gated and experimental** — nothing here justifies
+   promotion; the NO-GO sharpens the documentation of why.
+3. Optional methodological cleanup if the probe is reused:
+   capacity-normalized reachability (`∂L/∂zeta`) for a meaningful
+   stage-1↔stage-2 cross-check; band-normalized detectability scores; a
+   `band10` column alongside `band5` in `detectability_rows.csv` (the spec
+   listed both; only the 5% band feeds the pre-registered verdict).
 
-## 6. Raw verdict output
+## 7. Raw verdict output
 
 ```
 aridity-vs-meanP spearman -0.84 → aridity is a DRYNESS index; dry tercile n=21415
@@ -218,16 +235,18 @@ VERDICTS
   [SUSPECT] Cross-check: rank corr -0.02 (bar: > 0.3)
 ```
 
-Supporting stats (from `detectability_rows.csv`): Ref median 5%-band
-0.531 m³/s; Ref median |mean ΔQ|/δ at δ=0.01 = 0.946; the 4 detections'
-median band 7e-4 m³/s.
+Supporting stats (recomputed from `detectability_rows.csv` by the final
+review): Ref median 5%-band 0.531 m³/s; Ref median |mean ΔQ|/δ at δ=0.01 =
+0.946; the 4 detections' median band 7e-4 m³/s. Timing figures: 23 s/window
+is the timing-gate measurement (`--windows 1`); full N=96 runs averaged
+~20 s/window.
 
-## 7. Reproduce
+## 8. Reproduce
 
 ```bash
-# Stage 1 (CPU, ~37 min per run; identical seeds ⇒ identical windows)
+# Stage 1 (CPU, ~35 min per run; identical seeds ⇒ identical windows)
 cd /home/tbindas/projects/ddrs
-WT=<worktree or checkout with the probe binary>
+WT=<checkout with the probe binary>
 nice -n 10 $WT/target/release/probe_zeta_gradient \
   --config config/experiments/leakance_hourly_on.yaml \
   --checkpoint .ddrs/runs/2026-07-01T13-43-32Z-train-and-test/checkpoints/epoch_5_mb_9 \
