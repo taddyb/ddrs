@@ -44,7 +44,7 @@ trained hourly-ON checkpoint
         ▼
 TEACHER  eval-mode forward, leakance ON, per-COMID overrides of the
          NORMALIZED leakance params at planted reaches
-         (K_D → ceiling 1e-6, d_gw → floor −2, factor → target/ceiling)
+         (K_D → ceiling 1e-5, d_gw → floor −2, factor → target/ceiling)
          window: training period 1981-10-01 .. 1995-09-30
         │
         ├──► SYNTHETIC OBS   daily gauge discharge, zarr-v2 group in the
@@ -98,10 +98,10 @@ step-0 routing residual matches A's planted signal (minus the caveat in
   `band5` = 5% of the measurement gauge's mean observed flow (the probe's
   detectability band, already in `detectability_rows.csv`) and
   `ceiling_flux = area_z · K_D_max · (depth_mean − d_gw_min)` is the reach's
-  maximum expressible leakance flux (`K_D_max = 1e-6`, `d_gw_min = −2`;
+  maximum expressible leakance flux (`K_D_max = 1e-5`, `d_gw_min = −2`;
   `depth_mean` and `area_z_mean` from the diagnosis run's zeta diagnostic
-  netCDF exports).
-- **Implementation**: overrides set `K_D = 1e-6`, `d_gw = −2`,
+  netCDF exports). (`K_D_max` widened from 1e-6 by user decision 2026-07-03: the original ceiling left only 23/96 sites expressible; teacher and students share the widened range, preserving expressibility-by-construction and step-0 attribution.)
+- **Implementation**: overrides set `K_D = 1e-5`, `d_gw = −2`,
   `factor = target / ceiling_flux` (clamped to [0, 1]) — magnitude is tuned
   through `factor` alone. Sites where `ceiling_flux < 0.25 × band5` are
   **dropped and logged** (the term cannot express a detectable loss there;

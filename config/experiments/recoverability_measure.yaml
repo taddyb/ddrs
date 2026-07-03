@@ -66,7 +66,10 @@ params:
     n: [0.015, 0.25]
     q_spatial: [0.0, 1.0]
     p_spatial: [1.0, 200.0]
-    K_D: [1.0e-8, 1.0e-6]
+    # Widened from 1e-6 (2026-07-03 decision): at the old ceiling only 23/96
+    # plant sites could express a detectable loss. Teacher + students share
+    # this range, so expressibility and warm-start attribution still hold.
+    K_D: [1.0e-8, 1.0e-5]
     d_gw: [-2.0, 2.0]
     leakance_factor: [0.0, 1.0]
   attribute_minimums:

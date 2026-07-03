@@ -620,6 +620,8 @@ All five configs derive from `config/experiments/leakance_hourly_on.yaml` by a g
 | student_c | unchanged | synthetic | **none** | true | cpu |
 | measure | `testing:` 1981/09/30 → 1995/10/01 | synthetic | — (CLI) | true | cpu |
 
+NOTE (2026-07-03 amendment): all five configs also widen params.parameter_ranges.K_D to [1e-8, 1e-5] — see spec §Plant sites.
+
 The teacher `testing:` window is 1 day wider on each side than the student training axis because tau-trim drops the first prediction day and the writer drops the last — the synthetic obs then cover exactly 1981-10-01..1995-09-30. All paths absolute.
 
 - [ ] **Step 1: Write the generator** and run it from the worktree root:
@@ -734,7 +736,7 @@ ROOT = Path("/home/tbindas/projects/ddrs")
 PROBE = ROOT / "output/zeta_probe"
 OUT = ROOT / "output/recoverability"
 ZETA_NC = ROOT / ".ddrs/runs/2026-07-01T13-43-32Z-train-and-test/kan_parameters.nc"
-K_D_MAX = 1e-6
+K_D_MAX = 1e-5  # widened per user decision 2026-07-03
 D_GW_MIN = -2.0
 
 plan = pd.read_csv(PROBE / "probe_plan.csv", dtype={"staid_nearest": str})
