@@ -149,7 +149,18 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
     let mut accum_kd = GradAccum::new();
 
     let mut processed = 0usize;
+    let mut total_batches = 0usize;
     while processed < cli.windows {
+        if total_batches > 10 * cli.windows {
+            return Err(format!(
+                "retry cap exceeded: sampled {total_batches} batches but only processed \
+                 {processed}/{} — {} skipped (all-NaN batches); check dataset NaN coverage",
+                cli.windows,
+                total_batches - processed
+            )
+            .into());
+        }
+
         let idx = match sampler.next_batch() {
             Some(idx) => idx,
             None => {
@@ -157,6 +168,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
                 continue;
             }
         };
+        total_batches += 1;
 
         // Mirrors src/training/driver.rs:92-181 minus optimizer/checkpointing.
         let staids: Vec<_> = idx.iter().map(|&i| dataset.staids()[i].clone()).collect();
@@ -233,6 +245,20 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         let g_kd: Vec<f32> =
             leaves.k_d.grad(&grads).expect("k_d grad").into_data().into_vec().unwrap();
 
+        // Fail fast on non-finite gradients: a poisoned mean invalidates the
+        // entire accumulation map — do NOT skip-and-continue, which would
+        // desync accumulator coverage.
+        let nf_factor = g_factor.iter().filter(|v| !v.is_finite()).count();
+        let nf_dgw = g_dgw.iter().filter(|v| !v.is_finite()).count();
+        let nf_kd = g_kd.iter().filter(|v| !v.is_finite()).count();
+        if nf_factor > 0 || nf_dgw > 0 || nf_kd > 0 {
+            eprintln!(
+                "batch {}: non-finite grads — factor:{nf_factor} d_gw:{nf_dgw} k_d:{nf_kd}",
+                processed + 1
+            );
+            std::process::exit(1);
+        }
+
         accum_factor.add(&comids, &g_factor, &g_factor);
         accum_dgw.add(&comids, &g_dgw, &g_dgw);
         accum_kd.add(&comids, &g_kd, &g_kd);
@@ -252,6 +278,11 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
     let rows_kd = accum_kd.into_sorted_rows();
     assert_eq!(rows_factor.len(), rows_dgw.len());
     assert_eq!(rows_factor.len(), rows_kd.len());
+    assert!(
+        rows_factor.iter().map(|r| r.0).eq(rows_dgw.iter().map(|r| r.0))
+            && rows_factor.iter().map(|r| r.0).eq(rows_kd.iter().map(|r| r.0)),
+        "accumulator COMID sets diverged — per-param skipping was introduced somewhere"
+    );
 
     let comids: Vec<i64> = rows_factor.iter().map(|r| r.0).collect();
     let n_windows: Vec<i32> = rows_factor.iter().map(|r| r.3 as i32).collect();
