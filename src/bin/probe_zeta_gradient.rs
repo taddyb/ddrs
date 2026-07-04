@@ -995,8 +995,8 @@ fn write_floor_netcdf(
     file.add_attribute("checkpoint", checkpoint_label)?;
     file.add_attribute(
         "note",
-        "teacher-weights windowed |pred-obs| vs self-generated obs; day 0 = first \
-         post-trim day; floor(warmup) = nanmean over days >= warmup",
+        "windowed |pred-obs| residuals vs configured obs; day 0 = first post-trim day; \
+         floor(warmup) = nanmean over days >= warmup",
     )?;
     {
         let mut v = file.add_variable::<f32>("abs_residual", &["window", "gauge_slot", "day"])?;
@@ -1032,17 +1032,9 @@ fn build_gauge_uparea_lookup(
         .iter()
         .map(|r| (r.staid.as_str().to_string(), r.drain_sqkm as f32))
         .collect();
-    Ok(move |staid: &str| {
-        match lookup.get(staid) {
-            Some(&a) => a,
-            None => {
-                eprintln!(
-                    "WARNING: staid {staid} not found in gage CSV — uparea set to NaN \
-                     (stratification falls back to obs mean flow)"
-                );
-                f32::NAN
-            }
-        }
+    Ok(move |staid: &str| match lookup.get(staid) {
+        Some(&a) => a,
+        None => f32::NAN,
     })
 }
 
@@ -1062,7 +1054,7 @@ fn run_floor<I: Backend>(
     device: I::Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output = cli.output.as_ref().ok_or("--output is required in floor mode")?;
-    let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint required in floor mode")?;
+    let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint is required in floor mode")?;
 
     // Head on the inner backend I — forward-only, no autograd (same as perturb/teacher).
     let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
@@ -1083,8 +1075,8 @@ fn run_floor<I: Backend>(
     let exp = cfg.experiment.as_ref().expect("experiment section required");
     let rho = exp.rho.expect("floor mode requires experiment.rho");
 
-    // Sampler replica of the training driver — LOCAL rng seeded from --seed,
-    // same sequence as grad mode for the same --seed.
+    // Sampler replica of the training driver (src/training/driver.rs:73-93) with a LOCAL rng
+    // seeded from --seed — same sequence as grad mode for the same --seed.
     let mut rng = ChaCha12Rng::seed_from_u64(cli.seed);
     let mut sampler =
         BatchSource::Shuffle(RandomSampler::new(dataset.len(), exp.batch_size, true));
@@ -1136,6 +1128,10 @@ fn run_floor<I: Backend>(
         let tensors = batch.to_tensors::<I>(&device);
         // forward_eval returns gauge-aggregated hourly predictions (G, T_hours);
         // tau_trim_and_downsample converts to daily (G, T_days).
+        // carry_state=false ON PURPOSE: each window is an independent fresh
+        // routing from its own hotstart IC — that transient IS the quantity
+        // being measured (contrast: perturb/teacher pass chunk_idx > 0 to
+        // continue one long eval).
         let pred_hourly =
             forward_eval::<I>(&cfg, &tensors, &head, &device, false, None, None);
         let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
@@ -1178,6 +1174,18 @@ fn run_floor<I: Backend>(
             t_days
         );
         processed += 1;
+    }
+
+    // Summary uparea-miss warning (one line, not per-miss noise).
+    {
+        let n_miss = all_uparea.iter().filter(|v| v.is_nan()).count();
+        let total = all_uparea.len();
+        if n_miss > 0 {
+            eprintln!(
+                "warning: {n_miss}/{total} gauge-window slots had no DRAIN_SQKM \
+                 — uparea stratification will be partial"
+            );
+        }
     }
 
     // Assert constant batch size: RandomSampler(drop_last=true) guarantees this,
