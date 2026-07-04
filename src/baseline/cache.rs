@@ -375,6 +375,7 @@ mod tests {
             learning_rate: Default::default(),
             grad_clip_max_norm: None,
             checkpoint: None,
+            state_cache: None,
             loss: Default::default(),
         });
         cfg
@@ -471,6 +472,7 @@ mod tests {
             learning_rate: Default::default(),
             grad_clip_max_norm: None,
             checkpoint: None,
+            state_cache: None,
             loss: Default::default(),
         });
         let result = cache_key(&cfg);

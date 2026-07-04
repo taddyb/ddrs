@@ -17,7 +17,7 @@ use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
     AorcPrecipStore, AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, StreamflowSource,
+    ObservationsStore, StateCache, StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -58,6 +58,11 @@ pub struct RoutingBatch {
     /// `q_prime` — kept here for diagnostics / loss reconstruction.
     pub flow_scale: Vec<f32>,
     pub window: RhoWindow,
+    /// Per-reach discharge at window start (m³/s), batch-network order,
+    /// length `N`. Populated when `experiment.state_cache` is configured;
+    /// `None` otherwise → Task 3's forward pass falls back to the hotstart
+    /// heuristic (byte-identical to no-cache behavior).
+    pub initial_state: Option<Array1<f32>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +118,12 @@ pub struct RoutingTensors<B: Backend> {
     pub num_gauges: usize,
     pub gauge_staids: Vec<Staid>,
     pub window: RhoWindow,
+    /// Per-reach window-start discharge, shape `(N,)`.
+    /// `None` when `experiment.state_cache` is not configured.
+    /// Task 3 consumes this to seed the router instead of the hotstart
+    /// heuristic. It is a constant tensor (no grad); autograd topology
+    /// is unchanged relative to the no-cache path.
+    pub initial_state: Option<Tensor<B, 1>>,
 }
 
 impl RoutingBatch {
@@ -189,6 +200,13 @@ impl RoutingBatch {
 
         let num_gauges = self.gauge_staids.len();
 
+        // 5. Lift initial_state (N,) — constant, no grad.
+        let initial_state = self.initial_state.map(|arr| {
+            let n = arr.len();
+            let vec: Vec<f32> = arr.into_raw_vec_and_offset().0;
+            Tensor::<B, 1>::from_data(TensorData::new(vec, [n]), device)
+        });
+
         RoutingTensors {
             adjacency: self.adjacency,
             spatial_attributes,
@@ -202,6 +220,7 @@ impl RoutingBatch {
             num_gauges,
             gauge_staids: self.gauge_staids,
             window: self.window,
+            initial_state,
         }
     }
 }
@@ -237,6 +256,9 @@ pub struct MeritGagesDataset {
     /// `collate_window`. Interior mutability via `OnceCell` (single-threaded
     /// dataset access — the training loop drives it from one thread).
     static_network: OnceCell<StaticNetworkCache>,
+    /// Optional day-boundary discharge state cache. `None` ⇒ every code path
+    /// byte-identical to no-cache behavior (`RoutingBatch::initial_state = None`).
+    state_cache: Option<crate::data::store::StateCache>,
 }
 
 impl MeritGagesDataset {
@@ -377,6 +399,15 @@ impl MeritGagesDataset {
         // ---------- 4. Time axis from experiment dates ----------
         let time_axis = parse_experiment_axis(&exp.start_time, &exp.end_time)?;
 
+        // ---------- 5. Optional state cache ----------
+        let state_cache = match &exp.state_cache {
+            Some(p) => {
+                eprintln!("state cache: opening {}", p.display());
+                Some(StateCache::open(p)?)
+            }
+            None => None,
+        };
+
         Ok(Self {
             conus,
             gages_adj,
@@ -394,6 +425,7 @@ impl MeritGagesDataset {
             stds,
             gauges,
             static_network: OnceCell::new(),
+            state_cache,
         })
     }
 
@@ -519,7 +551,13 @@ impl MeritGagesDataset {
         // ----- 5. Observations (present-in-adjacency STAIDs; missing→error) -----
         let observations = self.observations.read_window(window, &gauge_staids)?;
 
-        // ----- 6. Assemble -----
+        // ----- 6. Window-start state from the cache (if configured) -----
+        let initial_state = match &self.state_cache {
+            Some(cache) => Some(cache.row_for_day(window.window_start, &compressed.divide_comids)?),
+            None => None,
+        };
+
+        // ----- 7. Assemble -----
         Ok(RoutingBatch {
             adjacency,
             spatial_attributes_normalized,
@@ -533,6 +571,7 @@ impl MeritGagesDataset {
             divide_comids: compressed.divide_comids,
             flow_scale,
             window: *window,
+            initial_state,
         })
     }
 
@@ -694,6 +733,13 @@ impl MeritGagesDataset {
             .slice(ndarray::s![window.daily_range(), ..])
             .to_owned();
 
+        // Window-start state from the cache (if configured). Same logic as
+        // `collate`: look up the window's start date in the cache.
+        let initial_state = match &self.state_cache {
+            Some(sc) => Some(sc.row_for_day(window.window_start, &cache.divide_comids)?),
+            None => None,
+        };
+
         Ok(RoutingBatch {
             adjacency: cache.adjacency.clone(),
             spatial_attributes_normalized: cache.spatial_attributes_normalized.clone(),
@@ -713,6 +759,7 @@ impl MeritGagesDataset {
                 rho_days: window.n_days,
                 window_start: window.window_start,
             },
+            initial_state,
         })
     }
 

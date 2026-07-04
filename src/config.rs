@@ -95,6 +95,14 @@ pub struct Experiment {
     pub grad_clip_max_norm: Option<f32>,
     #[serde(default)]
     pub checkpoint: Option<std::path::PathBuf>,
+    /// Optional path to a day-boundary discharge state cache (netCDF produced
+    /// by `--mode state-cache` in the probe binary). When set, `collate`
+    /// attaches the window-start per-reach Q vector as
+    /// `RoutingBatch::initial_state`. Absent → `None` → all behavior
+    /// byte-identical to the no-cache path (the hotstart heuristic remains in
+    /// effect until Task 3 wires the state into the forward pass).
+    #[serde(default)]
+    pub state_cache: Option<std::path::PathBuf>,
     /// Training objective. Defaults to L1 (the historical loss) so configs
     /// without a `loss:` block are byte-for-byte unchanged in behavior.
     #[serde(default)]
@@ -1060,6 +1068,31 @@ params:
         assert!(
             msg.contains("use_leakance") && msg.contains("use_cuda_graphs"),
             "expected leakance/graphs conflict, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn state_cache_absent_yields_none() {
+        // experiment block without state_cache → None (critical byte-identity invariant).
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert!(exp.state_cache.is_none(), "state_cache must default to None");
+    }
+
+    #[test]
+    fn state_cache_path_parses() {
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n\
+             state_cache: /tmp/state_cache.nc\n",
+        )
+        .expect("parse experiment with state_cache");
+        assert_eq!(
+            exp.state_cache.as_deref(),
+            Some(std::path::Path::new("/tmp/state_cache.nc"))
         );
     }
 

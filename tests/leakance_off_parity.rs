@@ -216,6 +216,7 @@ fn minimal_routing_tensors(
         num_gauges: 1,
         gauge_staids,
         window,
+        initial_state: None,
     }
 }
 
