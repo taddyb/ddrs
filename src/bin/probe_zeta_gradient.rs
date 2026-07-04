@@ -1350,11 +1350,21 @@ fn run_state_cache<I: Backend>(
     let day0_str = axis.start.format("%Y-%m-%d").to_string();
     let checkpoint_label = checkpoint.display().to_string();
 
-    // Chunked continuous forward (mirrors run_teacher's loop).
-    // carry_state = chunk_idx > 0 maintains the routed state across chunks.
+    // Chunked continuous forward. State continuity is maintained by injecting
+    // the final discharge vector from each chunk as `tensors.initial_state` for
+    // the next chunk (via `setup_inputs`'s `Some(q0_ext)` branch, which takes
+    // priority over the carry_state / hotstart path). A fresh MuskingumCunge
+    // engine is created per chunk, so `carry_state = true` alone has no effect
+    // (discharge_t is always None on a fresh engine). The explicit injection
+    // here is the correct mechanism.
     let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
+    // Final discharge from the previous chunk (per-reach, network column order).
+    // None for the first chunk → hotstart runs; Some for subsequent chunks →
+    // injected as initial_state so routing continues exactly from where the
+    // previous chunk left off.
+    let mut prev_final_state: Option<Vec<f32>> = None;
     while day_offset < n_days {
         let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
         let win = TestWindow::new(&axis, day_offset, chunk_n);
@@ -1363,12 +1373,34 @@ fn run_state_cache<I: Backend>(
             batch.divide_comids.iter().map(|c| c.0).eq(network_comids.iter().copied()),
             "reach column order changed between chunks — COMID index invalid"
         );
-        let tensors = batch.to_tensors::<I>(&device);
+        let mut tensors = batch.to_tensors::<I>(&device);
+
+        // Inject the previous chunk's final state for cross-chunk continuity.
+        // Chunk 0: prev_final_state = None → hotstart runs (correct cold start).
+        // Chunk k>0: inject so routing continues from the exact state where
+        // chunk k-1 ended, producing truly continuous day-boundary states.
+        if let Some(ref state_vec) = prev_final_state {
+            let n = state_vec.len();
+            tensors.initial_state = Some(Tensor::<I, 1>::from_data(
+                TensorData::new(state_vec.clone(), [n]),
+                &device,
+            ));
+        }
 
         // Per-reach hourly discharge: (n_reaches, chunk_n * 24).
-        let runoff = forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0);
+        // carry_state=false: continuity is provided by tensors.initial_state above.
+        let runoff = forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, false);
         let chunk_hours = chunk_n * 24;
         let runoff_vec: Vec<f32> = runoff.into_data().into_vec().unwrap();
+
+        // Save the last column of this chunk as the initial state for the next chunk.
+        // Column (chunk_hours - 1) is the discharge after the final routing step,
+        // consistent with what q_state[day_offset + chunk_n] captures below.
+        prev_final_state = Some(
+            (0..n_reaches)
+                .map(|r| runoff_vec[r * chunk_hours + (chunk_hours - 1)])
+                .collect(),
+        );
 
         // Row 0 of the cache ≈ hotstart: captured as column 0 of the first
         // chunk (discharge after the first routing step). This is one hourly
