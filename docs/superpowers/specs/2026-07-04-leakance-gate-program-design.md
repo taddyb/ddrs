@@ -139,10 +139,26 @@ normalization statistics (ddrs stats-JSON convention) for every new attribute.
 
 ### A0 — network crosswalks (one-time infrastructure)
 
+**ID-space clarification (do not skip).** Within MERIT-Basins, flowline =
+unit catchment = COMID, strictly 1:1 — no crosswalk is ever needed inside
+MERIT. Crosswalks exist only because the attribute PRODUCTS are keyed to
+FOREIGN networks. ⚠ **Name collision:** NHDPlusV2's reach identifier is ALSO
+called "COMID" but is a completely different ID space (~2.7M reaches at
+1:100k scale vs MERIT's ~346k CONUS reaches from the 90 m DEM; MERIT-Basins
+borrowed the name). A StreamCat/Zarrabi "COMID" is an NHDPlus COMID, never a
+MERIT COMID.
+
+A crosswalk here is a reach-ID → reach-ID lookup table with along-channel
+overlap lengths as weights (the two networks segment the same rivers at
+different breakpoints, so one MERIT reach maps to PORTIONS of several foreign
+reaches). Attribute transfer = length-weighted average over the matched
+foreign reaches. Nothing geometric happens at use time; geometry is consumed
+once, when the table is built.
+
 | Crosswalk | Status | Method |
 |---|---|---|
-| MERIT ↔ SWORD | **published** — Wade et al. 2025 (WRR, 10.1029/2024WR038633; Zenodo 10.5281/zenodo.13152826): bidirectional translation tables with ranked matches + partial-intersection lengths for weighted transfer | download + apply |
-| NHDPlusV2 → MERIT | not published | build via buffered-geometry intersection with length-weighted matching (mirroring Wade et al.'s method) in extractrs — reusable artifact for StreamCat/Zarrabi/McManamay transfer |
+| MERIT ↔ SWORD | **published** — Wade et al. 2025 (WRR, 10.1029/2024WR038633; Zenodo 10.5281/zenodo.13152826): per-pfaf-2 NetCDF tables, `sword_1..sword_40` ranked matches + `part_len_1..part_len_40` intersection lengths (m), bidirectional | download + apply length-weighted join |
+| NHDPlusV2 → MERIT | not published | build via buffered-geometry intersection with length-weighted matching (mirroring Wade et al.'s method) in extractrs — reusable artifact for StreamCat/Zarrabi/McManamay transfer; emit the same `(comid, nhd_1..nhd_k, part_len_1..part_len_k)` table shape + quality flags |
 
 ### A1 — precomputed per-reach products (transfer, don't rasterize)
 
