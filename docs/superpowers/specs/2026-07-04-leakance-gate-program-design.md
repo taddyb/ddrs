@@ -237,9 +237,38 @@ Mechanics:
   losing-only clamp — multiplication into the flux, off the autograd-sensitive
   path. Both changes must pass `leakance_gradcheck`, `leakance_off_parity`,
   `zeta_accum`, and `compare_ddr_sandbox` ABSOLUTE MATCH.
-- C2 training pair: hourly forcing, cold init, seed 42, identical recipe,
-  fixed objective from B, enriched inputs from A in BOTH cells. K_D range
-  stays `[1e-8, 1e-5]`.
+- C2 training pair — **STAGED, two-head recipe (user decision 2026-07-04,
+  replacing "cold init, both-at-once")**. Rationale: staged training makes
+  roughness→leakance cannibalization structurally impossible during the
+  leakance phase (stronger than detecting it post hoc via Leg 2) and defuses
+  the P2-cold suppression regime for free. It complements — does NOT replace
+  — the Phase-B objective fix (staging cannot remove the IC noise floor; the
+  floor fix cannot remove equifinality).
+  - **Architecture**: two KAN heads — the ROUTING head (n, q_spatial,
+    p_spatial + disaggregation) and a separate LEAKANCE head (K_D, d_gw,
+    leakance_factor), so freezing is a per-head optimizer choice, not
+    gradient surgery on shared weights.
+  - **Stage 1 (shared)**: train the routing head alone, leakance OFF, hourly,
+    fixed objective (state cache), enriched inputs, seed 42. This trained
+    model IS the OFF cell's starting point and the ON cell's frozen base —
+    the pair shares stage 1 exactly.
+  - **Stage 2 (ON cell)**: freeze the routing head; train the leakance head
+    only (losing-only clamp + impervious hard-zero active). Warm, small,
+    attributable.
+  - **Stage 3 (ON cell)**: brief joint fine-tune (both heads unfrozen, few
+    epochs, lower lr) so n can relax OUT of the compensations it absorbed in
+    stage 1 while leakance holds the losing signal — avoids locking in the
+    H5-absorbed bias (measured: Δn IQR 0.59; base-field removal cost 42%
+    loss).
+  - **Equal-budget control (confound guard)**: the OFF cell continues
+    training WITHOUT leakance for the same stage-2+3 epoch budget, so
+    ON-vs-OFF differences are attributable to leakance, not to extra
+    optimization time.
+  - K_D range stays `[1e-8, 1e-5]`. Gate legs unchanged; Leg 2's Δn now
+    measures only the stage-3 relaxation (expected small and
+    zeta-correlated in the RIGHT direction — where leakance took over,
+    n should relax toward rougher/slower, i.e. Δn ≥ 0 there; a large
+    NEGATIVE correlated shift still fails the leg).
 - C3 gate (pre-registered here, before any C2 run):
 
 | Leg | Test | Bar |
