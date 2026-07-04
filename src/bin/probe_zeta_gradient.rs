@@ -97,7 +97,7 @@ use ddrs::dump_parameters::{write_grad_netcdf, write_zeta_netcdf};
 use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::probe::{probe_forward, GradAccum};
-use ddrs::training::{batch_loss, forward_eval, forward_eval_reaches, tau_trim_and_downsample, LeakanceOverride, ZetaSums};
+use ddrs::training::{batch_loss, forward_eval, forward_eval_reaches, scatter_add_by_group, tau_trim_and_downsample, LeakanceOverride, ZetaSums};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe_zeta_gradient", about = "leakance zeta gradient probe (stage 1)")]
@@ -900,13 +900,21 @@ fn run_teacher<I: Backend>(
         ov.factor[col] = f;
     }
 
-    // Chunked forward with overrides + zeta accumulation (mirrors run_perturb's
-    // run_one; column order is asserted stable across chunks).
+    // Chunked CONTINUOUS forward with overrides + zeta accumulation. Continuity
+    // across chunks is maintained by injecting the previous chunk's final
+    // per-reach discharge as `tensors.initial_state` (the `carry_state` flag is
+    // a no-op through forward_eval — a fresh engine is constructed per call, so
+    // its `discharge_t` is always None and the hotstart always ran; this bug
+    // made the pre-2026-07-04 synthetic obs restart from hotstart every 15 days,
+    // leaving 15-day-periodic discontinuities 10-15x the day-to-day baseline on
+    // large basins). The per-reach forward is used so the final column can be
+    // extracted; gauge aggregation happens here via scatter_add_by_group.
     let mut zeta_sink = ZetaSums::<I>::new();
     let mut predictions_full = Array2::<f32>::zeros((n_all_gauges, n_hours));
     let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
+    let mut prev_final_state: Option<Vec<f32>> = None;
     while day_offset < n_days {
         let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
         let win = TestWindow::new(&axis, day_offset, chunk_n);
@@ -915,15 +923,35 @@ fn run_teacher<I: Backend>(
             batch.divide_comids.iter().map(|c| c.0).eq(network_comids.iter().copied()),
             "reach column order changed between chunks — override vectors invalid"
         );
-        let tensors = batch.to_tensors::<I>(&device);
-        let pred = forward_eval::<I>(
+        let mut tensors = batch.to_tensors::<I>(&device);
+        if let Some(ref state_vec) = prev_final_state {
+            let n = state_vec.len();
+            tensors.initial_state = Some(Tensor::<I, 1>::from_data(
+                TensorData::new(state_vec.clone(), [n]),
+                &device,
+            ));
+        }
+        let runoff = forward_eval_reaches::<I>(
             &cfg,
             &tensors,
             &head,
             &device,
-            chunk_idx > 0,
+            false,
             Some(&mut zeta_sink),
             Some(&ov),
+        );
+        let chunk_hours = win.n_hourly();
+        let runoff_vec: Vec<f32> = runoff.clone().into_data().into_vec().unwrap();
+        prev_final_state = Some(
+            (0..n_reaches)
+                .map(|r| runoff_vec[r * chunk_hours + (chunk_hours - 1)])
+                .collect(),
+        );
+        let pred = scatter_add_by_group(
+            runoff,
+            tensors.flat_indices.clone(),
+            tensors.group_ids.clone(),
+            tensors.num_gauges,
         );
         let dims = pred.dims();
         let v: Vec<f32> = pred.into_data().into_vec().unwrap();
@@ -1389,7 +1417,7 @@ fn run_state_cache<I: Backend>(
 
         // Per-reach hourly discharge: (n_reaches, chunk_n * 24).
         // carry_state=false: continuity is provided by tensors.initial_state above.
-        let runoff = forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, false);
+        let runoff = forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, false, None, None);
         let chunk_hours = chunk_n * 24;
         let runoff_vec: Vec<f32> = runoff.into_data().into_vec().unwrap();
 

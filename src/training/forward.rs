@@ -371,15 +371,19 @@ pub fn forward_eval<I: Backend>(
 
 /// Like `forward_eval` but returns per-reach `(n_reaches, T_hours)` before
 /// gauge aggregation. Used by the state-cache writer to capture day-boundary
-/// discharge states. No zeta accumulation, no leakance overrides.
+/// discharge states and by the teacher-obs writer, which needs the per-reach
+/// final column for cross-chunk state injection (gauge aggregation happens at
+/// the call site via `scatter_add_by_group`).
 pub fn forward_eval_reaches<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
     head: &KanHead<I>,
     device: &I::Device,
     carry_state: bool,
+    zeta: Option<&mut ZetaSums<I>>,
+    overrides: Option<&LeakanceOverride>,
 ) -> Tensor<I, 2> {
-    forward_eval_core(cfg, tensors, head, device, carry_state, None, None)
+    forward_eval_core(cfg, tensors, head, device, carry_state, zeta, overrides)
 }
 
 /// Shared body of `forward_eval` and `forward_eval_reaches`. Returns
