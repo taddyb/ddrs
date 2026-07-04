@@ -44,6 +44,20 @@
 //!       --plant-file output/plant_sites.csv \
 //!       --obs-output output/teacher_obs/ \
 //!       --zeta-output output/teacher_zeta.nc
+//!
+//! Stage 4 (`--mode floor`): per-day windowed |pred-obs| residuals for
+//! transient-floor curves. Teacher weights + self-generated synthetic obs →
+//! measures the IC-transient noise floor at every warmup post-hoc (one run per
+//! rho). `--checkpoint` is REQUIRED; `--output` is the output netCDF file.
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode floor --backend cpu \
+//!       --config config/experiments/floor_rho90.yaml \
+//!       --checkpoint output/recoverability/init_head \
+//!       --windows 96 --seed 42 \
+//!       --output output/floor_fix/floor_rho90.nc
+//!
+//! Post-hoc floor at warmup W: `nanmean(abs_residual[:, :, W:])` over the
+//! output netCDF. Spec: docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md §4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -59,6 +73,7 @@ use ndarray::Array2;
 
 use ddrs::config::{kan_config, Config, ConfigMode, SparseSolver};
 use ddrs::data::dataset::{MeritGagesDataset, RoutingTensors};
+use ddrs::data::GageMetadata;
 use ddrs::data::sampler::{BatchSource, RandomSampler};
 use ddrs::data::TestWindow;
 use ddrs::dump_parameters::{write_grad_netcdf, write_zeta_netcdf};
@@ -124,6 +139,7 @@ enum Mode {
     Grad,
     Perturb,
     Teacher,
+    Floor,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -133,21 +149,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "grad" => Mode::Grad,
         "perturb" => Mode::Perturb,
         "teacher" => Mode::Teacher,
+        "floor" => Mode::Floor,
         other => {
             return Err(
                 format!(
-                    "unknown --mode {other} (expected \"grad\", \"perturb\", or \"teacher\")"
+                    "unknown --mode {other} \
+                     (expected \"grad\", \"perturb\", \"teacher\", or \"floor\")"
                 )
                 .into(),
             )
         }
     };
 
-    // grad: training-mode config (probe batches replicate the training
+    // grad/floor: training-mode config (probe batches replicate the training
     // sampler). perturb/teacher: testing-mode config (replicates the eval
     // loop over the test window).
     let cfg_mode = match mode {
-        Mode::Grad => ConfigMode::Training,
+        Mode::Grad | Mode::Floor => ConfigMode::Training,
         Mode::Perturb | Mode::Teacher => ConfigMode::Testing,
     };
     let mut cfg = Config::from_yaml_file_with_mode(&cli.config, cfg_mode)?;
@@ -163,6 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Grad => run::<I>(cfg, cli, device),
                 Mode::Perturb => run_perturb::<I>(cfg, cli, device),
                 Mode::Teacher => run_teacher::<I>(cfg, cli, device),
+                Mode::Floor => run_floor::<I>(cfg, cli, device),
             }
         }
         "cuda" => {
@@ -174,6 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Grad => run::<I>(cfg, cli, device),
                 Mode::Perturb => run_perturb::<I>(cfg, cli, device),
                 Mode::Teacher => run_teacher::<I>(cfg, cli, device),
+                Mode::Floor => run_floor::<I>(cfg, cli, device),
             }
         }
         other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
@@ -938,9 +958,289 @@ fn run_teacher<I: Backend>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Stage 4: --mode floor
+// ---------------------------------------------------------------------------
+
+/// Floor-mode output: per-window, per-gauge-slot, per-post-trim-day |pred-obs|.
+/// Dimensions: `(window, gauge_slot, day)`; `gauge_staid` (window, gauge_slot)
+/// NC_STRING identifies which gauge occupied each slot (batches differ per
+/// window); `uparea` (window, gauge_slot) f32 carries the gauge's drainage area
+/// (km²) for decay-by-basin-size stratification. NaN = obs was NaN that
+/// window-day; floor(warmup) = nanmean over days >= warmup.
+///
+/// String storage choice: 2-D NC_STRING variable indexed by (window, gauge_slot)
+/// tuple — netcdf v0.12's `put_string` accepts any `E: TryInto<Extents>`, and
+/// `(usize, usize)` satisfies this via the crate's tuple blanket impl.
+#[allow(clippy::too_many_arguments)]
+fn write_floor_netcdf(
+    path: &Path,
+    n_windows: usize,
+    n_slots: usize,
+    n_days: usize,
+    abs_residual: &[f32],
+    gauge_staids: &[String],
+    uparea: &[f32],
+    seed: u64,
+    checkpoint_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    debug_assert_eq!(abs_residual.len(), n_windows * n_slots * n_days);
+    debug_assert_eq!(gauge_staids.len(), n_windows * n_slots);
+    debug_assert_eq!(uparea.len(), n_windows * n_slots);
+    let mut file = netcdf::create(path)?;
+    file.add_dimension("window", n_windows)?;
+    file.add_dimension("gauge_slot", n_slots)?;
+    file.add_dimension("day", n_days)?;
+    file.add_attribute("seed", seed as i64)?;
+    file.add_attribute("checkpoint", checkpoint_label)?;
+    file.add_attribute(
+        "note",
+        "teacher-weights windowed |pred-obs| vs self-generated obs; day 0 = first \
+         post-trim day; floor(warmup) = nanmean over days >= warmup",
+    )?;
+    {
+        let mut v = file.add_variable::<f32>("abs_residual", &["window", "gauge_slot", "day"])?;
+        v.put_values(abs_residual, ..)?;
+        v.put_attribute("units", "m^3/s")?;
+    }
+    {
+        let mut v = file.add_string_variable("gauge_staid", &["window", "gauge_slot"])?;
+        for (i, s) in gauge_staids.iter().enumerate() {
+            v.put_string(s, (i / n_slots, i % n_slots))?;
+        }
+    }
+    {
+        let mut v = file.add_variable::<f32>("uparea", &["window", "gauge_slot"])?;
+        v.put_values(uparea, ..)?;
+        v.put_attribute("units", "km^2")?;
+    }
+    Ok(())
+}
+
+/// Build a staid→drainage-area lookup from the gages CSV at `gages_path`.
+/// Returns a closure that maps a staid string to drain_sqkm (km²) as f32.
+/// Source column: DRAIN_SQKM in the gages CSV (same `GageMetadata` the dataset
+/// opens internally). If a staid is not in the CSV (should not happen for
+/// training gauges), returns f32::NAN; the analysis stratification then uses obs
+/// mean flow instead.
+fn build_gauge_uparea_lookup(
+    gages_path: &Path,
+) -> Result<impl Fn(&str) -> f32, Box<dyn std::error::Error>> {
+    let meta = GageMetadata::open(gages_path)?;
+    let lookup: HashMap<String, f32> = meta
+        .rows
+        .iter()
+        .map(|r| (r.staid.as_str().to_string(), r.drain_sqkm as f32))
+        .collect();
+    Ok(move |staid: &str| {
+        match lookup.get(staid) {
+            Some(&a) => a,
+            None => {
+                eprintln!(
+                    "WARNING: staid {staid} not found in gage CSV — uparea set to NaN \
+                     (stratification falls back to obs mean flow)"
+                );
+                f32::NAN
+            }
+        }
+    })
+}
+
+/// Floor mode: teacher-weights windowed residuals vs self-generated obs.
+/// Mirrors `run` (grad mode) sampling exactly — LOCAL ChaCha12 rng from
+/// --seed, same batch/window draws — but forward-only on the inner backend,
+/// no loss, no backward. Saves |pred - obs| for every post-trim day so the
+/// floor at ANY warmup is computable post-hoc: floor(w) = nanmean over
+/// days >= w. The head is loaded from --checkpoint (REQUIRED).
+///
+/// NaN obs propagates to NaN residual (the analysis nanmeans over valid days).
+/// No gauge NaN filter: NaN carries the information about which days are
+/// outside the obs record.
+fn run_floor<I: Backend>(
+    cfg: Config,
+    cli: Cli,
+    device: I::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = cli.output.as_ref().ok_or("--output is required in floor mode")?;
+    let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint required in floor mode")?;
+
+    // Head on the inner backend I — forward-only, no autograd (same as perturb/teacher).
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = kan_config(head_section, cfg.seed);
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+    eprintln!("loaded checkpoint: {}", head_base(checkpoint).display());
+
+    // Extract the gages CSV path before MeritGagesDataset::open borrows cfg.
+    let gages_path = cfg
+        .data_sources
+        .as_ref()
+        .ok_or("floor mode requires data_sources (gages path)")?
+        .gages
+        .clone();
+
+    let dataset = MeritGagesDataset::open(&cfg)?;
+    let exp = cfg.experiment.as_ref().expect("experiment section required");
+    let rho = exp.rho.expect("floor mode requires experiment.rho");
+
+    // Sampler replica of the training driver — LOCAL rng seeded from --seed,
+    // same sequence as grad mode for the same --seed.
+    let mut rng = ChaCha12Rng::seed_from_u64(cli.seed);
+    let mut sampler =
+        BatchSource::Shuffle(RandomSampler::new(dataset.len(), exp.batch_size, true));
+    sampler.reshuffle(&mut rng);
+
+    // Staid → drainage area (km²) from the gages CSV (DRAIN_SQKM column).
+    // GageMetadata is opened again here to avoid depending on pub(crate) dataset
+    // internals; the file is small and cached in the OS page cache after dataset.open().
+    let uparea_of = build_gauge_uparea_lookup(&gages_path)?;
+
+    let (mut all_resid, mut all_staids, mut all_uparea) =
+        (Vec::<f32>::new(), Vec::<String>::new(), Vec::<f32>::new());
+    let mut n_days_expected: Option<usize> = None;
+    let mut processed = 0usize;
+    let mut total = 0usize;
+
+    while processed < cli.windows {
+        if total > 10 * cli.windows {
+            return Err(
+                format!(
+                    "retry cap exceeded: sampled {total} batches but only {processed}/{} \
+                     windows processed — check dataset NaN coverage",
+                    cli.windows
+                )
+                .into(),
+            );
+        }
+
+        let idx = match sampler.next_batch() {
+            Some(idx) => idx,
+            None => {
+                sampler.reshuffle(&mut rng);
+                continue;
+            }
+        };
+        total += 1;
+
+        let staids: Vec<_> = idx.iter().map(|&i| dataset.staids()[i].clone()).collect();
+        let window = dataset.time_axis().sample_rho_window(&mut rng, rho);
+        let batch = dataset.collate(&staids, &window)?;
+
+        // Save obs + staids before to_tensors consumes the batch (same pattern as
+        // grad mode saving obs_arr before to_tensors<Autodiff<I>>).
+        let obs_arr = batch.observations.clone();
+        let batch_staids: Vec<String> =
+            batch.gauge_staids.iter().map(|s| s.as_str().to_string()).collect();
+
+        let tensors = batch.to_tensors::<I>(&device);
+        // forward_eval returns gauge-aggregated hourly predictions (G, T_hours);
+        // tau_trim_and_downsample converts to daily (G, T_days).
+        let pred_hourly =
+            forward_eval::<I>(&cfg, &tensors, &head, &device, false, None, None);
+        let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
+        let dims = daily.dims();
+        let (g, t_days) = (dims[0], dims[1]);
+
+        // Assert t_days is constant across windows (rho is fixed → same window
+        // length → same tau-trim output length every time).
+        if *n_days_expected.get_or_insert(t_days) != t_days {
+            return Err(format!(
+                "t_days varies across windows: expected {} got {} (window {})",
+                n_days_expected.unwrap(), t_days, processed
+            ).into());
+        }
+
+        let pred: Vec<f32> = daily.into_data().into_vec().unwrap();
+
+        // |pred - obs| with the SAME obs alignment as training (grad mode's
+        // obs_arr[(ti + 1, gi)]); NaN obs propagates to NaN residual.
+        for gi in 0..g {
+            for ti in 0..t_days {
+                let o = obs_arr[(ti + 1, gi)];
+                all_resid.push((pred[gi * t_days + ti] - o).abs());
+            }
+        }
+        all_staids.extend(batch_staids.iter().cloned());
+        all_uparea.extend(batch_staids.iter().map(|s| uparea_of(s)));
+
+        eprintln!(
+            "window {}/{} (rho {rho}, {g} gauges, {} days)",
+            processed + 1,
+            cli.windows,
+            t_days
+        );
+        processed += 1;
+    }
+
+    // Assert constant batch size: RandomSampler(drop_last=true) guarantees this,
+    // but verify before the integer division that computes n_slots.
+    assert!(
+        all_staids.len() % processed == 0,
+        "batch sizes are not constant across {processed} windows \
+         (total gauge-slot count {} is not divisible by window count)",
+        all_staids.len()
+    );
+    let n_slots = all_staids.len() / processed;
+
+    write_floor_netcdf(
+        output,
+        processed,
+        n_slots,
+        n_days_expected.unwrap(),
+        &all_resid,
+        &all_staids,
+        &all_uparea,
+        cli.seed,
+        &checkpoint.display().to_string(),
+    )?;
+    println!(
+        "wrote {} ({} windows x {} slots x {} days)",
+        output.display(),
+        processed,
+        n_slots,
+        n_days_expected.unwrap()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify write_floor_netcdf round-trips: 3-D abs_residual, 2-D string
+    /// gauge_staid, 2-D uparea, NaN preservation, and dim layout.
+    #[test]
+    fn floor_netcdf_roundtrip() {
+        let dir = std::env::temp_dir().join("probe_floor_nc_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("floor_test.nc");
+        let _ = std::fs::remove_file(&path);
+
+        // 2 windows x 2 gauges x 3 days of |pred - obs|; NaN = filtered gauge-day.
+        let resid = vec![
+            0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, // window 0: gauge rows
+            0.7, f32::NAN, 0.9, 1.0, 1.1, 1.2, // window 1
+        ];
+        let staids = vec![
+            "01010000".into(), "02020000".into(),
+            "01010000".into(), "03030000".into(),
+        ];
+        let uparea = vec![100.0f32, 2000.0, 100.0, 55000.0];
+        write_floor_netcdf(&path, 2, 2, 3, &resid, &staids, &uparea, 42, "ckpt").unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        let v = f.variable("abs_residual").unwrap();
+        assert_eq!(
+            v.dimensions().iter().map(|d| d.len()).collect::<Vec<_>>(),
+            vec![2, 2, 3]
+        );
+        let vals: Vec<f32> = v.get_values(..).unwrap();
+        assert_eq!(vals[0], 0.1);
+        assert!(vals[7].is_nan());
+        let ua = f.variable("uparea").unwrap();
+        let uv: Vec<f32> = ua.get_values(..).unwrap();
+        assert_eq!(uv[3], 55000.0);
+    }
 
     /// The task-6 design note flagged NC_STRING support as the one uncertain
     /// API — prove the round file round-trips (f32 grid + string coordinate).
