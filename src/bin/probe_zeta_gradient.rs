@@ -1129,6 +1129,7 @@ fn run_floor<I: Backend>(
         // Save obs + staids before to_tensors consumes the batch (same pattern as
         // grad mode saving obs_arr before to_tensors<Autodiff<I>>).
         let obs_arr = batch.observations.clone();
+        let t_days_full = obs_arr.nrows();
         let batch_staids: Vec<String> =
             batch.gauge_staids.iter().map(|s| s.as_str().to_string()).collect();
 
@@ -1151,6 +1152,13 @@ fn run_floor<I: Backend>(
         }
 
         let pred: Vec<f32> = daily.into_data().into_vec().unwrap();
+
+        // Mirrors grad mode's shape guard (run ~line 290): obs must be at least
+        // t_days + 2 rows (alignment offset 1 + tau-trim drop at end).
+        assert!(
+            t_days_full >= 2 + t_days,
+            "obs/pred shape mismatch: obs rows={t_days_full} pred t_days={t_days}"
+        );
 
         // |pred - obs| with the SAME obs alignment as training (grad mode's
         // obs_arr[(ti + 1, gi)]); NaN obs propagates to NaN residual.
