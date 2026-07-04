@@ -168,7 +168,7 @@ fn main() -> std::io::Result<()> {
     };
 
     let t_start = std::time::Instant::now();
-    mc.setup_inputs(inputs, q_prime, params, false);
+    mc.setup_inputs(inputs, q_prime, params, false, None);
     let setup_ms = t_start.elapsed().as_secs_f64() * 1000.0;
 
     let t_forward = std::time::Instant::now();

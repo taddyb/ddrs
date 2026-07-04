@@ -87,7 +87,7 @@ fn setup_inputs_uses_hotstart() {
     let streamflow: Tensor<TestBackend, 2> =
         Tensor::ones([12, n], &device) * q_val;
     let params = mock_spatial_parameters(n, &device);
-    mc.setup_inputs(inputs, streamflow, params, false);
+    mc.setup_inputs(inputs, streamflow, params, false, None);
     let v: Vec<f32> = mc
         .discharge_state()
         .expect("hotstart initializes discharge")
@@ -111,14 +111,14 @@ fn carry_state_skips_hotstart() {
     let inputs1 = mock_routing_inputs(n, &device);
     let streamflow: Tensor<TestBackend, 2> = Tensor::ones([12, n], &device) * 2.0;
     let params = mock_spatial_parameters(n, &device);
-    mc.setup_inputs(inputs1, streamflow.clone(), params, false);
+    mc.setup_inputs(inputs1, streamflow.clone(), params, false, None);
 
     // Manually overwrite — the next setup with carry_state should leave this alone.
     // The Rust API doesn't expose direct field mutation, so re-run with carry_state.
     let inputs2 = mock_routing_inputs(n, &device);
     let params2 = mock_spatial_parameters(n, &device);
     let before: Vec<f32> = mc.discharge_state().unwrap().into_data().to_vec().unwrap();
-    mc.setup_inputs(inputs2, streamflow, params2, true);
+    mc.setup_inputs(inputs2, streamflow, params2, true, None);
     let after: Vec<f32> = mc.discharge_state().unwrap().into_data().to_vec().unwrap();
     for (a, b) in before.iter().zip(after.iter()) {
         assert_relative_eq!(*a, *b, epsilon = 1e-6);
@@ -137,7 +137,7 @@ fn setup_inputs_slope_clamping() {
     inputs.adjacency.slope = vec![1e-5, 1e-3, 5e-5, 2e-3, 3e-5];
     let streamflow = mock_streamflow(12, 5, &device);
     let params = mock_spatial_parameters(5, &device);
-    mc.setup_inputs(inputs, streamflow, params, false);
+    mc.setup_inputs(inputs, streamflow, params, false, None);
     // We can't directly read `slope` (private), but a successful forward proves
     // no NaN/Inf surfaced; check via a route_timestep call below. For now: the
     // explicit assertion is in route_timestep + forward producing finite output.
@@ -200,7 +200,7 @@ fn forward_different_network_sizes() {
         let streamflow = mock_streamflow(t, n, &device);
         let params = mock_spatial_parameters(n, &device);
 
-        mc.setup_inputs(inputs, streamflow, params, false);
+        mc.setup_inputs(inputs, streamflow, params, false, None);
         let out = mc.forward();
         let dims = out.dims();
         assert_eq!(dims, [n, t], "output shape n={} t={}", n, t);
@@ -227,13 +227,13 @@ fn forward_reproducible() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     mc2.setup_inputs(
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
 
     let a: Vec<f32> = mc1.forward().into_data().to_vec().unwrap();
@@ -273,7 +273,7 @@ fn forward_gradients_flow_to_spatial_params() {
         d_gw: None,
         leakance_factor: None,
     };
-    mc.setup_inputs(inputs, streamflow_ad, params, false);
+    mc.setup_inputs(inputs, streamflow_ad, params, false, None);
     let out = mc.forward();
     let loss = out.sum();
     let grads = loss.backward();
@@ -365,7 +365,7 @@ fn carry_state_preserves_discharge_across_setup_inputs_calls() {
         d_gw: None,
         leakance_factor: None,
     };
-    mc.setup_inputs(inputs1, q_window_1, params1, false);
+    mc.setup_inputs(inputs1, q_window_1, params1, false, None);
     let _ = mc.forward();
     let state_after_first_forward: Vec<f32> = mc
         .discharge_state()
@@ -387,7 +387,7 @@ fn carry_state_preserves_discharge_across_setup_inputs_calls() {
         d_gw: None,
         leakance_factor: None,
     };
-    mc.setup_inputs(inputs2, q_window_2, params2, true);
+    mc.setup_inputs(inputs2, q_window_2, params2, true, None);
     let state_after_carry_setup: Vec<f32> = mc
         .discharge_state()
         .expect("discharge_state should survive carry_state=true setup")

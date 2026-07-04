@@ -127,6 +127,8 @@ pub fn forward_with_frozen_params<I: Backend>(
         Tensor::from_inner(tensors.q_prime.clone());
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    // Lift initial_state from inner backend to Autodiff (same pattern as q_prime).
+    let initial_state_ad = tensors.initial_state.clone().map(Tensor::<Autodiff<I>, 1>::from_inner);
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
         q_prime_autodiff,
@@ -139,6 +141,7 @@ pub fn forward_with_frozen_params<I: Backend>(
             leakance_factor: None,
         },
         carry_state,
+        initial_state_ad,
     );
 
     // engine.forward() → (N, T_hours) on Autodiff<I>.
@@ -238,6 +241,7 @@ pub fn forward<I: Backend>(
             leakance_factor,
         },
         carry_state,
+        tensors.initial_state.clone(),
     );
 
     let runoff = engine.forward(); // (N, T_hours)
@@ -463,6 +467,8 @@ fn forward_eval_core<I: Backend>(
     let leakance_factor_ad = leakance_factor_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    // Lift initial_state from inner backend to Autodiff (same pattern as q_prime_ad).
+    let initial_state_ad = tensors.initial_state.clone().map(Tensor::<Autodiff<I>, 1>::from_inner);
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage: x_ad },
         q_prime_ad,
@@ -475,6 +481,7 @@ fn forward_eval_core<I: Backend>(
             leakance_factor: leakance_factor_ad,
         },
         carry_state,
+        initial_state_ad,
     );
     if zeta.is_some() {
         engine.enable_zeta_accumulation();

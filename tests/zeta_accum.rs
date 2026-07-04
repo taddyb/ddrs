@@ -56,7 +56,7 @@ fn zeta_sums_none_when_leakance_off_or_not_enabled() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     let _ = mc.forward();
     assert!(mc.zeta_sums().is_none(), "no leakance params ⇒ no zeta sums");
@@ -67,7 +67,7 @@ fn zeta_sums_none_when_leakance_off_or_not_enabled() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let _ = mc.forward();
     assert!(mc.zeta_sums().is_none(), "accumulation off ⇒ no zeta sums");
@@ -84,7 +84,7 @@ fn accumulation_does_not_perturb_discharge() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out_plain = forward_vec(&mut mc_plain);
 
@@ -94,7 +94,7 @@ fn accumulation_does_not_perturb_discharge() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out_accum = forward_vec(&mut mc_accum);
 
@@ -128,7 +128,7 @@ fn accumulated_zeta_equals_headwater_qnext_difference() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     let out_off = forward_vec(&mut mc_off); // [n, 2] row-major
 
@@ -138,7 +138,7 @@ fn accumulated_zeta_equals_headwater_qnext_difference() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out_on = forward_vec(&mut mc_on);
 
@@ -168,7 +168,7 @@ fn zeta_is_linear_in_leakance_factor_on_single_step() {
             mock_routing_inputs(n, &device),
             mock_streamflow(t, n, &device),
             leakance_params(n, factor_norm, &device),
-            false,
+            false, None
         );
         let _ = mc.forward();
         let sums = mc.zeta_sums().expect("zeta sums present");
@@ -197,7 +197,7 @@ fn q_mean_matches_routed_discharge() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out = forward_vec(&mut mc); // [n, t] row-major
 
@@ -232,7 +232,7 @@ fn depth_and_area_z_are_leakance_independent_primitives() {
             mock_routing_inputs(n, &device),
             mock_streamflow(t, n, &device),
             leakance_params(n, factor_norm, &device),
-            false,
+            false, None
         );
         let _ = mc.forward();
         mc.zeta_sums().expect("zeta sums present")

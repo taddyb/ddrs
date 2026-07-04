@@ -97,6 +97,7 @@ pub fn probe_forward<I: Backend>(
             leakance_factor: Some(leaves.factor.clone()),
         },
         false,
+        tensors.initial_state.clone(),
     );
     let runoff = engine.forward();
 

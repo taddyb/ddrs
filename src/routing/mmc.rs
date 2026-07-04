@@ -161,12 +161,20 @@ impl<I: Backend> MuskingumCunge<I> {
 
     /// Bind static channel attributes, lateral inflows, and learned [0,1]
     /// parameters; build CSR pattern; denormalize; cold-start discharge.
+    ///
+    /// `initial_state`: optional window-start discharge `Q_0` (m³/s, per-reach,
+    /// same order as the network). When `Some`, it replaces the hotstart
+    /// heuristic — the injected value is used as-is (clamped to `discharge_lb`).
+    /// When `None`, falls back to the existing `carry_state` / hotstart logic
+    /// unchanged, so all existing callers that pass `None` are byte-identical to
+    /// the pre-Task-3 code path.
     pub fn setup_inputs(
         &mut self,
         inputs: RoutingInputs<I>,
         streamflow: Tensor<Autodiff<I>, 2>,
         params: SpatialParameters<I>,
         carry_state: bool,
+        initial_state: Option<Tensor<Autodiff<I>, 1>>,
     ) where
         I::FloatTensorPrimitive: 'static,
         I::Device: 'static,
@@ -224,29 +232,42 @@ impl<I: Backend> MuskingumCunge<I> {
         self.leakance_factor = params.leakance_factor
             .map(|t| denormalize(t, ranges.leakance_factor, log_space.iter().any(|s| s == "leakance_factor")));
 
-        if !carry_state || self.discharge_t.is_none() {
-            let q_prime_0 = self
-                .q_prime
-                .as_ref()
-                .unwrap()
-                .clone()
-                .slice([0..1, 0..n])
-                .reshape([n]);
-            // Hotstart: solve (I − N) · Q_0 = q'_0 via the same CSR solver
-            // with c = 1 (all-ones vector), then clamp.
-            let device = self.device.clone();
-            let ones: Tensor<Autodiff<I>, 1> = Tensor::ones([n], &device);
-            let pattern = self.pattern.as_ref().unwrap();
-            let assembler = self.assembler.as_ref().unwrap();
-            let a_values = assembler.assemble(ones);
-            let q0 = triangular_csr_solve::<I>(
-                pattern,
-                a_values,
-                q_prime_0,
-                self.sparse_solver == SparseSolver::Cuda,
-            )
-            .clamp_min(self.cfg.params.attribute_minimums.discharge);
-            self.discharge_t = Some(q0);
+        match initial_state {
+            Some(q0_ext) => {
+                // Use the externally provided window-start state (state-cache path).
+                // Clamp for numerical safety — same floor as the hotstart heuristic.
+                self.discharge_t = Some(
+                    q0_ext.clamp_min(self.cfg.params.attribute_minimums.discharge),
+                );
+            }
+            None => {
+                // No cache → existing carry_state / hotstart logic, byte-identical
+                // to the pre-Task-3 code path.
+                if !carry_state || self.discharge_t.is_none() {
+                    let q_prime_0 = self
+                        .q_prime
+                        .as_ref()
+                        .unwrap()
+                        .clone()
+                        .slice([0..1, 0..n])
+                        .reshape([n]);
+                    // Hotstart: solve (I − N) · Q_0 = q'_0 via the same CSR solver
+                    // with c = 1 (all-ones vector), then clamp.
+                    let device = self.device.clone();
+                    let ones: Tensor<Autodiff<I>, 1> = Tensor::ones([n], &device);
+                    let pattern = self.pattern.as_ref().unwrap();
+                    let assembler = self.assembler.as_ref().unwrap();
+                    let a_values = assembler.assemble(ones);
+                    let q0 = triangular_csr_solve::<I>(
+                        pattern,
+                        a_values,
+                        q_prime_0,
+                        self.sparse_solver == SparseSolver::Cuda,
+                    )
+                    .clamp_min(self.cfg.params.attribute_minimums.discharge);
+                    self.discharge_t = Some(q0);
+                }
+            }
         }
 
         // SP-10: eagerly capture the per-timestep CUDA graph once, here at

@@ -56,6 +56,7 @@ fn lifted_leaves_do_not_perturb_forward() {
             leakance_factor: Some(Tensor::<AB, 1>::ones([n], &device) * 0.5),
         },
         false,
+        None,
     );
     let out_plain: Vec<f32> = mc_plain.forward().into_data().to_vec().unwrap();
 
@@ -65,7 +66,7 @@ fn lifted_leaves_do_not_perturb_forward() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         params,
-        false,
+        false, None
     );
     let out_leaf: Vec<f32> = mc_leaf.forward().into_data().to_vec().unwrap();
 
@@ -84,7 +85,7 @@ fn leaf_grads_are_finite_and_nonzero_on_losing_chain() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         params,
-        false,
+        false, None
     );
     let loss = mc.forward().sum(); // any scalar downstream of every q_next
     let grads = loss.backward();

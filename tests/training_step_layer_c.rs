@@ -288,6 +288,7 @@ fn full_forward(
             leakance_factor: None,
         },
         false, // carry_state = false
+        None,
     );
 
     // engine.forward() → (n_reaches, rho_hours) in Autodiff mode.
