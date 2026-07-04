@@ -26,8 +26,8 @@ pub use checkpoint::{
     save_optimizer, save_train_state, state_path, TrainCkptState,
 };
 pub use forward::{
-    scatter_add_by_group, forward_with_frozen_params, forward_eval, FrozenParams, ZetaSums,
-    LeakanceOverride, FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
+    scatter_add_by_group, forward_with_frozen_params, forward_eval, forward_eval_reaches,
+    FrozenParams, ZetaSums, LeakanceOverride, FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
 pub use loss::{
     batch_loss, filter_nan_gauges, l1_loss_post_warmup, nnse_kge_loss, tau_trim_and_downsample,

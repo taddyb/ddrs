@@ -58,6 +58,23 @@
 //!
 //! Post-hoc floor at warmup W: `nanmean(abs_residual[:, :, W:])` over the
 //! output netCDF. Spec: docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md §4.
+//!
+//! Stage 5 (`--mode state-cache`): continuous-run day-boundary discharge cache
+//! for warm hotstart injection. Runs one continuous forward over the eval
+//! window (TESTING-mode config) and saves per-reach discharge at every day
+//! boundary as a netCDF `(day, COMID)` f32 array. Row 0 = approximated
+//! hotstart (discharge after hour 1 of day 0); row d (d ≥ 1) = discharge
+//! after the last hourly step of day d−1. Consumed by `experiment.state_cache`
+//! (Task 2) to seed each training window from a realistic in-sequence state
+//! instead of the synthetic hotstart heuristic. Refuses to overwrite a
+//! non-empty `--output` file. `--checkpoint` is REQUIRED; `--eval-days`
+//! controls the window length.
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode state-cache --backend cpu \
+//!       --config config/experiments/recoverability_measure.yaml \
+//!       --checkpoint output/recoverability/init_head \
+//!       --eval-days 999999 \
+//!       --output output/floor_fix/state_cache_teacher.nc
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -80,7 +97,7 @@ use ddrs::dump_parameters::{write_grad_netcdf, write_zeta_netcdf};
 use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::probe::{probe_forward, GradAccum};
-use ddrs::training::{batch_loss, forward_eval, tau_trim_and_downsample, LeakanceOverride, ZetaSums};
+use ddrs::training::{batch_loss, forward_eval, forward_eval_reaches, tau_trim_and_downsample, LeakanceOverride, ZetaSums};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe_zeta_gradient", about = "leakance zeta gradient probe (stage 1)")]
@@ -140,6 +157,7 @@ enum Mode {
     Perturb,
     Teacher,
     Floor,
+    StateCache,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -150,11 +168,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "perturb" => Mode::Perturb,
         "teacher" => Mode::Teacher,
         "floor" => Mode::Floor,
+        "state-cache" => Mode::StateCache,
         other => {
             return Err(
                 format!(
                     "unknown --mode {other} \
-                     (expected \"grad\", \"perturb\", \"teacher\", or \"floor\")"
+                     (expected \"grad\", \"perturb\", \"teacher\", \"floor\", or \"state-cache\")"
                 )
                 .into(),
             )
@@ -162,11 +181,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // grad/floor: training-mode config (probe batches replicate the training
-    // sampler). perturb/teacher: testing-mode config (replicates the eval
-    // loop over the test window).
+    // sampler). perturb/teacher/state-cache: testing-mode config (replicates
+    // the eval loop over the test window).
     let cfg_mode = match mode {
         Mode::Grad | Mode::Floor => ConfigMode::Training,
-        Mode::Perturb | Mode::Teacher => ConfigMode::Testing,
+        Mode::Perturb | Mode::Teacher | Mode::StateCache => ConfigMode::Testing,
     };
     let mut cfg = Config::from_yaml_file_with_mode(&cli.config, cfg_mode)?;
 
@@ -182,6 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Perturb => run_perturb::<I>(cfg, cli, device),
                 Mode::Teacher => run_teacher::<I>(cfg, cli, device),
                 Mode::Floor => run_floor::<I>(cfg, cli, device),
+                Mode::StateCache => run_state_cache::<I>(cfg, cli, device),
             }
         }
         "cuda" => {
@@ -194,6 +214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Perturb => run_perturb::<I>(cfg, cli, device),
                 Mode::Teacher => run_teacher::<I>(cfg, cli, device),
                 Mode::Floor => run_floor::<I>(cfg, cli, device),
+                Mode::StateCache => run_state_cache::<I>(cfg, cli, device),
             }
         }
         other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
@@ -1219,6 +1240,183 @@ fn run_floor<I: Backend>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Stage 5: --mode state-cache
+// ---------------------------------------------------------------------------
+
+/// Write a day-boundary discharge state cache as netCDF.
+///
+/// Layout: `q_state[(d, r)]` = discharge (m³/s) at reach column `r` entering
+/// day `d` (hour 0). `day0` = ISO date of the first row. COMID order matches
+/// the continuous run's network column order; consumers must look up values
+/// by COMID, not by position.
+fn write_state_cache_netcdf(
+    path: &Path,
+    n_days: usize,
+    comids: &[i64],
+    q_state: &[f32],
+    day0: &str,
+    checkpoint_label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    debug_assert_eq!(q_state.len(), n_days * comids.len());
+    let mut file = netcdf::create(path)?;
+    file.add_dimension("day", n_days)?;
+    file.add_dimension("COMID", comids.len())?;
+    file.add_attribute("day0", day0)?;
+    file.add_attribute("checkpoint", checkpoint_label)?;
+    {
+        let mut v = file.add_variable::<i64>("COMID", &["COMID"])?;
+        v.put_values(comids, ..)?;
+    }
+    {
+        let mut v = file.add_variable::<f32>("q_state", &["day", "COMID"])?;
+        v.put_values(q_state, ..)?;
+        v.put_attribute("units", "m^3/s")?;
+    }
+    Ok(())
+}
+
+/// Stage-5 driver: one continuous forward over the eval window, capturing
+/// per-reach discharge at every day boundary into a state-cache netCDF.
+///
+/// The cache allows training windows to start from realistic in-sequence
+/// routing states instead of the synthetic hotstart heuristic. Each cache row
+/// `d` holds the discharge vector entering day `d` (hour 0):
+///
+/// - Row 0: discharge after the first routing step (hour 1 of day 0). This
+///   approximates the hotstart vector; the error is one hourly routing step
+///   from the true initial condition, which affects only training windows
+///   starting exactly at day 0.
+/// - Row d (d ≥ 1): discharge after the last step of day d−1 (the exact
+///   state entering day d).
+///
+/// Mirrors `run_teacher`'s chunked loop (carry_state = chunk_idx > 0) but
+/// without plants/obs/zeta overhead.
+fn run_state_cache<I: Backend>(
+    cfg: Config,
+    cli: Cli,
+    device: I::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const BATCH_SIZE_DAYS: usize = 15;
+
+    let output = cli.output.as_ref().ok_or("--output is required in state-cache mode")?;
+
+    // Pre-flight: refuse to overwrite an existing non-empty file.
+    if output.exists() {
+        let meta = std::fs::metadata(output)?;
+        if meta.len() > 0 {
+            return Err(format!(
+                "--output {} already exists and is non-empty; remove it before \
+                 re-running state-cache mode to prevent stale cache data",
+                output.display()
+            )
+            .into());
+        }
+    }
+
+    let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint is required in state-cache mode")?;
+
+    // Head on the inner backend — forward-only, no autograd.
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = kan_config(head_section, cfg.seed);
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+    eprintln!("loaded checkpoint: {}", head_base(checkpoint).display());
+
+    let dataset = MeritGagesDataset::open(&cfg)?;
+    let axis = dataset.time_axis().clone();
+    let n_days = axis.num_days.min(cli.eval_days);
+    assert!(
+        n_days >= 1,
+        "eval window too short: {n_days} days (need >= 1)"
+    );
+
+    // 1-day probe: sizes the network (static across chunks) and gets COMID order.
+    let probe = TestWindow::new(&axis, 0, 1);
+    let probe_batch = dataset.collate_window(&probe)?;
+    let n_all_gauges = probe_batch.gauge_staids.len();
+    let network_comids: Vec<i64> = probe_batch.divide_comids.iter().map(|c| c.0).collect();
+    let n_reaches = network_comids.len();
+
+    eprintln!(
+        "state-cache: {n_all_gauges} gauges, {n_reaches} reaches, {n_days} days \
+         ({} chunks of {BATCH_SIZE_DAYS})",
+        n_days.div_ceil(BATCH_SIZE_DAYS)
+    );
+
+    // Pre-allocate the full cache: (n_days, n_reaches) row-major f32.
+    let mut q_state = vec![0.0f32; n_days * n_reaches];
+
+    let day0_str = axis.start.format("%Y-%m-%d").to_string();
+    let checkpoint_label = checkpoint.display().to_string();
+
+    // Chunked continuous forward (mirrors run_teacher's loop).
+    // carry_state = chunk_idx > 0 maintains the routed state across chunks.
+    let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
+    let mut day_offset = 0usize;
+    let mut chunk_idx = 0usize;
+    while day_offset < n_days {
+        let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
+        let win = TestWindow::new(&axis, day_offset, chunk_n);
+        let batch = dataset.collate_window(&win)?;
+        assert!(
+            batch.divide_comids.iter().map(|c| c.0).eq(network_comids.iter().copied()),
+            "reach column order changed between chunks — COMID index invalid"
+        );
+        let tensors = batch.to_tensors::<I>(&device);
+
+        // Per-reach hourly discharge: (n_reaches, chunk_n * 24).
+        let runoff = forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0);
+        let chunk_hours = chunk_n * 24;
+        let runoff_vec: Vec<f32> = runoff.into_data().into_vec().unwrap();
+
+        // Row 0 of the cache ≈ hotstart: captured as column 0 of the first
+        // chunk (discharge after the first routing step). This is one hourly
+        // step later than the true initial condition — simpler than extracting
+        // the pre-routing hotstart vector (internal to forward_eval_core) and
+        // affects only training windows starting exactly on day 0. The plan
+        // flagged day-0 indexing as a known unknown; this is the documented
+        // resolution (see module doc).
+        if chunk_idx == 0 {
+            for r in 0..n_reaches {
+                q_state[r] = runoff_vec[r * chunk_hours];
+            }
+        }
+
+        // Capture states entering days day_offset+1 through day_offset+chunk_n.
+        // State entering global day d = last step of day d−1 = local hourly
+        // column (d − day_offset)*24 − 1.
+        // Only store rows within [1, n_days): row n_days would require one
+        // more routing step beyond the eval window.
+        for k in 1..=chunk_n {
+            let global_day = day_offset + k;
+            if global_day >= n_days {
+                break;
+            }
+            let local_col = k * 24 - 1;
+            for r in 0..n_reaches {
+                q_state[global_day * n_reaches + r] = runoff_vec[r * chunk_hours + local_col];
+            }
+        }
+
+        eprintln!(
+            "  chunk {}/{n_chunks_total}: days {day_offset}..{}",
+            chunk_idx + 1,
+            day_offset + chunk_n
+        );
+        day_offset += chunk_n;
+        chunk_idx += 1;
+    }
+
+    write_state_cache_netcdf(output, n_days, &network_comids, &q_state, &day0_str, &checkpoint_label)?;
+
+    println!(
+        "wrote {} ({n_days} days x {n_reaches} reaches)",
+        output.display()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,6 +1454,35 @@ mod tests {
         let ua = f.variable("uparea").unwrap();
         let uv: Vec<f32> = ua.get_values(..).unwrap();
         assert_eq!(uv[3], 55000.0);
+    }
+
+    /// Verify write_state_cache_netcdf round-trips: (day, COMID) q_state grid,
+    /// COMID coordinate, day0 global attribute, and dim layout.
+    #[test]
+    fn state_cache_netcdf_roundtrip() {
+        let dir = std::env::temp_dir().join("probe_state_cache_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cache_test.nc");
+        let _ = std::fs::remove_file(&path);
+
+        // 3 days x 2 reaches of day-boundary discharge states.
+        let q = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let comids = vec![10i64, 20];
+        write_state_cache_netcdf(&path, 3, &comids, &q, "1981-10-01", "ckpt").unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        let v = f.variable("q_state").unwrap();
+        assert_eq!(
+            v.dimensions().iter().map(|d| d.len()).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        let vals: Vec<f32> = v.get_values(..).unwrap();
+        assert_eq!(vals, q);
+        let c = f.variable("COMID").unwrap();
+        let cv: Vec<i64> = c.get_values(..).unwrap();
+        assert_eq!(cv, comids);
+        let d0: String = f.attribute("day0").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(d0, "1981-10-01");
     }
 
     /// The task-6 design note flagged NC_STRING support as the one uncertain

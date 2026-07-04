@@ -356,6 +356,40 @@ pub fn forward_eval<I: Backend>(
     zeta: Option<&mut ZetaSums<I>>,
     overrides: Option<&LeakanceOverride>,
 ) -> Tensor<I, 2> {
+    let runoff = forward_eval_core(cfg, tensors, head, device, carry_state, zeta, overrides);
+    scatter_add_by_group(
+        runoff,
+        tensors.flat_indices.clone(),
+        tensors.group_ids.clone(),
+        tensors.num_gauges,
+    )
+}
+
+/// Like `forward_eval` but returns per-reach `(n_reaches, T_hours)` before
+/// gauge aggregation. Used by the state-cache writer to capture day-boundary
+/// discharge states. No zeta accumulation, no leakance overrides.
+pub fn forward_eval_reaches<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    head: &KanHead<I>,
+    device: &I::Device,
+    carry_state: bool,
+) -> Tensor<I, 2> {
+    forward_eval_core(cfg, tensors, head, device, carry_state, None, None)
+}
+
+/// Shared body of `forward_eval` and `forward_eval_reaches`. Returns
+/// per-reach `(n_reaches, T_hours)` on the inner backend before the
+/// `scatter_add_by_group` that produces gauge-aggregated output.
+fn forward_eval_core<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    head: &KanHead<I>,
+    device: &I::Device,
+    carry_state: bool,
+    zeta: Option<&mut ZetaSums<I>>,
+    overrides: Option<&LeakanceOverride>,
+) -> Tensor<I, 2> {
     let params_map = head.forward(tensors.spatial_attributes.clone());
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
@@ -453,12 +487,7 @@ pub fn forward_eval<I: Backend>(
         }
     }
 
-    scatter_add_by_group(
-        runoff,
-        tensors.flat_indices.clone(),
-        tensors.group_ids.clone(),
-        tensors.num_gauges,
-    )
+    runoff
 }
 
 #[cfg(test)]
