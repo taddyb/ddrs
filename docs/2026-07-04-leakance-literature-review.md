@@ -284,7 +284,82 @@ not discharge, is the identifying signal.
    term should supervise `d_gw`/`zeta_net` against one of these fields, injected
    outside the gauge-discharge loss.
 
-Confidence note: all 26 citations web-verified (title+authors+venue+DOI);
+## 6. Channel characteristics on vectorized networks (added 2026-07-04, second pass)
+
+Prompted by the gate-program design: how to get CHANNEL-scale (not
+basin-averaged) attributes onto MERIT reaches, and how to handle MERIT
+flowlines' positional error against rasters.
+
+**Per-reach products (transfer, don't rasterize):**
+
+23. **Wade et al. (2025)**, "Bidirectional Translations Between MERIT-Basins
+    and the SWOT River Database (SWORD)," *WRR*. DOI:10.1029/2024WR038633;
+    crosswalk at Zenodo 10.5281/zenodo.13152826. — Published MERIT↔SWORD
+    translation tables (ranked matches + partial-intersection lengths for
+    weighted transfer). **The biggest don't-reinvent finding**: delivers
+    SWORD/GRWL observed channel widths directly onto MERIT COMIDs.
+24. **Altenau et al. (2021)**, "The SWOT Mission River Database (SWORD) …,"
+    *WRR* 57, e2021WR030054. DOI:10.1029/2021WR030054. — GRWL widths + slope
+    on a MERIT-consistent global network (rivers ≥30 m).
+25. **Allen & Pavelsky (2018)**, "Global extent of rivers and streams,"
+    *Science* 361, 585–588. DOI:10.1126/science.aat0636. — GRWL: 58M Landsat
+    width measurements (RMSE ≈38 m vs gauges); the observational width source
+    SWORD ingests.
+26. **Hill et al. (2016)**, "The Stream-Catchment (StreamCat) Dataset …,"
+    *JAWRA* 52(1), 120–128. DOI:10.1111/1752-1688.12372. — 600+ metrics on
+    2.65M NHDPlusV2 reaches, including NLCD imperviousness precomputed in
+    **100 m riparian buffers** (`PctImp*Rp100Cat`) — our
+    `corridor_impervious` without touching a raster; also the 100 m-buffer
+    precedent itself.
+27. **Zarrabi et al. (2025)**, "Bankfull and Mean-Flow Channel Geometry
+    Estimation Through Machine Learning … (CONUS)," *WRR* 61, e2024WR037997.
+    DOI:10.1029/2024WR037997; data Zenodo 13883263. — ML bankfull width/depth
+    for 2.7M NHDPlus reaches (R² 0.85/0.69), supersedes Bieger 2015 regional
+    curves; our per-reach bankfull-depth source for the bed-relative WTD
+    conversion.
+28. **McManamay & DeRolph (2019)**, "A stream classification system for the
+    conterminous United States," *Scientific Data* 6, 190017. — Six-layer
+    classification incl. **valley confinement** (alluvial-setting proxy).
+    Caveat: does NOT carry substrate/grain size despite common misreading.
+29. **Linke et al. (2019)**, "Global hydro-environmental sub-basin and river
+    reach characteristics …," *Scientific Data* 6, 283.
+    DOI:10.1038/s41597-019-0300-6. — RiverATLAS: 281 attributes on
+    HydroRIVERS; methodologically notable for AVOIDING vector buffering
+    (native-grid / sub-basin association) — the pattern we adopt for coarse
+    WTD grids.
+
+**Flowline positional accuracy + buffering practice:**
+
+30. **Yamazaki et al. (2019)**, "MERIT Hydro: A high-resolution global
+    hydrography map …," *WRR* 55(6), 5053–5073. DOI:10.1029/2019WR024873. —
+    Flowlines from a 90 m DEM; no lateral-offset metric published; flat
+    valleys are the stated worst case (our leakance country!).
+31. **Amatulli et al. (2022)**, "Hydrography90m …," *ESSD* 14, 4525–4550.
+    DOI:10.5194/essd-14-4525-2022. — The quantitative benchmark: even the
+    best 90 m-derived network puts only 46% of stream cells within 100 m of
+    NHDPlus HR; MERIT Hydro-Vector performs worse. Typical MERIT lateral
+    error 100–300 m ⇒ fine-raster corridor extraction NEEDS ≥100 m
+    half-width buffers.
+32. **Nardi et al. (2019)**, "GFPLAIN250m, a global high-resolution dataset
+    of Earth's floodplains," *Scientific Data* 6, 180309.
+    DOI:10.1038/sdata.2018.309. — Geomorphic floodplain masks, robust to
+    flowline offset; our flat-valley corridor-widening envelope.
+
+**Synthesis for Phase A:** most channel targets already exist per-reach
+(StreamCat imperviousness, Zarrabi bankfull, SWORD widths via the published
+MERIT-SWORD crosswalk); the only genuinely novel extraction is the
+bed-relative channel water-table field. Buffering is two-tier: 100 m
+half-width (StreamCat precedent, exceeding the 90 m positional floor) for
+fine rasters, widened to 200 m under GFPLAIN floodplains; nearest-channel-cell
+association (RiverATLAS pattern) for ~1 km WTD grids where a fine buffer is
+meaningless. One crosswalk must be built (NHDPlus→MERIT, length-weighted,
+mirroring Wade et al.'s method); one is downloaded (MERIT↔SWORD). No national
+lined-channel dataset exists — corridor imperviousness remains the only
+scalable proxy for concrete channels.
+
+---
+
+Confidence note: all 32 citations web-verified (title+authors+venue+DOI);
 Brunner 2011 author-ordering is MEDIUM; Rackauckas 2020 is a widely-cited
 preprint, never formally journal-published. No citation here is unverified —
 anything the research pass could not confirm was dropped rather than guessed.

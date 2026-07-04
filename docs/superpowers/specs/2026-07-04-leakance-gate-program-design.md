@@ -64,23 +64,25 @@ plan.
 PHASE A (extractrs)                    PHASE B (ddrs)
 Channel-corridor + GW attributes       Objective floor fix
 ────────────────────────────          ────────────────────────────
-A1 corridor geometries                B1 floor-vs-warmup curve
-   (MERIT polylines → buffered           (forward-only, teacher weights
-    corridors, GeoDataFrame)              on self-generated obs;
-A2 raster acquisition                     warmup ∈ {5,15,30,60} @ rho 90,
-   (Zell&Sanford WTD, Fan WTD,            {90} @ rho 180; decay stratified
-    NLCD imperviousness, Soller           by upstream area)
-    surficial materials, BFI grid)     B2 pick + implement the fix
-A3 corridor extraction                    A: longer warmup/rho (config-only)
-   (extractrs zonal_stats over            B: state-cache hotstart (windows
-    corridors; new stats where            init from a saved continuous run's
-    needed: categorical mode,             reach states)
-    fraction-below-threshold)          B3 validate: fixed-objective floor
-A4 basin-scale additions                  ≤ 0.25 mean L1 (≤10% of converged
-   (permeability unlock, BFI,             loss, vs ~40% today)
+A0 network crosswalks                 B1 floor-vs-warmup curve
+   (MERIT↔SWORD published;               (forward-only, teacher weights
+    NHDPlus→MERIT built once)             on self-generated obs;
+A1 precomputed per-reach transfer         warmup ∈ {5,15,30,60} @ rho 90,
+   (StreamCat imperviousness,             {90} @ rho 180; decay stratified
+    Zarrabi bankfull geometry,            by upstream area)
+    SWORD widths, confinement, BFI)    B2 pick + implement the fix
+A2 corridor extraction                    A: longer warmup/rho (config-only)
+   (channel WTD bed-relative +            B: state-cache hotstart (windows
+    losing_fraction — the only            init from a saved continuous run's
+    targets with NO per-reach             reach states)
+    product; two-tier buffers)         B3 validate: fixed-objective floor
+A3 basin-scale additions                  ≤ 0.25 mean L1 (≤10% of converged
+   (permeability unlock,                  loss, vs ~40% today)
     drainage density from MERIT)
-A5 per-COMID attribute table +
-   normalization statistics
+A4 per-COMID netCDF in the exact
+   global.nc schema (dim COMID,
+   f64 vars, NaN outside CONUS)
+   + normalization statistics
         │                                   │
         └───────────────┬───────────────────┘
                         ▼
@@ -120,34 +122,78 @@ head never exceeds `depth + 2 m` — retained deliberately.
 
 ## 3. Phase A — attribute extraction (extractrs)
 
-Deliverable: a per-COMID attribute table (netCDF or parquet, keyed by COMID,
-CONUS eval-network coverage minimum) + normalization statistics, consumable by
-ddrs's attribute reader, containing:
+**Sourcing principle (2026-07-04 literature pass, see
+`docs/2026-07-04-leakance-literature-review.md` §6): precomputed per-reach
+products first; raw-raster corridor extraction ONLY where no per-reach product
+exists.** The channel-characteristics search found most of our targets already
+published per-reach on NHDPlusV2 or SWORD — the genuinely novel extraction is
+the channel water-table field.
+
+Deliverable: a per-COMID attribute netCDF **in the exact `global.nc` schema**
+— single dimension `COMID` (int64 ids), one float64 variable per attribute, no
+extra dims — so ddrs's existing `AttributesStore` reads it unchanged
+(verified: `merit_global_attributes_v2.nc` = dim `COMID` (2,939,404), f64
+vars). CONUS-only coverage is NaN-filled outside CONUS on the full global
+COMID vector (copied from `global.nc`), keeping index compatibility. Plus
+normalization statistics (ddrs stats-JSON convention) for every new attribute.
+
+### A0 — network crosswalks (one-time infrastructure)
+
+| Crosswalk | Status | Method |
+|---|---|---|
+| MERIT ↔ SWORD | **published** — Wade et al. 2025 (WRR, 10.1029/2024WR038633; Zenodo 10.5281/zenodo.13152826): bidirectional translation tables with ranked matches + partial-intersection lengths for weighted transfer | download + apply |
+| NHDPlusV2 → MERIT | not published | build via buffered-geometry intersection with length-weighted matching (mirroring Wade et al.'s method) in extractrs — reusable artifact for StreamCat/Zarrabi/McManamay transfer |
+
+### A1 — precomputed per-reach products (transfer, don't rasterize)
+
+| Attribute | Source (per-reach, verified downloadable) | Transfer |
+|---|---|---|
+| `corridor_impervious` | EPA StreamCat `PctImp2019Rp100Cat` (Hill et al. 2016) — NLCD imperviousness in a 100 m riparian buffer, precomputed for 2.65M NHDPlus reaches | NHDPlus→MERIT crosswalk, length-weighted |
+| `bankfull_depth`, `bankfull_width` | Zarrabi et al. 2025 (WRR 10.1029/2024WR037997; Zenodo 13883263) — ML bankfull geometry for 2.7M NHDPlus reaches (R²=0.85 width / 0.69 depth; supersedes Bieger 2015 curves AND our uparea power-law placeholder) | NHDPlus→MERIT crosswalk |
+| `channel_width_obs` | SWORD v2 (Altenau et al. 2021) GRWL-derived Landsat widths | MERIT-SWORD (published) — rivers ≥30 m; NaN below |
+| `valley_confinement` | McManamay & DeRolph 2019 stream classification (confined/mod/unconfined — alluvial-setting proxy) | NHDPlus→MERIT crosswalk |
+| `bfi` | USGS/Wolock gridded BFI | basin zonal mean (existing extractrs path) |
+| `drainage_density` | computed from MERIT fabric itself | channel length / catchment area (no raster) |
+
+### A2 — corridor extraction (the genuinely novel part)
+
+No precomputed per-reach product exists for the channel water-table field —
+this is ours to build:
 
 | Attribute | Source raster | Extraction |
 |---|---|---|
-| `channel_wtd_bed_rel` | Zell & Sanford 2020 (USGS ScienceBase, DOI 10.5066/P91LFFN1) primary; Fan 2013 (THREDDS) cross-check | corridor mean of WTD at channel pixels − per-reach STATIC bankfull-depth estimate (hydraulic-geometry power law on uparea — NOT learned parameters; extraction precedes training) |
-| `losing_fraction` | same | corridor fraction of pixels with WT below bed (threshold stat) |
-| `corridor_impervious` | NLCD percent-impervious (30 m) | corridor mean over a narrow buffer (~100 m half-width; sensitivity at 250 m) |
-| `alluvium_fraction` | Soller surficial materials (CONUS) | corridor fraction in alluvial classes (categorical) |
-| `corridor_lith` | GLiM | corridor majority class (categorical mode) — backstop only |
-| `bfi` | USGS/Wolock gridded BFI | basin zonal mean (existing extractrs path) |
-| `drainage_density` | computed from MERIT fabric itself | channel length / catchment area per COMID (no raster) |
+| `channel_wtd_bed_rel` | Zell & Sanford 2020 (ScienceBase 10.5066/P91LFFN1) primary; Fan 2013 (THREDDS) cross-check | channel-cell WTD − Zarrabi `bankfull_depth` (per-reach, replaces the uparea power-law) |
+| `losing_fraction` | same | fraction of channel cells with WT below bed (threshold in xarray, then corridor mean) |
+| `alluvium_fraction` | USGS Principal Aquifers polygons (10.5066/P9Y2HOUJ) + Soller surficial materials | polygon/corridor overlay fraction in alluvial classes |
+
+**Buffer strategy (literature-grounded — MERIT flowlines are NOT positionally
+exact):** Amatulli et al. 2022 benchmarked 90 m-DEM networks against NHDPlus
+HR and found <50% of cells within 100 m of the reference — typical MERIT
+lateral error is 100–300 m, worst in flat valleys (Yamazaki et al. 2019's
+stated worst case). Two-tier design, matching published practice:
+- **Fine rasters (30 m NLCD-class, if ever needed raw):** fixed **100 m
+  half-width** corridor — the StreamCat precedent (Hill et al. 2016) — widened
+  to **200 m** where GFPLAIN250m (Nardi et al. 2019) marks a broad floodplain
+  (flat-valley/braided error tail).
+- **Coarse grids (Zell & Sanford / Fan WTD at ~500 m–1 km):** NO fine buffer —
+  the cell already spans the positional error; take the nearest-channel-cell
+  value along the polyline (RiverATLAS-style native-grid association, Linke
+  et al. 2019), with the 100 m-buffer variant computed once as a sensitivity
+  column.
 
 Mechanics:
 - Corridors = MERIT reach polylines buffered (GeoDataFrame) → existing
   `ds.extrs.zonal_stats(corridors, id_col="COMID")`. Overlap at confluences is
   fine (per-feature exact stats).
-- Library changes IN extractrs where the stat is missing: categorical
-  mode / per-class fraction, and fraction-below-threshold (the latter may
-  reduce to thresholding in xarray + mean — prefer that; add a stat only if
-  performance demands).
-- Validation: spot-check ~10 known reaches (LA River corridor_impervious ≈ 1;
-  an Ogallala losing reach with deep channel WTD; a Appalachian gaining reach
-  with WT above bed); cross-check Zell&Sanford vs Fan channel WTD correlation
-  (expect positive, not identical; both retained as columns).
-- Normalization statistics (mean/std or the ddrs-convention stats JSON) for
-  every new attribute, since the KAN normalizes inputs.
+- Library changes IN extractrs only where a stat is missing (categorical
+  fraction; fraction-below-threshold prefers xarray preprocessing + mean).
+- Validation: spot-check ~10 known reaches (LA River `corridor_impervious`
+  ≈ 100; an Ogallala losing reach with deep channel WTD; an Appalachian
+  gaining reach with WT above bed); Zell&Sanford-vs-Fan channel-WTD
+  correlation (expect positive, not identical; both retained); MERIT-SWORD
+  width vs Zarrabi width consistency on large rivers.
+- Roundtrip test: the produced netCDF opens through ddrs's `AttributesStore`
+  and the new names resolve in `input_var_names`.
 
 ## 4. Phase B — objective floor fix (ddrs)
 
@@ -234,10 +280,15 @@ promotion on a REVISE.
 
 ## 7. Assumptions
 
-- Zell & Sanford 2020 (ScienceBase) and Fan 2013 (THREDDS) remain
-  downloadable (verified 2026-07-04); NLCD, Soller, GLiM, and a gridded BFI
-  are publicly acquirable (Phase A verifies before Phase C is planned in
-  detail).
+- Zell & Sanford 2020 (ScienceBase), Fan 2013 (THREDDS), StreamCat (EPA
+  API/FTP), Zarrabi 2025 (Zenodo 13883263), SWORD v2 + MERIT-SWORD (Zenodo
+  10013982 / 13152826), and a gridded BFI are downloadable (all verified
+  2026-07-04 by the channel-characteristics literature pass); Phase A
+  re-verifies at execution time.
+- The NHDPlus→MERIT crosswalk is buildable by buffered-geometry
+  length-weighted matching at acceptable quality on the eval network
+  (headwater divergence between the networks is the known weak spot —
+  crosswalk quality flags are a Phase A deliverable).
 - CPU-only remains workable (~85 min per training run measured); GPU used if
   free.
 - Gains remain Q′-baseflow's job; regional-groundwater channel gains stay
