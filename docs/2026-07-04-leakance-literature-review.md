@@ -296,8 +296,13 @@ flowlines' positional error against rasters.
     and the SWOT River Database (SWORD)," *WRR*. DOI:10.1029/2024WR038633;
     crosswalk at Zenodo 10.5281/zenodo.13152826. — Published MERIT↔SWORD
     translation tables (ranked matches + partial-intersection lengths for
-    weighted transfer). **The biggest don't-reinvent finding**: delivers
-    SWORD/GRWL observed channel widths directly onto MERIT COMIDs.
+    weighted transfer). **EMPIRICAL CAVEAT (2026-07-04, our execution):** the
+    tables index MERIT-Basins **v1.0** COMIDs; the `bugfix1` fabric this
+    project routes on RENUMBERED COMIDs, making the published join silently
+    wrong (matched reaches ~10³ km apart; width-vs-bankfull spearman ≈ 0).
+    Verify COMID-edition compatibility before using these tables with ANY
+    MERIT-Basins derivative; our replacement is a direct spatial join of
+    SWORD reach points into bugfix1 catchments (spearman 0.596 after fix).
 24. **Altenau et al. (2021)**, "The SWOT Mission River Database (SWORD) …,"
     *WRR* 57, e2021WR030054. DOI:10.1029/2021WR030054. — GRWL widths + slope
     on a MERIT-consistent global network (rivers ≥30 m).

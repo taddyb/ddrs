@@ -157,7 +157,7 @@ once, when the table is built.
 
 | Crosswalk | Status | Method |
 |---|---|---|
-| MERIT ↔ SWORD | **published** — Wade et al. 2025 (WRR, 10.1029/2024WR038633; Zenodo 10.5281/zenodo.13152826): per-pfaf-2 NetCDF tables, `sword_1..sword_40` ranked matches + `part_len_1..part_len_40` intersection lengths (m), bidirectional | download + apply length-weighted join |
+| MERIT ↔ SWORD | ~~published (Wade et al. 2025)~~ **INVALID for this project's fabric** — discovered at execution (2026-07-04): the Wade tables index MERIT-Basins v1.0 COMIDs; our `bugfix1` fabric RENUMBERED COMIDs, so the published join assigns widths ~10³ km off (spearman vs bankfull ≈ 0). Replaced by a spatial join of SWORD NA reach points into the bugfix1 catchment polygons (lakeflag==0, reach-length-weighted, 10 km nearest-catchment recovery) — spearman 0.596, obs/bankfull median 1.17 | `sword_width.py` commit e540e8b (extractrs) |
 | NHDPlusV2 → MERIT | not published | build via buffered-geometry intersection with length-weighted matching (mirroring Wade et al.'s method) in extractrs — reusable artifact for StreamCat/Zarrabi/McManamay transfer; emit the same `(comid, nhd_1..nhd_k, part_len_1..part_len_k)` table shape + quality flags |
 
 ### A1 — precomputed per-reach products (transfer, don't rasterize)
