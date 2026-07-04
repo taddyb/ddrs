@@ -30,6 +30,7 @@ base = zeta_frame(OUT / "baseline_zeta.nc", "base")
 za = zeta_frame(OUT / "zeta_a.nc", "a")
 zc = zeta_frame(OUT / "zeta_c.nc", "c")
 df = key.merge(base, on="comid").merge(za, on="comid").merge(zc, on="comid")
+assert len(df) == len(key), f"zeta merge dropped rows: {len(df)} != {len(key)}"
 df["planted"] = df["comid"].isin(planted)
 n_p = int(df["planted"].sum())
 assert n_p == len(planted), f"planted rows {n_p} != plan {len(planted)}"
@@ -67,6 +68,8 @@ r3_verdict = ("A<B (leakance needed)" if rel_gap > 0.05
 # R4 absorption map (descriptive): where did B move Manning's n?
 po = xr.open_dataset(OUT / "params_orig.nc")
 pb = xr.open_dataset(OUT / "params_b.nc")
+assert (po["COMID"].values == pb["COMID"].values).all(), \
+    "params_orig/params_b COMID order mismatch — positional dn invalid"
 dn = pd.DataFrame({"comid": po["COMID"].values,
                    "dn": pb["n"].values - po["n"].values})
 dn_planted = dn[dn["comid"].isin(planted)]["dn"]
