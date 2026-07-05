@@ -44,9 +44,59 @@ pub enum Workflow {
 // New top-level sections (SP-3)
 // ---------------------------------------------------------------------------
 
+/// Deserialize `attributes` as either a bare path string or a YAML list of
+/// path strings. A bare string maps to a single-element `Vec`; a list maps
+/// one-to-one. An empty list is a hard error. Preserved so all existing
+/// configs (which use the bare-path form) parse unchanged.
+fn deserialize_one_or_many_paths<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<std::path::PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct OneOrManyPaths;
+
+    impl<'de> Visitor<'de> for OneOrManyPaths {
+        type Value = Vec<std::path::PathBuf>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a path string or a list of path strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            Ok(vec![std::path::PathBuf::from(v)])
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Self::Value, E> {
+            Ok(vec![std::path::PathBuf::from(v)])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                paths.push(std::path::PathBuf::from(s));
+            }
+            if paths.is_empty() {
+                return Err(A::Error::custom(
+                    "data_sources.attributes: list must not be empty",
+                ));
+            }
+            Ok(paths)
+        }
+    }
+
+    deserializer.deserialize_any(OneOrManyPaths)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataSources {
-    pub attributes: std::path::PathBuf,
+    #[serde(deserialize_with = "deserialize_one_or_many_paths")]
+    pub attributes: Vec<std::path::PathBuf>,
     /// Pre-built CONUS adjacency zarr store. Either both adjacency keys must
     /// be present, or `geospatial_fabric` must be provided for managed builds.
     #[serde(default)]
@@ -1093,6 +1143,64 @@ params:
         assert_eq!(
             exp.state_cache.as_deref(),
             Some(std::path::Path::new("/tmp/state_cache.nc"))
+        );
+    }
+
+    // ── attributes: one-or-many deserialization ──────────────────────────────
+
+    #[test]
+    fn attributes_bare_path_parses_as_single_element_vec() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_attrs_bare_path.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("bare path should parse");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert_eq!(ds.attributes.len(), 1);
+        assert_eq!(ds.attributes[0], std::path::PathBuf::from("/dev/null/attrs.nc"));
+    }
+
+    #[test]
+    fn attributes_yaml_list_parses_as_multi_element_vec() {
+        let ds_block = r#"
+data_sources:
+  attributes:
+    - /dev/null/global_attrs.nc
+    - /dev/null/channel_attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_attrs_list.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("list should parse");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert_eq!(ds.attributes.len(), 2);
+        assert_eq!(ds.attributes[0], std::path::PathBuf::from("/dev/null/global_attrs.nc"));
+        assert_eq!(ds.attributes[1], std::path::PathBuf::from("/dev/null/channel_attrs.nc"));
+    }
+
+    #[test]
+    fn attributes_empty_list_rejected() {
+        let ds_block = r#"
+data_sources:
+  attributes: []
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_attrs_empty.yaml", ds_block);
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must not be empty") || msg.contains("attributes"),
+            "expected empty-list error, got: {msg}"
         );
     }
 

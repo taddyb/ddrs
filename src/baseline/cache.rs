@@ -354,7 +354,7 @@ mod tests {
         cfg.mode = "testing".into();
         cfg.seed = 0;
         cfg.data_sources = Some(DataSources {
-            attributes: PathBuf::from("/dev/null/attrs.nc"),
+            attributes: vec![PathBuf::from("/dev/null/attrs.nc")],
             conus_adjacency: Some(PathBuf::from("/dev/null/conus.zarr")),
             gages_adjacency: Some(PathBuf::from("/dev/null/gages_adj.zarr")),
             geospatial_fabric: None,
@@ -451,7 +451,7 @@ mod tests {
         cfg.mode = "testing".into();
         cfg.seed = 0;
         cfg.data_sources = Some(DataSources {
-            attributes: PathBuf::from("/dev/null/attrs.nc"),
+            attributes: vec![PathBuf::from("/dev/null/attrs.nc")],
             conus_adjacency: None,      // ← fabric-only config
             gages_adjacency: None,
             geospatial_fabric: Some(PathBuf::from("/dev/null/fabric.shp")),

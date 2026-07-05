@@ -16,6 +16,84 @@ use crate::nn::{KanHead, KanHeadConfig};
 use crate::routing::denormalize;
 use crate::training::load_kan_head;
 
+// ---------------------------------------------------------------------------
+// Attribute store + stats helpers shared by both dump functions
+// ---------------------------------------------------------------------------
+
+/// Open attribute stores and load per-variable normalization stats.
+///
+/// Routes on `ds.attributes.len()`: single path → existing drop-absent
+/// `AttributesStore::open`; multiple paths → `open_multi` (COMID-aligned, NaN-
+/// fill absent). Stats are loaded from each store's adjacent stats JSON and
+/// merged in `input_var_names` order.
+fn open_attrs_and_stats(
+    ds: &crate::config::DataSources,
+    input_var_names: &[String],
+    conus_order: &[crate::data::ids::Comid],
+) -> crate::data::error::Result<(AttributesStore, ndarray::Array1<f32>, ndarray::Array1<f32>)> {
+    if ds.attributes.len() == 1 {
+        let path = &ds.attributes[0];
+        let attrs = AttributesStore::open(path, input_var_names, conus_order)?;
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let fname = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let stats_path = dir
+            .join("statistics")
+            .join(format!("merit_attribute_statistics_{fname}.json"));
+        let stats = AttrStats::open(&stats_path)?;
+        Ok((attrs, stats.means_f32(input_var_names), stats.stds_f32(input_var_names)))
+    } else {
+        let attrs = AttributesStore::open_multi(&ds.attributes, input_var_names, conus_order)?;
+        let (means, stds) = dump_load_merged_stats(&ds.attributes, input_var_names)?;
+        Ok((attrs, means, stds))
+    }
+}
+
+/// Merge normalization stats from multiple adjacent stats files. Each path's
+/// adjacent JSON is checked in order; first match per variable wins. Hard-errors
+/// if any requested variable has no stats in any file.
+fn dump_load_merged_stats(
+    attr_paths: &[std::path::PathBuf],
+    attr_names: &[String],
+) -> crate::data::error::Result<(ndarray::Array1<f32>, ndarray::Array1<f32>)> {
+    let mut means_vec = vec![0.0f32; attr_names.len()];
+    let mut stds_vec = vec![1.0f32; attr_names.len()];
+    let mut found = vec![false; attr_names.len()];
+    for path in attr_paths {
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let fname = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let stats_path = dir
+            .join("statistics")
+            .join(format!("merit_attribute_statistics_{fname}.json"));
+        let Ok(stats) = AttrStats::open(&stats_path) else {
+            continue;
+        };
+        for (fi, name) in attr_names.iter().enumerate() {
+            if !found[fi] {
+                if let Some(row) = stats.by_name.get(name) {
+                    means_vec[fi] = row.mean as f32;
+                    stds_vec[fi] = row.std as f32;
+                    found[fi] = true;
+                }
+            }
+        }
+    }
+    for (fi, name) in attr_names.iter().enumerate() {
+        if !found[fi] {
+            return Err(crate::data::error::DataError::Malformed {
+                path: attr_paths[0].clone(),
+                message: format!("no statistics found for attribute '{name}'"),
+            });
+        }
+    }
+    Ok((ndarray::Array1::from(means_vec), ndarray::Array1::from(stds_vec)))
+}
+
 /// Run a trained KAN head over the full CONUS attribute matrix, denormalize
 /// into physical units, and write `(COMID, n, q_spatial, p_spatial, slope)`
 /// NetCDF4 to `output_path`. Returns the number of reaches written.
@@ -53,26 +131,9 @@ where
     eprintln!("CONUS reaches: {n_reaches}");
 
     // ---------- 2. Attributes + z-score stats ----------
-    eprintln!("opening attributes: {}", ds.attributes.display());
-    let attrs = AttributesStore::open(&ds.attributes, &head_cfg.input_var_names, &conus.order)
+    eprintln!("opening attributes: {} file(s)", ds.attributes.len());
+    let (attrs, means, stds) = open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.order)
         .map_err(|e| CliError::Other(Box::new(e)))?;
-
-    // Replicates the private `stats_path_from_attrs` helper in
-    // `src/data/dataset.rs:570`. Kept inline to avoid widening that fn's
-    // visibility just for one module.
-    let stats_path = {
-        let dir = ds.attributes.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fname = ds
-            .attributes
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        dir.join("statistics")
-            .join(format!("merit_attribute_statistics_{fname}.json"))
-    };
-    let stats = AttrStats::open(&stats_path).map_err(|e| CliError::Other(Box::new(e)))?;
-    let means = stats.means_f32(&head_cfg.input_var_names);
-    let stds = stats.stds_f32(&head_cfg.input_var_names);
 
     // ---------- 3. Build normalized (N, F) attribute tensor ----------
     // Mirrors `MeritGagesDataset::finalize_attrs` (`src/data/dataset.rs:403`).
@@ -292,23 +353,9 @@ where
     eprintln!("CONUS reaches: {n_reaches}");
 
     // ---------- 2. Attributes + z-score stats ----------
-    eprintln!("opening attributes: {}", ds.attributes.display());
-    let attrs = AttributesStore::open(&ds.attributes, &head_cfg.input_var_names, &conus.order)
+    eprintln!("opening attributes: {} file(s)", ds.attributes.len());
+    let (attrs, means, stds) = open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.order)
         .map_err(|e| CliError::Other(Box::new(e)))?;
-
-    let stats_path = {
-        let dir = ds.attributes.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fname = ds
-            .attributes
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        dir.join("statistics")
-            .join(format!("merit_attribute_statistics_{fname}.json"))
-    };
-    let stats = AttrStats::open(&stats_path).map_err(|e| CliError::Other(Box::new(e)))?;
-    let means = stats.means_f32(&head_cfg.input_var_names);
-    let stds = stats.stds_f32(&head_cfg.input_var_names);
 
     // ---------- 3. Build normalized (N, F) attribute tensor ----------
     let f = head_cfg.input_var_names.len();

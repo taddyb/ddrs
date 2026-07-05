@@ -339,16 +339,25 @@ impl MeritGagesDataset {
 
         // ---------- 2. Attributes + statistics ----------
         let attr_names: Vec<String> = head_cfg.input_var_names.clone();
-        let attrs = Arc::new(AttributesStore::open(
-            &ds.attributes,
-            &attr_names,
-            &conus.order,
-        )?);
-
-        let stats_path = stats_path_from_attrs(&ds.attributes);
-        let stats = Arc::new(AttrStats::open(&stats_path)?);
-        let means = stats.means_f32(&attr_names);
-        let stds = stats.stds_f32(&attr_names);
+        let (attrs, stats, means, stds) = if ds.attributes.len() == 1 {
+            // Single-path: byte-identical to the pre-C0 behavior.
+            let attrs = AttributesStore::open(&ds.attributes[0], &attr_names, &conus.order)?;
+            let stats_path = stats_path_from_attrs(&ds.attributes[0]);
+            let stats = AttrStats::open(&stats_path)?;
+            let means = stats.means_f32(&attr_names);
+            let stds = stats.stds_f32(&attr_names);
+            (Arc::new(attrs), Arc::new(stats), means, stds)
+        } else {
+            // Multi-path: COMID-aligned merge across stores; NaN-fill per-store gaps.
+            let attrs = AttributesStore::open_multi(&ds.attributes, &attr_names, &conus.order)?;
+            let (means, stds) = load_merged_stats(&ds.attributes, &attr_names)?;
+            // stats field is diagnostics-only (dead_code); use an empty placeholder.
+            let placeholder_stats = AttrStats {
+                path: ds.attributes[0].clone(),
+                by_name: std::collections::HashMap::new(),
+            };
+            (Arc::new(attrs), Arc::new(placeholder_stats), means, stds)
+        };
 
         // ---------- 3. Icechunk stores ----------
         let streamflow = Arc::new(StreamflowSource::open(&ds.streamflow)?);
@@ -877,6 +886,51 @@ impl MeritGagesDataset {
     }
 }
 
+/// Load and merge per-variable normalization stats from a list of attribute
+/// store paths. Each path's adjacent statistics JSON is checked in order; the
+/// first file that contains a given variable's stats wins. Hard-errors if any
+/// requested variable has no stats in any of the files.
+///
+/// Used by the multi-path `data_sources.attributes` case in [`MeritGagesDataset::open`].
+fn load_merged_stats(
+    attr_paths: &[std::path::PathBuf],
+    attr_names: &[String],
+) -> Result<(Array1<f32>, Array1<f32>)> {
+    let mut means_vec: Vec<f32> = vec![0.0; attr_names.len()];
+    let mut stds_vec: Vec<f32> = vec![1.0; attr_names.len()];
+    let mut found: Vec<bool> = vec![false; attr_names.len()];
+
+    for path in attr_paths {
+        let stats_path = stats_path_from_attrs(path);
+        let Ok(stats) = AttrStats::open(&stats_path) else {
+            continue;
+        };
+        for (fi, name) in attr_names.iter().enumerate() {
+            if !found[fi] {
+                if let Some(row) = stats.by_name.get(name) {
+                    means_vec[fi] = row.mean as f32;
+                    stds_vec[fi] = row.std as f32;
+                    found[fi] = true;
+                }
+            }
+        }
+    }
+
+    for (fi, name) in attr_names.iter().enumerate() {
+        if !found[fi] {
+            return Err(DataError::Malformed {
+                path: attr_paths[0].clone(),
+                message: format!(
+                    "no statistics found for attribute '{name}' in any stats file \
+                     adjacent to the attribute stores"
+                ),
+            });
+        }
+    }
+
+    Ok((Array1::from(means_vec), Array1::from(stds_vec)))
+}
+
 /// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
 /// Pre-head precip normalization: per-reach (column) z-score of `log1p(precip)`
 /// over the window's hours. The disaggregation head only cares about the
@@ -987,7 +1041,13 @@ mod tests {
         };
         // Skip if any required data path is absent.
         if let Some(ds) = cfg.data_sources.as_ref() {
-            for p in &[&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages] {
+            for p in &ds.attributes {
+                if !p.exists() {
+                    eprintln!("skipping: {} not present", p.display());
+                    return;
+                }
+            }
+            for p in [&ds.streamflow, &ds.observations, &ds.gages] {
                 if !p.exists() {
                     eprintln!("skipping: {} not present", p.display());
                     return;
@@ -1031,7 +1091,13 @@ mod tests {
             Err(_) => return,
         };
         if let Some(ds) = cfg.data_sources.as_ref() {
-            for p in &[&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages] {
+            for p in &ds.attributes {
+                if !p.exists() {
+                    eprintln!("skipping: {} not present", p.display());
+                    return;
+                }
+            }
+            for p in [&ds.streamflow, &ds.observations, &ds.gages] {
                 if !p.exists() {
                     eprintln!("skipping: {} not present", p.display());
                     return;
@@ -1092,7 +1158,13 @@ mod tests {
             Err(_) => return,
         };
         let Some(ds_cfg) = cfg.data_sources.as_ref() else { return };
-        for p in &[&ds_cfg.attributes, &ds_cfg.streamflow, &ds_cfg.observations, &ds_cfg.gages] {
+        for p in &ds_cfg.attributes {
+            if !p.exists() {
+                eprintln!("skipping: {} not present", p.display());
+                return;
+            }
+        }
+        for p in [&ds_cfg.streamflow, &ds_cfg.observations, &ds_cfg.gages] {
             if !p.exists() {
                 eprintln!("skipping: {} not present", p.display());
                 return;

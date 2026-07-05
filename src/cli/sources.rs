@@ -205,20 +205,27 @@ fn lock_sources_from_config(cfg_path: &Path, ws: &Workspace) -> Result<(), CliEr
 
     // Build the fingerprint pairs. Optional keys (adjacency zarr stores,
     // geospatial_fabric) are only locked when explicitly configured.
-    let mut pairs: Vec<(&str, PathBuf)> = vec![
-        ("attributes", ds.attributes.clone()),
-        ("streamflow", ds.streamflow.clone()),
-        ("observations", ds.observations.clone()),
-        ("gages", ds.gages.clone()),
-    ];
+    // Single-path attributes uses the "attributes" key (backward compat with
+    // existing lock files); multi-path uses "attributes_0", "attributes_1", …
+    let mut pairs: Vec<(String, PathBuf)> = Vec::new();
+    if ds.attributes.len() == 1 {
+        pairs.push(("attributes".into(), ds.attributes[0].clone()));
+    } else {
+        for (i, p) in ds.attributes.iter().enumerate() {
+            pairs.push((format!("attributes_{i}"), p.clone()));
+        }
+    }
+    pairs.push(("streamflow".into(), ds.streamflow.clone()));
+    pairs.push(("observations".into(), ds.observations.clone()));
+    pairs.push(("gages".into(), ds.gages.clone()));
     if let Some(p) = &ds.conus_adjacency {
-        pairs.push(("conus_adjacency", p.clone()));
+        pairs.push(("conus_adjacency".into(), p.clone()));
     }
     if let Some(p) = &ds.gages_adjacency {
-        pairs.push(("gages_adjacency", p.clone()));
+        pairs.push(("gages_adjacency".into(), p.clone()));
     }
     if let Some(p) = &ds.geospatial_fabric {
-        pairs.push(("geospatial_fabric", p.clone()));
+        pairs.push(("geospatial_fabric".into(), p.clone()));
     }
 
     // Parallel reachability + fingerprint. std::thread::scope is fine — these
