@@ -419,6 +419,11 @@ fn forward_eval_core<I: Backend>(
     // Forcing (inner backend): disaggregate when a head is attached, else the
     // flat repeat-24. Mirrors `forward`.
     let n_hourly = tensors.q_prime.dims()[0];
+    // Forcing: disaggregate when a head is attached (mirrors `forward`).
+    // When called from the teacher/state-cache path with a lookahead batch
+    // (d_daily = n_days+1, n_hourly = n_days*24), DisaggHead's d_use = n_days
+    // so the extra row naturally becomes the `next` tap for the last day —
+    // no right-clamp — without any special handling here.
     let q_prime_hourly: Tensor<I, 2> = match &head.disagg {
         Some(d) => d.forward(
             tensors.q_prime_daily.clone(),

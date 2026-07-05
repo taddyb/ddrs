@@ -812,7 +812,11 @@ fn run_teacher<I: Backend>(
     cli: Cli,
     device: I::Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    const BATCH_SIZE_DAYS: usize = 15;
+    // Large chunk size reduces disagg boundary-artifact density (left-clamp at chunk
+    // day 0 and precip right-clamp at chunk day C-1). With C=365 each artifact appears
+    // only ~14 times over 5115 teacher days (0.82%), vs 341 times with C=15 (20%).
+    // 70 GB RAM easily holds a 365-day AORC precip chunk (~2.3 GB).
+    const BATCH_SIZE_DAYS: usize = 365;
     assert!(cfg.params.use_leakance, "teacher requires params.use_leakance: true");
 
     let plants = parse_plant_file(
@@ -918,7 +922,18 @@ fn run_teacher<I: Backend>(
     while day_offset < n_days {
         let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
         let win = TestWindow::new(&axis, day_offset, chunk_n);
-        let batch = dataset.collate_window(&win)?;
+        // Disagg lookahead: pass one extra daily Q' row so the disagg "next"
+        // for the last day of this chunk uses the NEXT chunk's first day instead
+        // of repeating the last day (right-clamp). Skip for the last chunk (no
+        // next day to peek at). Without this, the floor's continuous routing
+        // diverges from the teacher's chunked routing at each chunk boundary,
+        // producing false large-river residuals at the floor bar.
+        let has_next_chunk = day_offset + chunk_n < n_days;
+        let batch = if has_next_chunk {
+            dataset.collate_window_with_daily_lookahead(&win)?
+        } else {
+            dataset.collate_window(&win)?
+        };
         assert!(
             batch.divide_comids.iter().map(|c| c.0).eq(network_comids.iter().copied()),
             "reach column order changed between chunks — override vectors invalid"
@@ -1325,7 +1340,8 @@ fn run_state_cache<I: Backend>(
     cli: Cli,
     device: I::Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    const BATCH_SIZE_DAYS: usize = 15;
+    // Must match run_teacher's BATCH_SIZE_DAYS so state boundaries align.
+    const BATCH_SIZE_DAYS: usize = 365;
 
     let output = cli.output.as_ref().ok_or("--output is required in state-cache mode")?;
 
@@ -1396,7 +1412,17 @@ fn run_state_cache<I: Backend>(
     while day_offset < n_days {
         let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
         let win = TestWindow::new(&axis, day_offset, chunk_n);
-        let batch = dataset.collate_window(&win)?;
+        // Disagg lookahead: same fix as run_teacher — peek one extra daily Q' row
+        // so the state entering the next chunk comes from a consistent disagg that
+        // agrees with the floor's continuous-window routing. Without this, the state
+        // cache at every chunk boundary reflects the wrong right-clamped disagg,
+        // which the floor's continuous routing then diverges from.
+        let has_next_chunk = day_offset + chunk_n < n_days;
+        let batch = if has_next_chunk {
+            dataset.collate_window_with_daily_lookahead(&win)?
+        } else {
+            dataset.collate_window(&win)?
+        };
         assert!(
             batch.divide_comids.iter().map(|c| c.0).eq(network_comids.iter().copied()),
             "reach column order changed between chunks — COMID index invalid"

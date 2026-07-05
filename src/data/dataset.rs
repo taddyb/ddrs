@@ -688,6 +688,32 @@ impl MeritGagesDataset {
         &self,
         window: &crate::data::TestWindow,
     ) -> Result<RoutingBatch> {
+        self.collate_window_inner(window, false)
+    }
+
+    /// Like `collate_window`, but reads one extra daily Q' row beyond the window
+    /// end so that the disaggregation head can use the NEXT chunk's first day as
+    /// the "next" context for the last day of this chunk. Without lookahead the
+    /// disagg right-clamps (next[d-1] = center[d-1]), which shifts sub-daily Q'
+    /// and causes systematic routing errors at every 15-day chunk boundary — the
+    /// diagnosed root cause of the floor validation failing the 0.25 m³/s bar.
+    ///
+    /// Pass `true` only for teacher/state-cache generation where the disagg must
+    /// match the floor's continuous-window disagg. Pass `false` (= `collate_window`)
+    /// everywhere else (eval, floor, training) where the current lookahead behaviour
+    /// is appropriate.
+    pub fn collate_window_with_daily_lookahead(
+        &self,
+        window: &crate::data::TestWindow,
+    ) -> Result<RoutingBatch> {
+        self.collate_window_inner(window, true)
+    }
+
+    fn collate_window_inner(
+        &self,
+        window: &crate::data::TestWindow,
+        daily_q_lookahead: bool,
+    ) -> Result<RoutingBatch> {
         let cache = self.get_or_build_static_network()?;
 
         // Read q_prime for this contiguous window and apply cached flow_scale.
@@ -706,19 +732,30 @@ impl MeritGagesDataset {
             }
         }
 
-        // Daily q' for the disaggregation head (test window: all n_days).
+        // Daily q' for the disaggregation head.
+        // With daily_q_lookahead=true, read one extra day so that the disagg
+        // "next" context for the last day of this chunk is the first day of the
+        // next chunk rather than the last day repeated (right-clamp). The extra
+        // row only participates in the 3-tap window; it does NOT extend routing
+        // (n_hourly = window.n_days * 24 is unchanged). d_use < d condition in
+        // disagg_head::forward then avoids the right-clamp unconditionally.
+        let n_days_q = if daily_q_lookahead {
+            window.n_days + 1
+        } else {
+            window.n_days
+        };
         let mut q_prime_daily = self.streamflow.read_window_daily(
             window.window_start,
-            window.n_days,
+            n_days_q,
             &cache.divide_comids,
         )?;
-        let n_days_q = q_prime_daily.shape()[0];
+        let actual_n_days_q = q_prime_daily.shape()[0];
         for col in 0..n {
             let s = cache.flow_scale[col];
             if (s - 1.0).abs() < 1e-9 {
                 continue;
             }
-            for t in 0..n_days_q {
+            for t in 0..actual_n_days_q {
                 q_prime_daily[(t, col)] *= s;
             }
         }
