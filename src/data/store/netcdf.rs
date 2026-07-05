@@ -243,7 +243,7 @@ impl AttributesStore {
         // --- Pass 2: group variable indices by their owning store ---
         let mut store_fi_lists: Vec<Vec<usize>> = vec![vec![]; paths.len()];
         for (fi, &owner) in var_owner.iter().enumerate() {
-            store_fi_lists[owner.unwrap()].push(fi);
+            store_fi_lists[owner.expect("bug: None owner should have errored in pass 1")].push(fi);
         }
 
         // --- Pass 3: open_aligned per store; copy into merged matrix ---
