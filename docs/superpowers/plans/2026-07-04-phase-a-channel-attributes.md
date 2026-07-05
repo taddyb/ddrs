@@ -195,6 +195,36 @@ if __name__ == "__main__":
 
 Note: the GFPLAIN-conditional selection between the two corridor widths happens in Task 6 (the only consumer of fine-raster corridors); Task 1 just materializes both. If GFPLAIN download failed in Task 0, the wide corridor is still produced and the selection falls back to 100 m everywhere (recorded, not silent).
 
+> **AMENDED 2026-07-04 — WIDTH-SCALED CORRIDOR RULE (as built; supersedes the
+> `corridors_wide`/GFPLAIN design above).** User decision after the corridor
+> buffer-scaling analysis; full derivation in extractrs
+> `pipelines/channel_attrs/specs/2026-07-04-corridor-buffer-scaling.md`,
+> implemented in extractrs commits `224775d` (hinge rule, width priority
+> chain, `--only` flag) and `ac4f996` (real-width merge + 3 km cap).
+>
+> ```
+> half_width(reach) = max( 100 m , 1.5 × width_est )        [EPSG:5070]
+> width_est priority: channel_width_obs (SWORD/GRWL observed, post-e540e8b
+>                     bugfix1 spatial join)
+>                   > bankfull_width (Zarrabi 2025, NHD crosswalk)
+>                   > order fallback w(ω) = 2 m · 1.9^(ω−1)
+> width cap:          min(width_est, WIDTH_CAP_M = 3000 m)  — SWORD residual
+>                     estuary/lake widths (max 16.7 km) are not channels
+> ```
+>
+> Literature chain: Leopold & Maddock (1953) `w ∝ Q^0.5` × Moody & Troutman
+> (2002) coefficient × Horton area ratios ⇒ width ≈ 1.9×/order (Downing et
+> al. 2012); positional-error floor 100 m per Amatulli (2022) + the
+> StreamCat precedent (Hill et al. 2016). The hinge engages ~order 6–7.
+>
+> Products as built: `corridors_100m.parquet` (floor set, sensitivity
+> column) + `corridors_scaled.parquet` (hinge rule, carries `half_width_m`;
+> p50=100 m, cap-bound max 4.5 km half-width; consumed by the alluvium
+> overlay, Task 8). `corridors_wide.parquet` DELETED. GFPLAIN widening
+> dropped — the width hinge covers the flat-valley/braided tail it targeted.
+> Coarse-grid WTD sampling (Task 6) unchanged: nearest-channel-cell, no fine
+> buffer.
+
 ---
 
 ### Task 2: SWORD widths onto MERIT (published crosswalk)
