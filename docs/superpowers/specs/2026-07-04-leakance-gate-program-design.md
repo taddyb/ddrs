@@ -231,6 +231,20 @@ Mechanics:
 
 ## 5. Phase C — the gate experiment (ddrs)
 
+- C0 code (attribute-source list — user decision 2026-07-05, replacing the
+  earlier merge idea): `data_sources.attributes` accepts a LIST of attribute
+  netCDFs that concatenate feature-wise (each store contributes variables;
+  lookups join on COMID). Rationale: `merit_global_attributes_v2.nc` is a
+  GLOBAL artifact (2.94M COMIDs) and must not absorb CONUS-only channel
+  attributes; `merit_channel_attributes_v1.nc` stays a separate versioned
+  store. Requirements: (a) backward compatible — a single path (all existing
+  configs) still parses (serde one-or-many); (b) each `input_var_names` entry
+  resolves across the stores with a HARD ERROR if a name is missing from all
+  or present in more than one (ambiguity is a config bug, not a preference);
+  (c) normalization stats load per-store via the existing filename
+  convention; (d) NaN handling per variable unchanged. Guarded by a
+  dataset-level test (two tiny stores, one var each, resolution + ambiguity
+  error) and byte-identity for single-path configs.
 - C1 code: `max(0, depth − d_gw)` clamp in the leakance flux (differentiable
   relu on the head term; gradcheck extended); static impervious hard-zero mask
   (from `corridor_impervious` > threshold, e.g. 0.7) applied like the
