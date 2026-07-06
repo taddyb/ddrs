@@ -180,6 +180,7 @@ fn kan_head_to_muskingum_cunge_gradient_flow() {
         k_d: None,
         d_gw: None,
         leakance_factor: None,
+        impervious_mask: None,
     };
 
     let mut mc = MuskingumCunge::<InnerBackend>::new(common::mock_config(), device.clone());
@@ -189,7 +190,7 @@ fn kan_head_to_muskingum_cunge_gradient_flow() {
     };
     let streamflow = common::mock_streamflow(n_timesteps, n_segments, &device);
 
-    mc.setup_inputs(inputs, streamflow, params, false);
+    mc.setup_inputs(inputs, streamflow, params, false, None);
     let out = mc.forward();
     let loss = out.sum();
     let grads = loss.backward();

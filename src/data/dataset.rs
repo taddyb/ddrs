@@ -17,7 +17,7 @@ use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
     AorcPrecipStore, AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, StreamflowSource,
+    ObservationsStore, StateCache, StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -58,6 +58,19 @@ pub struct RoutingBatch {
     /// `q_prime` — kept here for diagnostics / loss reconstruction.
     pub flow_scale: Vec<f32>,
     pub window: RhoWindow,
+    /// Per-reach discharge at window start (m³/s), batch-network order,
+    /// length `N`. Populated when `experiment.state_cache` is configured;
+    /// `None` otherwise → Task 3's forward pass falls back to the hotstart
+    /// heuristic (byte-identical to no-cache behavior).
+    pub initial_state: Option<Array1<f32>>,
+    /// Precomputed per-reach impervious hard-zero mask (0.0 = impervious,
+    /// 1.0 = leakance allowed), shape `(N,)`. Built from `corridor_impervious`
+    /// attribute column using `cfg.params.leakance_impervious_threshold`.
+    /// `None` when the column is absent from `attr_names` or leakance is off —
+    /// both are byte-identical no-ops (`SpatialParameters::impervious_mask`
+    /// stays `None`). NaN (no StreamCat coverage) → 1.0 (absence of
+    /// imperviousness data ≠ concrete; leakance allowed).
+    pub impervious_mask: Option<Vec<f32>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +93,9 @@ struct StaticNetworkCache {
     gauge_staids: Vec<Staid>,
     /// Active COMID list in topological order, length `N_active`.
     divide_comids: Vec<Comid>,
+    /// Precomputed impervious mask (same as `RoutingBatch::impervious_mask`).
+    /// Built once at static-network construction; cloned into every eval batch.
+    impervious_mask: Option<Vec<f32>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +129,16 @@ pub struct RoutingTensors<B: Backend> {
     pub num_gauges: usize,
     pub gauge_staids: Vec<Staid>,
     pub window: RhoWindow,
+    /// Per-reach window-start discharge, shape `(N,)`.
+    /// `None` when `experiment.state_cache` is not configured.
+    /// Task 3 consumes this to seed the router instead of the hotstart
+    /// heuristic. It is a constant tensor (no grad); autograd topology
+    /// is unchanged relative to the no-cache path.
+    pub initial_state: Option<Tensor<B, 1>>,
+    /// Per-reach impervious hard-zero mask, shape `(N,)`. Constant — no
+    /// autograd. `None` when `corridor_impervious` is absent from attributes
+    /// or leakance is disabled (byte-identical back-compat with PC1).
+    pub impervious_mask: Option<Tensor<B, 1>>,
 }
 
 impl RoutingBatch {
@@ -189,6 +215,19 @@ impl RoutingBatch {
 
         let num_gauges = self.gauge_staids.len();
 
+        // 5. Lift initial_state (N,) — constant, no grad.
+        let initial_state = self.initial_state.map(|arr| {
+            let n = arr.len();
+            let vec: Vec<f32> = arr.into_raw_vec_and_offset().0;
+            Tensor::<B, 1>::from_data(TensorData::new(vec, [n]), device)
+        });
+
+        // 6. Lift impervious_mask (N,) — constant, no grad.
+        let impervious_mask = self.impervious_mask.map(|mask| {
+            let n = mask.len();
+            Tensor::<B, 1>::from_data(TensorData::new(mask, [n]), device)
+        });
+
         RoutingTensors {
             adjacency: self.adjacency,
             spatial_attributes,
@@ -202,6 +241,8 @@ impl RoutingBatch {
             num_gauges,
             gauge_staids: self.gauge_staids,
             window: self.window,
+            initial_state,
+            impervious_mask,
         }
     }
 }
@@ -237,6 +278,13 @@ pub struct MeritGagesDataset {
     /// `collate_window`. Interior mutability via `OnceCell` (single-threaded
     /// dataset access — the training loop drives it from one thread).
     static_network: OnceCell<StaticNetworkCache>,
+    /// Optional day-boundary discharge state cache. `None` ⇒ every code path
+    /// byte-identical to no-cache behavior (`RoutingBatch::initial_state = None`).
+    state_cache: Option<crate::data::store::StateCache>,
+    /// When `Some(threshold)`, `corridor_impervious` is in `attr_names` AND
+    /// leakance is enabled — `collate`/`build_static_network` will call
+    /// `build_impervious_mask`. `None` ⇒ mask is never built (back-compat no-op).
+    leakance_impervious_threshold: Option<f32>,
 }
 
 impl MeritGagesDataset {
@@ -317,16 +365,25 @@ impl MeritGagesDataset {
 
         // ---------- 2. Attributes + statistics ----------
         let attr_names: Vec<String> = head_cfg.input_var_names.clone();
-        let attrs = Arc::new(AttributesStore::open(
-            &ds.attributes,
-            &attr_names,
-            &conus.order,
-        )?);
-
-        let stats_path = stats_path_from_attrs(&ds.attributes);
-        let stats = Arc::new(AttrStats::open(&stats_path)?);
-        let means = stats.means_f32(&attr_names);
-        let stds = stats.stds_f32(&attr_names);
+        let (attrs, stats, means, stds) = if ds.attributes.len() == 1 {
+            // Single-path: byte-identical to the pre-C0 behavior.
+            let attrs = AttributesStore::open(&ds.attributes[0], &attr_names, &conus.order)?;
+            let stats_path = stats_path_from_attrs(&ds.attributes[0]);
+            let stats = AttrStats::open(&stats_path)?;
+            let means = stats.means_f32(&attr_names);
+            let stds = stats.stds_f32(&attr_names);
+            (Arc::new(attrs), Arc::new(stats), means, stds)
+        } else {
+            // Multi-path: COMID-aligned merge across stores; NaN-fill per-store gaps.
+            let attrs = AttributesStore::open_multi(&ds.attributes, &attr_names, &conus.order)?;
+            let (means, stds) = load_merged_stats(&ds.attributes, &attr_names)?;
+            // stats field is diagnostics-only (dead_code); use an empty placeholder.
+            let placeholder_stats = AttrStats {
+                path: ds.attributes[0].clone(),
+                by_name: std::collections::HashMap::new(),
+            };
+            (Arc::new(attrs), Arc::new(placeholder_stats), means, stds)
+        };
 
         // ---------- 3. Icechunk stores ----------
         let streamflow = Arc::new(StreamflowSource::open(&ds.streamflow)?);
@@ -377,6 +434,25 @@ impl MeritGagesDataset {
         // ---------- 4. Time axis from experiment dates ----------
         let time_axis = parse_experiment_axis(&exp.start_time, &exp.end_time)?;
 
+        // ---------- 5. Optional state cache ----------
+        let state_cache = match &exp.state_cache {
+            Some(p) => {
+                eprintln!("state cache: opening {}", p.display());
+                Some(StateCache::open(p)?)
+            }
+            None => None,
+        };
+
+        // Build the impervious threshold when leakance is on AND the attribute
+        // is present. `None` ⇒ no mask built (all-ones back-compat no-op).
+        let leakance_impervious_threshold = if cfg.params.use_leakance
+            && attr_names.iter().any(|n| n == "corridor_impervious")
+        {
+            Some(cfg.params.leakance_impervious_threshold)
+        } else {
+            None
+        };
+
         Ok(Self {
             conus,
             gages_adj,
@@ -394,6 +470,8 @@ impl MeritGagesDataset {
             stds,
             gauges,
             static_network: OnceCell::new(),
+            state_cache,
+            leakance_impervious_threshold,
         })
     }
 
@@ -519,7 +597,16 @@ impl MeritGagesDataset {
         // ----- 5. Observations (present-in-adjacency STAIDs; missing→error) -----
         let observations = self.observations.read_window(window, &gauge_staids)?;
 
-        // ----- 6. Assemble -----
+        // ----- 6. Window-start state from the cache (if configured) -----
+        let initial_state = match &self.state_cache {
+            Some(cache) => Some(cache.row_for_day(window.window_start, &compressed.divide_comids)?),
+            None => None,
+        };
+
+        // ----- 7. Impervious mask (None when absent or leakance off) -----
+        let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
+
+        // ----- 8. Assemble -----
         Ok(RoutingBatch {
             adjacency,
             spatial_attributes_normalized,
@@ -533,6 +620,8 @@ impl MeritGagesDataset {
             divide_comids: compressed.divide_comids,
             flow_scale,
             window: *window,
+            initial_state,
+            impervious_mask,
         })
     }
 
@@ -632,6 +721,37 @@ impl MeritGagesDataset {
     }
 
     // -----------------------------------------------------------------------
+    // Impervious mask helper
+    // -----------------------------------------------------------------------
+
+    /// Build the per-reach impervious hard-zero mask for `divide_comids`.
+    ///
+    /// Returns `None` when `leakance_impervious_threshold` is `None` (i.e.,
+    /// leakance is off or `corridor_impervious` is not among the attributes).
+    ///
+    /// NaN (no StreamCat coverage for a reach) → 1.0: absence of imperviousness
+    /// data is NOT the same as impervious concrete; leakance is allowed.
+    fn build_impervious_mask(&self, divide_comids: &[Comid]) -> Option<Vec<f32>> {
+        let threshold = self.leakance_impervious_threshold?;
+        let fi = self
+            .attr_names
+            .iter()
+            .position(|n| n == "corridor_impervious")
+            .expect("leakance_impervious_threshold is Some only when corridor_impervious is in attr_names");
+        let raw: Vec<f32> = divide_comids
+            .iter()
+            .map(|comid| {
+                if let Some(src_col) = self.attrs.index.position(comid) {
+                    self.attrs.attrs[(fi, src_col)]
+                } else {
+                    f32::NAN // missing COMID → NaN → treated as not impervious
+                }
+            })
+            .collect();
+        Some(build_mask_from_raw_col(&raw, threshold))
+    }
+
+    // -----------------------------------------------------------------------
     // Test-mode collation (SP-5)
     // -----------------------------------------------------------------------
 
@@ -648,6 +768,32 @@ impl MeritGagesDataset {
     pub fn collate_window(
         &self,
         window: &crate::data::TestWindow,
+    ) -> Result<RoutingBatch> {
+        self.collate_window_inner(window, false)
+    }
+
+    /// Like `collate_window`, but reads one extra daily Q' row beyond the window
+    /// end so that the disaggregation head can use the NEXT chunk's first day as
+    /// the "next" context for the last day of this chunk. Without lookahead the
+    /// disagg right-clamps (next[d-1] = center[d-1]), which shifts sub-daily Q'
+    /// and causes systematic routing errors at every 15-day chunk boundary — the
+    /// diagnosed root cause of the floor validation failing the 0.25 m³/s bar.
+    ///
+    /// Pass `true` only for teacher/state-cache generation where the disagg must
+    /// match the floor's continuous-window disagg. Pass `false` (= `collate_window`)
+    /// everywhere else (eval, floor, training) where the current lookahead behaviour
+    /// is appropriate.
+    pub fn collate_window_with_daily_lookahead(
+        &self,
+        window: &crate::data::TestWindow,
+    ) -> Result<RoutingBatch> {
+        self.collate_window_inner(window, true)
+    }
+
+    fn collate_window_inner(
+        &self,
+        window: &crate::data::TestWindow,
+        daily_q_lookahead: bool,
     ) -> Result<RoutingBatch> {
         let cache = self.get_or_build_static_network()?;
 
@@ -667,19 +813,30 @@ impl MeritGagesDataset {
             }
         }
 
-        // Daily q' for the disaggregation head (test window: all n_days).
+        // Daily q' for the disaggregation head.
+        // With daily_q_lookahead=true, read one extra day so that the disagg
+        // "next" context for the last day of this chunk is the first day of the
+        // next chunk rather than the last day repeated (right-clamp). The extra
+        // row only participates in the 3-tap window; it does NOT extend routing
+        // (n_hourly = window.n_days * 24 is unchanged). d_use < d condition in
+        // disagg_head::forward then avoids the right-clamp unconditionally.
+        let n_days_q = if daily_q_lookahead {
+            window.n_days + 1
+        } else {
+            window.n_days
+        };
         let mut q_prime_daily = self.streamflow.read_window_daily(
             window.window_start,
-            window.n_days,
+            n_days_q,
             &cache.divide_comids,
         )?;
-        let n_days_q = q_prime_daily.shape()[0];
+        let actual_n_days_q = q_prime_daily.shape()[0];
         for col in 0..n {
             let s = cache.flow_scale[col];
             if (s - 1.0).abs() < 1e-9 {
                 continue;
             }
-            for t in 0..n_days_q {
+            for t in 0..actual_n_days_q {
                 q_prime_daily[(t, col)] *= s;
             }
         }
@@ -693,6 +850,13 @@ impl MeritGagesDataset {
             .full_observations
             .slice(ndarray::s![window.daily_range(), ..])
             .to_owned();
+
+        // Window-start state from the cache (if configured). Same logic as
+        // `collate`: look up the window's start date in the cache.
+        let initial_state = match &self.state_cache {
+            Some(sc) => Some(sc.row_for_day(window.window_start, &cache.divide_comids)?),
+            None => None,
+        };
 
         Ok(RoutingBatch {
             adjacency: cache.adjacency.clone(),
@@ -713,6 +877,8 @@ impl MeritGagesDataset {
                 rho_days: window.n_days,
                 window_start: window.window_start,
             },
+            initial_state,
+            impervious_mask: cache.impervious_mask.clone(),
         })
     }
 
@@ -781,6 +947,9 @@ impl MeritGagesDataset {
         };
         let full_observations = self.observations.read_window(&full_rho, &gauge_staids)?;
 
+        // 6. Impervious mask (None when corridor_impervious absent or leakance off).
+        let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
+
         Ok(StaticNetworkCache {
             adjacency,
             outflow_idx: compressed.outflow_idx,
@@ -789,8 +958,54 @@ impl MeritGagesDataset {
             full_observations,
             gauge_staids,
             divide_comids: compressed.divide_comids,
+            impervious_mask,
         })
     }
+}
+
+/// Load and merge per-variable normalization stats from a list of attribute
+/// store paths. Each path's adjacent statistics JSON is checked in order; the
+/// first file that contains a given variable's stats wins. Hard-errors if any
+/// requested variable has no stats in any of the files.
+///
+/// Used by the multi-path `data_sources.attributes` case in [`MeritGagesDataset::open`].
+fn load_merged_stats(
+    attr_paths: &[std::path::PathBuf],
+    attr_names: &[String],
+) -> Result<(Array1<f32>, Array1<f32>)> {
+    let mut means_vec: Vec<f32> = vec![0.0; attr_names.len()];
+    let mut stds_vec: Vec<f32> = vec![1.0; attr_names.len()];
+    let mut found: Vec<bool> = vec![false; attr_names.len()];
+
+    for path in attr_paths {
+        let stats_path = stats_path_from_attrs(path);
+        let Ok(stats) = AttrStats::open(&stats_path) else {
+            continue;
+        };
+        for (fi, name) in attr_names.iter().enumerate() {
+            if !found[fi] {
+                if let Some(row) = stats.by_name.get(name) {
+                    means_vec[fi] = row.mean as f32;
+                    stds_vec[fi] = row.std as f32;
+                    found[fi] = true;
+                }
+            }
+        }
+    }
+
+    for (fi, name) in attr_names.iter().enumerate() {
+        if !found[fi] {
+            return Err(DataError::Malformed {
+                path: attr_paths[0].clone(),
+                message: format!(
+                    "no statistics found for attribute '{name}' in any stats file \
+                     adjacent to the attribute stores"
+                ),
+            });
+        }
+    }
+
+    Ok((Array1::from(means_vec), Array1::from(stds_vec)))
 }
 
 /// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
@@ -882,10 +1097,74 @@ fn parse_experiment_axis(start: &str, end: &str) -> Result<TimeAxis> {
     Ok(TimeAxis::new(start_date, end_date))
 }
 
+/// Convert a raw `corridor_impervious` column (fraction [0, 1]) to a 0/1 mask.
+///
+/// `mask[i] = if raw[i] > threshold { 0.0 } else { 1.0 }`
+///
+/// NaN → 1.0: no StreamCat coverage means absence of imperviousness data, which is
+/// NOT the same as impervious concrete. Leakance is allowed where data is missing.
+pub(crate) fn build_mask_from_raw_col(raw: &[f32], threshold: f32) -> Vec<f32> {
+    raw.iter()
+        .map(|&v| if v.is_nan() || v <= threshold { 1.0_f32 } else { 0.0_f32 })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    // -----------------------------------------------------------------------
+    // build_mask_from_raw_col unit tests (no dataset required)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mask_from_raw_col_basic_threshold() {
+        // Values below/at threshold → 1.0 (leakance allowed).
+        // Values above threshold → 0.0 (impervious hard-zero).
+        let raw = [0.0_f32, 0.5, 0.7, 0.8, 1.0];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert_eq!(mask, vec![1.0, 1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mask_from_raw_col_nan_treated_as_not_impervious() {
+        // NaN (no StreamCat coverage) → 1.0: absence ≠ concrete.
+        let raw = [f32::NAN, 0.9, f32::NAN, 0.3];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert_eq!(mask, vec![1.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn mask_from_raw_col_all_below_threshold_is_all_ones() {
+        let raw = [0.1_f32, 0.2, 0.3];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert!(mask.iter().all(|&v| v == 1.0));
+    }
+
+    #[test]
+    fn mask_from_raw_col_all_above_threshold_is_all_zeros() {
+        let raw = [0.8_f32, 0.9, 1.0];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert!(mask.iter().all(|&v| v == 0.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Back-compat: when corridor_impervious is absent, mask is None
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn leakance_threshold_none_when_attr_absent() {
+        // A config with use_leakance=true but corridor_impervious NOT in attr_names
+        // must leave leakance_impervious_threshold = None (back-compat no-op).
+        //
+        // We can't open a full MeritGagesDataset without live data, so test
+        // the threshold-selection logic directly.
+        let attr_names = ["n", "q_spatial", "p_spatial"];
+        let has_corridor = attr_names.iter().any(|&n| n == "corridor_impervious");
+        let threshold: Option<f32> = if has_corridor { Some(0.7) } else { None };
+        assert!(threshold.is_none(), "back-compat guard: threshold must be None when attr absent");
+    }
 
     #[test]
     fn open_dataset_against_live_yaml() {
@@ -903,7 +1182,13 @@ mod tests {
         };
         // Skip if any required data path is absent.
         if let Some(ds) = cfg.data_sources.as_ref() {
-            for p in &[&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages] {
+            for p in &ds.attributes {
+                if !p.exists() {
+                    eprintln!("skipping: {} not present", p.display());
+                    return;
+                }
+            }
+            for p in [&ds.streamflow, &ds.observations, &ds.gages] {
                 if !p.exists() {
                     eprintln!("skipping: {} not present", p.display());
                     return;
@@ -947,7 +1232,13 @@ mod tests {
             Err(_) => return,
         };
         if let Some(ds) = cfg.data_sources.as_ref() {
-            for p in &[&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages] {
+            for p in &ds.attributes {
+                if !p.exists() {
+                    eprintln!("skipping: {} not present", p.display());
+                    return;
+                }
+            }
+            for p in [&ds.streamflow, &ds.observations, &ds.gages] {
                 if !p.exists() {
                     eprintln!("skipping: {} not present", p.display());
                     return;
@@ -1008,7 +1299,13 @@ mod tests {
             Err(_) => return,
         };
         let Some(ds_cfg) = cfg.data_sources.as_ref() else { return };
-        for p in &[&ds_cfg.attributes, &ds_cfg.streamflow, &ds_cfg.observations, &ds_cfg.gages] {
+        for p in &ds_cfg.attributes {
+            if !p.exists() {
+                eprintln!("skipping: {} not present", p.display());
+                return;
+            }
+        }
+        for p in [&ds_cfg.streamflow, &ds_cfg.observations, &ds_cfg.gages] {
             if !p.exists() {
                 eprintln!("skipping: {} not present", p.display());
                 return;

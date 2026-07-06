@@ -55,6 +55,11 @@ pub struct SpatialParameters<I: Backend> {
     pub k_d: Option<Tensor<Autodiff<I>, 1>>,
     pub d_gw: Option<Tensor<Autodiff<I>, 1>>,
     pub leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
+    /// Optional per-reach impervious hard-zero mask (0.0 = impervious, 1.0 = normal).
+    /// Precomputed from `corridor_impervious` attribute by the caller using
+    /// `cfg.params.leakance_impervious_threshold`. Constant, not autograd-tracked
+    /// (inner backend `I`, no gradient). `None` ⇒ all-ones (no-op, back-compat).
+    pub impervious_mask: Option<Tensor<I, 1>>,
 }
 
 /// Differentiable Muskingum-Cunge routing engine.
@@ -72,6 +77,9 @@ pub struct MuskingumCunge<I: Backend> {
     k_d: Option<Tensor<Autodiff<I>, 1>>,
     d_gw: Option<Tensor<Autodiff<I>, 1>>,
     leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
+    /// Per-reach impervious hard-zero mask (inner backend, constant).
+    /// Stored from `SpatialParameters::impervious_mask` at `setup_inputs`.
+    impervious_mask: Option<Tensor<I, 1>>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -141,6 +149,7 @@ impl<I: Backend> MuskingumCunge<I> {
             k_d: None,
             d_gw: None,
             leakance_factor: None,
+            impervious_mask: None,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -161,12 +170,20 @@ impl<I: Backend> MuskingumCunge<I> {
 
     /// Bind static channel attributes, lateral inflows, and learned [0,1]
     /// parameters; build CSR pattern; denormalize; cold-start discharge.
+    ///
+    /// `initial_state`: optional window-start discharge `Q_0` (m³/s, per-reach,
+    /// same order as the network). When `Some`, it replaces the hotstart
+    /// heuristic — the injected value is used as-is (clamped to `discharge_lb`).
+    /// When `None`, falls back to the existing `carry_state` / hotstart logic
+    /// unchanged, so all existing callers that pass `None` are byte-identical to
+    /// the pre-Task-3 code path.
     pub fn setup_inputs(
         &mut self,
         inputs: RoutingInputs<I>,
         streamflow: Tensor<Autodiff<I>, 2>,
         params: SpatialParameters<I>,
         carry_state: bool,
+        initial_state: Option<Tensor<Autodiff<I>, 1>>,
     ) where
         I::FloatTensorPrimitive: 'static,
         I::Device: 'static,
@@ -223,30 +240,45 @@ impl<I: Backend> MuskingumCunge<I> {
         self.d_gw = params.d_gw.map(|t| denormalize(t, ranges.d_gw, log_space.iter().any(|s| s == "d_gw")));
         self.leakance_factor = params.leakance_factor
             .map(|t| denormalize(t, ranges.leakance_factor, log_space.iter().any(|s| s == "leakance_factor")));
+        // Impervious mask: constant, no denormalization — stored as-is.
+        self.impervious_mask = params.impervious_mask;
 
-        if !carry_state || self.discharge_t.is_none() {
-            let q_prime_0 = self
-                .q_prime
-                .as_ref()
-                .unwrap()
-                .clone()
-                .slice([0..1, 0..n])
-                .reshape([n]);
-            // Hotstart: solve (I − N) · Q_0 = q'_0 via the same CSR solver
-            // with c = 1 (all-ones vector), then clamp.
-            let device = self.device.clone();
-            let ones: Tensor<Autodiff<I>, 1> = Tensor::ones([n], &device);
-            let pattern = self.pattern.as_ref().unwrap();
-            let assembler = self.assembler.as_ref().unwrap();
-            let a_values = assembler.assemble(ones);
-            let q0 = triangular_csr_solve::<I>(
-                pattern,
-                a_values,
-                q_prime_0,
-                self.sparse_solver == SparseSolver::Cuda,
-            )
-            .clamp_min(self.cfg.params.attribute_minimums.discharge);
-            self.discharge_t = Some(q0);
+        match initial_state {
+            Some(q0_ext) => {
+                // Use the externally provided window-start state (state-cache path).
+                // Clamp for numerical safety — same floor as the hotstart heuristic.
+                self.discharge_t = Some(
+                    q0_ext.clamp_min(self.cfg.params.attribute_minimums.discharge),
+                );
+            }
+            None => {
+                // No cache → existing carry_state / hotstart logic, byte-identical
+                // to the pre-Task-3 code path.
+                if !carry_state || self.discharge_t.is_none() {
+                    let q_prime_0 = self
+                        .q_prime
+                        .as_ref()
+                        .unwrap()
+                        .clone()
+                        .slice([0..1, 0..n])
+                        .reshape([n]);
+                    // Hotstart: solve (I − N) · Q_0 = q'_0 via the same CSR solver
+                    // with c = 1 (all-ones vector), then clamp.
+                    let device = self.device.clone();
+                    let ones: Tensor<Autodiff<I>, 1> = Tensor::ones([n], &device);
+                    let pattern = self.pattern.as_ref().unwrap();
+                    let assembler = self.assembler.as_ref().unwrap();
+                    let a_values = assembler.assemble(ones);
+                    let q0 = triangular_csr_solve::<I>(
+                        pattern,
+                        a_values,
+                        q_prime_0,
+                        self.sparse_solver == SparseSolver::Cuda,
+                    )
+                    .clamp_min(self.cfg.params.attribute_minimums.discharge);
+                    self.discharge_t = Some(q0);
+                }
+            }
         }
 
         // SP-10: eagerly capture the per-timestep CUDA graph once, here at
@@ -354,6 +386,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
                 k_d, d_gw, leakance_factor,
+                self.impervious_mask.as_ref().cloned(),
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
             );
             if let Some(diag) = zeta_step {

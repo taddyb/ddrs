@@ -4,7 +4,7 @@
 //! `outflow_idx`-derived `flat_indices` + `group_ids`.
 
 use burn::backend::Autodiff;
-use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor};
+use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
@@ -127,6 +127,8 @@ pub fn forward_with_frozen_params<I: Backend>(
         Tensor::from_inner(tensors.q_prime.clone());
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    // Lift initial_state from inner backend to Autodiff (same pattern as q_prime).
+    let initial_state_ad = tensors.initial_state.clone().map(Tensor::<Autodiff<I>, 1>::from_inner);
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
         q_prime_autodiff,
@@ -137,8 +139,10 @@ pub fn forward_with_frozen_params<I: Backend>(
             k_d: None,
             d_gw: None,
             leakance_factor: None,
+            impervious_mask: None,
         },
         carry_state,
+        initial_state_ad,
     );
 
     // engine.forward() → (N, T_hours) on Autodiff<I>.
@@ -225,6 +229,12 @@ pub fn forward<I: Backend>(
         (None, None, None)
     };
 
+    // Extract the inner-backend mask (no grad) from the Autodiff tensor.
+    // `None` when the attribute was absent or leakance is off — byte-identical
+    // to the pre-mask behavior.
+    let impervious_mask: Option<Tensor<I, 1>> =
+        tensors.impervious_mask.as_ref().map(|m| m.clone().inner());
+
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
@@ -236,8 +246,10 @@ pub fn forward<I: Backend>(
             k_d,
             d_gw,
             leakance_factor,
+            impervious_mask,
         },
         carry_state,
+        tensors.initial_state.clone(),
     );
 
     let runoff = engine.forward(); // (N, T_hours)
@@ -297,6 +309,43 @@ impl<I: Backend> Default for ZetaSums<I> {
     }
 }
 
+/// Per-reach override of the NORMALIZED leakance head outputs, applied inside
+/// `forward_eval` between `head.forward` and denormalization (which happens
+/// in `setup_inputs`). Vectors are dense over the network's reach columns
+/// (same order as `divide_comids`): `mask[i] == 1.0` replaces reach i's
+/// normalized K_D/d_gw/factor with the corresponding value; `mask[i] == 0.0`
+/// leaves the head's output untouched. Eval-path only — the training
+/// `forward` never sees this type.
+pub struct LeakanceOverride {
+    pub mask: Vec<f32>,
+    pub k_d: Vec<f32>,
+    pub d_gw: Vec<f32>,
+    pub factor: Vec<f32>,
+}
+
+impl LeakanceOverride {
+    fn apply<I: Backend>(
+        &self,
+        param: Tensor<I, 1>,
+        vals: &[f32],
+        device: &I::Device,
+    ) -> Tensor<I, 1> {
+        debug_assert_eq!(
+            vals.len(),
+            self.mask.len(),
+            "override vals length {} != mask length {}",
+            vals.len(),
+            self.mask.len()
+        );
+        let n = self.mask.len();
+        let mask_t: Tensor<I, 1> =
+            Tensor::from_data(TensorData::new(self.mask.clone(), [n]), device);
+        let vals_t: Tensor<I, 1> =
+            Tensor::from_data(TensorData::new(vals.to_vec(), [n]), device);
+        param * (mask_t.ones_like() - mask_t.clone()) + vals_t * mask_t
+    }
+}
+
 /// MLP inference forward — no autograd anywhere. Used by `bin/eval` and
 /// the KanHead arm of `EvalParams`.
 ///
@@ -306,6 +355,10 @@ impl<I: Backend> Default for ZetaSums<I> {
 ///
 /// `zeta` — optional leakance-diagnostic sink; when `Some` and leakance is
 /// active, the engine's per-timestep zeta sums are merged into it.
+///
+/// `overrides` — optional per-reach override of the NORMALIZED leakance head
+/// outputs; applied after `head.forward` and before denormalization. `None`
+/// is the normal eval path (no override).
 pub fn forward_eval<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
@@ -313,6 +366,45 @@ pub fn forward_eval<I: Backend>(
     device: &I::Device,
     carry_state: bool,
     zeta: Option<&mut ZetaSums<I>>,
+    overrides: Option<&LeakanceOverride>,
+) -> Tensor<I, 2> {
+    let runoff = forward_eval_core(cfg, tensors, head, device, carry_state, zeta, overrides);
+    scatter_add_by_group(
+        runoff,
+        tensors.flat_indices.clone(),
+        tensors.group_ids.clone(),
+        tensors.num_gauges,
+    )
+}
+
+/// Like `forward_eval` but returns per-reach `(n_reaches, T_hours)` before
+/// gauge aggregation. Used by the state-cache writer to capture day-boundary
+/// discharge states and by the teacher-obs writer, which needs the per-reach
+/// final column for cross-chunk state injection (gauge aggregation happens at
+/// the call site via `scatter_add_by_group`).
+pub fn forward_eval_reaches<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    head: &KanHead<I>,
+    device: &I::Device,
+    carry_state: bool,
+    zeta: Option<&mut ZetaSums<I>>,
+    overrides: Option<&LeakanceOverride>,
+) -> Tensor<I, 2> {
+    forward_eval_core(cfg, tensors, head, device, carry_state, zeta, overrides)
+}
+
+/// Shared body of `forward_eval` and `forward_eval_reaches`. Returns
+/// per-reach `(n_reaches, T_hours)` on the inner backend before the
+/// `scatter_add_by_group` that produces gauge-aggregated output.
+fn forward_eval_core<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    head: &KanHead<I>,
+    device: &I::Device,
+    carry_state: bool,
+    zeta: Option<&mut ZetaSums<I>>,
+    overrides: Option<&LeakanceOverride>,
 ) -> Tensor<I, 2> {
     let params_map = head.forward(tensors.spatial_attributes.clone());
 
@@ -335,6 +427,11 @@ pub fn forward_eval<I: Backend>(
     // Forcing (inner backend): disaggregate when a head is attached, else the
     // flat repeat-24. Mirrors `forward`.
     let n_hourly = tensors.q_prime.dims()[0];
+    // Forcing: disaggregate when a head is attached (mirrors `forward`).
+    // When called from the teacher/state-cache path with a lookahead batch
+    // (d_daily = n_days+1, n_hourly = n_days*24), DisaggHead's d_use = n_days
+    // so the extra row naturally becomes the `next` tap for the last day —
+    // no right-clamp — without any special handling here.
     let q_prime_hourly: Tensor<I, 2> = match &head.disagg {
         Some(d) => d.forward(
             tensors.q_prime_daily.clone(),
@@ -355,11 +452,22 @@ pub fn forward_eval<I: Backend>(
                 );
             }
         }
-        (
-            params_map.get("K_D").cloned(),
-            params_map.get("d_gw").cloned(),
-            params_map.get("leakance_factor").cloned(),
-        )
+        let (mut k_d_t, mut d_gw_t, mut factor_t) = (
+            params_map.get("K_D").expect("checked above").clone(),
+            params_map.get("d_gw").expect("checked above").clone(),
+            params_map.get("leakance_factor").expect("checked above").clone(),
+        );
+        if let Some(ov) = overrides {
+            assert_eq!(
+                ov.mask.len(),
+                k_d_t.dims()[0],
+                "LeakanceOverride mask length doesn't match network reaches"
+            );
+            k_d_t = ov.apply::<I>(k_d_t, &ov.k_d, device);
+            d_gw_t = ov.apply::<I>(d_gw_t, &ov.d_gw, device);
+            factor_t = ov.apply::<I>(factor_t, &ov.factor, device);
+        }
+        (Some(k_d_t), Some(d_gw_t), Some(factor_t))
     } else {
         (None, None, None)
     };
@@ -376,6 +484,8 @@ pub fn forward_eval<I: Backend>(
     let leakance_factor_ad = leakance_factor_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    // Lift initial_state from inner backend to Autodiff (same pattern as q_prime_ad).
+    let initial_state_ad = tensors.initial_state.clone().map(Tensor::<Autodiff<I>, 1>::from_inner);
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage: x_ad },
         q_prime_ad,
@@ -386,8 +496,10 @@ pub fn forward_eval<I: Backend>(
             k_d: k_d_ad,
             d_gw: d_gw_ad,
             leakance_factor: leakance_factor_ad,
+            impervious_mask: tensors.impervious_mask.clone(),
         },
         carry_state,
+        initial_state_ad,
     );
     if zeta.is_some() {
         engine.enable_zeta_accumulation();
@@ -400,12 +512,7 @@ pub fn forward_eval<I: Backend>(
         }
     }
 
-    scatter_add_by_group(
-        runoff,
-        tensors.flat_indices.clone(),
-        tensors.group_ids.clone(),
-        tensors.num_gauges,
-    )
+    runoff
 }
 
 #[cfg(test)]
@@ -451,6 +558,55 @@ mod tests {
             "log round-trip failed: {} != 21.0",
             p_recovered[0]
         );
+    }
+
+    #[test]
+    fn leakance_override_apply_replaces_masked_entries_only() {
+        let device = <B as burn::tensor::backend::BackendTypes>::Device::default();
+        let ov = LeakanceOverride {
+            mask: vec![0.0, 1.0, 0.0, 1.0],
+            k_d: vec![0.0, 1.0, 0.0, 0.5],
+            d_gw: vec![0.0, 0.0, 0.0, 0.25],
+            factor: vec![0.0, 0.9, 0.0, 0.1],
+        };
+        let param: Tensor<B, 1> =
+            Tensor::from_floats([0.7, 0.7, 0.7, 0.7], &device);
+        let out: Vec<f32> = ov
+            .apply(param.clone(), &ov.k_d, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out, vec![0.7, 1.0, 0.7, 0.5]);
+        let out_f: Vec<f32> = ov
+            .apply(param, &ov.factor, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out_f, vec![0.7, 0.9, 0.7, 0.1]);
+
+        // d_gw: masked positions (1, 3) take the d_gw values; unmasked stay 0.7.
+        let param2: Tensor<B, 1> = Tensor::from_floats([0.7, 0.7, 0.7, 0.7], &device);
+        let out_dgw: Vec<f32> = ov
+            .apply(param2, &ov.d_gw, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out_dgw, vec![0.7, 0.0, 0.7, 0.25]);
+
+        // All-zero mask is identity: output equals input param exactly.
+        let ov_zero = LeakanceOverride {
+            mask: vec![0.0; 4],
+            k_d: vec![1.0, 2.0, 3.0, 4.0],
+            d_gw: vec![1.0, 2.0, 3.0, 4.0],
+            factor: vec![1.0, 2.0, 3.0, 4.0],
+        };
+        let param3: Tensor<B, 1> = Tensor::from_floats([0.1, 0.2, 0.3, 0.4], &device);
+        let out_id: Vec<f32> = ov_zero
+            .apply(param3, &ov_zero.k_d, &device)
+            .into_data()
+            .into_vec()
+            .unwrap();
+        assert_eq!(out_id, vec![0.1, 0.2, 0.3, 0.4]);
     }
 
     #[test]

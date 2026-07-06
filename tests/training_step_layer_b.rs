@@ -324,6 +324,7 @@ fn layer_b_step2_hotstart_matches_ddr() {
             leakance_factor: None,
         },
         false, // carry_state = false
+        None,
     );
 
     let ddrs_discharge = engine
@@ -451,6 +452,7 @@ fn layer_b_step3_mc_forward_matches_ddr() {
             leakance_factor: None,
         },
         false, // carry_state = false
+        None,
     );
 
     // engine.forward() returns (n_reaches, rho_hours) on Autodiff<NdArray>.

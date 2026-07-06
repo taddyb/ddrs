@@ -465,6 +465,76 @@ mod tests {
         }
     }
 
+    /// Lookahead: an extra row appended to daily_q provides the `next` tap for
+    /// the last disagg day instead of right-clamping. Verifies:
+    /// (a) the last day's output changes when the lookahead value differs,
+    /// (b) earlier days are byte-identical regardless of the lookahead row.
+    #[test]
+    fn lookahead_fixes_right_clamp_on_last_day() {
+        let device = Default::default();
+        let cfg = DisaggHeadConfig::new(4, 42).with_use_attributes(false);
+        let mut head = cfg.init::<Bp>(&device);
+        // Non-zero output so the shape is genuinely non-flat and the `next` tap
+        // actually influences the logits.
+        head.output.weight = crate::nn::init::to_param_weight::<Bp>(
+            Array2::<f32>::from_shape_fn((cfg.hidden_size, 24), |(i, j)| {
+                0.3 * ((i + 3 * j) as f32).sin()
+            }),
+            &device,
+        );
+
+        // D=3 days; disagg all 3 (n_hourly = 3*24 = 72, d_use = 3).
+        // Without lookahead: day 2's `next` = daily_q[2] (right-clamp).
+        let q_no_la = daily::<Bp>(&[[1.0, 2.0], [5.0, 3.0], [10.0, 4.0]]);
+        let z = Tensor::<Bp, 2>::zeros([72, 2], &device);
+        let out_no_la = head.forward(q_no_la.clone(), Tensor::<Bp, 2>::zeros([2, 4], &device), z.clone(), z.clone(), 72);
+
+        // With lookahead: D+1=4 rows; last row has a VERY different value.
+        // Day 2's `next` = daily_q[3] = 50 (not the clamped 10).
+        let q_la = daily::<Bp>(&[[1.0, 2.0], [5.0, 3.0], [10.0, 4.0], [50.0, 50.0]]);
+        let out_la = head.forward(q_la, Tensor::<Bp, 2>::zeros([2, 4], &device), z.clone(), z.clone(), 72);
+
+        // (a) Day 2 output differs between the two.
+        let no_la_day2: Vec<f32> = out_no_la.clone().slice([48..72, 0..2]).into_data().to_vec().unwrap();
+        let la_day2: Vec<f32> = out_la.clone().slice([48..72, 0..2]).into_data().to_vec().unwrap();
+        let diff2: f32 = no_la_day2.iter().zip(&la_day2).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff2 > 1e-3, "last day should differ with vs without lookahead (diff {diff2})");
+
+        // (b) Day 0 and day 1 are unchanged (only `next` of day 2 differs).
+        let no_la_days01: Vec<f32> = out_no_la.slice([0..48, 0..2]).into_data().to_vec().unwrap();
+        let la_days01: Vec<f32> = out_la.slice([0..48, 0..2]).into_data().to_vec().unwrap();
+        let diff01: f32 = no_la_days01.iter().zip(&la_days01).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff01 < 1e-6, "earlier days should be byte-identical (diff {diff01})");
+    }
+
+    /// Lookahead with same value as clamp: when the lookahead row equals the
+    /// last row, output must be byte-identical to the no-lookahead case (the
+    /// "right-clamp = repeat" case produces the same result with or without
+    /// the explicit extra row).
+    #[test]
+    fn lookahead_same_value_is_byte_identical_to_clamp() {
+        let device = Default::default();
+        let cfg = DisaggHeadConfig::new(4, 99).with_use_attributes(false);
+        let mut head = cfg.init::<Bp>(&device);
+        head.output.weight = crate::nn::init::to_param_weight::<Bp>(
+            Array2::<f32>::from_shape_fn((cfg.hidden_size, 24), |(i, j)| {
+                0.2 * ((i + j) as f32).cos()
+            }),
+            &device,
+        );
+        let z = Tensor::<Bp, 2>::zeros([48, 2], &device);
+        // Without lookahead (D=2, d_use=2): day 1 right-clamps to [8.0, 2.0].
+        let q_no = daily::<Bp>(&[[3.0, 1.0], [8.0, 2.0]]);
+        let out_no = head.forward(q_no, Tensor::<Bp, 2>::zeros([2, 4], &device), z.clone(), z.clone(), 48);
+        // With lookahead that REPEATS the last value [8.0, 2.0] exactly.
+        let q_la = daily::<Bp>(&[[3.0, 1.0], [8.0, 2.0], [8.0, 2.0]]);
+        let out_la = head.forward(q_la, Tensor::<Bp, 2>::zeros([2, 4], &device), z.clone(), z.clone(), 48);
+        let v_no: Vec<f32> = out_no.into_data().to_vec().unwrap();
+        let v_la: Vec<f32> = out_la.into_data().to_vec().unwrap();
+        let diff: f32 = v_no.iter().zip(&v_la).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff < 1e-6, "clamp-equivalent lookahead should be byte-identical (diff {diff})");
+    }
+
     /// Mass balance across a 7-day window: the routing forcing carries the same
     /// total water whether it is upsampled by the flat `repeat-24`
     /// interpolation (no NN) or by the disaggregation head — with OR without

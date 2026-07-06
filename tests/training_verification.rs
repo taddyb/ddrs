@@ -53,8 +53,11 @@ fn all_paths_exist(cfg: &Config) -> bool {
         return false;
     };
     // Mandatory paths.
-    let mandatory = [&ds.attributes, &ds.streamflow, &ds.observations, &ds.gages];
-    if !mandatory.iter().all(|p: &&std::path::PathBuf| p.exists()) {
+    if !ds.attributes.iter().all(|p| p.exists()) {
+        return false;
+    }
+    let scalar_paths = [&ds.streamflow, &ds.observations, &ds.gages];
+    if !scalar_paths.iter().all(|p| p.exists()) {
         return false;
     }
     // Adjacency zarr required to open MeritGagesDataset; absent = not available yet.

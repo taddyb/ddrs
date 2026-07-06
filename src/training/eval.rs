@@ -2,8 +2,9 @@
 //! `~/projects/ddr/scripts/train_and_test.py::_test` (lines 43-119).
 //!
 //! Unlike the training loop, batches iterate TIME (not gauges) and the
-//! network is the static all-gauges union. `carry_state=i>0` propagates
-//! engine state across consecutive chunks.
+//! network is the static all-gauges union. Cross-chunk routing state is
+//! threaded via `tensors.initial_state` (the final per-reach discharge column
+//! of each chunk is injected as the initial discharge of the next chunk).
 
 use burn::tensor::backend::Backend;
 use chrono::NaiveDate;
@@ -15,8 +16,8 @@ use crate::data::error::Result;
 use crate::data::TestWindow;
 use crate::nn::kan_head::KanHead;
 use crate::training::{
-    forward_eval, forward_with_frozen_params, tau_trim_and_downsample, FrozenParams, Metrics,
-    ZetaSums,
+    forward_eval_reaches, forward_with_frozen_params, scatter_add_by_group,
+    tau_trim_and_downsample, FrozenParams, Metrics, ZetaSums,
 };
 
 /// Source of MC parameters at eval time.
@@ -73,34 +74,95 @@ pub fn evaluate<I: Backend>(
     // Stays empty (steps == 0) when leakance is off or params are Frozen.
     let mut zeta_sums: ZetaSums<I> = ZetaSums::new();
 
-    // Helper: dispatch the forward based on EvalParams. Returns (n_all_gauges, chunk_hours).
-    let mut run_chunk = |window: &TestWindow, carry_state: bool| -> Result<Array2<f32>> {
+    // Helper: dispatch the forward based on EvalParams.
+    //
+    // Returns `(gauge_predictions, Option<per_reach_final_col>)`:
+    //   - gauge_predictions: (n_all_gauges, chunk_hours) — written into predictions_full.
+    //   - per_reach_final_col: the last discharge column over all n_reaches in the
+    //     eval network (not gauge-aggregated). `Some` for the KanHead path, `None`
+    //     for FrozenParams (legacy baseline path that does not support state injection).
+    //
+    // `initial_state`: when `Some`, sets `tensors.initial_state` before the forward so
+    // the engine starts from the previous chunk's final discharge instead of hotstarting.
+    let mut run_chunk = |window: &TestWindow, initial_state: Option<Vec<f32>>| -> Result<(Array2<f32>, Option<Vec<f32>>)> {
         let batch = dataset.collate_window(window)?;
-        let tensors = batch.to_tensors::<I>(device);
-        let pred = match &params {
+        let mut tensors = batch.to_tensors::<I>(device);
+        // Inject cross-chunk state into tensors before the forward pass. This
+        // takes priority over both the state cache and the hotstart heuristic.
+        if let Some(ref q0) = initial_state {
+            tensors.initial_state =
+                Some(burn::tensor::Tensor::<I, 1>::from_floats(q0.as_slice(), device));
+        }
+        match &params {
             EvalParams::Frozen(frozen) => {
-                forward_with_frozen_params::<I>(cfg, &tensors, frozen, device, carry_state)
+                // FrozenParams produces gauge-aggregated (G, T) directly with no
+                // per-reach output to extract. State injection is NOT supported on
+                // this path — it cold-restarts from hotstart on every chunk.
+                // This is an acceptable limitation: FrozenParams is a legacy
+                // verification baseline, never used in production eval.
+                let pred = forward_with_frozen_params::<I>(cfg, &tensors, frozen, device, false);
+                let dims = pred.dims();
+                debug_assert_eq!(dims[0], n_all_gauges);
+                debug_assert_eq!(dims[1], window.n_hourly());
+                let v: Vec<f32> = pred.into_data().into_vec().unwrap();
+                Ok((Array2::from_shape_vec((dims[0], dims[1]), v).unwrap(), None))
             }
             EvalParams::KanHead(head) => {
-                forward_eval::<I>(cfg, &tensors, head, device, carry_state, Some(&mut zeta_sums))
+                // forward_eval_reaches returns per-reach (n_reaches, chunk_hours).
+                // Capture the final column for cross-chunk state injection before
+                // scatter-adding to gauge predictions.
+                let runoff_reaches =
+                    forward_eval_reaches::<I>(cfg, &tensors, head, device, false, Some(&mut zeta_sums), None);
+                let [n_reaches, chunk_hours] = runoff_reaches.dims();
+                let final_col: Vec<f32> = runoff_reaches
+                    .clone()
+                    .slice([0..n_reaches, chunk_hours - 1..chunk_hours])
+                    .reshape([n_reaches])
+                    .into_data()
+                    .into_vec()
+                    .unwrap();
+                let pred = scatter_add_by_group(
+                    runoff_reaches,
+                    tensors.flat_indices.clone(),
+                    tensors.group_ids.clone(),
+                    tensors.num_gauges,
+                );
+                let dims = pred.dims();
+                debug_assert_eq!(dims[0], n_all_gauges);
+                debug_assert_eq!(dims[1], window.n_hourly());
+                let v: Vec<f32> = pred.into_data().into_vec().unwrap();
+                Ok((Array2::from_shape_vec((dims[0], dims[1]), v).unwrap(), Some(final_col)))
             }
-        };
-        let dims = pred.dims();
-        debug_assert_eq!(dims[0], n_all_gauges);
-        debug_assert_eq!(dims[1], window.n_hourly());
-        let v: Vec<f32> = pred.into_data().into_vec().unwrap();
-        Ok(Array2::from_shape_vec((dims[0], dims[1]), v).unwrap())
+        }
     };
 
-    // Iterate chunks. First chunk is cold-start (carry_state=false); all
-    // subsequent chunks carry the engine state.
+    // Iterate chunks. The first chunk cold-starts (initial_state=None); each
+    // subsequent chunk receives the previous chunk's final per-reach discharge
+    // column as its initial state, eliminating the 35-56 m³/s restarts that
+    // occurred when every chunk cold-hostarted from its own q'[0].
+    //
+    // FrozenParams note: the Frozen arm returns None for final_col, so
+    // prev_final_state stays None and every chunk cold-restarts. This is
+    // intentional — see the FrozenParams arm comment above.
     let n_chunks_total = n_days_total.div_ceil(batch_size_days);
+    let mut prev_final_state: Option<Vec<f32>> = None;
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
     while day_offset < n_days_total {
         let chunk_n = (n_days_total - day_offset).min(batch_size_days);
         let win = TestWindow::new(&axis, day_offset, chunk_n);
-        let pred_arr = run_chunk(&win, chunk_idx > 0)?;
+        if chunk_idx > 0 {
+            if let EvalParams::Frozen(_) = &params {
+                eprintln!(
+                    "WARN(eval): FrozenParams does not support cross-chunk state injection; \
+                     chunk {}/{} cold-restarts from hotstart (legacy baseline path).",
+                    chunk_idx + 1,
+                    n_chunks_total,
+                );
+            }
+        }
+        let (pred_arr, final_col) = run_chunk(&win, prev_final_state.take())?;
+        prev_final_state = final_col;
         let h_start = day_offset * 24;
         let h_end = h_start + win.n_hourly();
         predictions_full.slice_mut(s![.., h_start..h_end]).assign(&pred_arr);

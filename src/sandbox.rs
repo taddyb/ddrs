@@ -280,10 +280,11 @@ where
         k_d: None,
         d_gw: None,
         leakance_factor: None,
+        impervious_mask: None,
     };
 
     let mut mc = MuskingumCunge::<I>::new(inputs.config.clone(), device.clone());
-    mc.setup_inputs(routing_inputs, qprime, params, false);
+    mc.setup_inputs(routing_inputs, qprime, params, false, None);
     let out: Vec<f32> = mc.forward().into_data().to_vec().map_err(|e| {
         CliError::Runtime(format!("sandbox smoke: failed to extract output tensor: {e}"))
     })?;

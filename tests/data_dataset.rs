@@ -21,7 +21,13 @@ fn collate_one_batch_against_live_stores() {
     }
     let cfg = Config::from_yaml_file(cfg_path).expect("load yaml");
     let ds_paths = cfg.data_sources.as_ref().expect("data_sources");
-    for p in &[&ds_paths.attributes, &ds_paths.streamflow, &ds_paths.observations, &ds_paths.gages] {
+    for p in &ds_paths.attributes {
+        if !p.exists() {
+            eprintln!("skipping: {} not present", p.display());
+            return;
+        }
+    }
+    for p in [&ds_paths.streamflow, &ds_paths.observations, &ds_paths.gages] {
         if !p.exists() {
             eprintln!("skipping: {} not present", p.display());
             return;

@@ -36,6 +36,7 @@ fn leakance_params(n: usize, factor_norm: f32, device: &TestDevice) -> SpatialPa
         k_d: Some(Tensor::<AB, 1>::ones([n], device)),
         d_gw: Some(Tensor::<AB, 1>::zeros([n], device)),
         leakance_factor: Some(Tensor::<AB, 1>::ones([n], device) * factor_norm),
+        impervious_mask: None,
     }
 }
 
@@ -56,7 +57,7 @@ fn zeta_sums_none_when_leakance_off_or_not_enabled() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     let _ = mc.forward();
     assert!(mc.zeta_sums().is_none(), "no leakance params ⇒ no zeta sums");
@@ -67,7 +68,7 @@ fn zeta_sums_none_when_leakance_off_or_not_enabled() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let _ = mc.forward();
     assert!(mc.zeta_sums().is_none(), "accumulation off ⇒ no zeta sums");
@@ -84,7 +85,7 @@ fn accumulation_does_not_perturb_discharge() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out_plain = forward_vec(&mut mc_plain);
 
@@ -94,7 +95,7 @@ fn accumulation_does_not_perturb_discharge() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out_accum = forward_vec(&mut mc_accum);
 
@@ -128,7 +129,7 @@ fn accumulated_zeta_equals_headwater_qnext_difference() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     let out_off = forward_vec(&mut mc_off); // [n, 2] row-major
 
@@ -138,7 +139,7 @@ fn accumulated_zeta_equals_headwater_qnext_difference() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out_on = forward_vec(&mut mc_on);
 
@@ -168,7 +169,7 @@ fn zeta_is_linear_in_leakance_factor_on_single_step() {
             mock_routing_inputs(n, &device),
             mock_streamflow(t, n, &device),
             leakance_params(n, factor_norm, &device),
-            false,
+            false, None
         );
         let _ = mc.forward();
         let sums = mc.zeta_sums().expect("zeta sums present");
@@ -197,7 +198,7 @@ fn q_mean_matches_routed_discharge() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         leakance_params(n, 1.0, &device),
-        false,
+        false, None
     );
     let out = forward_vec(&mut mc); // [n, t] row-major
 
@@ -232,7 +233,7 @@ fn depth_and_area_z_are_leakance_independent_primitives() {
             mock_routing_inputs(n, &device),
             mock_streamflow(t, n, &device),
             leakance_params(n, factor_norm, &device),
-            false,
+            false, None
         );
         let _ = mc.forward();
         mc.zeta_sums().expect("zeta sums present")
@@ -262,4 +263,86 @@ fn depth_and_area_z_are_leakance_independent_primitives() {
             "zeta/(area_z·(depth−d_gw)) must be uniform across reaches: {ratios:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// PC2: Impervious mask tests on eval-time zeta accumulation
+// ---------------------------------------------------------------------------
+
+/// With mask[2]=0, reach 2's accumulated |zeta| must be exactly 0.
+/// Other reaches (losing config, d_gw=−2 m < depth) must have zeta > 0.
+#[test]
+fn zeta_accum_masked_reach_zero() {
+    let device = TestDevice::default();
+    let (n, t) = (5usize, 2usize);
+    let cfg = mock_config();
+
+    // Build a mask tensor (inner backend) with mask[2] = 0.
+    use burn::backend::NdArray;
+    let mask_data = vec![1.0f32, 1.0, 0.0, 1.0, 1.0];
+    let mask: burn::tensor::Tensor<NdArray<f32>, 1> =
+        burn::tensor::Tensor::from_floats(mask_data.as_slice(), &device);
+
+    let mut params = leakance_params(n, 1.0, &device);
+    params.impervious_mask = Some(mask);
+
+    let mut mc = MuskingumCunge::new(cfg, device.clone());
+    mc.enable_zeta_accumulation();
+    mc.setup_inputs(
+        mock_routing_inputs(n, &device),
+        mock_streamflow(t, n, &device),
+        params,
+        false,
+        None,
+    );
+    let _ = mc.forward();
+    let sums = mc.zeta_sums().expect("zeta sums present");
+    let abs_v: Vec<f32> = sums.abs.into_data().to_vec().unwrap();
+
+    assert_eq!(abs_v.len(), n);
+    assert!(
+        abs_v[2].abs() < 1e-9,
+        "masked reach 2: accumulated |zeta| must be 0, got {:.3e}", abs_v[2]
+    );
+    for i in [0usize, 1, 3, 4] {
+        assert!(
+            abs_v[i] > 0.0,
+            "unmasked losing reach {i}: accumulated |zeta| must be positive, got {:.3e}", abs_v[i]
+        );
+    }
+}
+
+/// All-ones mask must produce the same accumulated zeta as no-mask (None).
+#[test]
+fn zeta_accum_all_ones_mask_same_as_no_mask() {
+    let device = TestDevice::default();
+    let (n, t) = (5usize, 6usize);
+    let cfg = mock_config();
+
+    use burn::backend::NdArray;
+    let all_ones: burn::tensor::Tensor<NdArray<f32>, 1> =
+        burn::tensor::Tensor::ones([n], &device);
+
+    let run = |mask: Option<burn::tensor::Tensor<NdArray<f32>, 1>>| -> Vec<f32> {
+        let mut params = leakance_params(n, 1.0, &device);
+        params.impervious_mask = mask;
+        let mut mc = MuskingumCunge::new(cfg.clone(), device.clone());
+        mc.enable_zeta_accumulation();
+        mc.setup_inputs(
+            mock_routing_inputs(n, &device),
+            mock_streamflow(t, n, &device),
+            params,
+            false,
+            None,
+        );
+        let _ = mc.forward();
+        mc.zeta_sums().expect("zeta sums present").abs.into_data().to_vec().unwrap()
+    };
+
+    let abs_no_mask = run(None);
+    let abs_ones_mask = run(Some(all_ones));
+    assert_eq!(
+        abs_no_mask, abs_ones_mask,
+        "all-ones mask must produce byte-identical zeta accumulation as no-mask"
+    );
 }

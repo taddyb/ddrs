@@ -44,9 +44,59 @@ pub enum Workflow {
 // New top-level sections (SP-3)
 // ---------------------------------------------------------------------------
 
+/// Deserialize `attributes` as either a bare path string or a YAML list of
+/// path strings. A bare string maps to a single-element `Vec`; a list maps
+/// one-to-one. An empty list is a hard error. Preserved so all existing
+/// configs (which use the bare-path form) parse unchanged.
+fn deserialize_one_or_many_paths<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<std::path::PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct OneOrManyPaths;
+
+    impl<'de> Visitor<'de> for OneOrManyPaths {
+        type Value = Vec<std::path::PathBuf>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a path string or a list of path strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            Ok(vec![std::path::PathBuf::from(v)])
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Self::Value, E> {
+            Ok(vec![std::path::PathBuf::from(v)])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                paths.push(std::path::PathBuf::from(s));
+            }
+            if paths.is_empty() {
+                return Err(A::Error::custom(
+                    "data_sources.attributes: list must not be empty",
+                ));
+            }
+            Ok(paths)
+        }
+    }
+
+    deserializer.deserialize_any(OneOrManyPaths)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataSources {
-    pub attributes: std::path::PathBuf,
+    #[serde(deserialize_with = "deserialize_one_or_many_paths")]
+    pub attributes: Vec<std::path::PathBuf>,
     /// Pre-built CONUS adjacency zarr store. Either both adjacency keys must
     /// be present, or `geospatial_fabric` must be provided for managed builds.
     #[serde(default)]
@@ -95,6 +145,14 @@ pub struct Experiment {
     pub grad_clip_max_norm: Option<f32>,
     #[serde(default)]
     pub checkpoint: Option<std::path::PathBuf>,
+    /// Optional path to a day-boundary discharge state cache (netCDF produced
+    /// by `--mode state-cache` in the probe binary). When set, `collate`
+    /// attaches the window-start per-reach Q vector as
+    /// `RoutingBatch::initial_state`. Absent → `None` → all behavior
+    /// byte-identical to the no-cache path (the hotstart heuristic remains in
+    /// effect until Task 3 wires the state into the forward pass).
+    #[serde(default)]
+    pub state_cache: Option<std::path::PathBuf>,
     /// Training objective. Defaults to L1 (the historical loss) so configs
     /// without a `loss:` block are byte-for-byte unchanged in behavior.
     #[serde(default)]
@@ -332,6 +390,17 @@ pub struct Params {
     /// when on, `K_D`/`d_gw`/`leakance_factor` must be in
     /// `kan_head.learnable_parameters`, and `use_cuda_graphs` must be false.
     pub use_leakance: bool,
+    /// Phase C: clamp the leakance head term to `max(0, depth − d_gw)` so
+    /// gaining reaches (depth ≤ d_gw) produce zeta ≡ 0. Defaults to `true`
+    /// (Phase C on). Set to `false` to recover the prior unclamped behavior
+    /// byte-identically (e.g. for the recovery control answer key).
+    pub leakance_losing_only: bool,
+    /// Phase C: impervious hard-zero threshold. Reaches with
+    /// `corridor_impervious > threshold` get `zeta ≡ 0` and zero gradient to
+    /// their leakance params. Only applied when an impervious mask tensor is
+    /// supplied at routing setup (the mask is precomputed by the caller).
+    /// Default 0.7 (70% impervious surface ≈ concrete-lined channel).
+    pub leakance_impervious_threshold: f32,
 }
 
 impl Default for Params {
@@ -347,6 +416,8 @@ impl Default for Params {
             sparse_solver: SparseSolver::default(),
             use_cuda_graphs: false,
             use_leakance: false,
+            leakance_losing_only: true,
+            leakance_impervious_threshold: 0.7,
         }
     }
 }
@@ -366,6 +437,8 @@ struct ParamsRaw {
     sparse_solver: Option<String>,
     use_cuda_graphs: Option<bool>,
     use_leakance: Option<bool>,
+    leakance_losing_only: Option<bool>,
+    leakance_impervious_threshold: Option<f32>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -428,6 +501,12 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(b) = r.use_leakance {
             p.use_leakance = b;
+        }
+        if let Some(b) = r.leakance_losing_only {
+            p.leakance_losing_only = b;
+        }
+        if let Some(v) = r.leakance_impervious_threshold {
+            p.leakance_impervious_threshold = v;
         }
         p
     }
@@ -1043,6 +1122,75 @@ params:
     }
 
     #[test]
+    fn leakance_losing_only_defaults_true() {
+        assert!(Params::default().leakance_losing_only,
+            "leakance_losing_only must default to true for Phase C");
+    }
+
+    #[test]
+    fn leakance_losing_only_parses_false() {
+        // Explicit false preserves the prior unclamped behavior.
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  leakance_losing_only: false
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_losing_only_false.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(!cfg.params.leakance_losing_only);
+    }
+
+    #[test]
+    fn leakance_losing_only_absent_defaults_true() {
+        // Absent key must default to true so Phase C configs without it are on.
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_losing_only_absent.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(cfg.params.leakance_losing_only);
+    }
+
+    #[test]
+    fn leakance_impervious_threshold_defaults_to_0_7() {
+        assert!(
+            (Params::default().leakance_impervious_threshold - 0.7).abs() < 1e-9,
+            "leakance_impervious_threshold must default to 0.7"
+        );
+    }
+
+    #[test]
+    fn leakance_impervious_threshold_parses() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  leakance_impervious_threshold: 0.5
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_impervious_threshold.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(
+            (cfg.params.leakance_impervious_threshold - 0.5).abs() < 1e-9,
+            "leakance_impervious_threshold should parse to 0.5"
+        );
+    }
+
+    #[test]
     fn leakance_with_cuda_graphs_rejected() {
         let yaml = r#"
 mode: training
@@ -1060,6 +1208,89 @@ params:
         assert!(
             msg.contains("use_leakance") && msg.contains("use_cuda_graphs"),
             "expected leakance/graphs conflict, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn state_cache_absent_yields_none() {
+        // experiment block without state_cache → None (critical byte-identity invariant).
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert!(exp.state_cache.is_none(), "state_cache must default to None");
+    }
+
+    #[test]
+    fn state_cache_path_parses() {
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n\
+             state_cache: /tmp/state_cache.nc\n",
+        )
+        .expect("parse experiment with state_cache");
+        assert_eq!(
+            exp.state_cache.as_deref(),
+            Some(std::path::Path::new("/tmp/state_cache.nc"))
+        );
+    }
+
+    // ── attributes: one-or-many deserialization ──────────────────────────────
+
+    #[test]
+    fn attributes_bare_path_parses_as_single_element_vec() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_attrs_bare_path.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("bare path should parse");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert_eq!(ds.attributes.len(), 1);
+        assert_eq!(ds.attributes[0], std::path::PathBuf::from("/dev/null/attrs.nc"));
+    }
+
+    #[test]
+    fn attributes_yaml_list_parses_as_multi_element_vec() {
+        let ds_block = r#"
+data_sources:
+  attributes:
+    - /dev/null/global_attrs.nc
+    - /dev/null/channel_attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_attrs_list.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("list should parse");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert_eq!(ds.attributes.len(), 2);
+        assert_eq!(ds.attributes[0], std::path::PathBuf::from("/dev/null/global_attrs.nc"));
+        assert_eq!(ds.attributes[1], std::path::PathBuf::from("/dev/null/channel_attrs.nc"));
+    }
+
+    #[test]
+    fn attributes_empty_list_rejected() {
+        let ds_block = r#"
+data_sources:
+  attributes: []
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_attrs_empty.yaml", ds_block);
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must not be empty") || msg.contains("attributes"),
+            "expected empty-list error, got: {msg}"
         );
     }
 

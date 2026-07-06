@@ -25,6 +25,9 @@ pub(crate) struct LeakanceTensors<I: Backend> {
     pub k_d: Tensor<I, 1>,
     pub d_gw: Tensor<I, 1>,
     pub leakance_factor: Tensor<I, 1>,
+    /// Optional per-reach impervious hard-zero mask (0.0 = impervious, 1.0 = normal).
+    /// Constant, not autograd-tracked. `None` ⇒ all-ones (no-op, back-compat).
+    pub mask: Option<Tensor<I, 1>>,
 }
 
 /// Per-step eval-time leakance diagnostics captured by the zeta sink: this
@@ -46,6 +49,13 @@ pub(crate) struct LeakanceSaved<I: Backend> {
     pub k_d: I::FloatTensorPrimitive,
     pub d_gw: I::FloatTensorPrimitive,
     pub leakance_factor: I::FloatTensorPrimitive,
+    /// Mirrors `cfg.params.leakance_losing_only` at the moment of the forward
+    /// call, so the backward can apply the same gate without accessing the config.
+    pub losing_only: bool,
+    /// Mirrors the impervious mask from the forward (same 0/1 constant). Used by
+    /// the backward to gate `gzeta` identically to the forward's multiplication.
+    /// `None` ⇒ no mask applied (all-ones behavior, byte-identical to pre-Task-2).
+    pub mask: Option<I::FloatTensorPrimitive>,
 }
 
 /// Saved primitives used by `TimestepOp::backward`.
@@ -641,6 +651,9 @@ where
         let d_gw = wrap(state.leak.d_gw.clone());
         let leakance_factor = wrap(state.leak.leakance_factor.clone());
 
+        // Impervious mask: same 0/1 constant from the forward, used to gate gzeta.
+        let mask = state.leak.mask.as_ref().map(|m| wrap(m.clone()));
+
         // Capture zeta's 3 leakance-parent grads out of the hook so we can
         // register them after `core` returns. The hook runs zeta_backward with
         // `gb_rhs` (no pre-negation — zeta_backward negates internally) and
@@ -660,6 +673,8 @@ where
                 k_d.clone(),
                 d_gw.clone(),
                 leakance_factor.clone(),
+                state.leak.losing_only,
+                mask.clone(),
             );
             zeta_param_grads = Some((
                 unwrap(zg.g_k_d),
@@ -852,6 +867,7 @@ where
     // Leakance: compute zeta from the SHARED depth/q_eps (S6/S1) so it can be
     // subtracted from b_rhs below. `None` ⇒ this block is skipped entirely and
     // the kernel order is byte-identical to the pre-leakance path.
+    let losing_only = cfg.params.leakance_losing_only;
     let zeta_opt = leakance.as_ref().map(|lk| {
         let (_w, area_z, zeta) = crate::routing::leakance::zeta_forward::<I>(
             depth.clone(),
@@ -861,12 +877,16 @@ where
             lk.k_d.clone(),
             lk.d_gw.clone(),
             lk.leakance_factor.clone(),
+            losing_only,
+            lk.mask.clone(),
         );
         *leak_out = Some(LeakanceSaved {
             area_z: unwrap(area_z.clone()),
             k_d: unwrap(lk.k_d.clone()),
             d_gw: unwrap(lk.d_gw.clone()),
             leakance_factor: unwrap(lk.leakance_factor.clone()),
+            losing_only,
+            mask: lk.mask.as_ref().map(|m| unwrap(m.clone())),
         });
         zeta
     });
@@ -1437,6 +1457,11 @@ where
 /// Registers a [`TimestepLeakanceOp`] node (8 parents). Never uses CUDA graphs
 /// (leakance forces `use_cuda_graphs: false`).
 ///
+/// `impervious_mask`: optional per-reach 0/1 constant (inner backend, not
+/// autograd-tracked). `mask[i]=0` ⇒ reach i is treated as impervious and
+/// `zeta[i] ≡ 0` with zero gradient to leakance params. `None` ⇒ all-ones
+/// (no-op, byte-identical to the no-mask path).
+///
 /// `zeta_out`: eval-time diagnostic sink. When `Some`, receives this step's
 /// zeta, routed depth, and area_z (inner backend, no tape), recomputed from the
 /// SAME saved primitives the backward reads — so the reported value is exactly
@@ -1457,6 +1482,7 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     k_d_at: Tensor<Autodiff<I>, 1>,
     d_gw_at: Tensor<Autodiff<I>, 1>,
     leakance_factor_at: Tensor<Autodiff<I>, 1>,
+    impervious_mask: Option<Tensor<I, 1>>,
     zeta_out: Option<&mut Option<ZetaStepDiag<I>>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
@@ -1508,6 +1534,7 @@ where
         k_d: wrap(kd_p.clone()),
         d_gw: wrap(dgw_p.clone()),
         leakance_factor: wrap(fac_p.clone()),
+        mask: impervious_mask,
     };
     let mut leak_out: Option<LeakanceSaved<I>> = None;
 
@@ -1537,19 +1564,27 @@ where
     ] = saved;
     let _ = (fsi::DEPTH, fsi::BW_RAW);
 
-    // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · (depth − d_gw),
-    // recomputed from the saved primitives (cheap: 3 elementwise kernels,
-    // only when a sink is supplied). Depth and area_z ride along for the
-    // low-zeta diagnosis (driving head + structural-ceiling analyses).
+    // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · head, where
+    // head = max(0, depth − d_gw) when losing_only, else depth − d_gw.
+    // Recomputed from the saved primitives so the reported value is exactly
+    // what was subtracted from b_rhs (same losing_only flag as the forward).
     if let Some(out) = zeta_out {
         let depth = wrap(depth_p.clone());
         let area_z = wrap(leak.area_z.clone());
-        let m = depth.clone() - wrap(leak.d_gw.clone());
-        *out = Some(ZetaStepDiag {
-            zeta: wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * m,
-            depth,
-            area_z,
-        });
+        let m_raw = depth.clone() - wrap(leak.d_gw.clone());
+        let head = if leak.losing_only {
+            m_raw.clamp_min(0.0)
+        } else {
+            m_raw
+        };
+        let zeta_raw = wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * head;
+        // Apply the impervious mask so the reported zeta equals exactly what was
+        // subtracted from b_rhs (same mask applied in forward_chain_inner).
+        let zeta = match leak.mask.as_ref() {
+            Some(m) => zeta_raw * wrap(m.clone()),
+            None => zeta_raw,
+        };
+        *out = Some(ZetaStepDiag { zeta, depth, area_z });
     }
 
     let base = TimestepState::<I> {

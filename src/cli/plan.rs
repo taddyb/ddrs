@@ -182,12 +182,20 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
         source: "data_sources: missing".into(),
     })?;
     // Optional adjacency keys are only fingerprinted when explicitly configured.
-    let mut pairs: Vec<(String, PathBuf)> = vec![
-        ("attributes".into(),   data_sources.attributes.clone()),
-        ("streamflow".into(),   data_sources.streamflow.clone()),
-        ("observations".into(), data_sources.observations.clone()),
-        ("gages".into(),        data_sources.gages.clone()),
-    ];
+    // Single-path attributes uses "attributes" (backward compat); multi-path
+    // expands to "attributes_0", "attributes_1", … so lock files are stable
+    // for the existing single-path case.
+    let mut pairs: Vec<(String, PathBuf)> = Vec::new();
+    if data_sources.attributes.len() == 1 {
+        pairs.push(("attributes".into(), data_sources.attributes[0].clone()));
+    } else {
+        for (i, p) in data_sources.attributes.iter().enumerate() {
+            pairs.push((format!("attributes_{i}"), p.clone()));
+        }
+    }
+    pairs.push(("streamflow".into(),   data_sources.streamflow.clone()));
+    pairs.push(("observations".into(), data_sources.observations.clone()));
+    pairs.push(("gages".into(),        data_sources.gages.clone()));
     if let Some(p) = &data_sources.conus_adjacency {
         pairs.push(("conus_adjacency".into(), p.clone()));
     }

@@ -67,6 +67,7 @@ fn losing_config_params(
         k_d: Some(Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 1.0),
         d_gw: Some(Tensor::<Autodiff<InnerBackend>, 1>::zeros([n], device)),
         leakance_factor: Some(Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 1.0),
+        impervious_mask: None,
     }
 }
 
@@ -83,7 +84,7 @@ fn leakance_removes_water_on_losing_config() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     let out_no_leak = mc_no_leak.forward();
     let sum_no_leak: f32 = out_no_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
@@ -94,7 +95,7 @@ fn leakance_removes_water_on_losing_config() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         losing_config_params(n, &device),
-        false,
+        false, None
     );
     let out_leak = mc_leak.forward();
     let sum_leak: f32 = out_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
@@ -119,7 +120,7 @@ fn leakance_none_matches_baseline_chain() {
         mock_routing_inputs(n, &device),
         mock_streamflow(t, n, &device),
         mock_spatial_parameters(n, &device),
-        false,
+        false, None
     );
     let out = mc.forward();
     assert_eq!(out.dims(), [n, t], "output shape");
@@ -216,6 +217,8 @@ fn minimal_routing_tensors(
         num_gauges: 1,
         gauge_staids,
         window,
+        initial_state: None,
+        impervious_mask: None,
     }
 }
 

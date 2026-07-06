@@ -270,6 +270,7 @@ fn full_forward(
             leakance_factor: None,
         },
         false,
+        None,
     );
 
     let runoff: Tensor<B, 2> = engine.forward();

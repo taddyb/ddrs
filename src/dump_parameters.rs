@@ -16,6 +16,84 @@ use crate::nn::{KanHead, KanHeadConfig};
 use crate::routing::denormalize;
 use crate::training::load_kan_head;
 
+// ---------------------------------------------------------------------------
+// Attribute store + stats helpers shared by both dump functions
+// ---------------------------------------------------------------------------
+
+/// Open attribute stores and load per-variable normalization stats.
+///
+/// Routes on `ds.attributes.len()`: single path → existing drop-absent
+/// `AttributesStore::open`; multiple paths → `open_multi` (COMID-aligned, NaN-
+/// fill absent). Stats are loaded from each store's adjacent stats JSON and
+/// merged in `input_var_names` order.
+fn open_attrs_and_stats(
+    ds: &crate::config::DataSources,
+    input_var_names: &[String],
+    conus_order: &[crate::data::ids::Comid],
+) -> crate::data::error::Result<(AttributesStore, ndarray::Array1<f32>, ndarray::Array1<f32>)> {
+    if ds.attributes.len() == 1 {
+        let path = &ds.attributes[0];
+        let attrs = AttributesStore::open(path, input_var_names, conus_order)?;
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let fname = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let stats_path = dir
+            .join("statistics")
+            .join(format!("merit_attribute_statistics_{fname}.json"));
+        let stats = AttrStats::open(&stats_path)?;
+        Ok((attrs, stats.means_f32(input_var_names), stats.stds_f32(input_var_names)))
+    } else {
+        let attrs = AttributesStore::open_multi(&ds.attributes, input_var_names, conus_order)?;
+        let (means, stds) = dump_load_merged_stats(&ds.attributes, input_var_names)?;
+        Ok((attrs, means, stds))
+    }
+}
+
+/// Merge normalization stats from multiple adjacent stats files. Each path's
+/// adjacent JSON is checked in order; first match per variable wins. Hard-errors
+/// if any requested variable has no stats in any file.
+fn dump_load_merged_stats(
+    attr_paths: &[std::path::PathBuf],
+    attr_names: &[String],
+) -> crate::data::error::Result<(ndarray::Array1<f32>, ndarray::Array1<f32>)> {
+    let mut means_vec = vec![0.0f32; attr_names.len()];
+    let mut stds_vec = vec![1.0f32; attr_names.len()];
+    let mut found = vec![false; attr_names.len()];
+    for path in attr_paths {
+        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let fname = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let stats_path = dir
+            .join("statistics")
+            .join(format!("merit_attribute_statistics_{fname}.json"));
+        let Ok(stats) = AttrStats::open(&stats_path) else {
+            continue;
+        };
+        for (fi, name) in attr_names.iter().enumerate() {
+            if !found[fi] {
+                if let Some(row) = stats.by_name.get(name) {
+                    means_vec[fi] = row.mean as f32;
+                    stds_vec[fi] = row.std as f32;
+                    found[fi] = true;
+                }
+            }
+        }
+    }
+    for (fi, name) in attr_names.iter().enumerate() {
+        if !found[fi] {
+            return Err(crate::data::error::DataError::Malformed {
+                path: attr_paths[0].clone(),
+                message: format!("no statistics found for attribute '{name}'"),
+            });
+        }
+    }
+    Ok((ndarray::Array1::from(means_vec), ndarray::Array1::from(stds_vec)))
+}
+
 /// Run a trained KAN head over the full CONUS attribute matrix, denormalize
 /// into physical units, and write `(COMID, n, q_spatial, p_spatial, slope)`
 /// NetCDF4 to `output_path`. Returns the number of reaches written.
@@ -53,26 +131,9 @@ where
     eprintln!("CONUS reaches: {n_reaches}");
 
     // ---------- 2. Attributes + z-score stats ----------
-    eprintln!("opening attributes: {}", ds.attributes.display());
-    let attrs = AttributesStore::open(&ds.attributes, &head_cfg.input_var_names, &conus.order)
+    eprintln!("opening attributes: {} file(s)", ds.attributes.len());
+    let (attrs, means, stds) = open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.order)
         .map_err(|e| CliError::Other(Box::new(e)))?;
-
-    // Replicates the private `stats_path_from_attrs` helper in
-    // `src/data/dataset.rs:570`. Kept inline to avoid widening that fn's
-    // visibility just for one module.
-    let stats_path = {
-        let dir = ds.attributes.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fname = ds
-            .attributes
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        dir.join("statistics")
-            .join(format!("merit_attribute_statistics_{fname}.json"))
-    };
-    let stats = AttrStats::open(&stats_path).map_err(|e| CliError::Other(Box::new(e)))?;
-    let means = stats.means_f32(&head_cfg.input_var_names);
-    let stds = stats.stds_f32(&head_cfg.input_var_names);
 
     // ---------- 3. Build normalized (N, F) attribute tensor ----------
     // Mirrors `MeritGagesDataset::finalize_attrs` (`src/data/dataset.rs:403`).
@@ -292,23 +353,9 @@ where
     eprintln!("CONUS reaches: {n_reaches}");
 
     // ---------- 2. Attributes + z-score stats ----------
-    eprintln!("opening attributes: {}", ds.attributes.display());
-    let attrs = AttributesStore::open(&ds.attributes, &head_cfg.input_var_names, &conus.order)
+    eprintln!("opening attributes: {} file(s)", ds.attributes.len());
+    let (attrs, means, stds) = open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.order)
         .map_err(|e| CliError::Other(Box::new(e)))?;
-
-    let stats_path = {
-        let dir = ds.attributes.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fname = ds
-            .attributes
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        dir.join("statistics")
-            .join(format!("merit_attribute_statistics_{fname}.json"))
-    };
-    let stats = AttrStats::open(&stats_path).map_err(|e| CliError::Other(Box::new(e)))?;
-    let means = stats.means_f32(&head_cfg.input_var_names);
-    let stds = stats.stds_f32(&head_cfg.input_var_names);
 
     // ---------- 3. Build normalized (N, F) attribute tensor ----------
     let f = head_cfg.input_var_names.len();
@@ -605,6 +652,96 @@ pub fn write_zeta_netcdf(
         v.put_values(q_mean, ..)?;
         v.put_attribute("long_name", "eval-window mean routed discharge")?;
         v.put_attribute("units", "m^3/s")?;
+    }
+
+    Ok(())
+}
+
+/// Write the stage-1 adjoint reachability map: per-reach mean |g| and mean
+/// signed g of the training L1 loss w.r.t. the NORMALIZED leakance params,
+/// plus the window-coverage count. Dimension `COMID_probe` = union of reaches
+/// covered by the sampled batches.
+#[allow(clippy::too_many_arguments)]
+pub fn write_grad_netcdf(
+    path: &Path,
+    comids: &[i64],
+    grad_factor_abs: &[f32],
+    grad_factor_net: &[f32],
+    grad_dgw_abs: &[f32],
+    grad_dgw_net: &[f32],
+    grad_kd_abs: &[f32],
+    grad_kd_net: &[f32],
+    n_windows: &[i32],
+    checkpoint_label: &str,
+    n_batches: usize,
+    seed: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut file = if path.exists() {
+        netcdf::append(path)?
+    } else {
+        netcdf::create(path)?
+    };
+
+    file.add_attribute("probe_checkpoint", checkpoint_label)?;
+    file.add_attribute("probe_n_batches", n_batches as i64)?;
+    file.add_attribute("probe_seed", seed as i64)?;
+    file.add_attribute("probe_ddrs_version", env!("CARGO_PKG_VERSION"))?;
+    file.add_attribute(
+        "probe_note",
+        "adjoint reachability: d(L1)/d(normalized leakance params), mean over covering windows",
+    )?;
+
+    match file.dimension("COMID_probe") {
+        Some(d) if d.len() != comids.len() => {
+            return Err(format!(
+                "{}: existing COMID_probe has {} reaches, this probe covered {}",
+                path.display(),
+                d.len(),
+                comids.len()
+            )
+            .into());
+        }
+        Some(_) => {}
+        None => {
+            file.add_dimension("COMID_probe", comids.len())?;
+        }
+    }
+
+    if let Some(mut v) = file.variable_mut("COMID_probe") {
+        v.put_values(comids, ..)?;
+    } else {
+        let mut v = file.add_variable::<i64>("COMID_probe", &["COMID_probe"])?;
+        v.put_values(comids, ..)?;
+        v.put_attribute("long_name", "MERIT reach identifier (probe-covered network)")?;
+    }
+
+    let mut put = |name: &str,
+                   vals: &[f32],
+                   long_name: &str|
+     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(mut v) = file.variable_mut(name) {
+            v.put_values(vals, ..)?;
+        } else {
+            let mut v = file.add_variable::<f32>(name, &["COMID_probe"])?;
+            v.put_values(vals, ..)?;
+            v.put_attribute("long_name", long_name)?;
+            v.put_attribute("units", "dimensionless (per normalized param)")?;
+        }
+        Ok(())
+    };
+    put("grad_factor_abs", grad_factor_abs, "mean |dL1/d leakance_factor| per covering window")?;
+    put("grad_factor_net", grad_factor_net, "mean signed dL1/d leakance_factor")?;
+    put("grad_dgw_abs", grad_dgw_abs, "mean |dL1/d d_gw|")?;
+    put("grad_dgw_net", grad_dgw_net, "mean signed dL1/d d_gw")?;
+    put("grad_kd_abs", grad_kd_abs, "mean |dL1/d K_D|")?;
+    put("grad_kd_net", grad_kd_net, "mean signed dL1/d K_D")?;
+
+    if let Some(mut v) = file.variable_mut("n_windows") {
+        v.put_values(n_windows, ..)?;
+    } else {
+        let mut v = file.add_variable::<i32>("n_windows", &["COMID_probe"])?;
+        v.put_values(n_windows, ..)?;
+        v.put_attribute("long_name", "number of sampled windows covering this reach")?;
     }
 
     Ok(())

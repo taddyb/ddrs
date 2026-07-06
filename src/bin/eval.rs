@@ -21,10 +21,11 @@
 
 use std::path::PathBuf;
 
-use burn_cuda::Cuda;
 use clap::Parser;
 
-use ddrs::config::{Config, ConfigMode};
+use burn::tensor::backend::Backend;
+
+use ddrs::config::{Config, ConfigMode, SparseSolver};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::data::TestWindow;
 use ddrs::nn::kan_head::KanHead;
@@ -57,6 +58,10 @@ struct Cli {
     /// `<run_dir>/kan_parameters.nc`). Requires `params.use_leakance: true`.
     #[arg(long)]
     zeta_output: Option<PathBuf>,
+
+    /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
+    #[arg(long, default_value = "cuda")]
+    backend: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -71,16 +76,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
 
-    let cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
+    let mut cfg = Config::from_yaml_file_with_mode(&cli.config, ConfigMode::Testing)?;
+    match cli.backend.as_str() {
+        "cpu" => {
+            type I = burn::backend::NdArray<f32>;
+            let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+            cfg.params.sparse_solver = SparseSolver::Cpu;
+            cfg.params.use_cuda_graphs = false;
+            eprintln!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
+            run::<I>(cfg, cli, device)
+        }
+        "cuda" => {
+            type I = burn_cuda::Cuda<f32, i32>;
+            // Config-selected CUDA ordinal (top-level `device:` key).
+            let device = cubecl::cuda::CudaDevice::new(cfg.device);
+            run::<I>(cfg, cli, device)
+        }
+        other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
+    }
+}
+
+fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<dyn std::error::Error>> {
     let dataset = MeritGagesDataset::open(&cfg)?;
     println!(
         "sparse_solver={:?} use_cuda_graphs={}",
         cfg.params.sparse_solver, cfg.params.use_cuda_graphs,
     );
-
-    type I = Cuda<f32, i32>;
-    // Config-selected CUDA ordinal (top-level `device:` key).
-    let device = cubecl::cuda::CudaDevice::new(cfg.device);
 
     // Seed the backend RNG so MLP template init is deterministic across runs.
     // (Per BURN 0.21 docs at burn-backend-0.21.0/src/backend/base.rs:141 —

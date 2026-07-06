@@ -84,10 +84,11 @@ where
         k_d: None,
         d_gw: None,
         leakance_factor: None,
+        impervious_mask: None,
     };
 
     let mut mc = MuskingumCunge::<Inner>::new(inputs.config.clone(), device.clone());
-    mc.setup_inputs(routing_inputs, qprime, params, false);
+    mc.setup_inputs(routing_inputs, qprime, params, false, None);
     let out = mc.forward();
     out.into_data().to_vec().unwrap()
 }
