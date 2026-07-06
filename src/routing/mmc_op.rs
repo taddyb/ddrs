@@ -46,6 +46,9 @@ pub(crate) struct LeakanceSaved<I: Backend> {
     pub k_d: I::FloatTensorPrimitive,
     pub d_gw: I::FloatTensorPrimitive,
     pub leakance_factor: I::FloatTensorPrimitive,
+    /// Mirrors `cfg.params.leakance_losing_only` at the moment of the forward
+    /// call, so the backward can apply the same gate without accessing the config.
+    pub losing_only: bool,
 }
 
 /// Saved primitives used by `TimestepOp::backward`.
@@ -660,6 +663,7 @@ where
                 k_d.clone(),
                 d_gw.clone(),
                 leakance_factor.clone(),
+                state.leak.losing_only,
             );
             zeta_param_grads = Some((
                 unwrap(zg.g_k_d),
@@ -852,6 +856,7 @@ where
     // Leakance: compute zeta from the SHARED depth/q_eps (S6/S1) so it can be
     // subtracted from b_rhs below. `None` ⇒ this block is skipped entirely and
     // the kernel order is byte-identical to the pre-leakance path.
+    let losing_only = cfg.params.leakance_losing_only;
     let zeta_opt = leakance.as_ref().map(|lk| {
         let (_w, area_z, zeta) = crate::routing::leakance::zeta_forward::<I>(
             depth.clone(),
@@ -861,12 +866,14 @@ where
             lk.k_d.clone(),
             lk.d_gw.clone(),
             lk.leakance_factor.clone(),
+            losing_only,
         );
         *leak_out = Some(LeakanceSaved {
             area_z: unwrap(area_z.clone()),
             k_d: unwrap(lk.k_d.clone()),
             d_gw: unwrap(lk.d_gw.clone()),
             leakance_factor: unwrap(lk.leakance_factor.clone()),
+            losing_only,
         });
         zeta
     });
@@ -1537,16 +1544,21 @@ where
     ] = saved;
     let _ = (fsi::DEPTH, fsi::BW_RAW);
 
-    // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · (depth − d_gw),
-    // recomputed from the saved primitives (cheap: 3 elementwise kernels,
-    // only when a sink is supplied). Depth and area_z ride along for the
-    // low-zeta diagnosis (driving head + structural-ceiling analyses).
+    // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · head, where
+    // head = max(0, depth − d_gw) when losing_only, else depth − d_gw.
+    // Recomputed from the saved primitives so the reported value is exactly
+    // what was subtracted from b_rhs (same losing_only flag as the forward).
     if let Some(out) = zeta_out {
         let depth = wrap(depth_p.clone());
         let area_z = wrap(leak.area_z.clone());
-        let m = depth.clone() - wrap(leak.d_gw.clone());
+        let m_raw = depth.clone() - wrap(leak.d_gw.clone());
+        let head = if leak.losing_only {
+            m_raw.clamp_min(0.0)
+        } else {
+            m_raw
+        };
         *out = Some(ZetaStepDiag {
-            zeta: wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * m,
+            zeta: wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * head,
             depth,
             area_z,
         });

@@ -390,6 +390,11 @@ pub struct Params {
     /// when on, `K_D`/`d_gw`/`leakance_factor` must be in
     /// `kan_head.learnable_parameters`, and `use_cuda_graphs` must be false.
     pub use_leakance: bool,
+    /// Phase C: clamp the leakance head term to `max(0, depth − d_gw)` so
+    /// gaining reaches (depth ≤ d_gw) produce zeta ≡ 0. Defaults to `true`
+    /// (Phase C on). Set to `false` to recover the prior unclamped behavior
+    /// byte-identically (e.g. for the recovery control answer key).
+    pub leakance_losing_only: bool,
 }
 
 impl Default for Params {
@@ -405,6 +410,7 @@ impl Default for Params {
             sparse_solver: SparseSolver::default(),
             use_cuda_graphs: false,
             use_leakance: false,
+            leakance_losing_only: true,
         }
     }
 }
@@ -424,6 +430,7 @@ struct ParamsRaw {
     sparse_solver: Option<String>,
     use_cuda_graphs: Option<bool>,
     use_leakance: Option<bool>,
+    leakance_losing_only: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -486,6 +493,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(b) = r.use_leakance {
             p.use_leakance = b;
+        }
+        if let Some(b) = r.leakance_losing_only {
+            p.leakance_losing_only = b;
         }
         p
     }
@@ -1098,6 +1108,47 @@ params:
     #[test]
     fn use_leakance_defaults_false() {
         assert!(!Params::default().use_leakance);
+    }
+
+    #[test]
+    fn leakance_losing_only_defaults_true() {
+        assert!(Params::default().leakance_losing_only,
+            "leakance_losing_only must default to true for Phase C");
+    }
+
+    #[test]
+    fn leakance_losing_only_parses_false() {
+        // Explicit false preserves the prior unclamped behavior.
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  leakance_losing_only: false
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_losing_only_false.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(!cfg.params.leakance_losing_only);
+    }
+
+    #[test]
+    fn leakance_losing_only_absent_defaults_true() {
+        // Absent key must default to true so Phase C configs without it are on.
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_losing_only_absent.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(cfg.params.leakance_losing_only);
     }
 
     #[test]
