@@ -145,22 +145,50 @@ and `corridor_impervious` — learns zeta ≈ 0 there while staying positive on
 alluvial losing reaches, that's direct evidence it represents physics, not
 residual-fitting. If it can't make that distinction, that informs KILL.
 
-## 4. What the imminent recovery-control result tells us first
+## 4. The recovery-control result (2026-07-05) — RESOLVED
 
-The recovery control (running now) is the pre-flight for this experiment:
-- **R1 ≥ 0.5** (planted leakance recovered on the clean objective): the
-  objective fix worked; Phase C's PROMOTE scenario is live; proceed with
-  confidence.
-- **R1 ≈ 0** (still unrecoverable despite the clean objective): leakance is
-  fundamentally unidentifiable from gauge discharge (detectability floor, not
-  objective noise). Phase C will almost certainly KILL — and that IS the
-  paper. We still run Phase C on real gauges to confirm the metric leg on
-  observations (the recovery control uses synthetic obs), but the expected
-  outcome shifts to KILL/selective-equifinality.
+Recovery control on the CLEAN objective (state-cache hotstart, floor ~0.11 on
+losing gauges): **R1 = 0.008 — FAILED, identical to the 0.009 on the noisy
+objective.** The floor fix did NOT make planted leakance recoverable. But the
+supporting numbers reveal the *mechanism*, and it is the paper's core result:
 
-Either way the code (clamp, hard-zero, staged training, gate) is built and the
-experiment runs — the recovery result sets the expected verdict, not whether
-to proceed.
+| Metric | Clean objective | Old (noisy) |
+|---|---|---|
+| R1 recovery ratio (median A/key at planted) | **0.008** | 0.009 |
+| R3 loss gap (B−A)/B | **+71%** (A 0.50, B 1.74) | +42% |
+| A |zeta| active on fraction of reaches | **78.2%** | — |
+| A total network Σ\|zeta\| | **1485 m³/s** | — |
+| Planted reaches' share of A's total \|zeta\| | **0.1%** | — |
+| A's top-10 \|zeta\| reaches that are planted | **0/10** | — |
+| A planted-reach \|zeta\| vs non-planted | 5.3e-3 vs 3.4e-3 (no localization) | — |
+
+**The mechanism is equifinality by smearing, not suppression.** On the clean
+objective the leakance term is used MORE (loss gap widened 42%→71%; it is
+active on 78% of reaches, 1485 m³/s total) — yet it recovers NOTHING at the
+planted reaches (they hold 0.1% of the total; A's largest zeta is nowhere near
+a plant). The model spreads a little loss almost everywhere to match the
+gauge's INTEGRATED upstream loss, because the observation operator
+(gauge = Σ over the upstream network) does not constrain WHERE within the
+network the loss sits. Many spatial distributions of zeta yield the same
+gauge signal → the same loss; training picks a smeared minimum-norm solution,
+not the true localized one.
+
+**This is selective equifinality, measured with every confound removed:**
+the term is physically motivated, has live gradients (probe), is given
+informative inputs (Phase A), and trained on an objective whose noise floor is
+fixed on the relevant gauges (Phase B) — and it STILL cannot be localized,
+because gauge discharge integrates over the network and cannot invert to
+per-reach flux. The term genuinely helps aggregate fit while being spatially
+unidentifiable.
+
+**Consequence for Phase C's expected verdict:** PROMOTE is off the table —
+Leg 3 (external WTD consistency, which requires correct localization) must
+fail given the smearing. The live question narrows to REVISE vs KILL: does the
+smeared field nonetheless improve REAL-gauge NSE/KGE (Leg 1)? If yes → REVISE
+(helps prediction but the field is not physical → reparameterize / do not
+promote as physics). If no → KILL. Either way Phase C runs on real
+observations to settle the metric leg — the recovery result already settled
+identifiability.
 
 ## 5. Reproduce (once built)
 
