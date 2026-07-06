@@ -31,6 +31,7 @@ fn probed_params(
             k_d: Some(k_d.clone()),
             d_gw: Some(d_gw.clone()),
             leakance_factor: Some(factor.clone()),
+            impervious_mask: None,
         },
         [k_d, d_gw, factor],
     )
@@ -54,6 +55,7 @@ fn lifted_leaves_do_not_perturb_forward() {
             k_d: Some(Tensor::<AB, 1>::ones([n], &device)),
             d_gw: Some(Tensor::<AB, 1>::zeros([n], &device)),
             leakance_factor: Some(Tensor::<AB, 1>::ones([n], &device) * 0.5),
+            impervious_mask: None,
         },
         false,
         None,

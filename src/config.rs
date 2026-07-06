@@ -395,6 +395,12 @@ pub struct Params {
     /// (Phase C on). Set to `false` to recover the prior unclamped behavior
     /// byte-identically (e.g. for the recovery control answer key).
     pub leakance_losing_only: bool,
+    /// Phase C: impervious hard-zero threshold. Reaches with
+    /// `corridor_impervious > threshold` get `zeta ≡ 0` and zero gradient to
+    /// their leakance params. Only applied when an impervious mask tensor is
+    /// supplied at routing setup (the mask is precomputed by the caller).
+    /// Default 0.7 (70% impervious surface ≈ concrete-lined channel).
+    pub leakance_impervious_threshold: f32,
 }
 
 impl Default for Params {
@@ -411,6 +417,7 @@ impl Default for Params {
             use_cuda_graphs: false,
             use_leakance: false,
             leakance_losing_only: true,
+            leakance_impervious_threshold: 0.7,
         }
     }
 }
@@ -431,6 +438,7 @@ struct ParamsRaw {
     use_cuda_graphs: Option<bool>,
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
+    leakance_impervious_threshold: Option<f32>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -496,6 +504,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(b) = r.leakance_losing_only {
             p.leakance_losing_only = b;
+        }
+        if let Some(v) = r.leakance_impervious_threshold {
+            p.leakance_impervious_threshold = v;
         }
         p
     }
@@ -1149,6 +1160,34 @@ params:
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("load yaml");
         assert!(cfg.params.leakance_losing_only);
+    }
+
+    #[test]
+    fn leakance_impervious_threshold_defaults_to_0_7() {
+        assert!(
+            (Params::default().leakance_impervious_threshold - 0.7).abs() < 1e-9,
+            "leakance_impervious_threshold must default to 0.7"
+        );
+    }
+
+    #[test]
+    fn leakance_impervious_threshold_parses() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  use_leakance: true
+  leakance_impervious_threshold: 0.5
+"#;
+        let path = std::env::temp_dir().join("ddrs_leakance_impervious_threshold.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("load yaml");
+        assert!(
+            (cfg.params.leakance_impervious_threshold - 0.5).abs() < 1e-9,
+            "leakance_impervious_threshold should parse to 0.5"
+        );
     }
 
     #[test]

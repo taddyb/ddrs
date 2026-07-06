@@ -272,6 +272,7 @@ fn forward_gradients_flow_to_spatial_params() {
         k_d: None,
         d_gw: None,
         leakance_factor: None,
+        impervious_mask: None,
     };
     mc.setup_inputs(inputs, streamflow_ad, params, false, None);
     let out = mc.forward();
@@ -364,6 +365,7 @@ fn carry_state_preserves_discharge_across_setup_inputs_calls() {
         k_d: None,
         d_gw: None,
         leakance_factor: None,
+        impervious_mask: None,
     };
     mc.setup_inputs(inputs1, q_window_1, params1, false, None);
     let _ = mc.forward();
@@ -386,6 +388,7 @@ fn carry_state_preserves_discharge_across_setup_inputs_calls() {
         k_d: None,
         d_gw: None,
         leakance_factor: None,
+        impervious_mask: None,
     };
     mc.setup_inputs(inputs2, q_window_2, params2, true, None);
     let state_after_carry_setup: Vec<f32> = mc

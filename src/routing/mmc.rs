@@ -55,6 +55,11 @@ pub struct SpatialParameters<I: Backend> {
     pub k_d: Option<Tensor<Autodiff<I>, 1>>,
     pub d_gw: Option<Tensor<Autodiff<I>, 1>>,
     pub leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
+    /// Optional per-reach impervious hard-zero mask (0.0 = impervious, 1.0 = normal).
+    /// Precomputed from `corridor_impervious` attribute by the caller using
+    /// `cfg.params.leakance_impervious_threshold`. Constant, not autograd-tracked
+    /// (inner backend `I`, no gradient). `None` ⇒ all-ones (no-op, back-compat).
+    pub impervious_mask: Option<Tensor<I, 1>>,
 }
 
 /// Differentiable Muskingum-Cunge routing engine.
@@ -72,6 +77,9 @@ pub struct MuskingumCunge<I: Backend> {
     k_d: Option<Tensor<Autodiff<I>, 1>>,
     d_gw: Option<Tensor<Autodiff<I>, 1>>,
     leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
+    /// Per-reach impervious hard-zero mask (inner backend, constant).
+    /// Stored from `SpatialParameters::impervious_mask` at `setup_inputs`.
+    impervious_mask: Option<Tensor<I, 1>>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -141,6 +149,7 @@ impl<I: Backend> MuskingumCunge<I> {
             k_d: None,
             d_gw: None,
             leakance_factor: None,
+            impervious_mask: None,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -231,6 +240,8 @@ impl<I: Backend> MuskingumCunge<I> {
         self.d_gw = params.d_gw.map(|t| denormalize(t, ranges.d_gw, log_space.iter().any(|s| s == "d_gw")));
         self.leakance_factor = params.leakance_factor
             .map(|t| denormalize(t, ranges.leakance_factor, log_space.iter().any(|s| s == "leakance_factor")));
+        // Impervious mask: constant, no denormalization — stored as-is.
+        self.impervious_mask = params.impervious_mask;
 
         match initial_state {
             Some(q0_ext) => {
@@ -375,6 +386,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
                 k_d, d_gw, leakance_factor,
+                self.impervious_mask.as_ref().cloned(),
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
             );
             if let Some(diag) = zeta_step {

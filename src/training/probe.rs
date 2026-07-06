@@ -95,6 +95,7 @@ pub fn probe_forward<I: Backend>(
             k_d: Some(leaves.k_d.clone()),
             d_gw: Some(leaves.d_gw.clone()),
             leakance_factor: Some(leaves.factor.clone()),
+            impervious_mask: None,
         },
         false,
         tensors.initial_state.clone(),

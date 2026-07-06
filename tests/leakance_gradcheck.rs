@@ -126,6 +126,7 @@ fn run_forward(
     kd: &[f32],
     dgw: &[f32],
     fac: &[f32],
+    mask: Option<Tensor<I, 1>>,
     req: Option<Parent>,
 ) -> (Tensor<AB, 1>, GradTensors) {
     let mk = |data: &[f32], on: bool| -> Tensor<AB, 1> {
@@ -163,6 +164,7 @@ fn run_forward(
         kd_t.clone(),
         dgw_t.clone(),
         fac_t.clone(),
+        mask,
         None,
     );
 
@@ -208,6 +210,7 @@ fn compute_analytical_grad(parent: Parent, dgw: &[f32]) -> Vec<f32> {
         &kd_vec(),
         dgw,
         &fac_vec(),
+        None,
         Some(parent),
     );
 
@@ -266,7 +269,8 @@ fn compute_fd_grad(parent: Parent, base_dgw_in: &[f32]) -> Vec<f32> {
             kd,
             dgw,
             fac,
-            None,
+            None, // mask
+            None, // req
         );
         let v: Vec<f32> = q_next.sum().into_data().to_vec::<f32>().unwrap();
         v[0]
@@ -550,6 +554,121 @@ fn gradcheck_mixed_chain_k_d_per_reach_gate() {
             rel < REL_TOL || abs_diff < ABS_TOL,
             "mixed: K_D [{i}] (losing) analytical={:.3e} fd={:.3e} rel={rel:.3e}",
             a[i], fd[i]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PC2: Impervious hard-zero mask tests
+// ---------------------------------------------------------------------------
+
+/// 5-reach linear chain (N=4 reaches used here for consistency with the
+/// existing chain constant). Mask [1,1,0,1] (reach 2 is impervious): K_D /
+/// d_gw / leakance_factor analytical grads for reach 2 must be exactly 0.
+/// Reaches 0,1,3 must retain finite non-zero leakance grads (losing config:
+/// d_gw=0 < depth).
+#[test]
+fn gradcheck_impervious_mask_reach2_zero() {
+    let cfg = mock_cfg();
+    let adj = linear_chain_sparse();
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &device);
+
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let length_vec = adj.length_m.clone();
+    let slope_vec = adj.slope.clone();
+
+    // mask[2] = 0.0 (impervious); all others = 1.0.
+    let mask_data = vec![1.0f32, 1.0, 0.0, 1.0];
+    let mask: Tensor<I, 1> = Tensor::from_floats(mask_data.as_slice(), &device);
+
+    for &parent in &[Parent::KD, Parent::DGW, Parent::LeakFactor] {
+        let (q_next, parents) = run_forward(
+            &cfg, &pattern, &assembler, &device,
+            &n_vec, &qsp_vec, &psp_vec, &qt_vec, &qpt_vec,
+            &length_vec, &slope_vec, &x_storage_vec(),
+            &kd_vec(), &dgw_vec(), &fac_vec(),
+            Some(mask.clone()),
+            Some(parent),
+        );
+        let grads = q_next.sum().backward();
+        let g: Vec<f32> = match parent {
+            Parent::KD => parents.kd.grad(&grads).expect("grad on K_D"),
+            Parent::DGW => parents.dgw.grad(&grads).expect("grad on d_gw"),
+            Parent::LeakFactor => parents.fac.grad(&grads).expect("grad on leakance_factor"),
+            _ => unreachable!(),
+        }.into_data().to_vec::<f32>().unwrap();
+
+        let name = match parent {
+            Parent::KD => "K_D",
+            Parent::DGW => "d_gw",
+            Parent::LeakFactor => "leakance_factor",
+            _ => unreachable!(),
+        };
+        println!("--- {name} masked (reach 2 impervious) ---");
+        for (i, &av) in g.iter().enumerate() {
+            println!("  [{i}] analytical={av:.3e}");
+        }
+        assert!(
+            g[2].abs() < 1e-9,
+            "impervious mask: {name} analytical grad at reach 2 must be 0, got {:.3e}", g[2]
+        );
+        // Losing reaches 0,1,3 must retain finite grads.
+        for i in [0usize, 1, 3] {
+            assert!(
+                g[i].is_finite(),
+                "impervious mask: {name} grad at losing reach {i} must be finite, got {:.3e}", g[i]
+            );
+        }
+    }
+}
+
+/// All-ones mask must produce byte-identical grads to no-mask (None).
+#[test]
+fn gradcheck_all_ones_mask_equals_no_mask() {
+    let cfg = mock_cfg();
+    let adj = linear_chain_sparse();
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &device);
+
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let length_vec = adj.length_m.clone();
+    let slope_vec = adj.slope.clone();
+
+    let all_ones: Tensor<I, 1> = Tensor::ones([N], &device);
+
+    let run_grad = |mask: Option<Tensor<I, 1>>, parent: Parent| -> Vec<f32> {
+        let (q_next, parents) = run_forward(
+            &cfg, &pattern, &assembler, &device,
+            &n_vec, &qsp_vec, &psp_vec, &qt_vec, &qpt_vec,
+            &length_vec, &slope_vec, &x_storage_vec(),
+            &kd_vec(), &dgw_vec(), &fac_vec(),
+            mask,
+            Some(parent),
+        );
+        let grads = q_next.sum().backward();
+        match parent {
+            Parent::KD => parents.kd.grad(&grads).expect("grad on K_D"),
+            Parent::DGW => parents.dgw.grad(&grads).expect("grad on d_gw"),
+            Parent::LeakFactor => parents.fac.grad(&grads).expect("grad on leakance_factor"),
+            _ => unreachable!(),
+        }.into_data().to_vec::<f32>().unwrap()
+    };
+
+    for &parent in &[Parent::KD, Parent::DGW, Parent::LeakFactor] {
+        let g_no_mask = run_grad(None, parent);
+        let g_ones = run_grad(Some(all_ones.clone()), parent);
+        let name = match parent {
+            Parent::KD => "K_D",
+            Parent::DGW => "d_gw",
+            Parent::LeakFactor => "leakance_factor",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            g_no_mask, g_ones,
+            "all-ones mask must be byte-identical to no-mask for {name}"
         );
     }
 }

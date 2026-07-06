@@ -17,6 +17,10 @@ use burn::tensor::{backend::Backend, Tensor};
 /// `losing_only=true` (Phase C default): clamps the head term to
 /// `max(0, depth − d_gw)` so gaining reaches (depth ≤ d_gw) produce zeta ≡ 0.
 /// `losing_only=false`: unclamped `depth − d_gw` (back-compat with prior runs).
+///
+/// `mask`: optional per-reach 0/1 constant (not autograd-tracked). When
+/// `mask[i] = 0.0`, the reach is treated as impervious and `zeta[i] ≡ 0`.
+/// `None` (or all-ones mask) ⇒ no-op, byte-identical to the no-mask path.
 pub fn zeta_forward<I: Backend>(
     depth: Tensor<I, 1>,
     p_spatial: Tensor<I, 1>,
@@ -26,6 +30,7 @@ pub fn zeta_forward<I: Backend>(
     d_gw: Tensor<I, 1>,
     leakance_factor: Tensor<I, 1>,
     losing_only: bool,
+    mask: Option<Tensor<I, 1>>,
 ) -> (Tensor<I, 1>, Tensor<I, 1>, Tensor<I, 1>) {
     let p_depth = p_spatial * depth.clone();
     let width_z = p_depth.powf(q_eps);
@@ -36,6 +41,10 @@ pub fn zeta_forward<I: Backend>(
         depth - d_gw
     };
     let zeta = leakance_factor * area_z.clone() * k_d * m;
+    let zeta = match mask {
+        Some(msk) => zeta * msk,
+        None => zeta,
+    };
     (width_z, area_z, zeta)
 }
 
@@ -60,6 +69,7 @@ mod tests {
             t(&[2.0]), t(&[10.0]), t(&[0.5]), t(&[1000.0]),
             t(&[1e-6]), t(&[1.0]), t(&[0.5]),
             false,  // unclamped path for hand-computed test
+            None,   // no impervious mask
         );
         assert!((w.into_scalar() - 4.472_136).abs() < 1e-4);
         assert!((a.into_scalar() - 4472.136).abs() < 1e-1);
@@ -73,6 +83,7 @@ mod tests {
             t(&[1.0]), t(&[10.0]), t(&[0.5]), t(&[1000.0]),
             t(&[1e-6]), t(&[3.0]), t(&[1.0]),
             false,
+            None,
         );
         assert!(z.into_scalar() < 0.0);
     }
@@ -84,6 +95,7 @@ mod tests {
             t(&[1.0]), t(&[10.0]), t(&[0.5]), t(&[1000.0]),
             t(&[1e-6]), t(&[3.0]), t(&[1.0]),
             true,
+            None,
         );
         assert_eq!(z.into_scalar(), 0.0);
     }
@@ -95,11 +107,13 @@ mod tests {
             t(&[2.0]), t(&[10.0]), t(&[0.5]), t(&[1000.0]),
             t(&[1e-6]), t(&[1.0]), t(&[0.5]),
             true,
+            None,
         );
         let (_, _, z_unclamped) = zeta_forward::<B>(
             t(&[2.0]), t(&[10.0]), t(&[0.5]), t(&[1000.0]),
             t(&[1e-6]), t(&[1.0]), t(&[0.5]),
             false,
+            None,
         );
         assert!((z_clamped.into_scalar() - z_unclamped.into_scalar()).abs() < 1e-9);
     }
@@ -113,6 +127,11 @@ mod tests {
 /// backward gates all grads to zero where `depth ≤ d_gw` (gaining reaches).
 /// Subgradient at the kink (depth == d_gw) is defined as 0 (measure-zero;
 /// finite-difference safe). `losing_only=false`: unclamped backward.
+///
+/// `mask`: same 0/1 constant passed to the forward. `mask[i]=0` ⇒ the
+/// forward multiplied zeta by 0 at reach i, so `∂L/∂(leakance_params[i]) = 0`
+/// here too. Applied as a multiplier on `gzeta` before all grad computations.
+/// `None` ⇒ no-op (no mask was applied in the forward).
 pub struct ZetaGrads<I: Backend> {
     pub g_k_d: Tensor<I, 1>,
     pub g_d_gw: Tensor<I, 1>,
@@ -133,6 +152,7 @@ pub fn zeta_backward<I: Backend>(
     d_gw: Tensor<I, 1>,
     leakance_factor: Tensor<I, 1>,
     losing_only: bool,
+    mask: Option<Tensor<I, 1>>,
 ) -> ZetaGrads<I> {
     // When losing_only: gate gzeta to zero where depth ≤ d_gw (gaining reaches).
     // Since every grad is a product of gzeta, gating it zeros all outputs at once.
@@ -142,6 +162,12 @@ pub fn zeta_backward<I: Backend>(
         (-g_b).mask_fill(gate.bool_not(), 0.0)
     } else {
         -g_b
+    };
+    // Impervious mask: forward multiplied zeta by mask, so chain rule multiplies
+    // gzeta by mask too. mask[i]=0 ⇒ all leakance-param grads at reach i are 0.
+    let gzeta = match mask {
+        Some(msk) => gzeta * msk,
+        None => gzeta,
     };
     let m = depth.clone() - d_gw;
     let g_leakance_factor = gzeta.clone() * area_z.clone() * k_d.clone() * m.clone();
@@ -185,6 +211,7 @@ mod grad_tests {
             s(1.0), s(depth as f32), s(p as f32), s(q_eps as f32),
             s(area_z as f32), s(k_d as f32), s(d_gw as f32), s(factor as f32),
             false,  // unclamped — matches the zeta_scalar FD helper
+            None,   // no impervious mask
         );
         let h = 1e-4;
         let cd = |f: &dyn Fn(f64) -> f64, x: f64| (f(x + h) - f(x - h)) / (2.0 * h);
