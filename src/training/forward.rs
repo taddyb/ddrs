@@ -229,6 +229,12 @@ pub fn forward<I: Backend>(
         (None, None, None)
     };
 
+    // Extract the inner-backend mask (no grad) from the Autodiff tensor.
+    // `None` when the attribute was absent or leakance is off — byte-identical
+    // to the pre-mask behavior.
+    let impervious_mask: Option<Tensor<I, 1>> =
+        tensors.impervious_mask.as_ref().map(|m| m.clone().inner());
+
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
     engine.setup_inputs(
         RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage },
@@ -240,7 +246,7 @@ pub fn forward<I: Backend>(
             k_d,
             d_gw,
             leakance_factor,
-            impervious_mask: None,
+            impervious_mask,
         },
         carry_state,
         tensors.initial_state.clone(),
@@ -490,7 +496,7 @@ fn forward_eval_core<I: Backend>(
             k_d: k_d_ad,
             d_gw: d_gw_ad,
             leakance_factor: leakance_factor_ad,
-            impervious_mask: None,
+            impervious_mask: tensors.impervious_mask.clone(),
         },
         carry_state,
         initial_state_ad,

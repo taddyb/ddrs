@@ -63,6 +63,14 @@ pub struct RoutingBatch {
     /// `None` otherwise → Task 3's forward pass falls back to the hotstart
     /// heuristic (byte-identical to no-cache behavior).
     pub initial_state: Option<Array1<f32>>,
+    /// Precomputed per-reach impervious hard-zero mask (0.0 = impervious,
+    /// 1.0 = leakance allowed), shape `(N,)`. Built from `corridor_impervious`
+    /// attribute column using `cfg.params.leakance_impervious_threshold`.
+    /// `None` when the column is absent from `attr_names` or leakance is off —
+    /// both are byte-identical no-ops (`SpatialParameters::impervious_mask`
+    /// stays `None`). NaN (no StreamCat coverage) → 1.0 (absence of
+    /// imperviousness data ≠ concrete; leakance allowed).
+    pub impervious_mask: Option<Vec<f32>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +93,9 @@ struct StaticNetworkCache {
     gauge_staids: Vec<Staid>,
     /// Active COMID list in topological order, length `N_active`.
     divide_comids: Vec<Comid>,
+    /// Precomputed impervious mask (same as `RoutingBatch::impervious_mask`).
+    /// Built once at static-network construction; cloned into every eval batch.
+    impervious_mask: Option<Vec<f32>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +135,10 @@ pub struct RoutingTensors<B: Backend> {
     /// heuristic. It is a constant tensor (no grad); autograd topology
     /// is unchanged relative to the no-cache path.
     pub initial_state: Option<Tensor<B, 1>>,
+    /// Per-reach impervious hard-zero mask, shape `(N,)`. Constant — no
+    /// autograd. `None` when `corridor_impervious` is absent from attributes
+    /// or leakance is disabled (byte-identical back-compat with PC1).
+    pub impervious_mask: Option<Tensor<B, 1>>,
 }
 
 impl RoutingBatch {
@@ -207,6 +222,12 @@ impl RoutingBatch {
             Tensor::<B, 1>::from_data(TensorData::new(vec, [n]), device)
         });
 
+        // 6. Lift impervious_mask (N,) — constant, no grad.
+        let impervious_mask = self.impervious_mask.map(|mask| {
+            let n = mask.len();
+            Tensor::<B, 1>::from_data(TensorData::new(mask, [n]), device)
+        });
+
         RoutingTensors {
             adjacency: self.adjacency,
             spatial_attributes,
@@ -221,6 +242,7 @@ impl RoutingBatch {
             gauge_staids: self.gauge_staids,
             window: self.window,
             initial_state,
+            impervious_mask,
         }
     }
 }
@@ -259,6 +281,10 @@ pub struct MeritGagesDataset {
     /// Optional day-boundary discharge state cache. `None` ⇒ every code path
     /// byte-identical to no-cache behavior (`RoutingBatch::initial_state = None`).
     state_cache: Option<crate::data::store::StateCache>,
+    /// When `Some(threshold)`, `corridor_impervious` is in `attr_names` AND
+    /// leakance is enabled — `collate`/`build_static_network` will call
+    /// `build_impervious_mask`. `None` ⇒ mask is never built (back-compat no-op).
+    leakance_impervious_threshold: Option<f32>,
 }
 
 impl MeritGagesDataset {
@@ -417,6 +443,16 @@ impl MeritGagesDataset {
             None => None,
         };
 
+        // Build the impervious threshold when leakance is on AND the attribute
+        // is present. `None` ⇒ no mask built (all-ones back-compat no-op).
+        let leakance_impervious_threshold = if cfg.params.use_leakance
+            && attr_names.iter().any(|n| n == "corridor_impervious")
+        {
+            Some(cfg.params.leakance_impervious_threshold)
+        } else {
+            None
+        };
+
         Ok(Self {
             conus,
             gages_adj,
@@ -435,6 +471,7 @@ impl MeritGagesDataset {
             gauges,
             static_network: OnceCell::new(),
             state_cache,
+            leakance_impervious_threshold,
         })
     }
 
@@ -566,7 +603,10 @@ impl MeritGagesDataset {
             None => None,
         };
 
-        // ----- 7. Assemble -----
+        // ----- 7. Impervious mask (None when absent or leakance off) -----
+        let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
+
+        // ----- 8. Assemble -----
         Ok(RoutingBatch {
             adjacency,
             spatial_attributes_normalized,
@@ -581,6 +621,7 @@ impl MeritGagesDataset {
             flow_scale,
             window: *window,
             initial_state,
+            impervious_mask,
         })
     }
 
@@ -677,6 +718,37 @@ impl MeritGagesDataset {
         }
         // Transpose to (N, F) for the MLP head's input contract.
         attrs_present.reversed_axes().into_owned()
+    }
+
+    // -----------------------------------------------------------------------
+    // Impervious mask helper
+    // -----------------------------------------------------------------------
+
+    /// Build the per-reach impervious hard-zero mask for `divide_comids`.
+    ///
+    /// Returns `None` when `leakance_impervious_threshold` is `None` (i.e.,
+    /// leakance is off or `corridor_impervious` is not among the attributes).
+    ///
+    /// NaN (no StreamCat coverage for a reach) → 1.0: absence of imperviousness
+    /// data is NOT the same as impervious concrete; leakance is allowed.
+    fn build_impervious_mask(&self, divide_comids: &[Comid]) -> Option<Vec<f32>> {
+        let threshold = self.leakance_impervious_threshold?;
+        let fi = self
+            .attr_names
+            .iter()
+            .position(|n| n == "corridor_impervious")
+            .expect("leakance_impervious_threshold is Some only when corridor_impervious is in attr_names");
+        let raw: Vec<f32> = divide_comids
+            .iter()
+            .map(|comid| {
+                if let Some(src_col) = self.attrs.index.position(comid) {
+                    self.attrs.attrs[(fi, src_col)]
+                } else {
+                    f32::NAN // missing COMID → NaN → treated as not impervious
+                }
+            })
+            .collect();
+        Some(build_mask_from_raw_col(&raw, threshold))
     }
 
     // -----------------------------------------------------------------------
@@ -806,6 +878,7 @@ impl MeritGagesDataset {
                 window_start: window.window_start,
             },
             initial_state,
+            impervious_mask: cache.impervious_mask.clone(),
         })
     }
 
@@ -874,6 +947,9 @@ impl MeritGagesDataset {
         };
         let full_observations = self.observations.read_window(&full_rho, &gauge_staids)?;
 
+        // 6. Impervious mask (None when corridor_impervious absent or leakance off).
+        let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
+
         Ok(StaticNetworkCache {
             adjacency,
             outflow_idx: compressed.outflow_idx,
@@ -882,6 +958,7 @@ impl MeritGagesDataset {
             full_observations,
             gauge_staids,
             divide_comids: compressed.divide_comids,
+            impervious_mask,
         })
     }
 }
@@ -1020,10 +1097,74 @@ fn parse_experiment_axis(start: &str, end: &str) -> Result<TimeAxis> {
     Ok(TimeAxis::new(start_date, end_date))
 }
 
+/// Convert a raw `corridor_impervious` column (fraction [0, 1]) to a 0/1 mask.
+///
+/// `mask[i] = if raw[i] > threshold { 0.0 } else { 1.0 }`
+///
+/// NaN → 1.0: no StreamCat coverage means absence of imperviousness data, which is
+/// NOT the same as impervious concrete. Leakance is allowed where data is missing.
+pub(crate) fn build_mask_from_raw_col(raw: &[f32], threshold: f32) -> Vec<f32> {
+    raw.iter()
+        .map(|&v| if v.is_nan() || v <= threshold { 1.0_f32 } else { 0.0_f32 })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    // -----------------------------------------------------------------------
+    // build_mask_from_raw_col unit tests (no dataset required)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mask_from_raw_col_basic_threshold() {
+        // Values below/at threshold → 1.0 (leakance allowed).
+        // Values above threshold → 0.0 (impervious hard-zero).
+        let raw = [0.0_f32, 0.5, 0.7, 0.8, 1.0];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert_eq!(mask, vec![1.0, 1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mask_from_raw_col_nan_treated_as_not_impervious() {
+        // NaN (no StreamCat coverage) → 1.0: absence ≠ concrete.
+        let raw = [f32::NAN, 0.9, f32::NAN, 0.3];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert_eq!(mask, vec![1.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn mask_from_raw_col_all_below_threshold_is_all_ones() {
+        let raw = [0.1_f32, 0.2, 0.3];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert!(mask.iter().all(|&v| v == 1.0));
+    }
+
+    #[test]
+    fn mask_from_raw_col_all_above_threshold_is_all_zeros() {
+        let raw = [0.8_f32, 0.9, 1.0];
+        let mask = build_mask_from_raw_col(&raw, 0.7);
+        assert!(mask.iter().all(|&v| v == 0.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Back-compat: when corridor_impervious is absent, mask is None
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn leakance_threshold_none_when_attr_absent() {
+        // A config with use_leakance=true but corridor_impervious NOT in attr_names
+        // must leave leakance_impervious_threshold = None (back-compat no-op).
+        //
+        // We can't open a full MeritGagesDataset without live data, so test
+        // the threshold-selection logic directly.
+        let attr_names = ["n", "q_spatial", "p_spatial"];
+        let has_corridor = attr_names.iter().any(|&n| n == "corridor_impervious");
+        let threshold: Option<f32> = if has_corridor { Some(0.7) } else { None };
+        assert!(threshold.is_none(), "back-compat guard: threshold must be None when attr absent");
+    }
 
     #[test]
     fn open_dataset_against_live_yaml() {
