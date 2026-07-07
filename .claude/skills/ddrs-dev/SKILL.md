@@ -1,5 +1,5 @@
 ---
-name: ddrs-overview
+name: ddrs-dev
 description: Use at the start of any ddrs task to route to the right sub-skill. Load this first when the task type is unclear, when onboarding to the project, or when multiple skill areas may apply.
 ---
 
