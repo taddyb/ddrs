@@ -174,11 +174,16 @@ def load_qprime_for_eval_network(
     store_path: str,
     eval_comids: np.ndarray,
     is_hourly: bool = False,
+    hourly_block_days: int = 30,
 ) -> np.ndarray:
     """Load daily Q' [n_eval, n_days_eval] for eval_comids over eval window.
 
     Missing COMIDs (not in store) are 0-filled.
-    Hourly stores are aggregated to daily means before returning.
+    Hourly stores are aggregated to daily means via chunked time iteration
+    (hourly_block_days at a time) to cap peak RSS — loading the full eval
+    window at once (132k reaches × 131k hours) exceeds 70 GB.
+    Peak extra memory per block: n_cov × (block_days*24) × 4 bytes
+    = 132336 × 720 × 4 ≈ 0.38 GB at the default block size of 30 days.
     """
     try:
         import icechunk as ic  # type: ignore
@@ -203,41 +208,64 @@ def load_qprime_for_eval_network(
         return np.zeros((len(eval_comids), n_days_eval), dtype=np.float32)
 
     time_vals = ds["time"].values
-    t_mask    = (time_vals >= EVAL_START) & (time_vals <= EVAL_END)
 
-    # For hourly stores, round to day boundaries before masking
     if is_hourly:
+        # --- Chunked hourly → daily aggregation ---
+        # Compute day-grouping metadata once, then iterate hour-blocks.
         days_only = time_vals.astype("datetime64[D]")
         t_mask    = (days_only >= EVAL_START.astype("datetime64[D]")) & (
                      days_only <= EVAL_END.astype("datetime64[D]"))
-
-    # xarray select: covered_comids (label-based), then integer-position select for time
-    ds_sel = ds["Qr"].sel(
-        divide_id=covered_comids,
-    ).isel(time=np.flatnonzero(t_mask))
-    # Load into memory
-    qr_covered = ds_sel.values.astype(np.float32)  # [n_covered, n_hours_or_days]
-
-    if is_hourly:
-        # Aggregate hours → daily means
-        # Group by calendar day using the time coordinate
-        t_sub = time_vals[t_mask]
-        days  = t_sub.astype("datetime64[D]")
-        unique_days, inv_idx = np.unique(days, return_inverse=True)
+        hour_indices = np.flatnonzero(t_mask)
+        t_sub        = time_vals[hour_indices]
+        days_sub     = t_sub.astype("datetime64[D]")
+        unique_days, inv_idx = np.unique(days_sub, return_inverse=True)
         n_days = len(unique_days)
-        n_cov  = qr_covered.shape[0]
-        # Vectorized NaN-safe accumulation: NaN hours excluded from both sum and
-        # denominator count so missing data doesn't bias the daily mean toward zero.
-        qr_safe    = np.where(np.isfinite(qr_covered), qr_covered, 0.0).astype(np.float32)
-        fin_mask   = np.isfinite(qr_covered).astype(np.int32)  # 1 = valid hour
+        n_cov  = covered_mask.sum()
+        print(f"    hourly eval window: {len(hour_indices)} hours → {n_days} days"
+              f"  (block_days={hourly_block_days})")
+
+        # Persistent NaN-safe accumulators
         qr_daily   = np.zeros((n_cov, n_days), dtype=np.float32)
         fin_counts = np.zeros((n_cov, n_days), dtype=np.int32)
-        np.add.at(qr_daily.T,   inv_idx, qr_safe.T)   # sum valid values per (reach, day)
-        np.add.at(fin_counts.T, inv_idx, fin_mask.T)   # count valid hours per (reach, day)
-        qr_daily  /= np.maximum(fin_counts, 1)
-        qr_covered = qr_daily
 
-    n_days_eval = qr_covered.shape[1]
+        # Pre-select by divide_id once to avoid repeated label lookup per block
+        qr_da       = ds["Qr"].sel(divide_id=covered_comids)
+        block_hours = hourly_block_days * 24
+        n_hours     = len(hour_indices)
+        block_num   = 0
+        h0 = 0
+        while h0 < n_hours:
+            h1        = min(h0 + block_hours, n_hours)
+            h_slice   = hour_indices[h0:h1]
+            inv_local = inv_idx[h0:h1]
+            block_num += 1
+            if block_num % 12 == 1 or h1 == n_hours:
+                print(f"      block {block_num}: hours [{h0}, {h1}) / {n_hours}"
+                      f"  days [{inv_local[0]}, {inv_local[-1]}]")
+                sys.stdout.flush()
+
+            block   = qr_da.isel(time=h_slice).values.astype(np.float32)
+            qr_safe = np.where(np.isfinite(block), block, 0.0)
+            fin_blk = np.isfinite(block).astype(np.int32)
+            del block
+
+            np.add.at(qr_daily.T,   inv_local, qr_safe.T)
+            np.add.at(fin_counts.T, inv_local, fin_blk.T)
+            del qr_safe, fin_blk
+
+            h0 = h1
+
+        qr_daily  /= np.maximum(fin_counts, 1)
+        qr_covered  = qr_daily
+        n_days_eval = n_days
+
+    else:
+        # --- Daily path: load entire eval window at once (fine for daily stores) ---
+        t_mask     = (time_vals >= EVAL_START) & (time_vals <= EVAL_END)
+        qr_covered = ds["Qr"].sel(
+            divide_id=covered_comids,
+        ).isel(time=np.flatnonzero(t_mask)).values.astype(np.float32)
+        n_days_eval = qr_covered.shape[1]
 
     # Assemble output: 0-fill for uncovered
     q_out = np.zeros((len(eval_comids), n_days_eval), dtype=np.float32)
@@ -504,6 +532,7 @@ def stage_b(
     store_path: str,
     is_hourly: bool = False,
     force: bool = False,
+    hourly_block_days: int = 30,
 ) -> dict:
     """Compute per-reach median / p10 / p90 / mean of SUMMED upstream daily Q' over eval window.
 
@@ -529,7 +558,8 @@ def stage_b(
     local_up    = stage_a_data["local_up"]
 
     # Load per-reach direct Q' over eval window
-    q = load_qprime_for_eval_network(store_path, eval_comids, is_hourly=is_hourly)
+    q = load_qprime_for_eval_network(store_path, eval_comids, is_hourly=is_hourly,
+                                     hourly_block_days=hourly_block_days)
     # q: [n_eval, n_days] f32
 
     n_eval, n_days = q.shape
@@ -1524,6 +1554,9 @@ def main() -> None:
                     help="Subsample gauges for fast dev run")
     ap.add_argument("--force",      action="store_true",
                     help="Recompute all stages even if cache exists")
+    ap.add_argument("--hourly-block-days", default=30, type=int,
+                    help="Block size in days for chunked hourly Q' loading (default: 30)."
+                         " Use a large value (e.g. 9999) to load in one shot for testing.")
     args = ap.parse_args()
 
     ddrs_root = Path(args.ddrs_root)
@@ -1547,7 +1580,8 @@ def main() -> None:
                       is_hourly=False, force=args.force)
     # Stage B — hourly-lstm (R3)
     b_hourly = stage_b(out_dir, a_data, "hourly", HOURLY_LSTM_STORE,
-                       is_hourly=True, force=args.force)
+                       is_hourly=True, force=args.force,
+                       hourly_block_days=args.hourly_block_days)
     # Stage B — common (dHBV2)
     b_common = stage_b(out_dir, a_data, "common", COMMON_STORE,
                        is_hourly=False, force=args.force)
