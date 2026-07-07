@@ -98,10 +98,17 @@ The top-level `device:` key in `ddrs.yaml` selects the CUDA device ordinal
 ### Data-source groups
 
 Named "save files" for the `data_sources:` block, stored under
-`config/sources/<name>.yaml` (tracked in git; `conus`, `conus-hourly`, and
-`global` ship in-repo — `conus-hourly` adds the hourly AORC precip store that
-drives the daily→hourly disaggregation head). Switching datasets never
-requires hand-editing `ddrs.yaml`:
+`config/sources/<name>.yaml` (tracked in git). Groups that ship in-repo:
+
+| Group | Streamflow source | Notes |
+|---|---|---|
+| `conus` | dHBV2 UH retrospective (daily) | Default CONUS source |
+| `conus-hourly` | same + AORC precip | Enables daily→hourly disaggregation head |
+| `global` | Global zarr-v2 Q' stores | 2.94M reaches |
+| `daily-lstm` | CudaLSTM unit-catchment forwards (daily) | NH LSTM output |
+| `hourly-lstm` | MTS-LSTM unit-catchment forwards (hourly-native) | NH LSTM output; no disagg |
+
+Switching datasets never requires hand-editing `ddrs.yaml`:
 
 ```bash
 ddrs sources list                # '*' marks the group matching ddrs.yaml
@@ -112,7 +119,30 @@ ddrs sources use  <name>         # splice group into ddrs.yaml + refresh sources
 Starting a global train from a CONUS workspace is just
 `ddrs sources use global && ddrs plan && ddrs run`.
 
-### Leakance (experimental)
+### Importing a Q' store
+
+Any icechunk store that follows the DDR Q' contract
+(`Qr(divide_id, time)` f32 m³/s, CF `days since`/`hours since` time axis)
+can be registered as a source group in one command:
+
+```bash
+ddrs import <store-path> --dry-run          # validate + coverage report only
+ddrs import <store-path> --name <group>     # validate + register config/sources/<group>.yaml
+```
+
+The reader auto-detects resolution from the CF time units — hourly stores are
+sliced natively (no repeat-24 interpolation, no disaggregation head — combining
+a disaggregation config with an hourly-native source is rejected at dataset
+open). The `daily-lstm` and `hourly-lstm` groups were registered this way;
+they can serve as reference examples. After import:
+
+```bash
+ddrs sources use <group> && ddrs plan && ddrs run --workflow train
+```
+
+See `docs/nh-qprime-store-contract.md` for the full producer/consumer contract.
+
+### Leakance (experimental, NOT promotable)
 
 An optional groundwater–surface-water loss term
 `zeta = leakance_factor · area_z · K_D · (depth − d_gw)` subtracted from the
@@ -123,12 +153,13 @@ enabling it takes `params.use_leakance: true`, the three extra
 section in `CLAUDE.md` for the exact keys, and
 `config/experiments/leakance_hourly_on.yaml` for a complete working config.
 
-On leakance runs, the eval phase also writes a per-reach zeta diagnostic to
-`.ddrs/runs/<id>/kan_parameters.nc`: `zeta` (eval-window mean |zeta|, m³/s)
-and `zeta_net` (signed mean; positive = losing reach). For an existing
-checkpoint, the standalone eval binary produces the same file via
-`--zeta-output` without retraining. Experiment findings:
-`docs/2026-07-01-leakance-hourly-findings.md`.
+**Research status (2026-07-06): NOT PROMOTABLE.** A full identifiability
+campaign established that zeta cannot be constrained from gauged discharge alone
+— the observation operator (gauge = Σ upstream zeta) is not invertible for the
+per-reach distribution. The term is code-complete and gradient-exact; it is left
+in place as the anchor for the paper's selective-equifinality axis. Do not
+attempt to promote it without reading
+`docs/2026-07-06-leakance-nogo-scientific-summary.md`.
 
 ### Advanced
 

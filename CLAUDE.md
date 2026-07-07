@@ -222,7 +222,7 @@ implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
 | `.ddrs/runs/<id>/config.yaml` | `ddrs run` | **Snapshot of the config that produced this run** (the `plan_bootstrap` source) |
 | `.ddrs/runs/<id>/run.log` | `ddrs run` (`cli::tee`) | Timestamped tee of the run's stdout+stderr (fd-level, so CUDA stderr and child processes are captured) |
-| `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*.mpk` | `ddrs run` train phase | KAN checkpoints |
+| `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*/` | `ddrs run` train phase | KAN checkpoint directories (`head.mpk`, `optim.mpk`, `state.json`) |
 | `.ddrs/runs/<id>/plot/kan_parameters.nc` | `ddrs run --plot` (`dump_parameters`) | Per-COMID denormalised KAN outputs (full CONUS) |
 | `.ddrs/runs/<id>/kan_parameters.nc` | `ddrs run` eval phase (leakance only), or `eval --zeta-output` | Eval-window per-reach `zeta`/`zeta_net` diagnostic (eval-network COMIDs) |
 
@@ -252,7 +252,7 @@ src/
 ├── sparse.rs             CSR pattern + triangular solve + custom Backward
 ├── geometry.rs           Trapezoidal channel geometry (Leopold & Maddock)
 ├── config.rs             Parameter ranges, attribute minimums, log-space flags
-├── nn/kan_head.rs        KAN head via rskan v0.1.0 — Linear→KanLayer×N→Linear
+├── nn/kan_head.rs        KAN head via rskan v0.1.3 — Linear→KanLayer×N→Linear
 │                         →Sigmoid, no inter-block ReLU (matches DDR `kan.py`).
 │                         Same I/O contract as the prior MLP placeholder.
 └── data/                 Live readers for DDR's training data (no export step)
@@ -417,22 +417,23 @@ target/release/eval --config config/experiments/leakance_hourly_on.yaml \
 The training path never enables accumulation — zero overhead, autograd
 untouched (invariant 4 intact).
 
-**Status (2026-07-01).** The 2×2 (leakance × forcing) is DONE on valid
-binaries — see `docs/2026-07-01-leakance-hourly-findings.md`. The interaction
-came out hypothesis-consistent: on the losing-stream subset leakance helps
-under hourly forcing (ΔNSE +0.0005, ΔKGE +0.0018, 55.5% of gauges improve) and
-hurts under daily (ΔNSE −0.0017, ΔKGE −0.0009, 35.6%). Leakance is
-identifiable (K_D pinned at the `1e-6` CEILING — the inverse of DDR's
-sub-floor collapse; `leakance_factor` interior ≈0.33). The zeta export
-measured the third gate criterion: **|zeta| > 0.01 m³/s on 10.4% of the
-64,892 eval reaches** (median 6.4e-4; 53.7% net-losing) — clears the ≥10%
-proxy bar with no headroom. Verdict: **GO, marginal** — all three criteria
-met. Top follow-up: widen the `K_D` range past `1e-6` (it's binding and
-likely clips both zeta magnitude and the skill delta), then promote or
-document NO-GO.
-Spec:
-`docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`.
-Plan: `docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md`.
+**Status (2026-07-06): CLOSED — NOT PROMOTABLE.** The full identifiability
+campaign (2×2 experiment, low-zeta diagnosis, gradient probe, synthetic
+recoverability control, Phase C promotion gate) concluded with a definitive
+**NO-GO**. The binding constraint is the observation operator: a gauge measures
+Σ(zeta) over its upstream network — the sum is not invertible for the per-reach
+distribution. Training constrains aggregate loss but carries zero information
+about per-reach flux. Every rival explanation (gradient starvation, objective
+noise, uninformative inputs, sign ambiguity) was individually REFUTED. The term
+remains code-complete and gradient-exact; do not remove it. Do NOT re-open
+without reading `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3.
+
+Campaign docs (chronological):
+`docs/2026-07-01-leakance-hourly-findings.md`,
+`docs/2026-07-02-leakance-diagnosis-findings.md`,
+`docs/2026-07-03-zeta-gradient-probe-findings.md`,
+`docs/2026-07-04-synthetic-recoverability-findings.md`,
+`docs/2026-07-06-phase-c-findings.md`.
 
 ## Baseline
 
