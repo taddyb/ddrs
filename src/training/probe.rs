@@ -2,11 +2,13 @@
 //! docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md).
 //!
 //! Gradients of the training objective w.r.t. the per-reach NORMALIZED
-//! leakance parameters, read at a FIXED head (no optimizer step ever).
+//! KAN-head outputs, read at a FIXED head (no optimizer step ever).
 //! `lift_leaf` detaches a head output from its graph and re-registers it as
-//! an autograd leaf; the analytical `TimestepLeakanceOp` backward already
-//! provides exact grads for these parents (tests/leakance_gradcheck.rs), so
-//! no Backward impl is touched.
+//! an autograd leaf; the caller selects which outputs to lift via the `lift`
+//! slice passed to `probe_forward`. For leakance params the analytical
+//! `TimestepLeakanceOp` backward provides exact grads; for routing params
+//! (n, q_spatial, p_spatial) the standard autograd tape is used.
+//! No Backward impl is touched.
 
 use std::collections::HashMap;
 
@@ -27,28 +29,48 @@ pub fn lift_leaf<I: Backend>(t: Tensor<Autodiff<I>, 1>) -> Tensor<Autodiff<I>, 1
     Tensor::<Autodiff<I>, 1>::from_inner(t.inner()).require_grad()
 }
 
-/// The three lifted per-reach leaves (normalized [0,1] space).
+/// Lifted per-reach leaves (normalized [0,1] space), keyed by head output name.
 pub struct ProbeLeaves<I: Backend> {
-    pub k_d: Tensor<Autodiff<I>, 1>,
-    pub d_gw: Tensor<Autodiff<I>, 1>,
-    pub factor: Tensor<Autodiff<I>, 1>,
+    /// `(head output name, lifted normalized tensor)` — order matches `lift`
+    /// argument passed to `probe_forward`.
+    pub leaves: Vec<(String, Tensor<Autodiff<I>, 1>)>,
+}
+
+impl<I: Backend> ProbeLeaves<I> {
+    /// Return the lifted tensor for `name`. Panics if `name` was not in `lift`.
+    pub fn get(&self, name: &str) -> &Tensor<Autodiff<I>, 1> {
+        &self.leaves
+            .iter()
+            .find(|(n, _)| n.as_str() == name)
+            .unwrap_or_else(|| panic!("probe leaf '{name}' not lifted"))
+            .1
+    }
 }
 
 /// Training-path forward (mirrors `forward`, src/training/forward.rs:169-252)
-/// with the leakance vectors lifted as leaves. Returns gauge-hourly
+/// with selected head outputs lifted as autograd leaves. Returns gauge-hourly
 /// predictions plus the leaves to read grads from after `loss.backward()`.
+///
+/// `lift` — KAN-head output names to detach and re-lift as `require_grad`
+/// leaves. Every name must appear in the head's output map. When `lift`
+/// contains any of `K_D`, `d_gw`, or `leakance_factor`,
+/// `cfg.params.use_leakance` must be `true` (asserted).
 pub fn probe_forward<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<Autodiff<I>>,
     head: &KanHead<Autodiff<I>>,
     device: &I::Device,
+    lift: &[String],
 ) -> (Tensor<Autodiff<I>, 2>, ProbeLeaves<I>) {
-    assert!(cfg.params.use_leakance, "probe requires params.use_leakance");
-    let params_map = head.forward(tensors.spatial_attributes.clone());
+    let wants_leakance = lift
+        .iter()
+        .any(|p| matches!(p.as_str(), "K_D" | "d_gw" | "leakance_factor"));
+    assert!(
+        !wants_leakance || cfg.params.use_leakance,
+        "probing leakance params requires params.use_leakance: true"
+    );
 
-    let n_param = params_map.get("n").expect("head missing n").clone();
-    let q_param = params_map.get("q_spatial").expect("head missing q_spatial").clone();
-    let p_param = params_map.get("p_spatial").cloned();
+    let params_map = head.forward(tensors.spatial_attributes.clone());
 
     let n_active = tensors.adjacency.n;
     let x_storage: Tensor<Autodiff<I>, 1> = match params_map.get("x_storage") {
@@ -72,16 +94,78 @@ pub fn probe_forward<I: Backend>(
         None => tensors.q_prime.clone(),
     };
 
-    for key in &["K_D", "d_gw", "leakance_factor"] {
-        assert!(
-            params_map.contains_key(*key),
-            "probe: head missing '{key}' — use a leakance experiment config"
-        );
-    }
+    // Build lifted leaves from the params_map for every name in `lift`.
     let leaves = ProbeLeaves {
-        k_d: lift_leaf::<I>(params_map.get("K_D").unwrap().clone()),
-        d_gw: lift_leaf::<I>(params_map.get("d_gw").unwrap().clone()),
-        factor: lift_leaf::<I>(params_map.get("leakance_factor").unwrap().clone()),
+        leaves: lift
+            .iter()
+            .map(|name| {
+                let t = params_map
+                    .get(name.as_str())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "head does not emit `{name}` — is it in \
+                             kan_head.learnable_parameters?"
+                        )
+                    })
+                    .clone();
+                (name.clone(), lift_leaf::<I>(t))
+            })
+            .collect(),
+    };
+
+    // For each param: use the lifted tensor when it was requested, else use
+    // the un-lifted version from params_map. Mirrors forward.rs:182-230.
+    let n_param = leaves
+        .leaves
+        .iter()
+        .find(|(n, _)| n.as_str() == "n")
+        .map(|(_, t)| t.clone())
+        .unwrap_or_else(|| params_map.get("n").expect("head missing n").clone());
+    let q_param = leaves
+        .leaves
+        .iter()
+        .find(|(n, _)| n.as_str() == "q_spatial")
+        .map(|(_, t)| t.clone())
+        .unwrap_or_else(|| {
+            params_map.get("q_spatial").expect("head missing q_spatial").clone()
+        });
+    let p_param: Option<Tensor<Autodiff<I>, 1>> = leaves
+        .leaves
+        .iter()
+        .find(|(n, _)| n.as_str() == "p_spatial")
+        .map(|(_, t)| t.clone())
+        .or_else(|| params_map.get("p_spatial").cloned());
+
+    // Mirrors forward.rs:214-230: leakance fields only when use_leakance is true.
+    let (k_d, d_gw, leakance_factor) = if cfg.params.use_leakance {
+        for key in &["K_D", "d_gw", "leakance_factor"] {
+            assert!(
+                params_map.contains_key(*key),
+                "use_leakance=true but KAN head is missing key '{key}' — \
+                 add it to kan_head.learnable_parameters in your config"
+            );
+        }
+        let k_d = leaves
+            .leaves
+            .iter()
+            .find(|(n, _)| n.as_str() == "K_D")
+            .map(|(_, t)| t.clone())
+            .or_else(|| params_map.get("K_D").cloned());
+        let d_gw = leaves
+            .leaves
+            .iter()
+            .find(|(n, _)| n.as_str() == "d_gw")
+            .map(|(_, t)| t.clone())
+            .or_else(|| params_map.get("d_gw").cloned());
+        let leakance_factor = leaves
+            .leaves
+            .iter()
+            .find(|(n, _)| n.as_str() == "leakance_factor")
+            .map(|(_, t)| t.clone())
+            .or_else(|| params_map.get("leakance_factor").cloned());
+        (k_d, d_gw, leakance_factor)
+    } else {
+        (None, None, None)
     };
 
     let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
@@ -92,9 +176,9 @@ pub fn probe_forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
-            k_d: Some(leaves.k_d.clone()),
-            d_gw: Some(leaves.d_gw.clone()),
-            leakance_factor: Some(leaves.factor.clone()),
+            k_d,
+            d_gw,
+            leakance_factor,
             impervious_mask: None,
         },
         false,
@@ -136,9 +220,17 @@ impl GradAccum {
         }
     }
 
-    /// `(comid, abs_sum, net_sum, count)` sorted by COMID.
+    /// `(comid, abs_sum, net_sum, count)` sorted by COMID (consuming).
     pub fn into_sorted_rows(self) -> Vec<(i64, f64, f64, u32)> {
         let mut rows: Vec<_> = self.map.into_iter().map(|(c, (a, s, n))| (c, a, s, n)).collect();
+        rows.sort_by_key(|r| r.0);
+        rows
+    }
+
+    /// `(comid, abs_sum, net_sum, count)` sorted by COMID (borrowing).
+    pub fn sorted_rows(&self) -> Vec<(i64, f64, f64, u32)> {
+        let mut rows: Vec<_> =
+            self.map.iter().map(|(&c, &(a, s, n))| (c, a, s, n)).collect();
         rows.sort_by_key(|r| r.0);
         rows
     }
