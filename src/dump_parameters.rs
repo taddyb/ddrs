@@ -755,6 +755,9 @@ pub fn write_grad_netcdf(
 ///
 /// `mean_abs[i]` and `mean_net[i]` must both have the same length as `comids`
 /// and correspond to `param_names[i]`.
+///
+/// All accums must cover the identical COMID set (guaranteed by the grad loop's
+/// fail-fast non-finite check); asserts instead of NaN-filling a union.
 #[allow(clippy::too_many_arguments)]
 pub fn write_param_grad_netcdf(
     path: &Path,

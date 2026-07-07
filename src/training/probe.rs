@@ -227,13 +227,6 @@ impl GradAccum {
         rows
     }
 
-    /// `(comid, abs_sum, net_sum, count)` sorted by COMID (borrowing).
-    pub fn sorted_rows(&self) -> Vec<(i64, f64, f64, u32)> {
-        let mut rows: Vec<_> =
-            self.map.iter().map(|(&c, &(a, s, n))| (c, a, s, n)).collect();
-        rows.sort_by_key(|r| r.0);
-        rows
-    }
 }
 
 impl Default for GradAccum {
