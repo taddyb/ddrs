@@ -5,7 +5,19 @@ Script: `scripts/equif_convergence_analysis.py`
 Prior findings: `docs/2026-07-06-leakance-nogo-scientific-summary.md`,
                 `docs/2026-06-23-precip-disaggregation-findings.md`
 
-**One-line verdict:** The pre-registered selective-equifinality pattern is REFUTED on the LSTM arms — under structurally different lateral inflows, Manning's n (not channel geometry) is the cross-source-consistent parameter: its per-reach values correlate strongly across sources (Spearman ρ up to 0.890) and its loss gradients align across sources (mean cosine 0.656), while geometry-parameter gradients are nearly orthogonal between the two structurally distinct stores (cosine 0.023–0.095).
+**One-line verdict (amended by the 2026-07-07 audit — see §8):** Under the registered
+rules H1–H3 are REFUTED and H4 is INCONCLUSIVE, but a same-day independent audit showed
+the registered H1/H2 metric compared unlike normalizations — like-for-like, n's relative
+spread (0.4512) exceeds every geometry quantity, reversing H1's direction — and the
+gradient instrument is noise-limited (within-arm ceilings 0.14–0.63); the overall
+scientific interpretation is **INCONCLUSIVE**, leaning toward the original
+selective-equifinality prediction at the parameter-value level, with the bias-absorber
+mechanism (H2) refuted on both the volume and timing axes.
+
+> **Superseded interpretation:** this document originally headlined "Manning's n (not
+> channel geometry) is the cross-source-consistent parameter." That reading is
+> metric-dependent and does not survive the audit (§8). The registered verdicts below
+> stand as registered; the interpretation does not.
 
 ---
 
@@ -210,6 +222,10 @@ headroom to add skill on these arms, which the ΔNSE columns show it does.
 ---
 
 ## 4. Conclusions
+
+> **Amendment notice (2026-07-07):** conclusions 1, 2, and 5 below reflect the
+> pre-audit interpretation and are SUPERSEDED by §8.4. Conclusions 3, 4, 6, 7 stand
+> (4 in weakened form — see §8.3). They are preserved unedited for the record.
 
 1. **The selective-equifinality thesis is NOT supported by the LSTM arms.** All three
    pre-registered hypotheses with defined falsification criteria (H1–H3) are REFUTED.
@@ -462,4 +478,110 @@ The run IDs used for the results in this document:
 R1: 2026-07-07T03-55-53Z-train-and-test
 R2: 2026-07-07T04-49-19Z-train-and-test
 R3: 2026-07-07T06-50-28Z-train-and-test
+```
+
+---
+
+## 8. Audit amendment (2026-07-07, same day)
+
+An independent audit of this document's verdicts
+(`/tmp/experiment-handoff-lstm-equifinality-audit.md`; recomputation verified twice
+independently) found that the interpretation — not the execution — was flawed. The
+registered verdicts in §3 stand exactly as registered. Three audit analyses were added to
+`scripts/equif_convergence_analysis.py` (reported under the `audit` key of
+`verdicts.json`, never mixed into the registered fields).
+
+### 8.1 Metric asymmetry (H1/H2) — the central finding
+
+The pre-registered H1 rule compared geometry spread normalized by the **per-reach
+cross-arm mean** against n spread normalized by its **parameter-box width** (0.235 ≈ 3×
+the typical learned n of ~0.08). The asymmetry was in the spec (pre-registered, not
+p-hacked) but its ~3× deflation of n's apparent spread was not appreciated until the
+audit. Like-for-like (relative-to-mean, all quantities, 132,336 reaches):
+
+| Quantity | rel-spread (median) |
+|---|---|
+| **n** | **0.4512** |
+| p_spatial | 0.3952 |
+| q_spatial | 0.1289 |
+| top_width (arm-own / common Q′) | 0.4075 / 0.3794 |
+| depth (arm-own / common Q′) | 0.2506 / 0.0955 |
+| hydraulic_radius (arm-own / common Q′) | 0.2545 / 0.1004 |
+
+Under this metric the H1 direction REVERSES: n spreads more than every geometry
+quantity, and per-arm median n differs ~40% across sources (R1 0.0835, R2 0.1001,
+R3 0.0651 s/m^(1/3)). The strong n Spearman correlations (up to 0.890) are
+level-invariant and coexist with this: the n *spatial pattern* transfers across sources
+while its *level* does not. Depth and hydraulic radius at the common reference discharge
+(~0.10) are the most convergent realized quantities — a ~4.5× contrast against n in the
+direction of the ORIGINAL selective-equifinality prediction.
+
+### 8.2 Timing-axis H2
+
+The registered H2 measured Q′ disagreement as eval-window mean volume — an axis
+mass-conserving routing cannot compensate through n. Rebuilt on the timing/shape axis
+(per-reach inter-store Pearson correlation of summed daily hydrographs, median r = 0.871,
+and Richards-Baker-style flashiness difference, median 0.543):
+
+- ρ(n rel-spread, 1 − r) = **−0.233**
+- ρ(n rel-spread, flashiness-diff) = **−0.211**
+
+Both remain negative (registered volume-based ρ = −0.248). The bias-absorber mechanism
+as formulated — n diverging more where sources disagree more — is refuted on both the
+volume and the physically relevant timing axis. If n's ~40% level divergence has a
+mechanism, it is not local, per-reach compensation proportional to inflow disagreement.
+
+### 8.3 Gradient instrument (H3) is noise-limited
+
+Two additions: common-mode-removed cosines and a within-arm noise ceiling
+(seed-42 vs seed-123 window sets, 96 windows each).
+
+**Common-mode removal.** With k=3 arms, residuals sum to zero per reach, so the null for
+CM-removed pairwise cosines is −1/(k−1) = −0.5, not 0. Against that null, the
+informative R1–R3 (distinct-store) residual correlations are: n **0.050**,
+q_spatial 0.332, p_spatial 0.297. n's pre-CM alignment (0.656, R1–R3 0.730) is therefore
+**entirely common mode**; q/p retain modest differential structure beyond it. Critically,
+CM removal cannot distinguish shared-initialization descent from a genuinely
+source-independent signal — both are common mode — so the registered H3 refutation
+cannot be defended against the shared-init confound with this design.
+
+**Noise ceiling.** Within-arm gradient-field reproducibility across independent window
+sets is low: n 0.476/0.144/0.628, q 0.388/0.382/0.573, p 0.443/0.235/0.594 (R1/R2/R3).
+Two caveats cut opposite ways: (a) cross-arm cosines used identical seed-42 windows, so
+they escape window-sampling noise and may legitimately exceed the ceiling; (b) geometry's
+near-zero raw R1–R3 cosines (0.023, 0.095) sit far below their ceilings (0.39–0.59),
+so geometry-gradient orthogonality across distinct stores is real signal, not noise
+floor. R2's n ceiling of 0.144 marks the disagg arm's gradients as barely reproducible —
+consistent with its H4 anomaly. Net: at 5 epochs / 96 windows, the gradient instrument
+lacks the SNR to support any strong claim about n; the geometry-orthogonality
+observation survives.
+
+### 8.4 Revised overall interpretation
+
+**INCONCLUSIVE.** The LSTM arms establish neither the registered inversion ("n
+converges, geometry diverges") nor the original thesis. On like-for-like metrics the
+value-level evidence leans toward the original prediction (n level-diverges ~40%; depth,
+hydraulic radius, and q converge), but: the mechanism test fails on both axes (§8.2),
+the gradient instrument is underpowered (§8.3), the arms share one model family and one
+seed at a 5-epoch budget, and top_width/p diverge under every reference. Conclusions 1,
+2, and 5 of §4 are superseded accordingly: the paper must adopt NEITHER direction until
+the dHBV2 cross-family arms, a longer-budget replicate, and a seed replicate (§5 items
+1–3) resolve the confounds. The negative-ρ mechanism result (§8.2) and the
+geometry-gradient orthogonality (§8.3b) are the two audit-robust facts this experiment
+contributes.
+
+### 8.5 Reproduce the audit blocks
+
+```bash
+# seed-123 replicate probes (noise ceiling inputs), per arm:
+probe_zeta_gradient --config config/experiments/<arm>.yaml \
+  --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_35 \
+  --params n,q_spatial,p_spatial --windows 96 --seed 123 --backend cpu \
+  --output output/equif_probe/grad_<arm>_seed123.nc
+
+# analysis with audit stages (B2 timing, dual-metric C, E-ext):
+uv run python scripts/equif_convergence_analysis.py <flags as §7> \
+  --grads-r1-rep output/equif_probe/grad_R1_seed123.nc \
+  --grads-r2-rep output/equif_probe/grad_R2_seed123.nc \
+  --grads-r3-rep output/equif_probe/grad_R3_seed123.nc
 ```

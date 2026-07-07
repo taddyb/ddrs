@@ -1710,24 +1710,21 @@ def stage_f(
                       f" / R2-R3={cm['R2R3']:.3f}  (pre-CM mean: {orig_mean:.3f}"
                       f" → CM mean: {cm_mean_val:.3f})")
 
-            # Conditional assessment
-            n_cm_mean    = cm_mean.get("n", float("nan"))
-            q_cm_mean    = cm_mean.get("q_spatial", float("nan"))
-            p_cm_mean    = cm_mean.get("p_spatial", float("nan"))
-            n_collapsed  = np.isfinite(n_cm_mean) and abs(n_cm_mean) < 0.1
-            geo_stays    = (np.isfinite(q_cm_mean) and abs(q_cm_mean) < 0.2 and
-                            np.isfinite(p_cm_mean) and abs(p_cm_mean) < 0.2)
-            if n_collapsed and geo_stays:
-                print("  ASSESSMENT: n alignment collapses to ~0 after CM removal while"
-                      " geometry cosines remain near 0. The H3 refutation is likely"
-                      " confounded by the shared-init common descent direction.")
-            elif n_collapsed:
-                print("  ASSESSMENT: n alignment collapses after CM removal."
-                      " Geometry cosines also shift — mixed signal.")
-            else:
-                print(f"  ASSESSMENT: n maintains cross-arm alignment after CM removal"
-                      f" (mean={n_cm_mean:.3f}); consistent with genuine convergence,"
-                      f" not purely a shared-init artifact.")
+            # Assessment. With k=3 arms, CM removal forces residuals to sum to
+            # zero per reach, so the NULL pairwise residual cosine is
+            # -1/(k-1) = -0.5, not 0. Judge each pair against that null; the
+            # R1-R3 pair (distinct stores) is the informative one. Note: CM
+            # removal cannot distinguish shared-init common descent from a
+            # genuinely source-independent signal — both are common mode.
+            print("  NOTE: null for CM-removed pairwise cosines is -1/(k-1) = -0.5"
+                  " (residuals sum to zero); values are read as deviations from -0.5,"
+                  " and R1-R3 (distinct stores) is the informative pair.")
+            n_r13 = e_ext_data.get("cm_n", {}).get("R1R3", float("nan"))
+            q_r13 = e_ext_data.get("cm_q_spatial", {}).get("R1R3", float("nan"))
+            p_r13 = e_ext_data.get("cm_p_spatial", {}).get("R1R3", float("nan"))
+            print(f"  R1-R3 residual structure beyond common mode:"
+                  f" n={n_r13:.3f}  q_spatial={q_r13:.3f}  p_spatial={p_r13:.3f}"
+                  f"  (≈0 ⇒ that parameter's pre-CM alignment was entirely common mode)")
 
             # Noise ceiling
             ceiling = e_ext_data.get("ceiling", {})
