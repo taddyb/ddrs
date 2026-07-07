@@ -167,6 +167,14 @@ geometry, at the level of individual per-reach gradient vectors.
 three-way split that yields 3 S, 3 R, 3 I across all 9 arm×param cells. Majority vote
 does not decide.
 
+*Methodological disclosure:* the spec pre-registered only the per-arm test
+("gauged/ungauged ratio ≈ 1" falsifies) and did not specify how to aggregate
+across the 9 arm×parameter cells; the majority-vote rule was fixed at
+analysis-script-writing time (before results were seen, but after the spec).
+Under any reasonable aggregation the 3/3/3 split remains INCONCLUSIVE.
+Similarly, H3 aggregates pairwise cosines by MEAN; the plan sketched MIN — the
+verdict is REFUTED under either (min: geometry 0.023/0.095 vs n 0.564).
+
 The arm-level pattern is itself informative (*post-hoc*): R1 (daily flat) shows distance
 decay but with non-monotone bins — distance bin 1 exceeds bin 0, producing INCONCLUSIVE
 rather than SUPPORTED. R3 (hourly-native) shows clean monotone decay for all three
@@ -192,6 +200,12 @@ skill (+0.022 NSE) over an already stronger baseline. R2's disagg head gains the
 NSE (+0.183) but loses KGE (−0.019), consistent with the prior disaggregation finding
 (dHBV2-UH arms: NSE +0.037 / KGE −0.007, `docs/2026-06-23-precip-disaggregation-findings.md`).
 None of the arms beat their own baseline on KGE except R1 (+0.006).
+
+For context against prior work: the dHBV2-UH summed-Q′ baseline used in all
+pre-2026-07 experiments was 0.6781 NSE / 0.7172 KGE (2,365 gauges, same
+window). The much lower LSTM baselines (0.4366 / 0.5321 NSE) reflect weaker
+Q′ sources, not a change in gauges or window — routing therefore has more
+headroom to add skill on these arms, which the ΔNSE columns show it does.
 
 ---
 

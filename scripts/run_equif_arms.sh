@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Sequential CPU training of the three selective-equifinality arms (R1-R3).
 # Detach with: nohup scripts/run_equif_arms.sh > output/equif_runs.log 2>&1 &
-# Survives agent/session death. Projected (Task 4 smoke): R1 ~12 min,
-# R2 ~80 min, R3 ~91 min + eval phases.
+# Survives agent/session death. Measured 2026-07-07 (train + eval):
+# R1 53 min, R2 2 h 01, R3 3 h 01.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
