@@ -104,9 +104,19 @@ Four levels, all restricted to the **intersection of real-coverage reaches**
 1. **Raw parameters:** per-reach n, p_spatial, q_spatial; cross-arm Spearman ρ
    and range-normalized spread.
 2. **Realized geometry:** depth, top width, hydraulic radius from learned p, q
-   at a common per-reach reference discharge — median summed upstream Q′ over
-   the eval window from the dHBV2-UH retrospective (arm-independent);
-   sensitivity at the 10th/90th percentile flows.
+   at the per-reach reference discharge. **Primary reference (decided
+   2026-07-06): each arm's OWN median summed upstream Q′ over the eval
+   window** — the flow regime that arm actually routes, consistent with the
+   per-arm baseline recomputed by `ddrs plan`. **Sensitivity check: the common
+   dHBV2-UH-derived reference** (isolates the learned geometry function from
+   Q′ magnitude disagreement — the two references answer "does the realized
+   state converge" vs "does the geometry function converge", and H1 is
+   strongest when both agree), plus 10th/90th percentile flows. Note: the
+   `ddrs plan` baseline cache is per-gauge; per-reach summed Q′ is computed by
+   the analysis script from each store + adjacency. Level-2 analysis is
+   restricted to reaches whose full upstream network has real (non-fill)
+   coverage in ALL arms, since arm-own references inherit each store's
+   coverage gaps.
 3. **Routing skill:** median NSE/KGE per arm vs each arm's own summed-Q′
    baseline (CONUS reference: 0.6781 NSE / 0.7172 KGE, 2365 gauges,
    1995/10–2010/09) — gauge count and window reported with every number.
@@ -146,9 +156,10 @@ Four levels, all restricted to the **intersection of real-coverage reaches**
   directory-style checkpoints as the runtime self-check.
 - **Assumption — 5 epochs suffices** for parameter comparison: matches every
   prior benchmarked run; comparability outweighs asymptotic convergence.
-- **Assumption — dHBV2-UH-derived reference discharge is fair to LSTM arms:**
-  it is arm-independent, which is what the comparison requires; absolute
-  realism matters less than commonality.
+- **Concern — arm-own reference discharge conflates Q′ magnitude with
+  geometry:** two arms with identical p, q still realize different depths if
+  their Q′ differs. *Mitigation:* the common dHBV2-UH-derived reference is
+  reported as the sensitivity check; H1 verdicts cite both.
 - **Assumption — `workflow: train-and-test` per arm** yields training + eval +
   parameter dump in one lifecycle; no bespoke per-arm steps.
 - **Why this change:** produces the paper's first citable results (research
