@@ -358,6 +358,15 @@ The windowed objective (rho=90, warmup=5) starts every window from heuristic ini
 
 ---
 
+## 2026-07-06: Leakance campaign: definitive NO-GO
+**Symptom:** Phase C trained with enriched inputs (channel/GW attributes), losing-only clamp, impervious hard-zero. Measured KGE +0.006 on affected gauges — marginally positive — but learned zeta field anti-correlates with independent groundwater depth (field–WTD ρ = −0.36).  
+**Root cause:** The observation operator is a network sum: a gauge measures Σ(zeta) over all upstream reaches. A sum is not invertible for its addends — training constrains aggregate loss but carries zero information about per-reach distribution. This is not a signal-to-noise problem; it is a structural non-identifiability.  
+**Evidence:** Every rival explanation removed one-by-one: gradient starvation (REFUTED), objective noise (REFUTED via state-cache Phase B), uninformative inputs (REFUTED — channel/GW attributes loaded), sign ambiguity (REFUTED — losing-only clamp). Canonical summary: `docs/2026-07-06-leakance-nogo-scientific-summary.md`.  
+**Resolution/Status:** CLOSED. DO NOT RE-OPEN.  
+**Lesson:** The observation operator design is the binding constraint, not the model capacity, objective, or inputs. Before proposing a leakance retry, read the scientific summary §3 evidence chain.
+
+---
+
 ## Part 6: Phase B objective and current state
 
 **Phase B target (as of 2026-07-05): NOT YET MET.**
@@ -392,6 +401,7 @@ Use SUPPORTED / REFUTED / INCONCLUSIVE as evidence labels.
 | Hourly forcing is a precondition for leakance (not nice-to-have) | SUPPORTED | H5: under daily forcing n compensates for leakance (daily Δn 0.59 IQR); under hourly mechanisms decouple |
 | CUDA graphs + use_cuda_graphs:true can return stale finite loss on NaN forward | SUPPORTED | AorcPrecip bug: all 2365 gauges NaN at eval; losses looked finite |
 | Widening K_D past 1e-6 is useful for leakance (real-data training) | REFUTED | H1 REFUTED; K_D re-pinned at new ceiling in recoverability control |
+| 2026-07-06 | Leakance campaign: NO-GO | SETTLED — closed |
 
 ---
 

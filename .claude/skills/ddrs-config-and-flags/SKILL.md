@@ -69,7 +69,7 @@ All data is read in place — no export step. Every path is a `PathBuf`.
 
 | Key | Required | Notes |
 |---|---|---|
-| `attributes` | Yes | NetCDF catchment attributes. Columns must match `kan_head.input_var_names`. |
+| `attributes` | Yes | NetCDF catchment attributes. Columns must match `kan_head.input_var_names`. `attributes` can be a single path OR a list of paths — they are feature-concatenated on COMID (NaN-filled for missing COMIDs, inner join on COMID dimension). Example: `[merit_global_attributes_v2.nc, merit_channel_attributes_v1.nc]`. |
 | `streamflow` | Yes | dHBV2 lateral inflow Q'. Icechunk (`.ic`) for CONUS; zarr-v2 for global. |
 | `observations` | Yes | USGS (or global) daily observed discharge; training targets. |
 | `gages` | Yes | CSV with STAID and COMID columns. |
@@ -107,6 +107,7 @@ data_sources:
 | `learning_rate` | map epoch→f32 | `{}` | `{1: 0.001, 3: 0.0005}` | Step decay; applies from that epoch onward. |
 | `grad_clip_max_norm` | float \| absent | absent | `1.0` | Global gradient-norm clip. Omit to disable. |
 | `checkpoint` | path \| absent | absent | absent | Directory path to resume from (e.g. `.ddrs/runs/<id>/checkpoints/epoch_5_mb_9`). |
+| `state_cache` | path \| absent | absent | absent | Path to a continuous-run state zarr store (from `probe_zeta_gradient --mode state-cache`). Injects window-start routing states (hotstarted from a continuous run rather than cold zero-flow start). Reduces the hotstart-transient noise floor. Optional; leave blank for standard cold-start training. |
 | `loss` | block \| absent | L1 (see below) | absent | Training objective. Omit for historical L1. |
 
 ### `experiment.loss:` sub-block
@@ -185,6 +186,8 @@ Presence of this block enables the learnable daily→hourly disaggregation head 
 | `sparse_solver` | `cpu` \| `cuda` | `cpu` | `cuda` | `cuda` uses cuSPARSE for the triangular solve. Falls back to `cpu` on non-CUDA backends with a WARN log. |
 | `use_cuda_graphs` | bool | `false` | `true` | Capture the routing forward as a CUDA graph; faster replay each timestep. **See guards below.** |
 | `use_leakance` | bool | `false` | `false` | Enable the GW–SW water-loss term. **See guards below.** Experimental as of 2026-07-05. |
+| `leakance_losing_only` | bool | `true` | `true` | When true, applies `max(0, depth − d_gw)` clamp so zeta is zero for gaining reaches. Config-gated; added in Phase C. No-op when `use_leakance: false`. |
+| `leakance_impervious_threshold` | float | `0.7` | `0.7` | Hard-zero mask: reaches with `corridor_impervious` attribute ≥ this threshold get zeta = 0 regardless of other params. No-op when `corridor_impervious` is absent from attributes. |
 | `tau` | integer | `3` | `3` (not set in YAML) | Muskingum routing sub-step count. Rarely changed. |
 | `log_space_parameters` | list of strings | `["p_spatial"]` | `["p_spatial"]` | Parameters whose range spans decades; KAN output is exp-scaled before routing. |
 | `defaults` | map str→f32 | `{p_spatial: 21.0}` | `{p_spatial: 21.0}` | Fixed values for parameters NOT in `learnable_parameters`. |

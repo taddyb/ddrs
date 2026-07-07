@@ -1,6 +1,6 @@
 ---
 name: ddrs-identifiability-campaign
-description: "Use when planning or executing the leakance identifiability gate, the selective-equifinality paper experiments, the Phase B objective-floor fix, or the Phase C leakance promotion experiment. Triggers: any task touching leakance training, the synthetic recoverability control, the gradient probe, the zeta-sensitivity worktree, the three-phase gate program, or the paper at /home/tbindas/projects/ddr_equifinality/paper.tex. Also use as the source-of-truth for what each phase's gate criteria are, which experiments have already run, and which commands reproduce the results."
+description: "Use when planning or executing the selective-equifinality paper experiment (4 NH inflow sources × same MERIT network), or when reviewing what the leakance identifiability campaign concluded. Triggers: any task touching the ddr_equifinality paper, training on daily-lstm/hourly-lstm/dHBV2.0 sources, cross-source parameter convergence analysis, or any question about why leakance is NOT promotable. Do NOT use for routine training/eval runs — use ddrs-run-and-operate."
 ---
 
 # ddrs identifiability campaign — executable runbook
@@ -50,6 +50,8 @@ TRACK 1: LEAKANCE IDENTIFIABILITY GATE
   Positive control (recoverability) DONE — FAILED (2026-07-04) ← BLOCKER
   Phase B: objective floor fix      NOT STARTED (target: ≤0.25 mean L1)
   Phase C: promotion gate           BLOCKED on Phase A + Phase B
+| Phase C gate experiment | DONE — NO-GO (2026-07-06) |
+| **LEAKANCE CAMPAIGN** | **CLOSED — NO-GO. NOT promotable. See docs/2026-07-06-leakance-nogo-scientific-summary.md** |
 
 TRACK 2: SELECTIVE EQUIFINALITY PAPER
   Paper draft                       IN PROGRESS — /home/tbindas/projects/ddr_equifinality/paper.tex
@@ -281,6 +283,8 @@ must pass before any identifiability claim. Phase B (state-cache hotstart,
 target ≤0.25 mean L1) is required.
 
 ### 1.6 Phase B: objective floor fix (NOT STARTED, 2026-07-05)
+
+> **CLOSED (2026-07-06): Phase B/C ran to completion. The leakance campaign concluded NO-GO. The mechanism is the observation operator: a gauge measures Σ(zeta) over its upstream network — the sum is not invertible for per-reach distribution. Do NOT re-open. See `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3.**
 
 **Goal**: reduce the windowed training objective floor from ~40% of a converged
 run's loss to ≤25% (≤0.25 mean L1). This unblocks Phase C.

@@ -140,7 +140,7 @@ Existing differentiable routing models (including DDR master) have no GW-SW exch
 - Root cause: the rho-90/warmup-5 windowed training objective has a ~130x hotstart-transient noise floor relative to the planted signal (step-0 loss 1.017 vs continuous residual 0.0076). The planted signal is 0.8% of the training loss — invisible. Adam actively degrades the model (continuous residual after 5 training epochs: 0.4431, vs 0.0076 before training).
 - This is a GENERAL ddrs finding: warmup=5 under-trims hotstart transients by ~2 orders of magnitude.
 
-**Implication: leakance identifiability is NOT proven.** Phase B (state-cache hotstart, target <= 0.25 mean L1 noise floor) is mandatory before any identifiability claim.
+Status: **CLOSED (2026-07-06) — NO-GO.** Phase B/C ran to completion. The verdict: zeta is not identifiable from gauged discharge because the observation operator is a network sum (not invertible for per-reach values). Do NOT pursue this frontier further. See `docs/2026-07-06-leakance-nogo-scientific-summary.md`.
 
 ### The ddrs asset
 
@@ -176,9 +176,7 @@ Existing differentiable routing models (including DDR master) have no GW-SW exch
 
 ### Falsifiable milestone
 
-**Phase B milestone:** windowed training loss at warmup=W drops to <= 0.25 mean L1 (the threshold from `docs/2026-07-04-synthetic-recoverability-findings.md`). Only then re-run the synthetic recoverability control and check R1 >= 0.5.
-
-**Auxiliary-constraint milestone (Phase C, conditional on Phase B):** train with a spatial regularizer on `d_gw` or `zeta_net` against an independent losing-potential signal (Jasechko 2021 well-vs-stream levels, or water-table-depth attributes). The aux loss must act directly on head outputs, not through routed discharge — see conclusions #3 in `docs/2026-07-04-synthetic-recoverability-findings.md`.
+~~Milestone was: |zeta| > 0.01 m³/s on ≥20% of eval reaches under fixed objective. Frontier CLOSED: milestone was not the binding constraint — the observation operator was.~~
 
 ### Config checklist for any leakance run
 
