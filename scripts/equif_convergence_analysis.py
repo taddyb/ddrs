@@ -226,12 +226,15 @@ def load_qprime_for_eval_network(
         unique_days, inv_idx = np.unique(days, return_inverse=True)
         n_days = len(unique_days)
         n_cov  = qr_covered.shape[0]
-        qr_daily = np.zeros((n_cov, n_days), dtype=np.float32)
-        counts   = np.zeros(n_days, dtype=np.int32)
-        np.add.at(counts, inv_idx, 1)
-        for h in range(qr_covered.shape[1]):
-            qr_daily[:, inv_idx[h]] += qr_covered[:, h]
-        qr_daily /= np.maximum(counts[np.newaxis, :], 1)
+        # Vectorized NaN-safe accumulation: NaN hours excluded from both sum and
+        # denominator count so missing data doesn't bias the daily mean toward zero.
+        qr_safe    = np.where(np.isfinite(qr_covered), qr_covered, 0.0).astype(np.float32)
+        fin_mask   = np.isfinite(qr_covered).astype(np.int32)  # 1 = valid hour
+        qr_daily   = np.zeros((n_cov, n_days), dtype=np.float32)
+        fin_counts = np.zeros((n_cov, n_days), dtype=np.int32)
+        np.add.at(qr_daily.T,   inv_idx, qr_safe.T)   # sum valid values per (reach, day)
+        np.add.at(fin_counts.T, inv_idx, fin_mask.T)   # count valid hours per (reach, day)
+        qr_daily  /= np.maximum(fin_counts, 1)
         qr_covered = qr_daily
 
     n_days_eval = qr_covered.shape[1]
@@ -535,11 +538,11 @@ def stage_b(
     # Topological accumulation (modifies q in place)
     topo_accumulate(q, local_down, local_up)
 
-    # Per-reach statistics over time axis
-    median_q = np.median(q, axis=1).astype(np.float32)
-    p10_q    = np.percentile(q, 10, axis=1).astype(np.float32)
-    p90_q    = np.percentile(q, 90, axis=1).astype(np.float32)
-    mean_q   = np.mean(q, axis=1).astype(np.float32)
+    # Per-reach statistics over time axis (NaN-safe: Q' stores can carry NaN)
+    median_q = np.nanmedian(q, axis=1).astype(np.float32)
+    p10_q    = np.nanpercentile(q, 10, axis=1).astype(np.float32)
+    p90_q    = np.nanpercentile(q, 90, axis=1).astype(np.float32)
+    mean_q   = np.nanmean(q, axis=1).astype(np.float32)
 
     np.savez_compressed(cache, median_q=median_q, p10_q=p10_q, p90_q=p90_q, mean_q=mean_q)
     print(f"    saved → {cache}")
@@ -630,6 +633,15 @@ def stage_c(
     p2 = load_align(params_r2, analysis_comids)
     p3 = load_align(params_r3, analysis_comids)
 
+    # Guard: q_spatial and p_spatial must be present — fail fast with actionable message
+    for pname in ("q_spatial", "p_spatial"):
+        for arm_label, pdata, ppath in (("R1", p1, params_r1), ("R2", p2, params_r2), ("R3", p3, params_r3)):
+            if pname not in pdata:
+                sys.exit(
+                    f"ERROR: required parameter '{pname}' not found in {ppath} (arm {arm_label}); "
+                    f"re-run ddrs eval with a config that includes '{pname}' in kan_head.learnable_parameters"
+                )
+
     # Assert slope is identical across arms (by construction)
     if "slope" in p1 and "slope" in p2 and "slope" in p3:
         diff_12 = np.nanmax(np.abs(p1["slope"] - p2["slope"]))
@@ -649,8 +661,10 @@ def stage_c(
         spears = {}
         for a, b, lbl in pairs:
             valid = np.isfinite(a) & np.isfinite(b)
-            if valid.sum() > 5:
-                r, _ = spearmanr(a[valid], b[valid])
+            a_v, b_v = a[valid], b[valid]
+            # Skip if too few points or either input is constant (would produce NaN/warning)
+            if valid.sum() > 5 and np.unique(a_v).size >= 2 and np.unique(b_v).size >= 2:
+                r, _ = spearmanr(a_v, b_v)
             else:
                 r = float("nan")
             spears[lbl] = float(r)
@@ -757,8 +771,9 @@ def stage_c(
     # H2: Spearman(n-spread, Q'-disagreement)
     from scipy.stats import spearmanr as sp
     valid = np.isfinite(stats_n["per_reach_spread"]) & np.isfinite(q_disagreement)
-    if valid.sum() > 5:
-        h2_rho, _ = sp(stats_n["per_reach_spread"][valid], q_disagreement[valid])
+    v1, v2 = stats_n["per_reach_spread"][valid], q_disagreement[valid]
+    if valid.sum() > 5 and np.unique(v1).size >= 2 and np.unique(v2).size >= 2:
+        h2_rho, _ = sp(v1, v2)
     else:
         h2_rho = float("nan")
     print(f"  H2 Spearman(n-spread, Q'-disagreement): {h2_rho:.3f}")
@@ -780,10 +795,10 @@ def stage_c(
         geo_own_depth       = geo_spread_own["depth"],
         geo_own_top_width   = geo_spread_own["top_width"],
         geo_own_hyd_radius  = geo_spread_own["hydraulic_radius"],
-        # Level 2 sensitivity
-        geo_common_depth    = np.array(list(geo_spread_common.values())[0]),   # approx
-        geo_common_top_width= np.array(list(geo_spread_common.values())[1]),
-        geo_common_hyd_radius=np.array(list(geo_spread_common.values())[2]),
+        # Level 2 sensitivity (named access — dict order is not guaranteed stable)
+        geo_common_depth     = geo_spread_common["depth"],
+        geo_common_top_width = geo_spread_common["top_width"],
+        geo_common_hyd_radius= geo_spread_common["hydraulic_radius"],
         # Q' disagreement
         q_disagreement      = q_disagreement,
         h2_rho              = np.float32(h2_rho),
@@ -1088,6 +1103,10 @@ def stage_e(
         h3_n_mean_cos  = np.float32(h3["n"]["mean_cosine"]),
         h3_q_mean_cos  = np.float32(h3["q_spatial"]["mean_cosine"]),
         h3_p_mean_cos  = np.float32(h3["p_spatial"]["mean_cosine"]),
+        # H3 sign-agreement fractions (per pair, same order as cosines)
+        h3_n_sign_agree = np.array([h3["n"]["sign_agree_R1R2"],         h3["n"]["sign_agree_R1R3"],         h3["n"]["sign_agree_R2R3"]]),
+        h3_q_sign_agree = np.array([h3["q_spatial"]["sign_agree_R1R2"], h3["q_spatial"]["sign_agree_R1R3"], h3["q_spatial"]["sign_agree_R2R3"]]),
+        h3_p_sign_agree = np.array([h3["p_spatial"]["sign_agree_R1R2"], h3["p_spatial"]["sign_agree_R1R3"], h3["p_spatial"]["sign_agree_R2R3"]]),
         # H4 per-arm ratio arrays (R1/R2/R3 × params)
         **{f"h4_{arm}_{p}_ratio": np.float32(h4[arm][p]["ratio"])
            for arm in ("R1", "R2", "R3") for p in ("n", "q_spatial", "p_spatial")},
@@ -1163,11 +1182,12 @@ def stage_f(
             np.nanmedian(c_data["geo_spread_own"]["hydraulic_radius"]),
         ]))
         contrast = n_spread > med_geo_spread
-        h2_supported = (h2_rho > 0.2) and contrast
+        # NaN rho → INCONCLUSIVE (too few data points or constant input vector)
+        h2_supported = np.isfinite(h2_rho) and (h2_rho > 0.2) and contrast
         h2_verdict   = (
-            "SUPPORTED" if h2_supported
-            else "REFUTED" if (h2_rho <= 0.2 or not contrast)
-            else "INCONCLUSIVE"
+            "SUPPORTED"         if h2_supported
+            else "INCONCLUSIVE" if not np.isfinite(h2_rho)
+            else "REFUTED"
         )
         verdicts["H2"] = h2_verdict
         print(f"\n[H2] n-divergence predicted by inter-source Q' disagreement")
@@ -1423,36 +1443,9 @@ def _dev_crosscheck_topo(
     q_sum = q_direct.copy()
     topo_accumulate(q_sum, local_down, local_up)
 
-    # 1. Headwaters: not appearing as local_down (no upstream edge)
-    has_upstream = np.zeros(len(eval_comids), dtype=bool)
-    has_upstream[local_down] = True  # reaches that have at least one upstream edge
-    # Actually: reaches appearing in local_down ARE downstream of something
-    # Headwaters = COMIDs that are NOT in local_down... wait.
-    # A headwater is a reach with NO upstream neighbours, i.e., it never appears as local_down.
-    # Wait: local_down[k] is downstream, local_up[k] is upstream.
-    # A headwater appears as local_up but NOT as local_down (it's never downstream of anything).
-    # Actually: a headwater has no upstream, meaning it never appears in local_up.
-    # And it may or may not appear in local_down.
-    # Let me rethink: local_up contains upstream reaches. A headwater is a reach
-    # that has no incoming upstream edges, meaning it does NOT appear in local_up.
-    is_upstream_of_something = set(local_up.tolist())
-    headwaters = [i for i in range(len(eval_comids)) if i not in is_upstream_of_something]
-    # Hmm wait — any reach can be downstream of another. Let me clarify:
-    # "headwater" = a reach that has no upstream neighbours in the eval network
-    # = a reach whose local index does NOT appear as local_down[k] for any k?
-    # No: local_down[k] is the downstream reach. local_up[k] is the upstream reach.
-    # A headwater is a reach with no upstream reaches, i.e., it never appears in local_up.
-    # But that's wrong too — any terminal headwater would appear as local_up[k] since
-    # it flows INTO local_down[k].
-    # Correct: a headwater never appears as local_down (it's never the downstream endpoint
-    # of an edge). Wait — every reach except the outlet appears as local_up at least once.
-    # A headwater has NO upstream, so it never has an edge where IT is the downstream node.
-    # So a headwater: its local index NEVER appears in local_up? No...
-    # Let me re-read: edges are (downstream, upstream). local_down = downstream, local_up = upstream.
-    # A headwater: no upstream tributaries → it never appears as local_down[k]
-    # (because there's no edge where it is the downstream endpoint of an upstream-flowing edge).
-    # Wait, that's wrong. Every reach CAN appear as local_down[k] if it has tributaries upstream.
-    # A headwater has NO tributaries, so it never appears as local_down[k].
+    # 1. Headwaters: reaches with no upstream tributaries.
+    # Edge convention: local_down[k] receives from local_up[k]; a headwater has no
+    # incoming tributaries so its index never appears as local_down[k].
     headwater_set = set(range(len(eval_comids))) - set(local_down.tolist())
     headwaters = sorted(headwater_set)[:5]
 
