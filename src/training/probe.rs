@@ -73,28 +73,10 @@ pub fn probe_forward<I: Backend>(
     let params_map = head.forward(tensors.spatial_attributes.clone());
 
     let n_active = tensors.adjacency.n;
-    let x_storage: Tensor<Autodiff<I>, 1> = match params_map.get("x_storage") {
-        Some(x_norm) => denormalize(
-            x_norm.clone(),
-            cfg.params.parameter_ranges.x_storage,
-            cfg.params.log_space_parameters.iter().any(|s| s == "x_storage"),
-        ),
-        None => Tensor::full([n_active], 0.3_f32, device),
-    };
-
-    let n_hourly = tensors.q_prime.dims()[0];
-    let q_prime_hourly = match &head.disagg {
-        Some(d) => d.forward(
-            tensors.q_prime_daily.clone(),
-            tensors.spatial_attributes.clone(),
-            tensors.precip_hourly.clone(),
-            tensors.temp_hourly.clone(),
-            n_hourly,
-        ),
-        None => tensors.q_prime.clone(),
-    };
 
     // Build lifted leaves from the params_map for every name in `lift`.
+    // Must come before x_storage so the lifted-or-fallback pattern below
+    // can route x_storage through the computation graph when it is lifted.
     let leaves = ProbeLeaves {
         leaves: lift
             .iter()
@@ -111,6 +93,35 @@ pub fn probe_forward<I: Backend>(
                 (name.clone(), lift_leaf::<I>(t))
             })
             .collect(),
+    };
+
+    let x_storage: Tensor<Autodiff<I>, 1> = {
+        let x_norm = leaves
+            .leaves
+            .iter()
+            .find(|(n, _)| n.as_str() == "x_storage")
+            .map(|(_, t)| t.clone())
+            .or_else(|| params_map.get("x_storage").cloned());
+        match x_norm {
+            Some(x_n) => denormalize(
+                x_n,
+                cfg.params.parameter_ranges.x_storage,
+                cfg.params.log_space_parameters.iter().any(|s| s == "x_storage"),
+            ),
+            None => Tensor::full([n_active], 0.3_f32, device),
+        }
+    };
+
+    let n_hourly = tensors.q_prime.dims()[0];
+    let q_prime_hourly = match &head.disagg {
+        Some(d) => d.forward(
+            tensors.q_prime_daily.clone(),
+            tensors.spatial_attributes.clone(),
+            tensors.precip_hourly.clone(),
+            tensors.temp_hourly.clone(),
+            n_hourly,
+        ),
+        None => tensors.q_prime.clone(),
     };
 
     // For each param: use the lifted tensor when it was requested, else use
@@ -226,7 +237,6 @@ impl GradAccum {
         rows.sort_by_key(|r| r.0);
         rows
     }
-
 }
 
 impl Default for GradAccum {

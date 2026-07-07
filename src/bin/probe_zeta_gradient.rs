@@ -4,9 +4,10 @@
 //! Samples training-style batches (same sampler + rho-window machinery as the
 //! training driver, but a LOCAL rng seeded from --seed), runs
 //! `probe_forward` + the config loss + backward at a FIXED head (no optimizer
-//! step ever), reads the gradients on the lifted normalized leakance leaves,
-//! accumulates per-COMID, and writes the mean |g| / signed g map via
-//! `write_grad_netcdf`.
+//! step ever), reads the gradients on the lifted normalized KAN-head output
+//! leaves (default: the leakance trio K_D, d_gw, leakance_factor; override via
+//! --params), accumulates per-COMID, and writes the mean |g| / signed g map
+//! via `write_grad_netcdf` (default) or `write_param_grad_netcdf` (--params).
 //!
 //! Usage (CPU, deterministic — the GPU may be busy training):
 //!   cargo run --release --bin probe_zeta_gradient -- \
