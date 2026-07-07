@@ -366,6 +366,28 @@ def bfs_upstream_distance(
 
     return dist
 
+
+# ---------------------------------------------------------------------------
+# Cosine / gradient helpers (module-level; shared by stage_e and stage_e_ext)
+# ---------------------------------------------------------------------------
+
+def _cosine_sim(v1: np.ndarray, v2: np.ndarray) -> float:
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+    if n1 < 1e-12 or n2 < 1e-12:
+        return float("nan")
+    return float(np.dot(v1, v2) / (n1 * n2))
+
+
+def _sign_agree(v1: np.ndarray, v2: np.ndarray) -> float:
+    s1 = np.sign(v1)
+    s2 = np.sign(v2)
+    nonzero = (s1 != 0) & (s2 != 0)
+    if nonzero.sum() == 0:
+        return float("nan")
+    return float((s1[nonzero] == s2[nonzero]).mean())
+
+
 # ---------------------------------------------------------------------------
 # Stage A: network & coverage
 # ---------------------------------------------------------------------------
@@ -580,6 +602,104 @@ def stage_b(
     return {"median_q": median_q, "p10_q": p10_q, "p90_q": p90_q, "mean_q": mean_q}
 
 # ---------------------------------------------------------------------------
+# Stage B2: inter-store timing disagreement
+# ---------------------------------------------------------------------------
+
+def stage_b2(
+    out_dir: Path,
+    stage_a_data: dict,
+    force: bool = False,
+    hourly_block_days: int = 30,
+) -> dict:
+    """Compute per-reach inter-store TIMING disagreement (daily-lstm vs hourly-lstm).
+
+    Loads summed upstream daily hydrographs for both stores and computes per-reach:
+      pearson_r       : Pearson correlation between the two daily time series
+      flashiness_diff : |std(diff(qa))/mean(qa) - std(diff(qb))/mean(qb)|
+
+    Both arrays are aligned to stage_a_data["analysis_mask_r12"].
+    Memory: 2 × n_eval × n_days × 4 bytes ≈ 5.8 GB at full scale — acceptable.
+    """
+    cache = out_dir / "stage_b2.npz"
+    if cache.exists() and not force:
+        d = np.load(cache)
+        if "pearson_r" in d.files and "flashiness_diff" in d.files:
+            print("[Stage B2] loading from cache")
+            return {"pearson_r": d["pearson_r"], "flashiness_diff": d["flashiness_diff"]}
+        print("[Stage B2] cache missing keys — recomputing")
+
+    print("[Stage B2] computing inter-store timing disagreement")
+    eval_comids = stage_a_data["eval_comids"]
+    local_down  = stage_a_data["local_down"]
+    local_up    = stage_a_data["local_up"]
+    amask       = stage_a_data["analysis_mask_r12"]
+
+    print("  loading daily-lstm summed series ...")
+    q_daily = load_qprime_for_eval_network(
+        DAILY_LSTM_STORE, eval_comids, is_hourly=False
+    )
+    topo_accumulate(q_daily, local_down, local_up)
+
+    print("  loading hourly-lstm summed series (→ daily aggregation) ...")
+    q_hourly = load_qprime_for_eval_network(
+        HOURLY_LSTM_STORE, eval_comids, is_hourly=True,
+        hourly_block_days=hourly_block_days,
+    )
+    topo_accumulate(q_hourly, local_down, local_up)
+
+    # Align time axes (should both be 5479 days but be defensive)
+    n_days = min(q_daily.shape[1], q_hourly.shape[1])
+    if n_days != q_daily.shape[1] or n_days != q_hourly.shape[1]:
+        print(f"  WARNING: time-axis length mismatch — daily={q_daily.shape[1]}"
+              f" hourly={q_hourly.shape[1]}; truncating to {n_days}")
+
+    # Plumbing self-check: if both store paths are identical, correlation must be ≈ 1
+    if DAILY_LSTM_STORE == HOURLY_LSTM_STORE:
+        print("  [Stage B2] same store for both arms — self-correlation should be ≈ 1.0")
+
+    # Restrict to analysis set BEFORE computing (saves 5x memory on analysis fraction)
+    qa = q_daily[amask, :n_days].astype(np.float32)
+    qb = q_hourly[amask, :n_days].astype(np.float32)
+    del q_daily, q_hourly
+    n_reach = qa.shape[0]
+    print(f"  analysis reaches: {n_reach}  eval days: {n_days}")
+
+    # Vectorized NaN-aware Pearson correlation per reach
+    qa_mu  = np.nanmean(qa, axis=1, keepdims=True)
+    qb_mu  = np.nanmean(qb, axis=1, keepdims=True)
+    qa_dm  = np.where(np.isfinite(qa), qa - qa_mu, 0.0).astype(np.float32)
+    qb_dm  = np.where(np.isfinite(qb), qb - qb_mu, 0.0).astype(np.float32)
+    cov    = (qa_dm * qb_dm).sum(axis=1)
+    std_a  = np.sqrt((qa_dm ** 2).sum(axis=1))
+    std_b  = np.sqrt((qb_dm ** 2).sum(axis=1))
+    pearson_r = np.clip(cov / (std_a * std_b + 1e-12), -1.0, 1.0).astype(np.float32)
+    del qa_dm, qb_dm, cov, std_a, std_b
+
+    if DAILY_LSTM_STORE == HOURLY_LSTM_STORE:
+        med_r = float(np.nanmedian(pearson_r))
+        assert med_r > 0.99, (
+            f"[Stage B2] self-correlation plumbing check failed: median r={med_r:.4f} (expected >0.99)"
+        )
+        print(f"  self-correlation median r={med_r:.6f} — plumbing OK")
+
+    # Flashiness: |std(diff(qa))/mean(qa) - std(diff(qb))/mean(qb)|  (Richards-Baker style)
+    diff_a = np.diff(np.where(np.isfinite(qa), qa, np.nan), axis=1)
+    diff_b = np.diff(np.where(np.isfinite(qb), qb, np.nan), axis=1)
+    mean_qa = np.nanmean(qa, axis=1)
+    mean_qb = np.nanmean(qb, axis=1)
+    flash_a = np.nanstd(diff_a, axis=1) / (np.abs(mean_qa) + 1e-6)
+    flash_b = np.nanstd(diff_b, axis=1) / (np.abs(mean_qb) + 1e-6)
+    flashiness_diff = np.abs(flash_a - flash_b).astype(np.float32)
+    del diff_a, diff_b, qa, qb
+
+    print(f"  median Pearson r:       {np.nanmedian(pearson_r):.4f}")
+    print(f"  median flashiness-diff: {np.nanmedian(flashiness_diff):.4f}")
+
+    np.savez_compressed(cache, pearson_r=pearson_r, flashiness_diff=flashiness_diff)
+    print(f"  saved → {cache}")
+    return {"pearson_r": pearson_r, "flashiness_diff": flashiness_diff}
+
+# ---------------------------------------------------------------------------
 # Stage C: Level 1 (raw params) + Level 2 (realized geometry)
 # ---------------------------------------------------------------------------
 
@@ -602,30 +722,55 @@ def stage_c(
     if cache.exists() and not force:
         print("[Stage C] loading from cache")
         d = np.load(cache, allow_pickle=True)
-        geo_spread_own = {
-            "depth":            d["geo_own_depth"],
-            "top_width":        d["geo_own_top_width"],
-            "hydraulic_radius": d["geo_own_hyd_radius"],
-        }
-        geo_spread_common = {
-            "depth":            d["geo_common_depth"],
-            "top_width":        d["geo_common_top_width"],
-            "hydraulic_radius": d["geo_common_hyd_radius"],
-        }
-        return {
-            "per_reach_spread_n": d["per_reach_spread_n"],
-            "per_reach_spread_q": d["per_reach_spread_q"],
-            "per_reach_spread_p": d["per_reach_spread_p"],
-            "median_spread_n":    float(d["median_spread_n"]),
-            "geo_spread_own":     geo_spread_own,
-            "geo_spread_common":  geo_spread_common,
-            "q_disagreement":     d["q_disagreement"],
-            "h2_rho":             float(d["h2_rho"]),
-            "spearman_n":         dict(zip(
-                d["spearman_pair_labels"].tolist(),
-                d["spearman_n"].tolist(),
-            )),
-        }
+        if "per_reach_rel_spread_n" not in d.files:
+            print("  [Stage C] old cache missing audit keys (rel-spread) — recomputing")
+        else:
+            geo_spread_own = {
+                "depth":            d["geo_own_depth"],
+                "top_width":        d["geo_own_top_width"],
+                "hydraulic_radius": d["geo_own_hyd_radius"],
+            }
+            geo_spread_common = {
+                "depth":            d["geo_common_depth"],
+                "top_width":        d["geo_common_top_width"],
+                "hydraulic_radius": d["geo_common_hyd_radius"],
+            }
+            return {
+                "per_reach_spread_n":     d["per_reach_spread_n"],
+                "per_reach_spread_q":     d["per_reach_spread_q"],
+                "per_reach_spread_p":     d["per_reach_spread_p"],
+                "median_spread_n":        float(d["median_spread_n"]),
+                "geo_spread_own":         geo_spread_own,
+                "geo_spread_common":      geo_spread_common,
+                "q_disagreement":         d["q_disagreement"],
+                "h2_rho":                 float(d["h2_rho"]),
+                "spearman_n":             dict(zip(
+                    d["spearman_pair_labels"].tolist(),
+                    d["spearman_n"].tolist(),
+                )),
+                # Audit keys (rel-to-mean spread + per-arm medians)
+                "per_reach_rel_spread_n": d["per_reach_rel_spread_n"],
+                "per_reach_rel_spread_q": d["per_reach_rel_spread_q"],
+                "per_reach_rel_spread_p": d["per_reach_rel_spread_p"],
+                "rel_spread_n":           float(d["rel_spread_n"]),
+                "rel_spread_q":           float(d["rel_spread_q"]),
+                "rel_spread_p":           float(d["rel_spread_p"]),
+                "arm_median_n":           {
+                    "R1": float(d["arm_median_n_R1"]),
+                    "R2": float(d["arm_median_n_R2"]),
+                    "R3": float(d["arm_median_n_R3"]),
+                },
+                "arm_median_q":           {
+                    "R1": float(d["arm_median_q_R1"]),
+                    "R2": float(d["arm_median_q_R2"]),
+                    "R3": float(d["arm_median_q_R3"]),
+                },
+                "arm_median_p":           {
+                    "R1": float(d["arm_median_p_R1"]),
+                    "R2": float(d["arm_median_p_R2"]),
+                    "R3": float(d["arm_median_p_R3"]),
+                },
+            }
 
     print("[Stage C] computing raw-parameter and geometry spreads")
 
@@ -687,6 +832,12 @@ def stage_c(
         stack = np.stack([v1, v2, v3], axis=0)          # (3, n)
         per_reach_spread = (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / rng
         median_spread    = float(np.nanmedian(per_reach_spread))
+        # Relative-to-mean spread (audit: like-for-like comparison with geometry normalization)
+        cross_mean = np.nanmean(stack, axis=0)
+        per_reach_rel_spread = (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / (
+            np.abs(cross_mean) + 1e-9
+        )
+        median_rel_spread = float(np.nanmedian(per_reach_rel_spread))
         pairs = [(v1, v2, "R1-R2"), (v1, v3, "R1-R3"), (v2, v3, "R2-R3")]
         spears = {}
         for a, b, lbl in pairs:
@@ -699,9 +850,11 @@ def stage_c(
                 r = float("nan")
             spears[lbl] = float(r)
         return {
-            "per_reach_spread": per_reach_spread,
-            "median_spread":    median_spread,
-            "spearman":         spears,
+            "per_reach_spread":     per_reach_spread,
+            "median_spread":        median_spread,
+            "per_reach_rel_spread": per_reach_rel_spread,
+            "median_rel_spread":    median_rel_spread,
+            "spearman":             spears,
         }
 
     stats_n = param_stats(p1["n"], p2["n"], p3["n"], "n")
@@ -710,8 +863,30 @@ def stage_c(
 
     print(f"  Level 1 median norm-spread:  n={stats_n['median_spread']:.4f}"
           f"  q={stats_q['median_spread']:.4f}  p={stats_p['median_spread']:.4f}")
+    print(f"  Level 1 median rel-spread:   n={stats_n['median_rel_spread']:.4f}"
+          f"  q={stats_q['median_rel_spread']:.4f}  p={stats_p['median_rel_spread']:.4f}")
     for lbl, r in stats_n["spearman"].items():
         print(f"    spearman n {lbl}: {r:.3f}")
+
+    # Per-arm medians (for audit level-disagreement reporting)
+    arm_median_n = {
+        "R1": float(np.nanmedian(p1["n"])),
+        "R2": float(np.nanmedian(p2["n"])),
+        "R3": float(np.nanmedian(p3["n"])),
+    }
+    arm_median_q = {
+        "R1": float(np.nanmedian(p1["q_spatial"])),
+        "R2": float(np.nanmedian(p2["q_spatial"])),
+        "R3": float(np.nanmedian(p3["q_spatial"])),
+    }
+    arm_median_p = {
+        "R1": float(np.nanmedian(p1["p_spatial"])),
+        "R2": float(np.nanmedian(p2["p_spatial"])),
+        "R3": float(np.nanmedian(p3["p_spatial"])),
+    }
+    print(f"  Per-arm median n: R1={arm_median_n['R1']:.4f}  R2={arm_median_n['R2']:.4f}  R3={arm_median_n['R3']:.4f}")
+    print(f"  Per-arm median q: R1={arm_median_q['R1']:.4f}  R2={arm_median_q['R2']:.4f}  R3={arm_median_q['R3']:.4f}")
+    print(f"  Per-arm median p: R1={arm_median_p['R1']:.4f}  R2={arm_median_p['R2']:.4f}  R3={arm_median_p['R3']:.4f}")
 
     # ---- Level 2: realized geometry ----
     slope_use = p1.get("slope", np.ones(len(analysis_comids), dtype=np.float32))
@@ -810,7 +985,7 @@ def stage_c(
 
     np.savez_compressed(
         cache,
-        # Level 1
+        # Level 1 (registered keys — unchanged)
         per_reach_spread_n  = stats_n["per_reach_spread"],
         per_reach_spread_q  = stats_q["per_reach_spread"],
         per_reach_spread_p  = stats_p["per_reach_spread"],
@@ -835,19 +1010,46 @@ def stage_c(
         # Analysis set info
         analysis_n_primary  = np.int32(amask.sum()),
         analysis_n_full     = np.int32(amask_full.sum()),
+        # Audit keys: relative-to-mean spread (like-for-like with geometry normalization)
+        per_reach_rel_spread_n = stats_n["per_reach_rel_spread"],
+        per_reach_rel_spread_q = stats_q["per_reach_rel_spread"],
+        per_reach_rel_spread_p = stats_p["per_reach_rel_spread"],
+        rel_spread_n        = np.float32(stats_n["median_rel_spread"]),
+        rel_spread_q        = np.float32(stats_q["median_rel_spread"]),
+        rel_spread_p        = np.float32(stats_p["median_rel_spread"]),
+        # Audit keys: per-arm medians
+        arm_median_n_R1     = np.float32(arm_median_n["R1"]),
+        arm_median_n_R2     = np.float32(arm_median_n["R2"]),
+        arm_median_n_R3     = np.float32(arm_median_n["R3"]),
+        arm_median_q_R1     = np.float32(arm_median_q["R1"]),
+        arm_median_q_R2     = np.float32(arm_median_q["R2"]),
+        arm_median_q_R3     = np.float32(arm_median_q["R3"]),
+        arm_median_p_R1     = np.float32(arm_median_p["R1"]),
+        arm_median_p_R2     = np.float32(arm_median_p["R2"]),
+        arm_median_p_R3     = np.float32(arm_median_p["R3"]),
     )
     print(f"  saved → {cache}")
 
     return {
-        "per_reach_spread_n":  stats_n["per_reach_spread"],
-        "per_reach_spread_q":  stats_q["per_reach_spread"],
-        "per_reach_spread_p":  stats_p["per_reach_spread"],
-        "median_spread_n":     stats_n["median_spread"],
-        "geo_spread_own":      geo_spread_own,
-        "geo_spread_common":   geo_spread_common,
-        "q_disagreement":      q_disagreement,
-        "h2_rho":              float(h2_rho),
-        "spearman_n":          stats_n["spearman"],
+        "per_reach_spread_n":     stats_n["per_reach_spread"],
+        "per_reach_spread_q":     stats_q["per_reach_spread"],
+        "per_reach_spread_p":     stats_p["per_reach_spread"],
+        "median_spread_n":        stats_n["median_spread"],
+        "geo_spread_own":         geo_spread_own,
+        "geo_spread_common":      geo_spread_common,
+        "q_disagreement":         q_disagreement,
+        "h2_rho":                 float(h2_rho),
+        "spearman_n":             stats_n["spearman"],
+        # Audit fields
+        "per_reach_rel_spread_n": stats_n["per_reach_rel_spread"],
+        "per_reach_rel_spread_q": stats_q["per_reach_rel_spread"],
+        "per_reach_rel_spread_p": stats_p["per_reach_rel_spread"],
+        "rel_spread_n":           stats_n["median_rel_spread"],
+        "rel_spread_q":           stats_q["median_rel_spread"],
+        "rel_spread_p":           stats_p["median_rel_spread"],
+        "arm_median_n":           arm_median_n,
+        "arm_median_q":           arm_median_q,
+        "arm_median_p":           arm_median_p,
     }
 
 # ---------------------------------------------------------------------------
@@ -1147,6 +1349,162 @@ def stage_e(
     return {"h3": h3, "h4": h4, "probe_dist": probe_dist, "bin_labels": bin_labels}
 
 # ---------------------------------------------------------------------------
+# Stage E extension: common-mode-removed H3 + within-arm noise ceiling
+# ---------------------------------------------------------------------------
+
+def stage_e_ext(
+    out_dir: Path,
+    grads_r1: Optional[Path],
+    grads_r2: Optional[Path],
+    grads_r3: Optional[Path],
+    grads_r1_rep: Optional[Path] = None,
+    grads_r2_rep: Optional[Path] = None,
+    grads_r3_rep: Optional[Path] = None,
+    force: bool = False,
+) -> dict:
+    """Common-mode-removed H3 cosines + within-arm noise ceiling (audit, POST-HOC).
+
+    Common-mode removal: for each param, subtract the cross-arm mean gradient field
+    from each arm's net-gradient, then recompute pairwise cosines on residuals.
+
+    Noise ceiling (--grads-r*-rep): per arm per param, cosine(seed-42, seed-123).
+    Skips gracefully when rep files are absent or don't exist on disk.
+
+    Cache: stage_e_ext.npz (schema-tolerant; --force regenerates).
+    Returns empty dict if grad files not provided or stage_e.npz not found.
+    """
+    cache = out_dir / "stage_e_ext.npz"
+    if cache.exists() and not force:
+        d = np.load(cache, allow_pickle=True)
+        if "cm_n_R1R2" in d.files:
+            print("[Stage E ext] loading from cache")
+            result: dict = {}
+            for pname in ("n", "q_spatial", "p_spatial"):
+                result[f"cm_{pname}"] = {
+                    "R1R2": float(d[f"cm_{pname}_R1R2"]),
+                    "R1R3": float(d[f"cm_{pname}_R1R3"]),
+                    "R2R3": float(d[f"cm_{pname}_R2R3"]),
+                }
+            ceiling: dict = {}
+            for arm in ("R1", "R2", "R3"):
+                arm_ceil: dict = {}
+                for pname in ("n", "q_spatial", "p_spatial"):
+                    key = f"ceil_{arm}_{pname}"
+                    if key in d.files:
+                        arm_ceil[pname] = float(d[key])
+                if arm_ceil:
+                    ceiling[arm] = arm_ceil
+            result["ceiling"] = ceiling
+            return result
+        print("[Stage E ext] cache missing keys — recomputing")
+
+    if not all([grads_r1, grads_r2, grads_r3]):
+        print("[Stage E ext] skipped — one or more --grads-r* not provided")
+        return {}
+
+    # Need common_comids from stage_e cache
+    e_cache = out_dir / "stage_e.npz"
+    if not e_cache.exists():
+        print("[Stage E ext] stage_e.npz not found — run Stage E first; skipping")
+        return {}
+    common_comids_arr = np.load(e_cache)["common_comids"].astype(np.int64)
+    common_list       = common_comids_arr.tolist()
+
+    print("[Stage E ext] computing common-mode-removed cosines and noise ceiling")
+
+    def _load_align(path: Path) -> dict[str, np.ndarray]:
+        """Load gradient NetCDF, align to common_list. Returns net-grad arrays."""
+        gdata     = load_gradients(path)
+        probe_arr = gdata["COMID_probe"].astype(np.int64)
+        probe_set = set(probe_arr.tolist())
+        valid_c   = [c for c in common_list if c in probe_set]
+        missing   = len(common_list) - len(valid_c)
+        if missing:
+            print(f"    WARNING: {missing} common COMIDs not in {path.name}")
+        idx_map = {int(c): i for i, c in enumerate(probe_arr)}
+        idx     = np.array([idx_map[c] for c in valid_c], dtype=np.int64)
+        out: dict[str, np.ndarray] = {}
+        for net_key in ("grad_n_net", "grad_q_spatial_net", "grad_p_spatial_net"):
+            out[net_key] = gdata[net_key][idx]
+        out["_n"] = len(valid_c)
+        return out
+
+    a1 = _load_align(grads_r1)
+    a2 = _load_align(grads_r2)
+    a3 = _load_align(grads_r3)
+
+    save_dict: dict = {}
+    result: dict    = {}
+
+    # ---- Common-mode removal ----
+    print("  Common-mode-removed cosines:")
+    for pname, net_key in [
+        ("n",         "grad_n_net"),
+        ("q_spatial", "grad_q_spatial_net"),
+        ("p_spatial", "grad_p_spatial_net"),
+    ]:
+        v1 = a1[net_key]
+        v2 = a2[net_key]
+        v3 = a3[net_key]
+        n_min = min(len(v1), len(v2), len(v3))
+        v1, v2, v3 = v1[:n_min], v2[:n_min], v3[:n_min]
+
+        mean_g = (v1 + v2 + v3) / 3.0
+        r1_cm  = v1 - mean_g
+        r2_cm  = v2 - mean_g
+        r3_cm  = v3 - mean_g
+
+        cos_12 = _cosine_sim(r1_cm, r2_cm)
+        cos_13 = _cosine_sim(r1_cm, r3_cm)
+        cos_23 = _cosine_sim(r2_cm, r3_cm)
+        print(f"    {pname}: R1-R2={cos_12:.3f}  R1-R3={cos_13:.3f}  R2-R3={cos_23:.3f}")
+
+        save_dict[f"cm_{pname}_R1R2"] = np.float32(cos_12)
+        save_dict[f"cm_{pname}_R1R3"] = np.float32(cos_13)
+        save_dict[f"cm_{pname}_R2R3"] = np.float32(cos_23)
+        result[f"cm_{pname}"] = {"R1R2": cos_12, "R1R3": cos_13, "R2R3": cos_23}
+
+    # ---- Noise ceiling (replicate grads, seed 123) ----
+    ceiling: dict = {}
+    rep_paths = {
+        "R1": (grads_r1, grads_r1_rep),
+        "R2": (grads_r2, grads_r2_rep),
+        "R3": (grads_r3, grads_r3_rep),
+    }
+    seed42_data = {"R1": a1, "R2": a2, "R3": a3}
+    any_rep = False
+    for arm_label, (g42_path, g123_path) in rep_paths.items():
+        if g123_path is None or not Path(g123_path).exists():
+            reason = "not provided" if g123_path is None else f"not found at {g123_path}"
+            print(f"  noise ceiling [{arm_label}] SKIPPED — rep file {reason}")
+            continue
+        print(f"  noise ceiling [{arm_label}] loading {Path(g123_path).name} ...")
+        a123 = _load_align(g123_path)
+        a42  = seed42_data[arm_label]
+        arm_ceil: dict = {}
+        for pname, net_key in [
+            ("n",         "grad_n_net"),
+            ("q_spatial", "grad_q_spatial_net"),
+            ("p_spatial", "grad_p_spatial_net"),
+        ]:
+            v42  = a42[net_key]
+            v123 = a123[net_key]
+            n_min = min(len(v42), len(v123))
+            ceil_val = _cosine_sim(v42[:n_min], v123[:n_min])
+            arm_ceil[pname] = ceil_val
+            save_dict[f"ceil_{arm_label}_{pname}"] = np.float32(ceil_val)
+            print(f"    ceiling [{arm_label}] {pname}: {ceil_val:.3f}")
+        ceiling[arm_label] = arm_ceil
+        any_rep = True
+    if not any_rep:
+        print("  noise ceiling: all rep files absent — ceiling section will be skipped in report")
+    result["ceiling"] = ceiling
+
+    np.savez_compressed(cache, **save_dict)
+    print(f"  saved → {cache}")
+    return result
+
+# ---------------------------------------------------------------------------
 # Stage F: verdicts + figures
 # ---------------------------------------------------------------------------
 
@@ -1156,6 +1514,8 @@ def stage_f(
     c_data: Optional[dict],
     d_data: Optional[dict],
     e_data: Optional[dict],
+    b2_data: Optional[dict] = None,
+    e_ext_data: Optional[dict] = None,
 ) -> None:
     """Print and write H1–H4 verdicts; generate figures."""
 
@@ -1198,6 +1558,54 @@ def stage_f(
             print(f"  Sensitivity (common dHBV2 Q'):")
             for k, v in geo_common.items():
                 print(f"    median rel-spread({k}) = {np.nanmedian(v):.4f}")
+
+        # ---- [H1-audit] like-for-like relative-to-mean comparison ----
+        if "rel_spread_n" in c_data:
+            rel_n = c_data["rel_spread_n"]
+            rel_q = c_data["rel_spread_q"]
+            rel_p = c_data["rel_spread_p"]
+            geo_own_d  = float(np.nanmedian(geo_own["depth"]))
+            geo_own_tw = float(np.nanmedian(geo_own["top_width"]))
+            geo_own_hr = float(np.nanmedian(geo_own["hydraulic_radius"]))
+            geo_com_d  = float(np.nanmedian(geo_common["depth"]))  if geo_common else float("nan")
+            geo_com_tw = float(np.nanmedian(geo_common["top_width"])) if geo_common else float("nan")
+            geo_com_hr = float(np.nanmedian(geo_common["hydraulic_radius"])) if geo_common else float("nan")
+
+            all_geo = [geo_own_d, geo_own_tw, geo_own_hr]
+            if geo_common:
+                all_geo += [geo_com_d, geo_com_tw, geo_com_hr]
+            h1_reverses = all(rel_n > g for g in all_geo if np.isfinite(g))
+
+            print(f"\n[H1-audit] Like-for-like (relative-to-mean) comparison"
+                  f" — POST-HOC, discovered 2026-07-07 audit:")
+            print(f"  rel-spread(n)={rel_n:.4f}  rel-spread(q)={rel_q:.4f}"
+                  f"  rel-spread(p)={rel_p:.4f}")
+            print(f"  geometry (arm-own): depth {geo_own_d:.4f} / top_width {geo_own_tw:.4f}"
+                  f" / Rh {geo_own_hr:.4f}")
+            if geo_common:
+                print(f"  geometry (common):  depth {geo_com_d:.4f} / top_width {geo_com_tw:.4f}"
+                      f" / Rh {geo_com_hr:.4f}")
+            if h1_reverses:
+                print("  Under this metric the H1 direction REVERSES:"
+                      " n spreads more than every geometry quantity.")
+            else:
+                print("  Under this metric n does NOT exceed all geometry quantities"
+                      " — H1 direction is CONSISTENT with pre-registered metric.")
+            am_n = c_data.get("arm_median_n", {})
+            am_q = c_data.get("arm_median_q", {})
+            am_p = c_data.get("arm_median_p", {})
+            if am_n:
+                print(f"  per-arm median n: R1={am_n.get('R1', float('nan')):.4f}"
+                      f"  R2={am_n.get('R2', float('nan')):.4f}"
+                      f"  R3={am_n.get('R3', float('nan')):.4f}")
+            if am_q:
+                print(f"  per-arm median q: R1={am_q.get('R1', float('nan')):.4f}"
+                      f"  R2={am_q.get('R2', float('nan')):.4f}"
+                      f"  R3={am_q.get('R3', float('nan')):.4f}")
+            if am_p:
+                print(f"  per-arm median p: R1={am_p.get('R1', float('nan')):.4f}"
+                      f"  R2={am_p.get('R2', float('nan')):.4f}"
+                      f"  R3={am_p.get('R3', float('nan')):.4f}")
     else:
         verdicts["H1"] = "INCONCLUSIVE"
         print("\n[H1] INCONCLUSIVE — Stage C not run (params not provided)")
@@ -1225,6 +1633,34 @@ def stage_f(
         print(f"  n-spread vs geometry contrast: {n_spread:.4f} vs {med_geo_spread:.4f}  contrast={contrast}")
         print(f"  Rule: SUPPORTED iff ρ > 0.2 AND n-spread > geometry-spread")
         print(f"  → H2: {h2_verdict}")
+
+        # ---- [H2-audit] timing-axis disagreement ----
+        if b2_data is not None and "per_reach_rel_spread_n" in c_data:
+            from scipy.stats import spearmanr as _sp
+            n_spr = c_data["per_reach_rel_spread_n"]
+            p_r   = b2_data["pearson_r"]
+            p_fd  = b2_data["flashiness_diff"]
+            one_minus_r = (1.0 - p_r).astype(np.float64)
+
+            h2_rho_corr  = float("nan")
+            h2_rho_flash = float("nan")
+            valid1 = np.isfinite(n_spr) & np.isfinite(one_minus_r)
+            if valid1.sum() > 5:
+                h2_rho_corr = float(_sp(n_spr[valid1], one_minus_r[valid1])[0])
+            valid2 = np.isfinite(n_spr) & np.isfinite(p_fd)
+            if valid2.sum() > 5:
+                h2_rho_flash = float(_sp(n_spr[valid2], p_fd[valid2])[0])
+
+            print(f"\n[H2-audit] Timing-axis H2 (Spearman ρ on timing disagreement)"
+                  f" — POST-HOC, 2026-07-07 audit:")
+            print(f"  registered volume-based ρ(n-spread, Q'-disagreement)"
+                  f" = {h2_rho:.3f}  (bar: > 0.2)")
+            print(f"  timing-based: ρ(n-rel-spread, 1−pearson_r) = {h2_rho_corr:.3f}")
+            print(f"                ρ(n-rel-spread, flashiness-diff) = {h2_rho_flash:.3f}")
+            print(f"  n can only compensate timing, not volume;"
+                  f" timing axis is the physically relevant test.")
+        elif b2_data is None:
+            print("\n[H2-audit] SKIPPED — Stage B2 not run")
     else:
         verdicts["H2"] = "INCONCLUSIVE"
         print("\n[H2] INCONCLUSIVE — Stage C not run")
@@ -1252,6 +1688,73 @@ def stage_f(
         print(f"  Rule: SUPPORTED iff mean_cos(q) > mean_cos(n) AND mean_cos(p) > mean_cos(n)")
         print(f"        REFUTED   iff mean_cos(n) >= both; INCONCLUSIVE otherwise")
         print(f"  → H3: {h3_verdict}")
+
+        # ---- [H3-audit] common-mode-removed cosines + noise ceiling ----
+        if e_ext_data:
+            print(f"\n[H3-audit] Common-mode-removed cosines (CM = subtract cross-arm mean"
+                  f" gradient field) — POST-HOC, 2026-07-07 audit:")
+            cm_mean: dict = {}
+            for pname in ("n", "q_spatial", "p_spatial"):
+                cm_key = f"cm_{pname}"
+                if cm_key not in e_ext_data:
+                    continue
+                cm = e_ext_data[cm_key]
+                # Original (pre-CM) cosines for reference
+                orig_key_map = {"n": "h3_n_cosines", "q_spatial": "h3_q_cosines",
+                                 "p_spatial": "h3_p_cosines"}
+                orig_mean = h3[pname]["mean_cosine"]
+                cm_vals = [cm["R1R2"], cm["R1R3"], cm["R2R3"]]
+                cm_mean_val = float(np.nanmean([v for v in cm_vals if np.isfinite(v)]))
+                cm_mean[pname] = cm_mean_val
+                print(f"  {pname}: R1-R2={cm['R1R2']:.3f} / R1-R3={cm['R1R3']:.3f}"
+                      f" / R2-R3={cm['R2R3']:.3f}  (pre-CM mean: {orig_mean:.3f}"
+                      f" → CM mean: {cm_mean_val:.3f})")
+
+            # Conditional assessment
+            n_cm_mean    = cm_mean.get("n", float("nan"))
+            q_cm_mean    = cm_mean.get("q_spatial", float("nan"))
+            p_cm_mean    = cm_mean.get("p_spatial", float("nan"))
+            n_collapsed  = np.isfinite(n_cm_mean) and abs(n_cm_mean) < 0.1
+            geo_stays    = (np.isfinite(q_cm_mean) and abs(q_cm_mean) < 0.2 and
+                            np.isfinite(p_cm_mean) and abs(p_cm_mean) < 0.2)
+            if n_collapsed and geo_stays:
+                print("  ASSESSMENT: n alignment collapses to ~0 after CM removal while"
+                      " geometry cosines remain near 0. The H3 refutation is likely"
+                      " confounded by the shared-init common descent direction.")
+            elif n_collapsed:
+                print("  ASSESSMENT: n alignment collapses after CM removal."
+                      " Geometry cosines also shift — mixed signal.")
+            else:
+                print(f"  ASSESSMENT: n maintains cross-arm alignment after CM removal"
+                      f" (mean={n_cm_mean:.3f}); consistent with genuine convergence,"
+                      f" not purely a shared-init artifact.")
+
+            # Noise ceiling
+            ceiling = e_ext_data.get("ceiling", {})
+            if ceiling:
+                print("  Within-arm noise ceiling (seed-42 vs seed-123 gradients):")
+                for arm in ("R1", "R2", "R3"):
+                    if arm not in ceiling:
+                        print(f"    [{arm}] SKIPPED — rep file absent")
+                        continue
+                    ac = ceiling[arm]
+                    n_c  = ac.get("n",         float("nan"))
+                    q_c  = ac.get("q_spatial",  float("nan"))
+                    p_c  = ac.get("p_spatial",  float("nan"))
+                    print(f"    [{arm}] n={n_c:.3f}  q_spatial={q_c:.3f}"
+                          f"  p_spatial={p_c:.3f}")
+                    # Note cross-arm vs ceiling for n (registered cosine)
+                    cross_n_mean = h3["n"]["mean_cosine"]
+                    if np.isfinite(n_c):
+                        print(f"      cross-arm n={cross_n_mean:.3f} vs ceiling={n_c:.3f}"
+                              f" (ceiling is interpretability floor)")
+            else:
+                print("  Within-arm noise ceiling: SKIPPED — rep grad files not provided"
+                      " (pass --grads-r*-rep when seed-123 probes are ready)")
+        elif e_ext_data is not None:
+            pass  # empty dict means stage skipped
+        else:
+            print("\n[H3-audit] SKIPPED — Stage E ext not run")
     else:
         verdicts["H3"] = "INCONCLUSIVE"
         print("\n[H3] INCONCLUSIVE — Stage E not run (grad files not provided)")
@@ -1308,7 +1811,7 @@ def stage_f(
 
     # Write verdicts.json
     verdicts_path = out_dir / "verdicts.json"
-    verdicts_out  = {
+    verdicts_out: dict = {
         "verdicts":    verdicts,
         "eval_window": {"start": str(EVAL_START), "end": str(EVAL_END)},
         "analysis_n_primary":  int(stage_a_data["analysis_mask_r12"].sum()),
@@ -1325,6 +1828,69 @@ def stage_f(
         verdicts_out["L4_h3_mean_cosines"] = {
             p: e_data["h3"][p]["mean_cosine"] for p in e_data["h3"]
         }
+
+    # ---- audit key (separate from registered verdicts — do NOT edit verdicts above) ----
+    audit: dict = {}
+    if c_data is not None and "rel_spread_n" in c_data:
+        geo_own  = c_data["geo_spread_own"]
+        geo_com  = c_data.get("geo_spread_common", {})
+        audit["H1"] = {
+            "rel_spread":       {
+                "n": float(c_data["rel_spread_n"]),
+                "q": float(c_data["rel_spread_q"]),
+                "p": float(c_data["rel_spread_p"]),
+            },
+            "geo_arm_own_median": {
+                "depth":        float(np.nanmedian(geo_own["depth"])),
+                "top_width":    float(np.nanmedian(geo_own["top_width"])),
+                "hyd_radius":   float(np.nanmedian(geo_own["hydraulic_radius"])),
+            },
+            "geo_common_median": {
+                "depth":        float(np.nanmedian(geo_com["depth"]))     if geo_com else None,
+                "top_width":    float(np.nanmedian(geo_com["top_width"])) if geo_com else None,
+                "hyd_radius":   float(np.nanmedian(geo_com["hydraulic_radius"])) if geo_com else None,
+            },
+            "arm_median_n": c_data.get("arm_median_n", {}),
+            "arm_median_q": c_data.get("arm_median_q", {}),
+            "arm_median_p": c_data.get("arm_median_p", {}),
+        }
+
+    if c_data is not None and b2_data is not None and "per_reach_rel_spread_n" in c_data:
+        from scipy.stats import spearmanr as _sp2
+        n_spr = c_data["per_reach_rel_spread_n"]
+        p_r   = b2_data["pearson_r"]
+        p_fd  = b2_data["flashiness_diff"]
+        one_minus_r = (1.0 - p_r).astype(np.float64)
+        h2_rho_corr  = float("nan")
+        h2_rho_flash = float("nan")
+        valid1 = np.isfinite(n_spr) & np.isfinite(one_minus_r)
+        if valid1.sum() > 5:
+            h2_rho_corr = float(_sp2(n_spr[valid1], one_minus_r[valid1])[0])
+        valid2 = np.isfinite(n_spr) & np.isfinite(p_fd)
+        if valid2.sum() > 5:
+            h2_rho_flash = float(_sp2(n_spr[valid2], p_fd[valid2])[0])
+        audit["H2"] = {
+            "volume_rho":           float(c_data["h2_rho"]),
+            "timing_rho_pearson":   h2_rho_corr,
+            "timing_rho_flashiness": h2_rho_flash,
+            "median_pearson_r":     float(np.nanmedian(b2_data["pearson_r"])),
+            "median_flashiness_diff": float(np.nanmedian(b2_data["flashiness_diff"])),
+        }
+
+    if e_ext_data:
+        h3_audit: dict = {"cm_cosines": {}}
+        for pname in ("n", "q_spatial", "p_spatial"):
+            cm_key = f"cm_{pname}"
+            if cm_key in e_ext_data:
+                h3_audit["cm_cosines"][pname] = e_ext_data[cm_key]
+        ceiling = e_ext_data.get("ceiling", {})
+        if ceiling:
+            h3_audit["noise_ceiling"] = ceiling
+        audit["H3"] = h3_audit
+
+    if audit:
+        verdicts_out["audit"] = audit
+
     with open(verdicts_path, "w") as f:
         json.dump(verdicts_out, f, indent=2)
     print(f"verdicts written → {verdicts_path}")
@@ -1544,10 +2110,17 @@ def main() -> None:
     ap.add_argument("--params-r1", default=None, type=Path)
     ap.add_argument("--params-r2", default=None, type=Path)
     ap.add_argument("--params-r3", default=None, type=Path)
-    # Gradient NetCDF paths (Stage E)
+    # Gradient NetCDF paths (Stage E / Stage E ext seed-42)
     ap.add_argument("--grads-r1", default=None, type=Path)
     ap.add_argument("--grads-r2", default=None, type=Path)
     ap.add_argument("--grads-r3", default=None, type=Path)
+    # Replicate gradient paths (Stage E ext seed-123 noise ceiling; optional)
+    ap.add_argument("--grads-r1-rep", default=None, type=Path,
+                    help="Replicate (seed-123) gradient NetCDF for R1 — noise ceiling")
+    ap.add_argument("--grads-r2-rep", default=None, type=Path,
+                    help="Replicate (seed-123) gradient NetCDF for R2 — noise ceiling")
+    ap.add_argument("--grads-r3-rep", default=None, type=Path,
+                    help="Replicate (seed-123) gradient NetCDF for R3 — noise ceiling")
     # Output
     ap.add_argument("--out",        default=None, help="Output dir (default: <ddrs-root>/output/equif)")
     ap.add_argument("--max-gauges", default=None, type=int,
@@ -1586,6 +2159,10 @@ def main() -> None:
     b_common = stage_b(out_dir, a_data, "common", COMMON_STORE,
                        is_hourly=False, force=args.force)
 
+    # Stage B2 — inter-store timing disagreement (audit; new stage)
+    b2_data = stage_b2(out_dir, a_data, force=args.force,
+                       hourly_block_days=args.hourly_block_days)
+
     # Dev cross-check when eval network is small
     if args.max_gauges is not None and args.max_gauges <= 20:
         _dev_crosscheck_topo(a_data, b_daily, DAILY_LSTM_STORE)
@@ -1620,8 +2197,18 @@ def main() -> None:
     else:
         print("[Stage E] skipped — one or more --grads-r* not provided")
 
+    # Stage E ext — common-mode-removed H3 + noise ceiling (audit; new stage)
+    e_ext_data = stage_e_ext(
+        out_dir,
+        args.grads_r1, args.grads_r2, args.grads_r3,
+        grads_r1_rep=args.grads_r1_rep,
+        grads_r2_rep=args.grads_r2_rep,
+        grads_r3_rep=args.grads_r3_rep,
+        force=args.force,
+    )
+
     # Stage F
-    stage_f(out_dir, a_data, c_data, d_data, e_data)
+    stage_f(out_dir, a_data, c_data, d_data, e_data, b2_data=b2_data, e_ext_data=e_ext_data)
 
 
 if __name__ == "__main__":
