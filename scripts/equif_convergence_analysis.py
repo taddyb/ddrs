@@ -211,11 +211,10 @@ def load_qprime_for_eval_network(
         t_mask    = (days_only >= EVAL_START.astype("datetime64[D]")) & (
                      days_only <= EVAL_END.astype("datetime64[D]"))
 
-    # xarray select: covered_comids (label-based, works with zarr)
+    # xarray select: covered_comids (label-based), then integer-position select for time
     ds_sel = ds["Qr"].sel(
         divide_id=covered_comids,
-        time=t_mask,
-    )
+    ).isel(time=np.flatnonzero(t_mask))
     # Load into memory
     qr_covered = ds_sel.values.astype(np.float32)  # [n_covered, n_hours_or_days]
 
@@ -304,7 +303,7 @@ def bfs_upstream_distance(
     local_up: np.ndarray,
     n_eval: int,
     gauge_local_idx: np.ndarray,
-    max_sweeps: int = 5,
+    max_sweeps: int = 200,
 ) -> np.ndarray:
     """Multi-source BFS going upstream from gauges.
 
@@ -330,6 +329,9 @@ def bfs_upstream_distance(
         if not update.any():
             break
         np.minimum.at(dist, u_rev, new_u)
+    else:
+        print(f"  WARNING: bfs_upstream_distance did not reach fixpoint "
+              f"after {max_sweeps} sweeps — some distances may be underestimated")
 
     return dist
 
@@ -425,6 +427,7 @@ def stage_a(
     sort_e     = np.argsort(local_down, kind="stable")
     local_down = local_down[sort_e]
     local_up   = local_up[sort_e]
+    assert np.all(local_down >= local_up), "eval-network remap broke topological ordering"
     print(f"  eval network edges: {len(local_down)}")
 
     # --- per-store coverage masks (COMID present in store) ---
@@ -499,16 +502,23 @@ def stage_b(
     is_hourly: bool = False,
     force: bool = False,
 ) -> dict:
-    """Compute per-reach median / p10 / p90 of SUMMED upstream daily Q' over eval window.
+    """Compute per-reach median / p10 / p90 / mean of SUMMED upstream daily Q' over eval window.
 
     tag : short label used for cache filename ('daily', 'hourly', 'common')
-    Returns dict with keys: median_q, p10_q, p90_q  each (n_eval,) f32
+    Returns dict with keys: median_q, p10_q, p90_q, mean_q  each (n_eval,) f32
     """
     cache = out_dir / f"stage_b_{tag}.npz"
     if cache.exists() and not force:
         print(f"[Stage B:{tag}] loading from cache")
         d = np.load(cache)
-        return {"median_q": d["median_q"], "p10_q": d["p10_q"], "p90_q": d["p90_q"]}
+        if "mean_q" in d.files:
+            return {
+                "median_q": d["median_q"],
+                "p10_q":    d["p10_q"],
+                "p90_q":    d["p90_q"],
+                "mean_q":   d["mean_q"],
+            }
+        print(f"  [Stage B:{tag}] old cache missing mean_q — recomputing")
 
     print(f"[Stage B:{tag}] computing summed Q' from {store_path.split('/')[-1]}")
     eval_comids = stage_a_data["eval_comids"]
@@ -529,11 +539,12 @@ def stage_b(
     median_q = np.median(q, axis=1).astype(np.float32)
     p10_q    = np.percentile(q, 10, axis=1).astype(np.float32)
     p90_q    = np.percentile(q, 90, axis=1).astype(np.float32)
+    mean_q   = np.mean(q, axis=1).astype(np.float32)
 
-    np.savez_compressed(cache, median_q=median_q, p10_q=p10_q, p90_q=p90_q)
+    np.savez_compressed(cache, median_q=median_q, p10_q=p10_q, p90_q=p90_q, mean_q=mean_q)
     print(f"    saved → {cache}")
 
-    return {"median_q": median_q, "p10_q": p10_q, "p90_q": p90_q}
+    return {"median_q": median_q, "p10_q": p10_q, "p90_q": p90_q, "mean_q": mean_q}
 
 # ---------------------------------------------------------------------------
 # Stage C: Level 1 (raw params) + Level 2 (realized geometry)
@@ -557,7 +568,31 @@ def stage_c(
     cache = out_dir / "stage_c.npz"
     if cache.exists() and not force:
         print("[Stage C] loading from cache")
-        return dict(np.load(cache, allow_pickle=True))
+        d = np.load(cache, allow_pickle=True)
+        geo_spread_own = {
+            "depth":            d["geo_own_depth"],
+            "top_width":        d["geo_own_top_width"],
+            "hydraulic_radius": d["geo_own_hyd_radius"],
+        }
+        geo_spread_common = {
+            "depth":            d["geo_common_depth"],
+            "top_width":        d["geo_common_top_width"],
+            "hydraulic_radius": d["geo_common_hyd_radius"],
+        }
+        return {
+            "per_reach_spread_n": d["per_reach_spread_n"],
+            "per_reach_spread_q": d["per_reach_spread_q"],
+            "per_reach_spread_p": d["per_reach_spread_p"],
+            "median_spread_n":    float(d["median_spread_n"]),
+            "geo_spread_own":     geo_spread_own,
+            "geo_spread_common":  geo_spread_common,
+            "q_disagreement":     d["q_disagreement"],
+            "h2_rho":             float(d["h2_rho"]),
+            "spearman_n":         dict(zip(
+                d["spearman_pair_labels"].tolist(),
+                d["spearman_n"].tolist(),
+            )),
+        }
 
     print("[Stage C] computing raw-parameter and geometry spreads")
 
@@ -712,8 +747,8 @@ def stage_c(
 
     # Q' disagreement between stores (for H2): R1/R2 = daily, R3 = hourly
     # per-reach relative range of eval-window mean Q' across the 2 distinct stores
-    q_mean_r12 = b_r12["median_q"][amask]
-    q_mean_r3  = b_r3["median_q"][amask]
+    q_mean_r12 = b_r12["mean_q"][amask]
+    q_mean_r3  = b_r3["mean_q"][amask]
     q_stack_2  = np.stack([q_mean_r12, q_mean_r3], axis=0)
     q_mean_2   = np.nanmean(q_stack_2, axis=0)
     q_disagreement = (np.nanmax(q_stack_2, axis=0) - np.nanmin(q_stack_2, axis=0)) / (
@@ -863,7 +898,39 @@ def stage_e(
     cache = out_dir / "stage_e.npz"
     if cache.exists() and not force:
         print("[Stage E] loading from cache")
-        return dict(np.load(cache, allow_pickle=True))
+        d = np.load(cache, allow_pickle=True)
+        h3_loaded: dict = {}
+        for pname, cos_key, mean_key in [
+            ("n",         "h3_n_cosines", "h3_n_mean_cos"),
+            ("q_spatial", "h3_q_cosines", "h3_q_mean_cos"),
+            ("p_spatial", "h3_p_cosines", "h3_p_mean_cos"),
+        ]:
+            cosines = d[cos_key]
+            h3_loaded[pname] = {
+                "cosine_R1R2": float(cosines[0]),
+                "cosine_R1R3": float(cosines[1]),
+                "cosine_R2R3": float(cosines[2]),
+                "mean_cosine": float(d[mean_key]),
+            }
+        h4_loaded: dict = {}
+        for arm in ("R1", "R2", "R3"):
+            h4_loaded[arm] = {}
+            for p in ("n", "q_spatial", "p_spatial"):
+                h4_loaded[arm][p] = {
+                    "ratio":       float(d[f"h4_{arm}_{p}_ratio"]),
+                    "bin_medians": d[f"h4_{arm}_{p}_bins"].tolist(),
+                }
+        bin_labels_loaded = (
+            d["bin_labels"].tolist()
+            if "bin_labels" in d.files
+            else ["0", "1-2", "3-5", "6-10", ">10"]
+        )
+        return {
+            "h3":        h3_loaded,
+            "h4":        h4_loaded,
+            "probe_dist": d["probe_dist"],
+            "bin_labels": bin_labels_loaded,
+        }
 
     print("[Stage E] computing gradient alignment and reachability")
 
@@ -1013,6 +1080,7 @@ def stage_e(
         cache,
         common_comids  = common_comids_arr,
         probe_dist     = probe_dist,
+        bin_labels     = np.array(bin_labels),
         # H3 cosines (flattened)
         h3_n_cosines   = np.array([h3["n"]["cosine_R1R2"],       h3["n"]["cosine_R1R3"],       h3["n"]["cosine_R2R3"]]),
         h3_q_cosines   = np.array([h3["q_spatial"]["cosine_R1R2"], h3["q_spatial"]["cosine_R1R3"], h3["q_spatial"]["cosine_R2R3"]]),
@@ -1156,7 +1224,7 @@ def stage_f(
                     vals_in_order[i] > vals_in_order[i - 1] + 1e-15
                     for i in range(1, len(vals_in_order))
                 )
-                if ratio > 1 and violations <= 1:
+                if ratio > 1 and violations == 0:
                     cell_v = "S"   # SUPPORTED
                 elif ratio <= 1:
                     cell_v = "R"   # REFUTED
