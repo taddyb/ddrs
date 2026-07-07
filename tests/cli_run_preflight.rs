@@ -54,10 +54,71 @@ data_sources:
         strict: false,
         max_mini_batches: Some(1),
         batch_order_from: None,
+        backend: "cuda".into(),
     }).unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("requires a CUDA GPU") && msg.contains("train"),
         "expected GPU pre-flight, got: {msg}"
+    );
+}
+
+#[test]
+fn run_train_cpu_skips_gpu_preflight() {
+    // Same setup as run_train_requires_gpu_when_none_probed, but
+    // backend: "cpu". The run may fail later (missing data in the tmp
+    // workspace) — assert only that the failure is NOT the GPU pre-flight
+    // message.
+    use std::fs;
+    let tmp = tempfile::tempdir().unwrap();
+    let conus = tmp.path().join("conus.zarr");
+    fs::create_dir_all(&conus).unwrap();
+    fs::write(conus.join("zarr.json"), "{}").unwrap();
+    for array in ["order", "length_m", "slope", "indices_0", "indices_1"] {
+        fs::create_dir_all(conus.join(array)).unwrap();
+        fs::write(conus.join(array).join("zarr.json"), "{}").unwrap();
+    }
+    let gages = tmp.path().join("gages.zarr");
+    fs::create_dir_all(&gages).unwrap();
+    fs::write(gages.join("zarr.json"), "{}").unwrap();
+
+    let cfg_path = tmp.path().join("ddrs.yaml");
+    fs::write(&cfg_path, format!(r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+workflow: train
+data_sources:
+  attributes: /dev/null
+  conus_adjacency: {conus}
+  gages_adjacency: {gages}
+  streamflow: /dev/null
+  observations: /dev/null
+  gages: /dev/null
+"#, conus = conus.display(), gages = gages.display())).unwrap();
+    let ws_root = tmp.path().join(".ddrs");
+    fs::create_dir_all(ws_root.join("runs")).unwrap();
+    let lock = ddrs::cli::lockfile::Lockfile {
+        ddrs_version: "test".into(),
+        created_at: "0".into(),
+        sources: std::collections::BTreeMap::new(),
+    };
+    lock.write_atomic(&ws_root.join("sources.lock")).unwrap();
+    let ws = ddrs::cli::workspace::Workspace::with_root(&ws_root);
+    let err = ddrs::cli::run::run(ddrs::cli::run::RunInput {
+        workspace: ws,
+        config_path: cfg_path,
+        workflow: None,
+        plot: false,
+        strict: false,
+        max_mini_batches: Some(1),
+        batch_order_from: None,
+        backend: "cpu".into(),
+    }).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("requires a CUDA GPU"),
+        "cpu backend must skip GPU pre-flight, got: {msg}"
     );
 }

@@ -89,6 +89,7 @@ data_sources:
         strict: false,
         max_mini_batches: Some(1),
         batch_order_from: None,
+        backend: "cuda".into(),
     });
     // Expected: fails downstream (sandbox / data source / GPU), NOT at workflow.
     if let Err(e) = res {

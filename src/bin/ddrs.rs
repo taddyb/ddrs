@@ -87,6 +87,9 @@ enum Cmd {
         #[arg(long, value_name = "PATH")] batch_order_from: Option<PathBuf>,
         /// Print the run result as JSON instead of human-readable text.
         #[arg(long)] json: bool,
+        /// Backend for training/evaluation: "cuda" (default) or "cpu"
+        /// (NdArray, deterministic; sparse_solver forced to cpu).
+        #[arg(long, default_value = "cuda")] backend: String,
     },
     /// Inspect a past run's manifest.
     Show {
@@ -207,7 +210,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Cmd::Run { workflow, plot, strict, max_mini_batches, batch_order_from, json: _ } => {
+        Cmd::Run { workflow, plot, strict, max_mini_batches, batch_order_from, json: _, backend } => {
             let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
                 path: ".".into(),
                 source: "no ddrs.yaml found in current directory. \
@@ -221,6 +224,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 strict,
                 max_mini_batches,
                 batch_order_from,
+                backend,
             })?;
             eprintln!("run complete → {}", run_dir.display());
             Ok(())
