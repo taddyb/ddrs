@@ -65,6 +65,7 @@ data_sources:
 
 #[test]
 fn run_train_cpu_skips_gpu_preflight() {
+    // no GPU guard needed: negative assertion holds on both GPU and no-GPU hosts
     // Same setup as run_train_requires_gpu_when_none_probed, but
     // backend: "cpu". The run may fail later (missing data in the tmp
     // workspace) — assert only that the failure is NOT the GPU pre-flight

@@ -125,6 +125,7 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
                     let device = <I as BackendTypes>::Device::default();
                     crate::dump_parameters::dump::<I>(&pr.config, &ck_base, &nc, 50_000, &device)
                 }
+                // "cuda" — validated in run()
                 _ => {
                     type I = burn_cuda::Cuda<f32, i32>;
                     let device = cubecl::cuda::CudaDevice::new(pr.config.device);
@@ -311,6 +312,9 @@ fn dispatch_backend<I>(
 where
     I: Backend,
     Autodiff<I>: AutodiffBackend<InnerBackend = I>,
+    // Autodiff<I>::Device == I::Device in BURN 0.21 (driver.rs:58); required to
+    // pass `device: I::Device` to bootstrap_head_and_state, which takes
+    // `&<Autodiff<I> as BackendTypes>::Device`.
     I: BackendTypes<Device = <Autodiff<I> as BackendTypes>::Device>,
 {
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(serde_json::Value, RunOutputs), CliError> {
@@ -323,7 +327,6 @@ where
                 ));
             }
             Workflow::Train => {
-                let device = device.clone();
                 let phase1_start = Instant::now();
 
                 let mut train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
@@ -373,8 +376,6 @@ where
                 Ok((metrics, outputs))
             }
             Workflow::TrainAndTest => {
-                let device = device.clone();
-
                 // --- Phase 1: training ---
                 let phase1_start = Instant::now();
                 let mut train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
