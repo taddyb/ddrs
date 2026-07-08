@@ -87,6 +87,9 @@ enum Cmd {
         #[arg(long, value_name = "PATH")] batch_order_from: Option<PathBuf>,
         /// Print the run result as JSON instead of human-readable text.
         #[arg(long)] json: bool,
+        /// Backend for training/evaluation: "cuda" (default) or "cpu"
+        /// (NdArray, deterministic; sparse_solver forced to cpu).
+        #[arg(long, default_value = "cuda")] backend: String,
     },
     /// Inspect a past run's manifest.
     Show {
@@ -94,6 +97,19 @@ enum Cmd {
         run_id: String,
         /// Print the manifest as JSON.
         #[arg(long)] json: bool,
+    },
+    /// Validate a Q' store against the DDR store contract
+    /// (docs/nh-qprime-store-contract.md) and register it as a data-source
+    /// group under config/sources/.
+    Import {
+        /// Path to the Q' store (icechunk repo or global zarr).
+        store: PathBuf,
+        /// Group name to register (omit together with --dry-run to validate only).
+        #[arg(long)] name: Option<String>,
+        /// Validate and report only; don't write a source group.
+        #[arg(long)] dry_run: bool,
+        /// Overwrite an existing group with the same name.
+        #[arg(long)] force: bool,
     },
     /// Named data-source groups ("save files") under config/sources/.
     Sources {
@@ -194,7 +210,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             }
             Ok(())
         }
-        Cmd::Run { workflow, plot, strict, max_mini_batches, batch_order_from, json: _ } => {
+        Cmd::Run { workflow, plot, strict, max_mini_batches, batch_order_from, json: _, backend } => {
             let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
                 path: ".".into(),
                 source: "no ddrs.yaml found in current directory. \
@@ -208,11 +224,24 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 strict,
                 max_mini_batches,
                 batch_order_from,
+                backend,
             })?;
             eprintln!("run complete → {}", run_dir.display());
             Ok(())
         }
         Cmd::Show { run_id, json } => ddrs::cli::show::run_show(&ws, &run_id, json),
+        Cmd::Import { store, name, dry_run, force } => {
+            ddrs::cli::import::run_import(
+                cfg_path.as_deref(),
+                &ws,
+                ddrs::cli::import::ImportInput {
+                    store_path: store,
+                    name,
+                    dry_run,
+                    force,
+                },
+            )
+        }
         Cmd::Sources { cmd } => {
             let cfg = cfg_path.ok_or_else(|| CliError::ConfigInvalid {
                 path: ".".into(),

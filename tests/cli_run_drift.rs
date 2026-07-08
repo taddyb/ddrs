@@ -60,6 +60,7 @@ fn run_warns_on_drift_strict_fails_on_drift() {
         strict: true,
         max_mini_batches: Some(1),
         batch_order_from: None,
+        backend: "cuda".into(),
     })
     .unwrap_err();
     assert!(

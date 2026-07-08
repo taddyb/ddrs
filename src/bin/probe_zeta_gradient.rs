@@ -4,9 +4,10 @@
 //! Samples training-style batches (same sampler + rho-window machinery as the
 //! training driver, but a LOCAL rng seeded from --seed), runs
 //! `probe_forward` + the config loss + backward at a FIXED head (no optimizer
-//! step ever), reads the gradients on the lifted normalized leakance leaves,
-//! accumulates per-COMID, and writes the mean |g| / signed g map via
-//! `write_grad_netcdf`.
+//! step ever), reads the gradients on the lifted normalized KAN-head output
+//! leaves (default: the leakance trio K_D, d_gw, leakance_factor; override via
+//! --params), accumulates per-COMID, and writes the mean |g| / signed g map
+//! via `write_grad_netcdf` (default) or `write_param_grad_netcdf` (--params).
 //!
 //! Usage (CPU, deterministic — the GPU may be busy training):
 //!   cargo run --release --bin probe_zeta_gradient -- \
@@ -93,7 +94,7 @@ use ddrs::data::dataset::{MeritGagesDataset, RoutingTensors};
 use ddrs::data::GageMetadata;
 use ddrs::data::sampler::{BatchSource, RandomSampler};
 use ddrs::data::TestWindow;
-use ddrs::dump_parameters::{write_grad_netcdf, write_zeta_netcdf};
+use ddrs::dump_parameters::{write_grad_netcdf, write_param_grad_netcdf, write_zeta_netcdf};
 use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::probe::{probe_forward, GradAccum};
@@ -149,6 +150,12 @@ struct Cli {
     /// Stage 2 only: route only the first D days of the eval period.
     #[arg(long, default_value_t = 1095)]
     eval_days: usize,
+
+    /// grad mode only: comma-separated KAN-head outputs to probe.
+    /// Defaults to the leakance trio (K_D,d_gw,leakance_factor).
+    /// Example: --params n,q_spatial,p_spatial
+    #[arg(long)]
+    params: Option<String>,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -179,6 +186,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
     };
+
+    // --params is only valid in grad mode.
+    if cli.params.is_some() && mode != Mode::Grad {
+        return Err(format!(
+            "--params is only valid in --mode grad (got --mode {})",
+            cli.mode
+        )
+        .into());
+    }
 
     // grad/floor: training-mode config (probe batches replicate the training
     // sampler). perturb/teacher/state-cache: testing-mode config (replicates
@@ -222,10 +238,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<dyn std::error::Error>> {
-    assert!(
-        cfg.params.use_leakance,
-        "probe requires params.use_leakance: true — use a leakance experiment config"
-    );
+    let lift: Vec<String> = match &cli.params {
+        Some(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
+        None => vec!["K_D".into(), "d_gw".into(), "leakance_factor".into()],
+    };
+    let wants_leakance = lift
+        .iter()
+        .any(|p| matches!(p.as_str(), "K_D" | "d_gw" | "leakance_factor"));
+    if wants_leakance {
+        assert!(
+            cfg.params.use_leakance,
+            "probing leakance params requires params.use_leakance: true — \
+             use a leakance experiment config"
+        );
+    }
     let output = cli.output.ok_or("--output is required in grad mode")?;
 
     let dataset = MeritGagesDataset::open(&cfg)?;
@@ -259,9 +285,8 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         BatchSource::Shuffle(RandomSampler::new(dataset.len(), exp.batch_size, true));
     sampler.reshuffle(&mut rng);
 
-    let mut accum_factor = GradAccum::new();
-    let mut accum_dgw = GradAccum::new();
-    let mut accum_kd = GradAccum::new();
+    let mut accums: HashMap<String, GradAccum> =
+        lift.iter().map(|name| (name.clone(), GradAccum::new())).collect();
 
     let mut processed = 0usize;
     let mut total_batches = 0usize;
@@ -300,7 +325,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         let t_days_full = obs_arr.nrows();
 
         let tensors = batch.to_tensors::<Autodiff<I>>(&device);
-        let (pred_hourly, leaves) = probe_forward::<I>(&cfg, &tensors, &head, &device);
+        let (pred_hourly, leaves) = probe_forward::<I>(&cfg, &tensors, &head, &device, &lift);
         let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
         let dims = daily.dims();
         let (g, t_days) = (dims[0], dims[1]);
@@ -353,30 +378,38 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
         let grads = loss.backward();
-        let g_factor: Vec<f32> =
-            leaves.factor.grad(&grads).expect("factor grad").into_data().into_vec().unwrap();
-        let g_dgw: Vec<f32> =
-            leaves.d_gw.grad(&grads).expect("d_gw grad").into_data().into_vec().unwrap();
-        let g_kd: Vec<f32> =
-            leaves.k_d.grad(&grads).expect("k_d grad").into_data().into_vec().unwrap();
+        let grad_vecs: Vec<(String, Vec<f32>)> = lift
+            .iter()
+            .map(|name| {
+                let g: Vec<f32> = leaves
+                    .get(name)
+                    .grad(&grads)
+                    .unwrap_or_else(|| panic!("no grad for '{name}'"))
+                    .into_data()
+                    .into_vec()
+                    .unwrap();
+                (name.clone(), g)
+            })
+            .collect();
 
         // Fail fast on non-finite gradients: a poisoned mean invalidates the
         // entire accumulation map — do NOT skip-and-continue, which would
         // desync accumulator coverage.
-        let nf_factor = g_factor.iter().filter(|v| !v.is_finite()).count();
-        let nf_dgw = g_dgw.iter().filter(|v| !v.is_finite()).count();
-        let nf_kd = g_kd.iter().filter(|v| !v.is_finite()).count();
-        if nf_factor > 0 || nf_dgw > 0 || nf_kd > 0 {
-            eprintln!(
-                "batch {}: non-finite grads — factor:{nf_factor} d_gw:{nf_dgw} k_d:{nf_kd}",
-                processed + 1
-            );
+        let mut any_nf = false;
+        for (name, g) in &grad_vecs {
+            let nf = g.iter().filter(|v| !v.is_finite()).count();
+            if nf > 0 {
+                eprintln!("batch {}: non-finite grads for '{name}': {nf}", processed + 1);
+                any_nf = true;
+            }
+        }
+        if any_nf {
             std::process::exit(1);
         }
 
-        accum_factor.add(&comids, &g_factor, &g_factor);
-        accum_dgw.add(&comids, &g_dgw, &g_dgw);
-        accum_kd.add(&comids, &g_kd, &g_kd);
+        for (name, g) in &grad_vecs {
+            accums.get_mut(name.as_str()).unwrap().add(&comids, g, g);
+        }
 
         eprintln!(
             "batch {}/{}: loss={loss_f32:.5} gauges={surviving_g}",
@@ -386,21 +419,32 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         processed += 1;
     }
 
-    // All three accumulators saw identical (comids, count) streams — the
-    // factor rows define the master COMID order.
-    let rows_factor = accum_factor.into_sorted_rows();
-    let rows_dgw = accum_dgw.into_sorted_rows();
-    let rows_kd = accum_kd.into_sorted_rows();
-    assert_eq!(rows_factor.len(), rows_dgw.len());
-    assert_eq!(rows_factor.len(), rows_kd.len());
-    assert!(
-        rows_factor.iter().map(|r| r.0).eq(rows_dgw.iter().map(|r| r.0))
-            && rows_factor.iter().map(|r| r.0).eq(rows_kd.iter().map(|r| r.0)),
-        "accumulator COMID sets diverged — per-param skipping was introduced somewhere"
-    );
+    // Drain accumulators in lift order → sorted rows per param.
+    let sorted_rows: Vec<(String, Vec<(i64, f64, f64, u32)>)> = lift
+        .iter()
+        .map(|name| {
+            let rows =
+                accums.remove(name.as_str()).expect("accumulator missing").into_sorted_rows();
+            (name.clone(), rows)
+        })
+        .collect();
 
-    let comids: Vec<i64> = rows_factor.iter().map(|r| r.0).collect();
-    let n_windows: Vec<i32> = rows_factor.iter().map(|r| r.3 as i32).collect();
+    // All accumulators saw identical (comids, count) streams — any divergence
+    // indicates a per-param skip bug was introduced somewhere.
+    if sorted_rows.len() > 1 {
+        let ref_comids: Vec<i64> = sorted_rows[0].1.iter().map(|r| r.0).collect();
+        for (name, rows) in &sorted_rows[1..] {
+            assert!(
+                rows.iter().map(|r| r.0).eq(ref_comids.iter().copied()),
+                "accumulator COMID sets diverged for '{name}' vs '{}' \
+                 — per-param skipping was introduced somewhere",
+                sorted_rows[0].0
+            );
+        }
+    }
+
+    let comids: Vec<i64> = sorted_rows[0].1.iter().map(|r| r.0).collect();
+    let n_windows: Vec<i32> = sorted_rows[0].1.iter().map(|r| r.3 as i32).collect();
     let mean_abs = |rows: &[(i64, f64, f64, u32)]| -> Vec<f32> {
         rows.iter().map(|r| (r.1 / r.3 as f64) as f32).collect()
     };
@@ -408,21 +452,49 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         rows.iter().map(|r| (r.2 / r.3 as f64) as f32).collect()
     };
 
-    write_grad_netcdf(
-        &output,
-        &comids,
-        &mean_abs(&rows_factor),
-        &mean_net(&rows_factor),
-        &mean_abs(&rows_dgw),
-        &mean_net(&rows_dgw),
-        &mean_abs(&rows_kd),
-        &mean_net(&rows_kd),
-        &n_windows,
-        &checkpoint_label,
-        cli.windows,
-        cli.seed,
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    if cli.params.is_some() {
+        // Generic writer: one variable pair per probed param.
+        let param_names: Vec<&str> = sorted_rows.iter().map(|(n, _)| n.as_str()).collect();
+        let abs_vecs: Vec<Vec<f32>> = sorted_rows.iter().map(|(_, r)| mean_abs(r)).collect();
+        let net_vecs: Vec<Vec<f32>> = sorted_rows.iter().map(|(_, r)| mean_net(r)).collect();
+        write_param_grad_netcdf(
+            &output,
+            &param_names,
+            &comids,
+            &abs_vecs,
+            &net_vecs,
+            &n_windows,
+            &checkpoint_label,
+            cli.windows,
+            cli.seed,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    } else {
+        // Legacy writer: leakance trio in fixed variable-name order —
+        // byte-identical to the pre-generalization output.
+        let get_rows = |name: &str| -> &Vec<(i64, f64, f64, u32)> {
+            sorted_rows
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, r)| r)
+                .unwrap_or_else(|| panic!("legacy leakance param '{name}' missing"))
+        };
+        write_grad_netcdf(
+            &output,
+            &comids,
+            &mean_abs(get_rows("leakance_factor")),
+            &mean_net(get_rows("leakance_factor")),
+            &mean_abs(get_rows("d_gw")),
+            &mean_net(get_rows("d_gw")),
+            &mean_abs(get_rows("K_D")),
+            &mean_net(get_rows("K_D")),
+            &n_windows,
+            &checkpoint_label,
+            cli.windows,
+            cli.seed,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    }
 
     println!(
         "wrote {} ({} reaches, {} batches, seed {})",

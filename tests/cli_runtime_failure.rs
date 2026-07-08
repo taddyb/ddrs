@@ -44,6 +44,7 @@ fn run_writes_failure_manifest_when_dispatch_stub_fails() {
         strict: false,
         max_mini_batches: Some(1),
         batch_order_from: None,
+        backend: "cuda".into(),
     })
     .expect("run should return Ok(run_dir) even when dispatch fails");
 

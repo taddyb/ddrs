@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use burn::backend::Autodiff;
+use burn::tensor::backend::{AutodiffBackend, Backend, BackendTypes};
 use burn_cuda::Cuda;
 
 use crate::cli::{
@@ -32,9 +34,20 @@ pub struct RunInput {
     /// experiment. When `Some`, builds a `BatchSource::Replay` and passes it
     /// to `train(...)`, overriding the default per-epoch shuffle.
     pub batch_order_from: Option<PathBuf>,
+    /// Backend for training/evaluation: "cuda" (default) or "cpu"
+    /// (NdArray, deterministic; sparse_solver forced to cpu).
+    pub backend: String,
 }
 
 pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
+    // 0. Validate backend before any workspace mutation.
+    if !matches!(input.backend.as_str(), "cpu" | "cuda") {
+        return Err(CliError::Runtime(format!(
+            "unknown --backend {} (expected \"cpu\" or \"cuda\")",
+            input.backend
+        )));
+    }
+
     // 1. Plan as a library call (reused — not re-parsed in run). Handles
     //    workspace init, smoke caching, drift policy (strict aborts before
     //    the relock), and adjacency/baseline caches.
@@ -49,7 +62,8 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     )?;
 
     // 1b. GPU pre-flight for workflows that need training kernels.
-    if matches!(pr.workflow, Workflow::Train | Workflow::TrainAndTest) {
+    //     Skipped when --backend cpu is requested.
+    if input.backend == "cuda" && matches!(pr.workflow, Workflow::Train | Workflow::TrainAndTest) {
         let has_gpu = crate::cli::system::probe()
             .ok()
             .flatten()
@@ -59,7 +73,7 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
             return Err(CliError::Runtime(format!(
                 "run: workflow `{}` requires a CUDA GPU; system probe found none. \
                  Smoke verified the routing core works on CPU, but production \
-                 training does not.",
+                 training does not. Use --backend cpu for CPU-only operation.",
                 workflow_slug(pr.workflow)
             )));
         }
@@ -105,9 +119,19 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
             let plot_dir = run_dir.join("plot");
             fs::create_dir_all(&plot_dir).ok();
             let nc = plot_dir.join("kan_parameters.nc");
-            type I = burn_cuda::Cuda<f32, i32>;
-            let device = cubecl::cuda::CudaDevice::new(pr.config.device);
-            let res = crate::dump_parameters::dump::<I>(&pr.config, &ck_base, &nc, 50_000, &device);
+            let res = match input.backend.as_str() {
+                "cpu" => {
+                    type I = burn::backend::NdArray<f32>;
+                    let device = <I as BackendTypes>::Device::default();
+                    crate::dump_parameters::dump::<I>(&pr.config, &ck_base, &nc, 50_000, &device)
+                }
+                // "cuda" — validated in run()
+                _ => {
+                    type I = burn_cuda::Cuda<f32, i32>;
+                    let device = cubecl::cuda::CudaDevice::new(pr.config.device);
+                    crate::dump_parameters::dump::<I>(&pr.config, &ck_base, &nc, 50_000, &device)
+                }
+            };
             if let Err(e) = res {
                 eprintln!("warning: --plot post-step failed: {e}");
             } else {
@@ -124,6 +148,8 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
     }
 
     // 6. Finalize manifest.json.
+    let failed = matches!(status, RunStatus::Failed);
+    let failure_reason = if failed { exit_reason.clone() } else { None };
     let manifest = Manifest {
         run_id: run_id.clone(),
         ddrs_version: env!("CARGO_PKG_VERSION").into(),
@@ -155,6 +181,14 @@ pub fn run(input: RunInput) -> Result<PathBuf, CliError> {
         max_mini_batches: input.max_mini_batches,
     };
     manifest.write_atomic(&run_dir.join("manifest.json"))?;
+    // Propagate workflow failures as a non-zero exit. The manifest is always
+    // written first so the run directory and exit_reason are preserved. The
+    // `catch_unwind` in `dispatch` ensures panics also land here as Failed.
+    if failed {
+        return Err(CliError::Runtime(
+            failure_reason.unwrap_or_else(|| "workflow failed (no exit reason captured)".into()),
+        ));
+    }
     Ok(run_dir)
 }
 
@@ -239,16 +273,50 @@ fn capture_git() -> GitInfo {
 
 /// Execute the requested workflow in-process.
 ///
-/// Wraps the body in `catch_unwind` so a thread panic (e.g. CUDA init
-/// failure) produces `RunStatus::Failed` with a populated `exit_reason`
-/// rather than crashing before the manifest is written.
+/// Selects the backend at runtime: "cuda" binds `Cuda<f32, i32>` (default);
+/// "cpu" binds `NdArray<f32>` (deterministic, forces `sparse_solver=cpu` and
+/// `use_cuda_graphs=false`). Delegates to `dispatch_backend` for the
+/// backend-generic body.
 fn dispatch(
     input: &RunInput,
     pr: &PlanResult,
     run_dir: &Path,
 ) -> (RunStatus, Option<String>, serde_json::Value, RunOutputs) {
-    type I = Cuda<f32, i32>;
+    match input.backend.as_str() {
+        "cpu" => {
+            type I = burn::backend::NdArray<f32>;
+            let device = <I as BackendTypes>::Device::default();
+            eprintln!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
+            dispatch_backend::<I>(input, pr, run_dir, device, true)
+        }
+        // "cuda" — validated in run()
+        _ => {
+            type I = Cuda<f32, i32>;
+            let device = cubecl::cuda::CudaDevice::new(pr.config.device);
+            dispatch_backend::<I>(input, pr, run_dir, device, false)
+        }
+    }
+}
 
+/// Backend-generic workflow executor.
+///
+/// `force_cpu` patches the parsed config(s) to set `sparse_solver=cpu` and
+/// `use_cuda_graphs=false` — required when `I = NdArray<f32>`.
+fn dispatch_backend<I>(
+    input: &RunInput,
+    pr: &PlanResult,
+    run_dir: &Path,
+    device: <I as BackendTypes>::Device,
+    force_cpu: bool,
+) -> (RunStatus, Option<String>, serde_json::Value, RunOutputs)
+where
+    I: Backend,
+    Autodiff<I>: AutodiffBackend<InnerBackend = I>,
+    // Autodiff<I>::Device == I::Device in BURN 0.21 (driver.rs:58); required to
+    // pass `device: I::Device` to bootstrap_head_and_state, which takes
+    // `&<Autodiff<I> as BackendTypes>::Device`.
+    I: BackendTypes<Device = <Autodiff<I> as BackendTypes>::Device>,
+{
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(serde_json::Value, RunOutputs), CliError> {
         match pr.workflow {
             Workflow::Eval => {
@@ -259,13 +327,15 @@ fn dispatch(
                 ));
             }
             Workflow::Train => {
-                // Config-selected CUDA ordinal (top-level `device:` key).
-                let device = cubecl::cuda::CudaDevice::new(pr.config.device);
                 let phase1_start = Instant::now();
 
                 let mut train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
                 apply_resolved_adjacency(&mut train_cfg, pr);
+                if force_cpu {
+                    train_cfg.params.sparse_solver = crate::config::SparseSolver::Cpu;
+                    train_cfg.params.use_cuda_graphs = false;
+                }
                 let train_dataset = MeritGagesDataset::open(&train_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -306,14 +376,15 @@ fn dispatch(
                 Ok((metrics, outputs))
             }
             Workflow::TrainAndTest => {
-                // Config-selected CUDA ordinal (top-level `device:` key).
-                let device = cubecl::cuda::CudaDevice::new(pr.config.device);
-
                 // --- Phase 1: training ---
                 let phase1_start = Instant::now();
                 let mut train_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Training)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
                 apply_resolved_adjacency(&mut train_cfg, pr);
+                if force_cpu {
+                    train_cfg.params.sparse_solver = crate::config::SparseSolver::Cpu;
+                    train_cfg.params.use_cuda_graphs = false;
+                }
                 let train_dataset = MeritGagesDataset::open(&train_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
@@ -350,6 +421,10 @@ fn dispatch(
                 let mut test_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Testing)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
                 apply_resolved_adjacency(&mut test_cfg, pr);
+                if force_cpu {
+                    test_cfg.params.sparse_solver = crate::config::SparseSolver::Cpu;
+                    test_cfg.params.use_cuda_graphs = false;
+                }
                 let test_dataset = MeritGagesDataset::open(&test_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 

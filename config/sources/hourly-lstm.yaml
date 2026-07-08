@@ -1,0 +1,11 @@
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/hourly_lstm_merit_unit_catchments.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  # Hourly AORC precip (zarr v3, CONUS). NOTE: unused with this group — the
+  # streamflow store is hourly-native, and kan_head.disaggregation (the only
+  # consumer of precip) is a config error with an hourly-native source.
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr

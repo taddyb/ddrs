@@ -747,6 +747,108 @@ pub fn write_grad_netcdf(
     Ok(())
 }
 
+/// Write a generic gradient probe map: per-reach mean |g| and mean signed g
+/// for an arbitrary set of KAN-head outputs (`param_names`). Variables are
+/// named `grad_<name>_abs` and `grad_<name>_net` (f32, dimensionless).
+/// Modeled on `write_grad_netcdf` — same `COMID_probe` dimension, same
+/// append-or-create behaviour, same global attrs.
+///
+/// `mean_abs[i]` and `mean_net[i]` must both have the same length as `comids`
+/// and correspond to `param_names[i]`.
+///
+/// All accums must cover the identical COMID set (structurally guaranteed:
+/// every accum's `add()` receives the same `comids` slice in the same loop
+/// iteration); asserts instead of NaN-filling a union.
+#[allow(clippy::too_many_arguments)]
+pub fn write_param_grad_netcdf(
+    path: &Path,
+    param_names: &[&str],
+    comids: &[i64],
+    mean_abs: &[Vec<f32>],
+    mean_net: &[Vec<f32>],
+    n_windows: &[i32],
+    checkpoint_label: &str,
+    n_batches: usize,
+    seed: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    assert_eq!(mean_abs.len(), param_names.len());
+    assert_eq!(mean_net.len(), param_names.len());
+
+    let mut file = if path.exists() { netcdf::append(path)? } else { netcdf::create(path)? };
+
+    file.add_attribute("probe_checkpoint", checkpoint_label)?;
+    file.add_attribute("probe_n_batches", n_batches as i64)?;
+    file.add_attribute("probe_seed", seed as i64)?;
+    file.add_attribute("probe_ddrs_version", env!("CARGO_PKG_VERSION"))?;
+    file.add_attribute("probe_params", param_names.join(","))?;
+    file.add_attribute(
+        "probe_note",
+        "adjoint reachability: d(loss)/d(normalized KAN params), mean over covering windows",
+    )?;
+
+    match file.dimension("COMID_probe") {
+        Some(d) if d.len() != comids.len() => {
+            return Err(format!(
+                "{}: existing COMID_probe has {} reaches, this probe covered {}",
+                path.display(),
+                d.len(),
+                comids.len()
+            )
+            .into());
+        }
+        Some(_) => {}
+        None => {
+            file.add_dimension("COMID_probe", comids.len())?;
+        }
+    }
+
+    if let Some(mut v) = file.variable_mut("COMID_probe") {
+        v.put_values(comids, ..)?;
+    } else {
+        let mut v = file.add_variable::<i64>("COMID_probe", &["COMID_probe"])?;
+        v.put_values(comids, ..)?;
+        v.put_attribute("long_name", "MERIT reach identifier (probe-covered network)")?;
+    }
+
+    let mut put = |name: &str,
+                   vals: &[f32],
+                   long_name: &str|
+     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(mut v) = file.variable_mut(name) {
+            v.put_values(vals, ..)?;
+        } else {
+            let mut v = file.add_variable::<f32>(name, &["COMID_probe"])?;
+            v.put_values(vals, ..)?;
+            v.put_attribute("long_name", long_name)?;
+            v.put_attribute("units", "dimensionless (per normalized param)")?;
+        }
+        Ok(())
+    };
+
+    for (i, &pname) in param_names.iter().enumerate() {
+        put(
+            &format!("grad_{pname}_abs"),
+            &mean_abs[i],
+            &format!("mean |dL/d {pname}| per covering window"),
+        )?;
+        put(
+            &format!("grad_{pname}_net"),
+            &mean_net[i],
+            &format!("mean signed dL/d {pname}"),
+        )?;
+    }
+
+    if let Some(mut v) = file.variable_mut("n_windows") {
+        v.put_values(n_windows, ..)?;
+    } else {
+        let mut v = file.add_variable::<i32>("n_windows", &["COMID_probe"])?;
+        v.put_values(n_windows, ..)?;
+        v.put_attribute("long_name", "number of sampled windows covering this reach")?;
+    }
+
+    Ok(())
+}
+
 /// Write a NetCDF4 file with the COMID-keyed KAN parameter schema. Each var
 /// carries a `long_name` + `units` attribute so xarray-based plotting code
 /// (e.g. DDR's `plot_parameter_map.ipynb`) gets self-describing axes.

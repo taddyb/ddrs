@@ -31,7 +31,7 @@ use zarrs::storage::{
 
 use ndarray::Array2;
 
-use crate::data::dates::RhoWindow;
+use crate::data::dates::{Frequency, RhoWindow};
 use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, IdIndex, Staid};
 
@@ -173,12 +173,18 @@ impl ReadableStorageTraits for IcZarrStorage {
 
 /// `Qr` reader over `merit_dhbv2_UH_retrospective.ic`-style icechunk repos.
 ///
-/// Opened once at dataset construction. Task 3 will add `read_window`.
+/// Opened once at dataset construction.
 pub struct StreamflowStore {
     pub path: PathBuf,
     pub index: IdIndex<Comid>,
+    /// First calendar day covered by the store (for hourly stores, the day
+    /// containing the first hour — open() enforces hour-0 alignment).
     pub time_start: NaiveDate,
+    /// Length of the NATIVE time axis: days for daily stores, hours for
+    /// hourly stores.
     pub n_time: usize,
+    /// Native axis resolution, sniffed from the CF `units` attribute.
+    pub resolution: Frequency,
     // SP-3 may consolidate to a shared runtime; keep the Arc alive so the
     // icechunk Store is not dropped while `qr` is in use.
     #[allow(dead_code)]
@@ -194,12 +200,12 @@ impl StreamflowStore {
         // zarrs Array::open takes Arc<dyn ReadableStorageTraits> — cast via type alias
         let readable: ReadableStorage = storage.clone();
 
-        // 1. Read `time` coord: shape (n_time,), dtype int64.
-        //    The encoding is CF-convention "days since YYYY-MM-DD" (units attr).
+        // 1. Read `time` coord: shape (n_time,), dtype int64. CF units are
+        //    "days since …" (daily) or "hours since …" (hourly) — the sniff
+        //    that decides this store's native resolution.
         let time_arr = ZarrArray::open(readable.clone(), "/time")
             .map_err(|e| ic_err(&path, e))?;
-        // Parse the epoch from the `units` attribute ("days since 1980-01-01").
-        let time_epoch = parse_cf_epoch(time_arr.attributes(), &path)?;
+        let (time_epoch, resolution) = parse_cf_units(time_arr.attributes(), &path)?;
         let time_subset = time_arr.subset_all();
         let time_i64: Vec<i64> = time_arr
             .retrieve_array_subset(&time_subset)
@@ -211,8 +217,15 @@ impl StreamflowStore {
                 message: "time axis is empty".into(),
             });
         }
-        let time_start = time_epoch
-            + chrono::Duration::days(time_i64[0]);
+        let time_start = match resolution {
+            Frequency::Daily => {
+                time_epoch + chrono::Duration::days(time_i64[0])
+            }
+            Frequency::Hourly => {
+                validate_hourly_axis(&time_i64, &path)?;
+                time_epoch + chrono::Duration::days(time_i64[0] / 24)
+            }
+        };
 
         // 2. Read `divide_id` coord; build IdIndex<Comid>.
         let div_arr = ZarrArray::open(readable.clone(), "/divide_id")
@@ -227,16 +240,44 @@ impl StreamflowStore {
         let qr = ZarrArray::open(readable.clone(), "/Qr")
             .map_err(|e| ic_err(&path, e))?;
 
-        Ok(Self { path, index, time_start, n_time, storage, qr })
+        Ok(Self { path, index, time_start, n_time, resolution, storage, qr })
     }
 }
 
-/// Parse `units` CF attribute of the form `"days since YYYY-MM-DD"` and
-/// return the epoch as a `NaiveDate`.
-pub(crate) fn parse_cf_epoch(
+/// Contract checks for an hourly time axis (docs/nh-qprime-store-contract.md):
+/// must start at hour 0 of a calendar day and step by exactly 1 hour.
+/// The full scan is cheap (~2.8 MB of i64 for 40 years of hours).
+fn validate_hourly_axis(time_i64: &[i64], path: &Path) -> Result<()> {
+    if time_i64[0] % 24 != 0 {
+        return Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!(
+                "hourly store must start at hour 0 of a day; \
+                 first time value is {}",
+                time_i64[0]
+            ),
+        });
+    }
+    if let Some(i) = (1..time_i64.len()).find(|&i| time_i64[i] - time_i64[i - 1] != 1) {
+        return Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!("hourly time axis has a gap at index {i}"),
+        });
+    }
+    Ok(())
+}
+
+/// Parse the CF `units` attribute of a time coordinate and return the epoch
+/// plus the native axis resolution. Supported forms (see
+/// docs/nh-qprime-store-contract.md):
+///   "days since YYYY-MM-DD[ HH:MM:SS]"  → Daily
+///   "hours since YYYY-MM-DD[ HH:MM:SS]" → Hourly
+/// Anything else is a hard error naming the store and the units string — a
+/// mis-scaled time axis must never be silently accepted.
+pub(crate) fn parse_cf_units(
     attrs: &serde_json::Map<String, serde_json::Value>,
     path: &Path,
-) -> Result<NaiveDate> {
+) -> Result<(NaiveDate, Frequency)> {
     let units = attrs
         .get("units")
         .and_then(|v| v.as_str())
@@ -244,21 +285,42 @@ pub(crate) fn parse_cf_epoch(
             path: path.to_path_buf(),
             message: "time array missing 'units' attribute".into(),
         })?;
-    // Expected: "days since YYYY-MM-DD" (CF convention).
-    let date_str = units
-        .strip_prefix("days since ")
-        .ok_or_else(|| DataError::Malformed {
+    let (date_str, resolution) = if let Some(rest) = units.strip_prefix("days since ") {
+        (rest, Frequency::Daily)
+    } else if let Some(rest) = units.strip_prefix("hours since ") {
+        (rest, Frequency::Hourly)
+    } else {
+        return Err(DataError::Malformed {
             path: path.to_path_buf(),
-            message: format!("unexpected time units format: {units:?}"),
-        })?;
+            message: format!(
+                "unsupported time units {units:?}: expected \"days since …\" \
+                 or \"hours since …\""
+            ),
+        });
+    };
     // The date portion may be followed by a time-of-day component, e.g.
-    // "1980-01-01 00:00:00" (USGS store) vs "1980-01-01" (streamflow store).
-    // Take only the first token.
+    // "1981-01-01 00:00:00" — take only the first token.
     let date_part = date_str.split_whitespace().next().unwrap_or("");
-    NaiveDate::parse_from_str(date_part, "%Y-%m-%d").map_err(|e| DataError::Malformed {
-        path: path.to_path_buf(),
-        message: format!("cannot parse epoch from units {units:?}: {e}"),
-    })
+    let epoch =
+        NaiveDate::parse_from_str(date_part, "%Y-%m-%d").map_err(|e| DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!("cannot parse epoch from units {units:?}: {e}"),
+        })?;
+    Ok((epoch, resolution))
+}
+
+/// Daily-only wrapper for stores whose axis MUST be daily (USGS observations, global Q' zarr).
+pub(crate) fn parse_cf_epoch(
+    attrs: &serde_json::Map<String, serde_json::Value>,
+    path: &Path,
+) -> Result<NaiveDate> {
+    match parse_cf_units(attrs, path)? {
+        (epoch, Frequency::Daily) => Ok(epoch),
+        (_, Frequency::Hourly) => Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: "expected a daily time axis (\"days since …\"), got hourly".into(),
+        }),
+    }
 }
 
 /// Repeat a `(rho_days, N)` daily slab to `(n_hourly, N)` by replicating
@@ -283,25 +345,34 @@ pub(crate) fn daily_to_hourly_trim(daily: &Array2<f32>, n_hourly: usize) -> Arra
     hourly
 }
 
+/// Collapse a `(n_days * 24, N)` hourly slab to `(n_days, N)` by averaging
+/// each 24-hour block. Q' is a rate (m³/s): the daily value is the day's
+/// mean flow, so total daily volume is preserved.
+pub(crate) fn hourly_to_daily_mean(hourly: &Array2<f32>) -> Array2<f32> {
+    let (n_hours, n_div) = hourly.dim();
+    debug_assert_eq!(n_hours % 24, 0, "hourly slab length {n_hours} not a multiple of 24");
+    let n_days = n_hours / 24;
+    let mut daily = Array2::<f32>::zeros((n_days, n_div));
+    for d in 0..n_days {
+        for h in 0..24 {
+            let row = hourly.row(d * 24 + h);
+            for j in 0..n_div {
+                daily[(d, j)] += row[j];
+            }
+        }
+        for j in 0..n_div {
+            daily[(d, j)] /= 24.0;
+        }
+    }
+    daily
+}
+
 impl StreamflowStore {
-    /// Read `Qr` daily for `[window_start, window_start + n_days)` and
-    /// `comids`. Returns `(n_days, N)` f32 matrix; missing COMIDs are
-    /// filled with `0.001` (discharge minimum, mirrors DDR's
-    /// `torch.full(..., fill_value=0.001)` in `readers.py:464-468`).
-    ///
-    /// Used directly by the summed Q' baseline (which needs daily output
-    /// over a 15-yr window where the hourly form would be ~8.5 GB).
-    /// `read_window` and `read_test_window` wrap this and add the
-    /// daily → hourly repeat.
-    pub fn read_window_daily(
-        &self,
-        window_start: NaiveDate,
-        n_days: usize,
-        comids: &[Comid],
-    ) -> Result<Array2<f32>> {
-        // 1. Resolve time window to store-local day indices.
-        let store_start_day_i64 = (window_start - self.time_start).num_days();
-        if store_start_day_i64 < 0 {
+    /// Store-local index of `window_start` on the NATIVE time axis
+    /// (day index for daily stores, hour index for hourly stores).
+    fn native_start_index(&self, window_start: NaiveDate) -> Result<usize> {
+        let days = (window_start - self.time_start).num_days();
+        if days < 0 {
             return Err(DataError::Malformed {
                 path: self.path.clone(),
                 message: format!(
@@ -310,19 +381,35 @@ impl StreamflowStore {
                 ),
             });
         }
-        let store_start_day = store_start_day_i64 as usize;
-        let end_day = store_start_day + n_days;
-        if end_day > self.n_time {
+        Ok(match self.resolution {
+            Frequency::Daily => days as usize,
+            Frequency::Hourly => days as usize * 24,
+        })
+    }
+
+    /// Read `(n_steps, N)` from native time-axis positions
+    /// `[start_step, start_step + n_steps)` for `comids`. Missing COMIDs are
+    /// filled with `0.001` (discharge minimum, mirrors DDR's
+    /// `torch.full(..., fill_value=0.001)` in `readers.py:464-468`).
+    fn read_slab(
+        &self,
+        start_step: usize,
+        n_steps: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        let end_step = start_step + n_steps;
+        if end_step > self.n_time {
             return Err(DataError::Malformed {
                 path: self.path.clone(),
                 message: format!(
-                    "window extends to store day {end_day} but n_time={}",
-                    self.n_time
+                    "window extends to store step {end_step} but n_time={} \
+                     ({:?} axis)",
+                    self.n_time, self.resolution
                 ),
             });
         }
 
-        // 2. Resolve COMIDs → divide-axis positions.
+        // Resolve COMIDs → divide-axis positions.
         // `positions_of` returns positions in the order of non-missing inputs,
         // plus a list of indices (into `comids`) that were missing.
         let (positions, missing_indices) = self.index.positions_of(comids);
@@ -331,17 +418,13 @@ impl StreamflowStore {
         let n_out = comids.len();
 
         // Pre-fill with the discharge minimum; missing COMIDs keep this value.
-        let mut daily = Array2::<f32>::from_elem((n_days, n_out), 0.001);
+        let mut out = Array2::<f32>::from_elem((n_steps, n_out), 0.001);
 
         if positions.is_empty() {
-            // All COMIDs missing — return filled daily result.
-            return Ok(daily);
+            return Ok(out);
         }
 
-        // 3. Contiguous divide-axis read covering [min_pos, max_pos].
-        // Transient memory: (max_pos - min_pos + 1) * n_days * 4 bytes.
-        // For 50 COMIDs spanning ~100K positions × 90 days = ~36 MB — acceptable
-        // for SP-2. SP-3 may revisit with gather-style reads.
+        // Contiguous divide-axis read covering [min_pos, max_pos].
         let min_pos = *positions.iter().min().unwrap();
         let max_pos = *positions.iter().max().unwrap();
         let div_range_end = max_pos + 1;
@@ -350,30 +433,28 @@ impl StreamflowStore {
         // Qr is stored as (divide_id, time). Subset: axis 0 = divide, axis 1 = time.
         let subset = zarrs::array::ArraySubset::new_with_ranges(&[
             (min_pos as u64)..(div_range_end as u64),
-            (store_start_day as u64)..(end_day as u64),
+            (start_step as u64)..(end_step as u64),
         ]);
         let raw_f32: Vec<f32> = self
             .qr
             .retrieve_array_subset(&subset)
             .map_err(|e| ic_err(&self.path, e))?;
-        // raw_f32 is row-major: shape (div_count, n_days).
-        // Element at (i, t) is at index i * n_days + t.
-        debug_assert_eq!(raw_f32.len(), div_count * n_days);
+        // raw_f32 is row-major: shape (div_count, n_steps).
+        debug_assert_eq!(raw_f32.len(), div_count * n_steps);
 
-        // 4. Scatter into the output. Walk `comids` in order; for each
+        // Scatter into the output. Walk `comids` in order; for each
         // non-missing entry consume the next element of `positions`.
         let mut next_present = 0usize;
         for (out_col, _) in comids.iter().enumerate() {
             if missing_set.contains(&out_col) {
-                // Already pre-filled with 0.001.
                 continue;
             }
             let div_pos = positions[next_present];
             next_present += 1;
             let local_div = div_pos - min_pos;
-            for d in 0..n_days {
-                let raw_idx = local_div * n_days + d;
-                daily[(d, out_col)] = raw_f32[raw_idx];
+            for t in 0..n_steps {
+                let raw_idx = local_div * n_steps + t;
+                out[(t, out_col)] = raw_f32[raw_idx];
             }
         }
 
@@ -383,28 +464,93 @@ impl StreamflowStore {
             "scatter walked past `positions` — IdIndex::positions_of invariant broken"
         );
 
-        Ok(daily)
+        Ok(out)
     }
 
-    /// Read `Qr` for `window` and `comids`. Returns `(n_hourly, N)` f32
-    /// matrix; missing COMIDs (not in the store) are filled with `0.001`
-    /// (discharge minimum, mirrors DDR's `torch.full(..., fill_value=0.001)`
-    /// in `readers.py:464-468`).
+    /// Read `Qr` daily for `[window_start, window_start + n_days)` and
+    /// `comids`. Returns `(n_days, N)` f32 matrix. On hourly-native stores
+    /// each day is the mean of its 24 hours (Q' is a rate in m³/s, so the
+    /// daily value is the day's average flow — keeps the summed-Q' baseline
+    /// meaningful on hourly stores).
+    pub fn read_window_daily(
+        &self,
+        window_start: NaiveDate,
+        n_days: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        let start = self.native_start_index(window_start)?;
+        match self.resolution {
+            Frequency::Daily => self.read_slab(start, n_days, comids),
+            Frequency::Hourly => {
+                // Chunk the hourly read in day blocks to bound the transient
+                // allocation: the summed-Q' baseline asks for ~15-year windows,
+                // and a single (n_days*24, N) read would be multi-GB at CONUS
+                // scale (plus the raw divide-span buffer inside read_slab).
+                const CHUNK_DAYS: usize = 32;
+                let n_out = comids.len();
+                let mut daily = Array2::<f32>::zeros((n_days, n_out));
+                let mut day = 0usize;
+                while day < n_days {
+                    let chunk = CHUNK_DAYS.min(n_days - day);
+                    let hourly = self.read_slab(start + day * 24, chunk * 24, comids)?;
+                    let mean = hourly_to_daily_mean(&hourly);
+                    for local_d in 0..chunk {
+                        for j in 0..n_out {
+                            daily[(day + local_d, j)] = mean[(local_d, j)];
+                        }
+                    }
+                    day += chunk;
+                }
+                Ok(daily)
+            }
+        }
+    }
+
+    /// Read `Qr` for `window` and `comids`. Returns `(n_hourly, N)` f32.
+    /// Daily stores upsample via repeat-24 + trailing-day trim (unchanged);
+    /// hourly stores slice the native axis directly — no upsampling.
     pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
-        let daily = self.read_window_daily(window.window_start, window.rho_days, comids)?;
-        Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+        match self.resolution {
+            Frequency::Daily => {
+                let daily =
+                    self.read_window_daily(window.window_start, window.rho_days, comids)?;
+                Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+            }
+            Frequency::Hourly => {
+                let start = self.native_start_index(window.window_start)?;
+                self.read_slab(start, window.n_hourly(), comids)
+            }
+        }
     }
 
-    /// Same as `read_window` but for `TestWindow` — returns `n_days * 24`
-    /// hours (no trailing-day trim) so chunks tile cleanly. Used by SP-5
-    /// `evaluate()`.
+    /// Same as `read_window` but for `TestWindow` — `n_days * 24` hours
+    /// (no trailing-day trim) so chunks tile cleanly.
     pub fn read_test_window(
         &self,
         window: &crate::data::TestWindow,
         comids: &[Comid],
     ) -> Result<Array2<f32>> {
-        let daily = self.read_window_daily(window.window_start, window.n_days, comids)?;
-        Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+        match self.resolution {
+            Frequency::Daily => {
+                let daily =
+                    self.read_window_daily(window.window_start, window.n_days, comids)?;
+                Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+            }
+            Frequency::Hourly => {
+                let start = self.native_start_index(window.window_start)?;
+                self.read_slab(start, window.n_hourly(), comids)
+            }
+        }
+    }
+
+    /// `units` attribute of the `/Qr` variable, if present. Used by
+    /// `ddrs import` to check the m³/s contract.
+    pub fn qr_units(&self) -> Option<String> {
+        self.qr
+            .attributes()
+            .get("units")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
     }
 }
 
@@ -645,6 +791,17 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn hourly_axis_validation_rejects_misalignment_and_gaps() {
+        let p = Path::new("/t");
+        assert!(validate_hourly_axis(&[0, 1, 2, 3], p).is_ok());
+        assert!(validate_hourly_axis(&[24, 25, 26], p).is_ok());
+        let err = validate_hourly_axis(&[5, 6, 7], p).unwrap_err();
+        assert!(err.to_string().contains("hour 0"), "got: {err}");
+        let err = validate_hourly_axis(&[0, 1, 3], p).unwrap_err();
+        assert!(err.to_string().contains("gap at index 2"), "got: {err}");
+    }
+
+    #[test]
     fn daily_to_hourly_trim_repeats_and_truncates() {
         use ndarray::Array2;
         // 3 daily values × 2 divides → expand to 72 hours, truncate to 47
@@ -749,5 +906,64 @@ mod tests {
             "first STAID should be 01011000 (per design-time probe), got {}",
             first
         );
+    }
+
+    fn attrs_with_units(u: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("units".into(), serde_json::Value::String(u.into()));
+        m
+    }
+
+    #[test]
+    fn parse_cf_units_daily() {
+        let (epoch, res) =
+            parse_cf_units(&attrs_with_units("days since 1980-01-01"), Path::new("/t")).unwrap();
+        assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1980, 1, 1).unwrap());
+        assert_eq!(res, Frequency::Daily);
+    }
+
+    #[test]
+    fn parse_cf_units_daily_with_time_of_day() {
+        // daily_lstm store encodes "days since 1981-01-01 00:00:00".
+        let (epoch, res) =
+            parse_cf_units(&attrs_with_units("days since 1981-01-01 00:00:00"), Path::new("/t"))
+                .unwrap();
+        assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1981, 1, 1).unwrap());
+        assert_eq!(res, Frequency::Daily);
+    }
+
+    #[test]
+    fn parse_cf_units_hourly() {
+        // hourly_lstm store encodes "hours since 1981-01-01 00:00:00".
+        let (epoch, res) =
+            parse_cf_units(&attrs_with_units("hours since 1981-01-01 00:00:00"), Path::new("/t"))
+                .unwrap();
+        assert_eq!(epoch, chrono::NaiveDate::from_ymd_opt(1981, 1, 1).unwrap());
+        assert_eq!(res, Frequency::Hourly);
+    }
+
+    #[test]
+    fn parse_cf_units_rejects_missing_units() {
+        let empty = serde_json::Map::new();
+        let err = parse_cf_units(&empty, Path::new("/t")).unwrap_err();
+        assert!(err.to_string().contains("missing"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cf_units_rejects_other_resolutions() {
+        let err = parse_cf_units(&attrs_with_units("minutes since 1981-01-01"), Path::new("/t"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("minutes since"), "error must name the units: {msg}");
+        assert!(msg.contains("days since"), "error must name what IS supported: {msg}");
+    }
+
+    #[test]
+    fn parse_cf_epoch_rejects_hourly_axis() {
+        // The daily-only wrapper (used by the USGS observations store) must
+        // refuse an hourly axis rather than silently mis-scaling.
+        let err = parse_cf_epoch(&attrs_with_units("hours since 1980-01-01"), Path::new("/t"))
+            .unwrap_err();
+        assert!(err.to_string().contains("daily"), "got: {err}");
     }
 }
