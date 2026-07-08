@@ -36,7 +36,7 @@ pub use error::{DataError, Result};
 pub use ids::{Comid, IdIndex, Staid};
 pub use sampler::{RandomSampler, SequentialSampler};
 pub use store::{
-    AttributesStore, ConusAdjacencyStore, GageMetadata, GageRow, GageSubgraph,
+    load_comid_field, AttributesStore, ConusAdjacencyStore, GageMetadata, GageRow, GageSubgraph,
     GagesAdjacencyStore, GlobalObservationsStore, GlobalStreamflowStore, ObservationsStore,
     StreamflowSource, StreamflowStore, UsgsObservationsStore,
 };

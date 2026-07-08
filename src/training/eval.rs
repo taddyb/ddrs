@@ -111,8 +111,16 @@ pub fn evaluate<I: Backend>(
                 // forward_eval_reaches returns per-reach (n_reaches, chunk_hours).
                 // Capture the final column for cross-chunk state injection before
                 // scatter-adding to gauge predictions.
-                let runoff_reaches =
-                    forward_eval_reaches::<I>(cfg, &tensors, head, device, false, Some(&mut zeta_sums), None);
+                let runoff_reaches = forward_eval_reaches::<I>(
+                    cfg,
+                    &tensors,
+                    head,
+                    device,
+                    false,
+                    Some(&mut zeta_sums),
+                    None,
+                    None,
+                );
                 let [n_reaches, chunk_hours] = runoff_reaches.dims();
                 let final_col: Vec<f32> = runoff_reaches
                     .clone()
