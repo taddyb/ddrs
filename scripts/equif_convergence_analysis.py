@@ -59,6 +59,7 @@ COMMON_STORE = "/mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic"
 CONUS_ADJ_PATH = "/home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr"
 GAGES_ADJ_PATH = "/home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr"
 GAGES_CSV_PATH = "/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv"
+MERIT_ATTRS_PATH = "/home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc"
 
 EVAL_START = np.datetime64("1995-10-01")
 EVAL_END   = np.datetime64("2010-09-30")
@@ -700,6 +701,113 @@ def stage_b2(
     return {"pearson_r": pearson_r, "flashiness_diff": flashiness_diff}
 
 # ---------------------------------------------------------------------------
+# Shared N-arm-ready helpers (spread, geometry, percentiles, DA-conditioning)
+# ---------------------------------------------------------------------------
+
+def load_align(path: Path, target_comids: np.ndarray) -> dict[str, np.ndarray]:
+    """Load kan_parameters.nc and align to target_comids (module-level; shared
+    by stage_c and stage_g_level1_5)."""
+    raw = load_kan_params(path)
+    file_comids = raw["COMID"].astype(np.int64)
+    comid_to_pos = {int(c): i for i, c in enumerate(file_comids)}
+    idx = np.array([comid_to_pos.get(int(c), -1) for c in target_comids])
+    missing = (idx < 0).sum()
+    if missing > 0:
+        print(f"    WARNING: {missing} analysis COMIDs not in {path.name}")
+    valid = idx >= 0
+    out: dict[str, np.ndarray] = {}
+    for p_name in ("n", "q_spatial", "p_spatial", "slope"):
+        if p_name not in raw:
+            continue
+        arr = np.full(len(target_comids), np.nan, dtype=np.float32)
+        arr[valid] = raw[p_name][idx[valid]]
+        out[p_name] = arr
+    return out
+
+
+def _rel_spread(stack: np.ndarray) -> np.ndarray:
+    """(max-min across arms, axis=0) / (|cross-arm mean| + eps) — the v2-primary
+    relative-to-mean normalization, k-agnostic (stack is (k, n))."""
+    cross_mean = np.nanmean(stack, axis=0)
+    return (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / (
+        np.abs(cross_mean) + 1e-9
+    )
+
+
+def _arm_own_geometry(
+    params_list: list[dict],
+    Q_own_per_arm: list[np.ndarray],
+    slope: np.ndarray,
+) -> dict[str, list[np.ndarray]]:
+    """Per-arm realized geometry using each arm's OWN Q' reference (k-agnostic).
+
+    params_list   : list of k per-arm param dicts (each aligned to the same reaches).
+    Q_own_per_arm : list of k per-arm reference discharge arrays (same length as params).
+    Returns dict: quantity -> list of k per-arm arrays (depth/top_width/hydraulic_radius).
+    """
+    geo_stack: dict[str, list] = {"depth": [], "top_width": [], "hydraulic_radius": []}
+    for params, Q_own in zip(params_list, Q_own_per_arm):
+        g = trapezoidal_geometry(
+            params["n"], params["p_spatial"], params["q_spatial"], Q_own, slope,
+        )
+        for k in geo_stack:
+            geo_stack[k].append(g[k])
+    return geo_stack
+
+
+def _percentiles(values: np.ndarray, pcts: tuple = (5, 25, 50, 75, 95)) -> dict[str, float]:
+    """Percentiles of a single array, NaN-safe."""
+    v = values[np.isfinite(values)]
+    if len(v) == 0:
+        return {f"p{p}": float("nan") for p in pcts}
+    return {f"p{p}": float(np.percentile(v, p)) for p in pcts}
+
+
+def _decile_bins(x: np.ndarray, n_bins: int = 10) -> np.ndarray:
+    """Percentile-based decile bin index (0..n_bins-1) per element of x."""
+    edges = np.percentile(x, np.linspace(0, 100, n_bins + 1))
+    edges = edges.copy()
+    edges[0]  -= 1e-9
+    edges[-1] += 1e-9
+    return np.digitize(x, edges[1:-1], right=False)
+
+
+def _binned_profile(log_da: np.ndarray, values: np.ndarray, n_bins: int = 10) -> dict[str, np.ndarray]:
+    """Median `values` and median log_da within decile bins of log_da (NaN-safe)."""
+    valid = np.isfinite(log_da) & np.isfinite(values)
+    log_da_v, values_v = log_da[valid], values[valid]
+    bin_da  = np.full(n_bins, np.nan)
+    bin_val = np.full(n_bins, np.nan)
+    bin_n   = np.zeros(n_bins, dtype=np.int64)
+    if len(log_da_v) < n_bins:
+        return {"bin_da_median": bin_da, "bin_value_median": bin_val, "bin_count": bin_n}
+    bin_idx = _decile_bins(log_da_v, n_bins)
+    for b in range(n_bins):
+        m = bin_idx == b
+        bin_n[b] = m.sum()
+        if m.any():
+            bin_da[b]  = np.median(log_da_v[m])
+            bin_val[b] = np.median(values_v[m])
+    return {"bin_da_median": bin_da, "bin_value_median": bin_val, "bin_count": bin_n}
+
+
+def _loglog_slope(log_da: np.ndarray, values: np.ndarray) -> tuple[float, int]:
+    """OLS slope of ln(values) vs log_da (exploratory, unweighted np.polyfit).
+
+    Drops non-finite and non-positive values (ln undefined) before fitting;
+    returns (slope, n_dropped).
+    """
+    finite   = np.isfinite(log_da) & np.isfinite(values)
+    positive = values > 0
+    keep     = finite & positive
+    n_dropped = int((~keep).sum())
+    if keep.sum() < 10:
+        return float("nan"), n_dropped
+    slope, _intercept = np.polyfit(log_da[keep], np.log(values[keep]), 1)
+    return float(slope), n_dropped
+
+
+# ---------------------------------------------------------------------------
 # Stage C: Level 1 (raw params) + Level 2 (realized geometry)
 # ---------------------------------------------------------------------------
 
@@ -785,25 +893,6 @@ def stage_c(
     print(f"  analysis set (primary):     {len(analysis_comids)}")
     print(f"  analysis set (sensitivity): {len(analysis_full)}")
 
-    def load_align(path: Path, target_comids: np.ndarray) -> dict[str, np.ndarray]:
-        """Load kan_parameters.nc and align to target_comids."""
-        raw = load_kan_params(path)
-        file_comids = raw["COMID"].astype(np.int64)
-        comid_to_pos = {int(c): i for i, c in enumerate(file_comids)}
-        idx = np.array([comid_to_pos.get(int(c), -1) for c in target_comids])
-        missing = (idx < 0).sum()
-        if missing > 0:
-            print(f"    WARNING: {missing} analysis COMIDs not in {path.name}")
-        valid = idx >= 0
-        out: dict[str, np.ndarray] = {}
-        for p_name in ("n", "q_spatial", "p_spatial", "slope"):
-            if p_name not in raw:
-                continue
-            arr = np.full(len(target_comids), np.nan, dtype=np.float32)
-            arr[valid] = raw[p_name][idx[valid]]
-            out[p_name] = arr
-        return out
-
     p1 = load_align(params_r1, analysis_comids)
     p2 = load_align(params_r2, analysis_comids)
     p3 = load_align(params_r3, analysis_comids)
@@ -826,21 +915,21 @@ def stage_c(
     # ---- Level 1: raw-param spread ----
     from scipy.stats import spearmanr  # type: ignore
 
-    def param_stats(v1, v2, v3, p_name) -> dict:
+    def param_stats(values: list[np.ndarray], p_name) -> dict:
+        """N-arm-ready: values is a list of k per-arm arrays (k=3 here)."""
         lo, hi = PARAM_RANGES.get(p_name, (0.0, 1.0))
         rng = hi - lo
-        stack = np.stack([v1, v2, v3], axis=0)          # (3, n)
+        stack = np.stack(values, axis=0)                # (k, n)
         per_reach_spread = (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / rng
         median_spread    = float(np.nanmedian(per_reach_spread))
         # Relative-to-mean spread (audit: like-for-like comparison with geometry normalization)
-        cross_mean = np.nanmean(stack, axis=0)
-        per_reach_rel_spread = (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / (
-            np.abs(cross_mean) + 1e-9
-        )
+        per_reach_rel_spread = _rel_spread(stack)
         median_rel_spread = float(np.nanmedian(per_reach_rel_spread))
-        pairs = [(v1, v2, "R1-R2"), (v1, v3, "R1-R3"), (v2, v3, "R2-R3")]
+        k = len(values)
+        pairs = [(i, j) for i in range(k) for j in range(i + 1, k)]
         spears = {}
-        for a, b, lbl in pairs:
+        for i, j in pairs:
+            a, b, lbl = values[i], values[j], f"R{i + 1}-R{j + 1}"
             valid = np.isfinite(a) & np.isfinite(b)
             a_v, b_v = a[valid], b[valid]
             # Skip if too few points or either input is constant (would produce NaN/warning)
@@ -857,9 +946,9 @@ def stage_c(
             "spearman":             spears,
         }
 
-    stats_n = param_stats(p1["n"], p2["n"], p3["n"], "n")
-    stats_q = param_stats(p1["q_spatial"], p2["q_spatial"], p3["q_spatial"], "q_spatial")
-    stats_p = param_stats(p1["p_spatial"], p2["p_spatial"], p3["p_spatial"], "p_spatial")
+    stats_n = param_stats([p1["n"], p2["n"], p3["n"]], "n")
+    stats_q = param_stats([p1["q_spatial"], p2["q_spatial"], p3["q_spatial"]], "q_spatial")
+    stats_p = param_stats([p1["p_spatial"], p2["p_spatial"], p3["p_spatial"]], "p_spatial")
 
     print(f"  Level 1 median norm-spread:  n={stats_n['median_spread']:.4f}"
           f"  q={stats_q['median_spread']:.4f}  p={stats_p['median_spread']:.4f}")
@@ -894,12 +983,13 @@ def stage_c(
     def geometry_spread_at_Q(
         Q_ref: np.ndarray,
         label: str,
-        arm_params: tuple,
+        arm_params: list[dict],
         slope: np.ndarray,
     ) -> dict[str, np.ndarray]:
         """Compute per-reach relative spread of depth/top_width/hyd_radius.
 
-        arm_params : tuple of 3 param dicts (one per arm), each aligned to Q_ref length.
+        arm_params : list of k param dicts (one per arm), each aligned to Q_ref length,
+                     SAME Q_ref for every arm (N-arm-ready via _rel_spread).
         slope      : (n,) array aligned to Q_ref length.
         """
         geo_stack: dict[str, list] = {"depth": [], "top_width": [], "hydraulic_radius": []}
@@ -912,10 +1002,7 @@ def stage_c(
                 geo_stack[k].append(g[k])
         result = {}
         for k, arm_list in geo_stack.items():
-            stack     = np.stack(arm_list, axis=0)           # (3, n)
-            cross_mean = np.nanmean(stack, axis=0)
-            spread     = (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / (
-                          np.abs(cross_mean) + 1e-9)
+            spread = _rel_spread(np.stack(arm_list, axis=0))
             result[k] = spread
             print(f"  Level 2 [{label}] {k} median rel-spread: {np.nanmedian(spread):.4f}")
         return result
@@ -924,25 +1011,14 @@ def stage_c(
     q_r12 = b_r12["median_q"][amask]
     q_r3  = b_r3["median_q"][amask]
 
-    # Use each arm's own median Q' as operating point
-    geo_arm_own: list[dict] = []
+    # Use each arm's own median Q' as operating point (N-arm-ready: list, not tuple)
     Q_own_per_arm = [q_r12, q_r12, q_r3]  # R1/R2 share daily store
-    geo_stack_own: dict[str, list] = {"depth": [], "top_width": [], "hydraulic_radius": []}
-    for params, Q_own in zip((p1, p2, p3), Q_own_per_arm):
-        g = trapezoidal_geometry(
-            params["n"], params["p_spatial"], params["q_spatial"],
-            Q_own, slope_use,
-        )
-        for k in geo_stack_own:
-            geo_stack_own[k].append(g[k])
+    geo_stack_own = _arm_own_geometry([p1, p2, p3], Q_own_per_arm, slope_use)
 
     geo_spread_own: dict[str, np.ndarray] = {}
     print("  Level 2 [arm-own Q'] relative spread:")
     for k, arm_list in geo_stack_own.items():
-        stack      = np.stack(arm_list, axis=0)
-        cross_mean = np.nanmean(stack, axis=0)
-        spread     = (np.nanmax(stack, axis=0) - np.nanmin(stack, axis=0)) / (
-                      np.abs(cross_mean) + 1e-9)
+        spread = _rel_spread(np.stack(arm_list, axis=0))
         geo_spread_own[k] = spread
         print(f"    {k}: median={np.nanmedian(spread):.4f}")
 
@@ -956,13 +1032,13 @@ def stage_c(
     Q_common_p90 = b_common["p90_q"][amask_full]
     print("  Level 2 [common dHBV2 Q'] relative spread:")
     geo_spread_common = geometry_spread_at_Q(
-        Q_common, label="common-median", arm_params=(p1s, p2s, p3s), slope=slope_s)
+        Q_common, label="common-median", arm_params=[p1s, p2s, p3s], slope=slope_s)
     print("  Level 2 [common dHBV2 p10] relative spread:")
     geo_spread_common_p10 = geometry_spread_at_Q(
-        Q_common_p10, label="common-p10", arm_params=(p1s, p2s, p3s), slope=slope_s)
+        Q_common_p10, label="common-p10", arm_params=[p1s, p2s, p3s], slope=slope_s)
     print("  Level 2 [common dHBV2 p90] relative spread:")
     geo_spread_common_p90 = geometry_spread_at_Q(
-        Q_common_p90, label="common-p90", arm_params=(p1s, p2s, p3s), slope=slope_s)
+        Q_common_p90, label="common-p90", arm_params=[p1s, p2s, p3s], slope=slope_s)
 
     # Q' disagreement between stores (for H2): R1/R2 = daily, R3 = hourly
     # per-reach relative range of eval-window mean Q' across the 2 distinct stores
@@ -1505,6 +1581,318 @@ def stage_e_ext(
     return result
 
 # ---------------------------------------------------------------------------
+# Stage H2-network: network-scale H2 variant (per-gauge integrated upstream)
+# ---------------------------------------------------------------------------
+
+def stage_h2_network(
+    out_dir: Path,
+    stage_a_data: dict,
+    c_data: dict,
+    b2_data: dict,
+    gages_adj_path: str = GAGES_ADJ_PATH,
+    min_reaches: int = 3,
+    force: bool = False,
+) -> dict:
+    """Network-scale H2 variant (v2 spec, pre-registered).
+
+    For each gauge g with upstream network U(g) (gauge adjacency store, same
+    zarr access pattern stage_a already uses):
+      n_disagreement(g)      = median of per-reach n rel-spread over U(g)
+      timing_disagreement(g) = median of per-reach (1 - pearson_r) over U(g)
+      (flashiness_diff reported alongside as the network mean)
+    then Spearman rho across gauges between n_disagreement and timing_disagreement.
+
+    Gauges whose upstream set has fewer than `min_reaches` valid (finite)
+    reaches are skipped (too few reaches to form a meaningful median).
+    """
+    cache = out_dir / "stage_h2_network.npz"
+    if cache.exists() and not force:
+        print("[Stage H2-network] loading from cache")
+        d = np.load(cache, allow_pickle=True)
+        return {
+            "gauge_staids":        d["gauge_staids"].tolist(),
+            "n_disagreement":      d["n_disagreement"],
+            "timing_disagreement": d["timing_disagreement"],
+            "flashiness_mean":     d["flashiness_mean"],
+            "n_upstream_reaches":  d["n_upstream_reaches"],
+            "rho":                 float(d["rho"]),
+            "n_gauges_used":       int(d["n_gauges_used"]),
+        }
+
+    print("[Stage H2-network] computing per-gauge network-scale H2 aggregation")
+    import zarr  # type: ignore
+    from scipy.stats import spearmanr
+
+    gages  = zarr.open(gages_adj_path, mode="r")
+    staids = stage_a_data["gauge_staids"]
+
+    eval_comids = stage_a_data["eval_comids"].astype(np.int64)
+    amask       = stage_a_data["analysis_mask_r12"]
+    analysis_comids = eval_comids[amask]
+    comid_to_idx = {int(c): i for i, c in enumerate(analysis_comids)}
+
+    n_rel_spread = c_data["per_reach_rel_spread_n"]
+    pearson_r    = b2_data["pearson_r"]
+    flashiness   = b2_data["flashiness_diff"]
+
+    n_dis_list: list = []
+    timing_dis_list: list = []
+    flash_list: list = []
+    n_up_list: list = []
+    used_staids: list = []
+    for staid in staids:
+        g_order = gages[staid]["order"][:].astype(np.int64)
+        idxs = [comid_to_idx[c] for c in g_order.tolist() if c in comid_to_idx]
+        if len(idxs) < min_reaches:
+            continue
+        idxs = np.array(idxs, dtype=np.int64)
+        n_vals = n_rel_spread[idxs]
+        r_vals = pearson_r[idxs]
+        f_vals = flashiness[idxs]
+        valid_n = np.isfinite(n_vals)
+        valid_r = np.isfinite(r_vals)
+        if valid_n.sum() < min_reaches or valid_r.sum() < min_reaches:
+            continue
+        n_dis_list.append(float(np.nanmedian(n_vals)))
+        timing_dis_list.append(float(np.median(1.0 - r_vals[valid_r])))
+        flash_list.append(float(np.nanmean(f_vals)))
+        n_up_list.append(len(idxs))
+        used_staids.append(staid)
+
+    n_disagreement      = np.array(n_dis_list, dtype=np.float64)
+    timing_disagreement = np.array(timing_dis_list, dtype=np.float64)
+    flashiness_mean      = np.array(flash_list, dtype=np.float64)
+    n_upstream_reaches   = np.array(n_up_list, dtype=np.int32)
+
+    print(f"  gauges used (>= {min_reaches} valid upstream reaches):"
+          f" {len(used_staids)} / {len(staids)}")
+
+    valid = np.isfinite(n_disagreement) & np.isfinite(timing_disagreement)
+    if (valid.sum() > 5 and np.unique(n_disagreement[valid]).size >= 2
+            and np.unique(timing_disagreement[valid]).size >= 2):
+        rho, _ = spearmanr(n_disagreement[valid], timing_disagreement[valid])
+        rho = float(rho)
+    else:
+        rho = float("nan")
+    n_gauges_used = int(valid.sum())
+
+    print(f"  network-scale H2: Spearman rho(n_disagreement, timing_disagreement)"
+          f" = {rho:.3f}  (n_gauges={n_gauges_used})")
+
+    np.savez_compressed(
+        cache,
+        gauge_staids        = np.array(used_staids),
+        n_disagreement      = n_disagreement,
+        timing_disagreement = timing_disagreement,
+        flashiness_mean      = flashiness_mean,
+        n_upstream_reaches   = n_upstream_reaches,
+        rho                  = np.float32(rho),
+        n_gauges_used        = np.int32(n_gauges_used),
+    )
+    print(f"  saved → {cache}")
+    return {
+        "gauge_staids":        used_staids,
+        "n_disagreement":      n_disagreement,
+        "timing_disagreement": timing_disagreement,
+        "flashiness_mean":     flashiness_mean,
+        "n_upstream_reaches":  n_upstream_reaches,
+        "rho":                 rho,
+        "n_gauges_used":       n_gauges_used,
+    }
+
+# ---------------------------------------------------------------------------
+# Stage G: Level 1.5 — per-arm distributions + drainage-area conditioning
+# ---------------------------------------------------------------------------
+
+def stage_g_level1_5(
+    out_dir: Path,
+    stage_a_data: dict,
+    c_data: dict,
+    params_r1: Path,
+    params_r2: Path,
+    params_r3: Path,
+    b_r12: dict,
+    b_r3: dict,
+    attrs_path: str = MERIT_ATTRS_PATH,
+    force: bool = False,
+) -> dict:
+    """Level 1.5 (v2 spec): per-arm percentiles + drainage-area conditioning.
+
+    (a) per-arm percentiles (p5/p25/p50/p75/p95) of n, q_spatial, p_spatial
+    (b) join analysis-set COMIDs to log10_uparea (MERIT global attributes)
+    (c) per-arm, per-quantity (n, q_spatial, p_spatial + arm-own realized
+        depth/top_width/hydraulic_radius): decile-binned median vs log10(DA)
+        and OLS slope of ln(quantity) vs log10(DA)
+    (d) spread-vs-DA profile: median cross-arm rel-spread (from stage_c, NOT
+        box-normalized) within each log10(DA) decile bin
+
+    Descriptive only — no falsification bar (per v2 spec).
+    """
+    qnames = ("n", "q_spatial", "p_spatial", "depth", "top_width", "hydraulic_radius")
+    pct_keys = ("p5", "p25", "p50", "p75", "p95")
+
+    cache = out_dir / "stage_g.npz"
+    if cache.exists() and not force:
+        print("[Stage G] loading from cache")
+        d = np.load(cache, allow_pickle=True)
+        percentiles: dict = {}
+        for arm_label in ("R1", "R2", "R3"):
+            percentiles[arm_label] = {}
+            for pname in ("n", "q_spatial", "p_spatial"):
+                percentiles[arm_label][pname] = {
+                    k: float(d[f"pct_{arm_label}_{pname}_{k}"]) for k in pct_keys
+                }
+        da_slopes: dict = {}
+        da_bins: dict = {}
+        for qname in qnames:
+            da_slopes[qname] = {}
+            da_bins[qname] = {}
+            for arm_label in ("R1", "R2", "R3"):
+                da_slopes[qname][arm_label] = {
+                    "slope":     float(d[f"slope_{qname}_{arm_label}"]),
+                    "n_dropped": int(d[f"dropped_{qname}_{arm_label}"]),
+                }
+                da_bins[qname][arm_label] = {
+                    "bin_da_median":    d[f"bin_da_{qname}_{arm_label}"],
+                    "bin_value_median": d[f"bin_val_{qname}_{arm_label}"],
+                    "bin_count":        d[f"bin_n_{qname}_{arm_label}"],
+                }
+        spread_vs_da: dict = {}
+        for qname in qnames:
+            spread_vs_da[qname] = {
+                "bin_da_median":    d[f"spread_bin_da_{qname}"],
+                "bin_value_median": d[f"spread_bin_val_{qname}"],
+                "bin_count":        d[f"spread_bin_n_{qname}"],
+            }
+        return {
+            "percentiles":  percentiles,
+            "da_slopes":    da_slopes,
+            "da_bins":      da_bins,
+            "spread_vs_da": spread_vs_da,
+            "log_da":       d["log_da"],
+        }
+
+    print("[Stage G] computing Level 1.5 (distributions + drainage-area conditioning)")
+
+    eval_comids = stage_a_data["eval_comids"].astype(np.int64)
+    amask       = stage_a_data["analysis_mask_r12"]
+    analysis_comids = eval_comids[amask]
+    n_analysis = len(analysis_comids)
+
+    p1 = load_align(params_r1, analysis_comids)
+    p2 = load_align(params_r2, analysis_comids)
+    p3 = load_align(params_r3, analysis_comids)
+    arms = {"R1": p1, "R2": p2, "R3": p3}
+
+    # ---- (a) per-arm percentiles ----
+    percentiles: dict = {}
+    for arm_label, pdict in arms.items():
+        percentiles[arm_label] = {
+            pname: _percentiles(pdict[pname]) for pname in ("n", "q_spatial", "p_spatial")
+        }
+    print("  Per-arm percentiles (p5/p25/p50/p75/p95):")
+    for arm_label, pd_ in percentiles.items():
+        for pname, pcts in pd_.items():
+            print(f"    [{arm_label}] {pname}: "
+                  + " / ".join(f"{k}={v:.4f}" for k, v in pcts.items()))
+
+    # ---- (b) join log10_uparea (exact-COMID; MERIT CONUS is a strict subset) ----
+    import xarray as xr  # type: ignore
+    ds_attrs = xr.open_dataset(attrs_path)
+    attr_comid  = ds_attrs["COMID"].values.astype(np.int64)
+    attr_log_da = ds_attrs["log10_uparea"].values.astype(np.float64)
+    comid_to_da = dict(zip(attr_comid.tolist(), attr_log_da.tolist()))
+    log_da = np.array(
+        [comid_to_da.get(int(c), np.nan) for c in analysis_comids], dtype=np.float64,
+    )
+    n_missing = int(np.sum(~np.isfinite(log_da)))
+    assert n_missing == 0, (
+        f"[Stage G] {n_missing} analysis COMIDs missing log10_uparea in {attrs_path}"
+        f" — expected 0 (MERIT CONUS eval network must be a strict subset of the"
+        f" global attributes file); this is a bug, not expected data loss"
+    )
+    print(f"  log10_uparea joined: {n_analysis - n_missing} / {n_analysis} (missing={n_missing})")
+
+    # ---- (c) per-arm realized geometry (arm-own Q' reference, same as stage_c) ----
+    q_r12 = b_r12["median_q"][amask]
+    q_r3  = b_r3["median_q"][amask]
+    Q_own_per_arm = [q_r12, q_r12, q_r3]
+    slope_use = p1.get("slope", np.ones(n_analysis, dtype=np.float32))
+    geo_stack_own = _arm_own_geometry([p1, p2, p3], Q_own_per_arm, slope_use)
+
+    arm_order = ("R1", "R2", "R3")
+    quantities: dict[str, dict[str, np.ndarray]] = {
+        "n":         {a: arms[a]["n"] for a in arm_order},
+        "q_spatial": {a: arms[a]["q_spatial"] for a in arm_order},
+        "p_spatial": {a: arms[a]["p_spatial"] for a in arm_order},
+        "depth":            {a: geo_stack_own["depth"][i] for i, a in enumerate(arm_order)},
+        "top_width":        {a: geo_stack_own["top_width"][i] for i, a in enumerate(arm_order)},
+        "hydraulic_radius": {a: geo_stack_own["hydraulic_radius"][i] for i, a in enumerate(arm_order)},
+    }
+
+    da_slopes: dict = {}
+    da_bins: dict = {}
+    print("  DA-conditioned OLS slopes (ln(quantity) ~ log10_uparea):")
+    for qname, arm_vals in quantities.items():
+        da_slopes[qname] = {}
+        da_bins[qname] = {}
+        for arm_label, vals in arm_vals.items():
+            slope, n_dropped = _loglog_slope(log_da, vals.astype(np.float64))
+            da_slopes[qname][arm_label] = {"slope": slope, "n_dropped": n_dropped}
+            da_bins[qname][arm_label] = _binned_profile(log_da, vals.astype(np.float64))
+            print(f"    {qname:<18} [{arm_label}] slope={slope:+.4f}  (dropped={n_dropped})")
+
+    # ---- (d) spread-vs-DA profile (rel-to-mean spread, NOT box-normalized, from stage_c) ----
+    spread_arrays = {
+        "n":                c_data["per_reach_rel_spread_n"],
+        "q_spatial":        c_data["per_reach_rel_spread_q"],
+        "p_spatial":        c_data["per_reach_rel_spread_p"],
+        "depth":            c_data["geo_spread_own"]["depth"],
+        "top_width":        c_data["geo_spread_own"]["top_width"],
+        "hydraulic_radius": c_data["geo_spread_own"]["hydraulic_radius"],
+    }
+    spread_vs_da: dict = {}
+    print("  Spread-vs-DA profile (median rel-spread per decile bin):")
+    for qname, spr in spread_arrays.items():
+        profile = _binned_profile(log_da, spr.astype(np.float64))
+        spread_vs_da[qname] = profile
+        finite_vals = profile["bin_value_median"][np.isfinite(profile["bin_value_median"])]
+        if len(finite_vals):
+            print(f"    {qname:<18} bin medians: "
+                  + " / ".join(f"{v:.3f}" for v in finite_vals))
+
+    # ---- save cache (flatten nested dicts for npz) ----
+    save_dict: dict = {"analysis_comids": analysis_comids, "log_da": log_da}
+    for arm_label, pd_ in percentiles.items():
+        for pname, pcts in pd_.items():
+            for k, v in pcts.items():
+                save_dict[f"pct_{arm_label}_{pname}_{k}"] = np.float64(v)
+    for qname, arm_slopes in da_slopes.items():
+        for arm_label, sd in arm_slopes.items():
+            save_dict[f"slope_{qname}_{arm_label}"]   = np.float64(sd["slope"])
+            save_dict[f"dropped_{qname}_{arm_label}"] = np.int64(sd["n_dropped"])
+    for qname, arm_profiles in da_bins.items():
+        for arm_label, prof in arm_profiles.items():
+            save_dict[f"bin_da_{qname}_{arm_label}"]  = prof["bin_da_median"]
+            save_dict[f"bin_val_{qname}_{arm_label}"] = prof["bin_value_median"]
+            save_dict[f"bin_n_{qname}_{arm_label}"]   = prof["bin_count"]
+    for qname, prof in spread_vs_da.items():
+        save_dict[f"spread_bin_da_{qname}"]  = prof["bin_da_median"]
+        save_dict[f"spread_bin_val_{qname}"] = prof["bin_value_median"]
+        save_dict[f"spread_bin_n_{qname}"]   = prof["bin_count"]
+
+    np.savez_compressed(cache, **save_dict)
+    print(f"  saved → {cache}")
+
+    return {
+        "percentiles":  percentiles,
+        "da_slopes":    da_slopes,
+        "da_bins":      da_bins,
+        "spread_vs_da": spread_vs_da,
+        "log_da":       log_da,
+    }
+
+# ---------------------------------------------------------------------------
 # Stage F: verdicts + figures
 # ---------------------------------------------------------------------------
 
@@ -1516,6 +1904,8 @@ def stage_f(
     e_data: Optional[dict],
     b2_data: Optional[dict] = None,
     e_ext_data: Optional[dict] = None,
+    h2n_data: Optional[dict] = None,
+    g_data: Optional[dict] = None,
 ) -> None:
     """Print and write H1–H4 verdicts; generate figures."""
 
@@ -1665,6 +2055,45 @@ def stage_f(
         verdicts["H2"] = "INCONCLUSIVE"
         print("\n[H2] INCONCLUSIVE — Stage C not run")
 
+    # ---- [H2-network-audit] network-scale H2 variant (v2 pre-registered) --
+    h2n_verdict = "INCONCLUSIVE"
+    if h2n_data is not None and c_data is not None:
+        rho   = h2n_data["rho"]
+        n_g   = h2n_data["n_gauges_used"]
+        n_tot = len(stage_a_data["gauge_staids"])
+        rel_n = c_data.get("rel_spread_n", float("nan"))
+        geo_own = c_data.get("geo_spread_own", {})
+        med_geo_rel = (
+            float(np.nanmedian([
+                np.nanmedian(geo_own["depth"]),
+                np.nanmedian(geo_own["top_width"]),
+                np.nanmedian(geo_own["hydraulic_radius"]),
+            ]))
+            if geo_own else float("nan")
+        )
+        contrast = (np.isfinite(rel_n) and np.isfinite(med_geo_rel)
+                    and (rel_n > med_geo_rel))
+        if not np.isfinite(rho):
+            h2n_verdict = "INCONCLUSIVE"
+        elif rho > 0.2 and contrast:
+            h2n_verdict = "SUPPORTED"
+        else:
+            h2n_verdict = "REFUTED"
+
+        print(f"\n[H2-network-audit] Network-scale H2 (per-gauge integrated"
+              f" upstream response) — v2 pre-registered, 2026-07-07:")
+        print(f"  n_gauges used: {n_g} / {n_tot}"
+              f"  (skipped if upstream set has < min_reaches valid reaches)")
+        print(f"  Spearman ρ(n_disagreement, timing_disagreement) = {rho:.3f}  (bar: > 0.2)")
+        print(f"  n rel-spread vs geometry rel-spread contrast:"
+              f" {rel_n:.4f} vs {med_geo_rel:.4f}  contrast={contrast}")
+        print(f"  Rule: SUPPORTED iff ρ > 0.2 AND n-rel-spread > geometry-rel-spread;"
+              f" REFUTED iff ρ ≤ 0.2 or contrast fails; INCONCLUSIVE if ρ undefined")
+        print(f"  → H2_network: {h2n_verdict}  (own v2 verdict — NOT folded into"
+              f" the registered H2 REFUTED verdict above)")
+    else:
+        print("\n[H2-network-audit] SKIPPED — Stage H2-network not run")
+
     # ---- H3 ----------------------------------------------------------------
     if e_data is not None:
         h3 = e_data["h3"]
@@ -1799,6 +2228,35 @@ def stage_f(
         verdicts["H4"] = "INCONCLUSIVE"
         print("\n[H4] INCONCLUSIVE — Stage E not run")
 
+    # ---- [Level 1.5] distributional + drainage-area conditioning (descriptive) ----
+    if g_data is not None:
+        print(f"\n[Level 1.5] Per-arm distributions + drainage-area conditioning"
+              f" — v2 pre-registered, DESCRIPTIVE ONLY (no falsification bar):")
+        print("  Per-arm percentiles (p5/p25/p50/p75/p95):")
+        for arm_label in ("R1", "R2", "R3"):
+            for pname in ("n", "q_spatial", "p_spatial"):
+                pcts = g_data["percentiles"][arm_label][pname]
+                print(f"    [{arm_label}] {pname}: "
+                      + " / ".join(f"{k}={v:.4f}" for k, v in pcts.items()))
+        print("  DA-conditioned ln(quantity) ~ log10(uparea) OLS slopes:")
+        for qname, arm_slopes in g_data["da_slopes"].items():
+            row = "  ".join(
+                f"{arm}={sd['slope']:+.4f}(dropped={sd['n_dropped']})"
+                for arm, sd in arm_slopes.items()
+            )
+            print(f"    {qname:<18} {row}")
+        print("  Spread-vs-DA profile (median rel-spread per log10(uparea) decile bin,"
+              " headwater→outlet):")
+        for qname, prof in g_data["spread_vs_da"].items():
+            vals = prof["bin_value_median"]
+            finite = vals[np.isfinite(vals)]
+            if len(finite):
+                print(f"    {qname:<18} first-bin(headwater)={finite[0]:.4f}"
+                      f"  last-bin(outlet)={finite[-1]:.4f}"
+                      f"  range=[{np.nanmin(finite):.4f}, {np.nanmax(finite):.4f}]")
+    else:
+        print("\n[Level 1.5] SKIPPED — Stage G not run")
+
     # ---- Summary ----
     print("\n" + "=" * 72)
     print("VERDICT TABLE")
@@ -1884,6 +2342,35 @@ def stage_f(
         if ceiling:
             h3_audit["noise_ceiling"] = ceiling
         audit["H3"] = h3_audit
+
+    if h2n_data is not None:
+        audit["H2_network"] = {
+            "rho":            h2n_data["rho"],
+            "verdict":        h2n_verdict,
+            "n_gauges_used":  h2n_data["n_gauges_used"],
+            "n_gauges_total": len(stage_a_data["gauge_staids"]),
+        }
+
+    if g_data is not None:
+        audit["Level1_5"] = {
+            "percentiles": g_data["percentiles"],
+            "da_slopes": {
+                qname: {arm: sd["slope"] for arm, sd in arm_slopes.items()}
+                for qname, arm_slopes in g_data["da_slopes"].items()
+            },
+            "da_slopes_n_dropped": {
+                qname: {arm: sd["n_dropped"] for arm, sd in arm_slopes.items()}
+                for qname, arm_slopes in g_data["da_slopes"].items()
+            },
+            "spread_vs_da_bin_medians": {
+                qname: prof["bin_value_median"].tolist()
+                for qname, prof in g_data["spread_vs_da"].items()
+            },
+            "spread_vs_da_bin_log_da": {
+                qname: prof["bin_da_median"].tolist()
+                for qname, prof in g_data["spread_vs_da"].items()
+            },
+        }
 
     if audit:
         verdicts_out["audit"] = audit
@@ -2176,6 +2663,25 @@ def main() -> None:
     else:
         print("[Stage C] skipped — one or more --params-r* not provided")
 
+    # Stage H2-network — network-scale H2 variant (v2 spec; depends on B2 + C)
+    h2n_data = None
+    if c_data is not None:
+        h2n_data = stage_h2_network(out_dir, a_data, c_data, b2_data, force=args.force)
+    else:
+        print("[Stage H2-network] skipped — Stage C not run")
+
+    # Stage G — Level 1.5 distributions + drainage-area conditioning (v2 spec; depends on C)
+    g_data = None
+    if c_data is not None:
+        g_data = stage_g_level1_5(
+            out_dir, a_data, c_data,
+            args.params_r1, args.params_r2, args.params_r3,
+            b_daily, b_hourly,
+            force=args.force,
+        )
+    else:
+        print("[Stage G] skipped — Stage C not run")
+
     # Stage D
     d_data = stage_d(
         out_dir, runs_dir,
@@ -2205,7 +2711,8 @@ def main() -> None:
     )
 
     # Stage F
-    stage_f(out_dir, a_data, c_data, d_data, e_data, b2_data=b2_data, e_ext_data=e_ext_data)
+    stage_f(out_dir, a_data, c_data, d_data, e_data, b2_data=b2_data, e_ext_data=e_ext_data,
+            h2n_data=h2n_data, g_data=g_data)
 
 
 if __name__ == "__main__":
