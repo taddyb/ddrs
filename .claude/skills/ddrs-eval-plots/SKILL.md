@@ -1,6 +1,6 @@
 ---
 name: ddrs-eval-plots
-description: Generate plotting notebooks for the output of a ddrs-trained KAN routing model. Use this whenever the user wants to visualize a ddrs training run — hydrographs of predicted vs. observed streamflow, spatial maps of learned Manning's n / Leopold-Maddock p / q parameters over MERIT-Hydro basins, or metrics distributions (NSE, KGE, bias, RMSE, FHV, FLV) across evaluation gauges. Trigger on phrases like "plot my trained model", "visualize the trained KAN", "make a hydrograph for gauge X", "plot Manning's n over basin Y", "show NSE distribution", "evaluation plots", or any request to inspect a checkpoint under `output/saved_models*/`. Also trigger when the user gestures vaguely at "the latest model" or "my training run" — the skill knows how to find inputs.
+description: Generate plotting notebooks for the output of a ddrs-trained KAN routing model. Use this whenever the user wants to visualize a ddrs training run — hydrographs of predicted vs. observed streamflow, spatial maps of learned Manning's n / Leopold-Maddock p / q parameters over MERIT-Hydro basins, metrics distributions (NSE, KGE, bias, RMSE, FHV, FLV) across evaluation gauges, or the selective-equifinality H5/H6 parameter-swap and loss-landscape results. Trigger on phrases like "plot my trained model", "visualize the trained KAN", "make a hydrograph for gauge X", "plot Manning's n over basin Y", "show NSE distribution", "evaluation plots", "plot the H5 swap results", "visualize the loss landscape", or any request to inspect a checkpoint under `output/saved_models*/`. Also trigger when the user gestures vaguely at "the latest model" or "my training run" — the skill knows how to find inputs.
 ---
 
 # ddrs trained-model plotting
@@ -9,14 +9,16 @@ This skill generates Jupyter notebooks that visualize the output of a trained dd
 
 ## Why this exists
 
-ddrs writes two artifacts after training:
+ddrs writes two artifacts after training, plus one more from the
+selective-equifinality campaign's H5 parameter-swap probe:
 
 | Artifact | Producer | Schema |
 |---|---|---|
 | Predictions zarr | `cargo run --bin eval` | groups `gage_ids`, `time`, `predictions (G,T)`, `observations (G,T)` |
 | KAN parameter NetCDF | `cargo run --bin dump_parameters` | dim `COMID`, vars `n`, `q_spatial`, `p_spatial`, `slope` |
+| H5 eval-loss CSV | `probe_zeta_gradient --mode eval-loss` | tidy `composition,window,mean_loss` |
 
-Visualizing them well requires three families of plots, each with its own data dependencies and conventions. Instead of asking the user to assemble matplotlib calls from scratch every time, this skill picks the right recipe, generates a notebook, and saves output PNGs next to the checkpoint so the artifacts travel with the model run.
+Visualizing them well requires several families of plots, each with its own data dependencies and conventions. Instead of asking the user to assemble matplotlib calls from scratch every time, this skill picks the right recipe, generates a notebook, and saves output PNGs next to the checkpoint (or next to the eval-loss CSVs, for H5/H6) so the artifacts travel with the run.
 
 ## How it works
 
@@ -70,8 +72,11 @@ Pick one (or more — emit one notebook per family):
 | hydrograph, time series, predicted vs observed, gauge X over year Y | **hydrograph** → `references/hydrograph.md` |
 | Manning's n, p_spatial, q_spatial, slope, map, basin, MERIT, area | **parameter_map** → `references/parameter_map.md` |
 | NSE, KGE, bias, RMSE, FHV, FLV, distribution, CDF, boxplot, metrics | **metrics** → `references/metrics.md` |
+| H5, parameter swap, n-swap/geo-swap, transfer penalty, f_n, compensator vs sloppy | **parameter_swap** → `references/parameter_swap.md` |
+| H6, loss landscape, (n,p) grid, valley, minima shift, barrier | **loss_landscape_h6** → `references/loss_landscape_h6.md` |
+| KAN interpretability, sensitivity sweep, how does the model understand inputs, disagg head response to precip, per-edge spline, pykan-style | **kan_interpretability** → `references/kan_interpretability.md` |
 
-If the user is vague ("plot my trained model"), ask which family — but offer to emit all three as a default plot bundle if they don't have a preference.
+If the user is vague ("plot my trained model"), ask which family — but offer to emit all three (hydrograph/parameter_map/metrics) as a default plot bundle if they don't have a preference. H5/H6 are a separate research campaign (selective equifinality) and only apply when the user is working with `probe_zeta_gradient --mode eval-loss` output, not a routine training run.
 
 ### Step 2 — Locate inputs
 
@@ -122,6 +127,20 @@ depend on two producible artifacts:
 
 **Always save plots into `<CKPT_DIR>/plots/`** so artifacts travel with the run. Create the directory if it doesn't exist.
 
+**H5/H6 artifacts don't live under a `saved_models*`/run-dir checkpoint** —
+they're produced by `probe_zeta_gradient --mode eval-loss` (see
+`references/parameter_swap.md`) against a research campaign's own output
+directory (e.g. `output/equif/h5/*.csv`), not the routine training-run
+layout above. If the CSVs the user references don't exist yet, this IS a
+CPU job you can offer to run (minutes, no GPU) — see the reference for the
+exact CLI invocation and required flags (`--donor-params-nc`,
+`--compositions`, `--windows`, `--seed`, `--loss-output`). H6 (`--mode
+landscape`, see `references/loss_landscape_h6.md`) is the same kind of CPU
+job (`--surface-output`/`--barrier-output`); registered-resolution data
+already exists at `output/equif/h6/{r1,r3}_{surface,barrier}.csv` (16
+windows, 11×11 grid, 21-point barrier, both forcings) — check there before
+offering to regenerate it, since a fresh run takes roughly an hour per arm.
+
 ### Step 3 — Read the relevant reference
 
 Each reference file contains:
@@ -137,6 +156,7 @@ Write `<CKPT_DIR>/plots/<plot_name>.ipynb`. Suggested names:
 - `hydrograph_<gage_id>_<year>.ipynb`
 - `parameter_map_<variable>_<region>.ipynb`
 - `metrics_distribution.ipynb`
+- `h5_parameter_swap.ipynb` (saves into `<h5_csv_dir>/plots/`, not a checkpoint dir — see `references/parameter_swap.md`)
 
 Each notebook ends by saving PNGs to the same `<CKPT_DIR>/plots/` directory. Include a markdown cell at the top documenting: which checkpoint, which inputs, what region/gauge/year was selected, the date generated.
 
@@ -192,6 +212,9 @@ These match DDR's `plots.py` and `evaluate.ipynb` so notebooks look familiar:
 - `references/hydrograph.md` — single-gauge predictions vs. observations
 - `references/parameter_map.md` — learned KAN parameters over MERIT polygons
 - `references/metrics.md` — NSE/KGE/bias distributions across gauges
+- `references/parameter_swap.md` — H5 transfer-penalty / f_n plots (implemented, self-contained pandas/matplotlib, no `ddr` dependency)
+- `references/loss_landscape_h6.md` — H6 loss-landscape overlay (`--mode landscape` on `probe_zeta_gradient`; implemented, registered-resolution data exists at `output/equif/h6/`)
+- `references/kan_interpretability.md` — sensitivity-sweep plots for ddrs's KAN heads (disagg head implemented via `examples/kan_sensitivity_sweep.rs`; true per-edge spline plots feasible via `rskan::KanLayer`'s public fields but not yet built — see reference for status)
 - `scripts/load_ddrs_predictions.py` — **always use this** to open predictions/baseline zarrs. Handles two pitfalls every notebook hits otherwise:
   1. ddrs writes zarr v3 with `_ARRAY_DIMENSIONS` but no `dimension_names`, so `xr.open_zarr` raises `KeyError`.
   2. `gage_ids` is stored as `(G, W) uint8` (W = longest ID, min 8; widened 2026-06-12 so global `Provider__GageId` names are no longer truncated), not 1D bytes/string — naïve `.decode()` won't work.

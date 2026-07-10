@@ -244,21 +244,22 @@ pub struct KanHeadConfigSection {
 }
 
 /// YAML `kan_head.disaggregation:` block (presence enables the head).
+/// The head always consumes `(daily Q', that day's 24h precip)` — requires
+/// `data_sources.aorc_precip` to be set. See `src/nn/disagg_head.rs`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DisaggregationSection {
     #[serde(default = "default_disagg_hidden")]
     pub hidden_size: usize,
-    #[serde(default = "default_true")]
-    pub use_attributes: bool,
-    /// Condition the within-day shape on hourly AORC precip (the full
-    /// `[d-1,d,d+1]` = 72-hour window per reach). Requires
-    /// `data_sources.aorc_precip` to be set. Default false ⇒ daily-Q-only head.
+    #[serde(default = "default_disagg_num_hidden_layers")]
+    pub num_hidden_layers: usize,
+    #[serde(default = "default_disagg_grid")]
+    pub grid: usize,
+    #[serde(default = "default_disagg_k")]
+    pub k: usize,
+    /// Day-boundary shape-continuity blend factor λ ∈ [0, 1]. Default 0.0 ⇒
+    /// fully independent per-day shapes (no continuity enforcement).
     #[serde(default)]
-    pub use_precip: bool,
-    /// Condition the within-day shape on hourly AORC temperature (another
-    /// `[d-1,d,d+1]` window). Also requires `data_sources.aorc_precip`.
-    #[serde(default)]
-    pub use_temp: bool,
+    pub boundary_blend: f32,
 }
 
 /// Build a [`KanHeadConfig`] from a parsed YAML section + seed, threading the
@@ -282,9 +283,10 @@ pub fn kan_config(
         Some(d) => cfg
             .with_disagg_enabled(true)
             .with_disagg_hidden_size(d.hidden_size)
-            .with_disagg_use_attributes(d.use_attributes)
-            .with_disagg_use_precip(d.use_precip)
-            .with_disagg_use_temp(d.use_temp),
+            .with_disagg_num_hidden_layers(d.num_hidden_layers)
+            .with_disagg_grid(d.grid)
+            .with_disagg_k(d.k)
+            .with_disagg_boundary_blend(d.boundary_blend),
         None => cfg,
     }
 }
@@ -298,8 +300,14 @@ fn default_k() -> usize {
 fn default_disagg_hidden() -> usize {
     16
 }
-fn default_true() -> bool {
-    true
+fn default_disagg_num_hidden_layers() -> usize {
+    1
+}
+fn default_disagg_grid() -> usize {
+    3
+}
+fn default_disagg_k() -> usize {
+    3
 }
 
 // ---------------------------------------------------------------------------

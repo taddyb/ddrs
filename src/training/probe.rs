@@ -114,13 +114,7 @@ pub fn probe_forward<I: Backend>(
 
     let n_hourly = tensors.q_prime.dims()[0];
     let q_prime_hourly = match &head.disagg {
-        Some(d) => d.forward(
-            tensors.q_prime_daily.clone(),
-            tensors.spatial_attributes.clone(),
-            tensors.precip_hourly.clone(),
-            tensors.temp_hourly.clone(),
-            n_hourly,
-        ),
+        Some(d) => d.forward(tensors.q_prime_daily.clone(), tensors.precip_hourly.clone(), n_hourly),
         None => tensors.q_prime.clone(),
     };
 

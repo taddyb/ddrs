@@ -79,24 +79,26 @@ pub struct KanHeadConfig {
 
     /// Attach a learnable mass-preserving daily→hourly disaggregation head
     /// (replaces flat `repeat-24` for the forcing). Off by default → the head
-    /// is exactly the prior KAN-only head (parity preserved).
+    /// is exactly the prior KAN-only head (parity preserved). When enabled,
+    /// the head consumes `(daily Q', that day's 24h precip)` only — requires
+    /// a precip store wired into the dataset (`data_sources.aorc_precip`).
     #[config(default = false)]
     pub disagg_enabled: bool,
-    /// Hidden width of the disaggregation MLP (only used when enabled).
+    /// Hidden width of the disaggregation KAN (only used when enabled).
     #[config(default = 16)]
     pub disagg_hidden_size: usize,
-    /// Whether the disaggregation head also conditions on static attributes.
-    #[config(default = true)]
-    pub disagg_use_attributes: bool,
-    /// Whether the disaggregation head conditions on hourly AORC precip (the
-    /// `[d-1,d,d+1]` 72-hour window per reach). Requires a precip store to be
-    /// wired into the dataset; off by default.
-    #[config(default = false)]
-    pub disagg_use_precip: bool,
-    /// Whether the disaggregation head conditions on hourly AORC temperature
-    /// (another `[d-1,d,d+1]` window). Requires the AORC store; off by default.
-    #[config(default = false)]
-    pub disagg_use_temp: bool,
+    /// Number of `KanLayer(H, H)` blocks in the disaggregation head.
+    #[config(default = 1)]
+    pub disagg_num_hidden_layers: usize,
+    /// B-spline grid intervals for the disaggregation head's KAN layers.
+    #[config(default = 3)]
+    pub disagg_grid: usize,
+    /// B-spline order for the disaggregation head's KAN layers.
+    #[config(default = 3)]
+    pub disagg_k: usize,
+    /// Day-boundary shape-continuity blend factor (see `disagg_head.rs`).
+    #[config(default = 0.0)]
+    pub disagg_boundary_blend: f32,
 }
 
 impl KanHeadConfig {
@@ -151,15 +153,16 @@ impl KanHeadConfig {
             })
             .collect();
 
-        // Optional disaggregation head. Same attribute count as the KAN input;
-        // zero-init output → uniform shape → exact repeat-24 at init.
+        // Optional disaggregation head: (daily Q', that day's 24h precip) ->
+        // 24 hourly values. Independent of the routing KAN's attribute input.
         let disagg = if self.disagg_enabled {
             Some(
-                DisaggHeadConfig::new(self.input_var_names.len(), self.seed)
+                DisaggHeadConfig::new(self.seed)
                     .with_hidden_size(self.disagg_hidden_size)
-                    .with_use_attributes(self.disagg_use_attributes)
-                    .with_use_precip(self.disagg_use_precip)
-                    .with_use_temp(self.disagg_use_temp)
+                    .with_num_hidden_layers(self.disagg_num_hidden_layers)
+                    .with_grid(self.disagg_grid)
+                    .with_k(self.disagg_k)
+                    .with_boundary_blend(self.disagg_boundary_blend)
                     .init::<B>(device),
             )
         } else {

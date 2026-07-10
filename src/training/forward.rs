@@ -66,7 +66,10 @@ impl FrozenParams {
 /// Converts a physical parameter value back to normalized [0, 1] so it can
 /// be fed into `MuskingumCunge::setup_inputs`. Must exactly mirror the
 /// `+1e-6` epsilon used in `denormalize`'s log-space branch.
-fn physical_to_normalized(values: &[f32], range: [f32; 2], log_space: bool) -> Vec<f32> {
+///
+/// `pub` (not `pub(crate)`): callers in `src/bin/*.rs` are separate crates
+/// that depend on `ddrs` externally, so crate-visibility isn't enough.
+pub fn physical_to_normalized(values: &[f32], range: [f32; 2], log_space: bool) -> Vec<f32> {
     let [lo, hi] = range;
     if log_space {
         let log_lo = (lo + 1e-6).ln(); // matches denormalize's epsilon
@@ -201,13 +204,7 @@ pub fn forward<I: Backend>(
     // disagg head is attached, else the flat repeat-24 already in `q_prime`.
     let n_hourly = tensors.q_prime.dims()[0];
     let q_prime_hourly = match &head.disagg {
-        Some(d) => d.forward(
-            tensors.q_prime_daily.clone(),
-            tensors.spatial_attributes.clone(),
-            tensors.precip_hourly.clone(),
-            tensors.temp_hourly.clone(),
-            n_hourly,
-        ),
+        Some(d) => d.forward(tensors.q_prime_daily.clone(), tensors.precip_hourly.clone(), n_hourly),
         None => tensors.q_prime.clone(),
     };
 
@@ -346,6 +343,49 @@ impl LeakanceOverride {
     }
 }
 
+/// Per-reach override of a subset of the NORMALIZED `n`/`q_spatial`/
+/// `p_spatial` head outputs, applied inside `forward_eval_core` right after
+/// `head.forward` — same seam as `LeakanceOverride`, but a WHOLE-BATCH
+/// replace rather than a masked blend: every populated field replaces every
+/// reach in the batch's column order (same order as `divide_comids`);
+/// `None` passes the head's own output through unchanged. Built for the
+/// H5/H6 selective-equifinality parameter-swap tests
+/// (`docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`)
+/// — eval-path only, the training `forward` never sees this type.
+#[derive(Default)]
+pub struct RoutingParamOverride {
+    pub n: Option<Vec<f32>>,
+    pub q_spatial: Option<Vec<f32>>,
+    pub p_spatial: Option<Vec<f32>>,
+}
+
+impl RoutingParamOverride {
+    /// Replace `param` wholesale with `vals` when `Some`, else pass through.
+    /// Panics (not a silent no-op) on a length mismatch — a mismatched
+    /// override vector means the donor NetCDF's gather-by-COMID produced the
+    /// wrong reach count for this batch, which would silently corrupt the
+    /// routing solve if allowed through.
+    fn replace_or_passthrough<I: Backend>(
+        param: Tensor<I, 1>,
+        vals: &Option<Vec<f32>>,
+        device: &I::Device,
+    ) -> Tensor<I, 1> {
+        match vals {
+            Some(v) => {
+                assert_eq!(
+                    v.len(),
+                    param.dims()[0],
+                    "RoutingParamOverride length {} != batch reach count {}",
+                    v.len(),
+                    param.dims()[0]
+                );
+                Tensor::from_data(TensorData::new(v.clone(), [v.len()]), device)
+            }
+            None => param,
+        }
+    }
+}
+
 /// MLP inference forward — no autograd anywhere. Used by `bin/eval` and
 /// the KanHead arm of `EvalParams`.
 ///
@@ -359,6 +399,12 @@ impl LeakanceOverride {
 /// `overrides` — optional per-reach override of the NORMALIZED leakance head
 /// outputs; applied after `head.forward` and before denormalization. `None`
 /// is the normal eval path (no override).
+///
+/// `param_overrides` — optional per-reach override of a subset of the
+/// NORMALIZED `n`/`q_spatial`/`p_spatial` head outputs (see
+/// `RoutingParamOverride`); `None` is the normal eval path (no override).
+/// Orthogonal to `overrides`/leakance and to the disaggregation head — both
+/// are computed independently of `n`/`q_spatial`/`p_spatial`.
 pub fn forward_eval<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
@@ -367,8 +413,18 @@ pub fn forward_eval<I: Backend>(
     carry_state: bool,
     zeta: Option<&mut ZetaSums<I>>,
     overrides: Option<&LeakanceOverride>,
+    param_overrides: Option<&RoutingParamOverride>,
 ) -> Tensor<I, 2> {
-    let runoff = forward_eval_core(cfg, tensors, head, device, carry_state, zeta, overrides);
+    let runoff = forward_eval_core(
+        cfg,
+        tensors,
+        head,
+        device,
+        carry_state,
+        zeta,
+        overrides,
+        param_overrides,
+    );
     scatter_add_by_group(
         runoff,
         tensors.flat_indices.clone(),
@@ -390,8 +446,18 @@ pub fn forward_eval_reaches<I: Backend>(
     carry_state: bool,
     zeta: Option<&mut ZetaSums<I>>,
     overrides: Option<&LeakanceOverride>,
+    param_overrides: Option<&RoutingParamOverride>,
 ) -> Tensor<I, 2> {
-    forward_eval_core(cfg, tensors, head, device, carry_state, zeta, overrides)
+    forward_eval_core(
+        cfg,
+        tensors,
+        head,
+        device,
+        carry_state,
+        zeta,
+        overrides,
+        param_overrides,
+    )
 }
 
 /// Shared body of `forward_eval` and `forward_eval_reaches`. Returns
@@ -405,12 +471,31 @@ fn forward_eval_core<I: Backend>(
     carry_state: bool,
     zeta: Option<&mut ZetaSums<I>>,
     overrides: Option<&LeakanceOverride>,
+    param_overrides: Option<&RoutingParamOverride>,
 ) -> Tensor<I, 2> {
     let params_map = head.forward(tensors.spatial_attributes.clone());
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
     let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
     let p_param = params_map.get("p_spatial").cloned();
+
+    // H5/H6 parameter-swap override: whole-batch replace of n/q_spatial/
+    // p_spatial (normalized space), independent of leakance/disagg below.
+    let (n_param, q_param, p_param) = if let Some(po) = param_overrides {
+        let n_param = RoutingParamOverride::replace_or_passthrough(n_param, &po.n, device);
+        let q_param = RoutingParamOverride::replace_or_passthrough(q_param, &po.q_spatial, device);
+        let p_param = match (p_param, &po.p_spatial) {
+            (Some(p), ov) => Some(RoutingParamOverride::replace_or_passthrough(p, ov, device)),
+            (None, Some(_)) => panic!(
+                "RoutingParamOverride requested a p_spatial override but this KAN head has no \
+                 p_spatial output — add p_spatial to kan_head.learnable_parameters"
+            ),
+            (None, None) => None,
+        };
+        (n_param, q_param, p_param)
+    } else {
+        (n_param, q_param, p_param)
+    };
 
     let n_active = tensors.adjacency.n;
     // Learnable Muskingum X (eval path mirrors `forward`): denormalize the
@@ -427,19 +512,12 @@ fn forward_eval_core<I: Backend>(
     // Forcing (inner backend): disaggregate when a head is attached, else the
     // flat repeat-24. Mirrors `forward`.
     let n_hourly = tensors.q_prime.dims()[0];
-    // Forcing: disaggregate when a head is attached (mirrors `forward`).
-    // When called from the teacher/state-cache path with a lookahead batch
-    // (d_daily = n_days+1, n_hourly = n_days*24), DisaggHead's d_use = n_days
-    // so the extra row naturally becomes the `next` tap for the last day —
-    // no right-clamp — without any special handling here.
+    // Forcing: disaggregate when a head is attached (mirrors `forward`). Each
+    // day is disaggregated independently from its own (daily Q', 24h precip)
+    // — no cross-day lookahead/window, so no special handling is needed for
+    // the teacher/state-cache path's lookahead-batch shape here.
     let q_prime_hourly: Tensor<I, 2> = match &head.disagg {
-        Some(d) => d.forward(
-            tensors.q_prime_daily.clone(),
-            tensors.spatial_attributes.clone(),
-            tensors.precip_hourly.clone(),
-            tensors.temp_hourly.clone(),
-            n_hourly,
-        ),
+        Some(d) => d.forward(tensors.q_prime_daily.clone(), tensors.precip_hourly.clone(), n_hourly),
         None => tensors.q_prime.clone(),
     };
 
@@ -607,6 +685,181 @@ mod tests {
             .into_vec()
             .unwrap();
         assert_eq!(out_id, vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    // -----------------------------------------------------------------------
+    // RoutingParamOverride (H5/H6 parameter-swap) — unit test + parity test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn routing_param_override_replace_or_passthrough() {
+        let device = Dev::default();
+        let param: Tensor<B, 1> = Tensor::from_floats([0.1, 0.2, 0.3], &device);
+
+        // None passes the input straight through, unchanged.
+        let passthrough: Vec<f32> =
+            RoutingParamOverride::replace_or_passthrough(param.clone(), &None, &device)
+                .into_data()
+                .into_vec()
+                .unwrap();
+        assert_eq!(passthrough, vec![0.1, 0.2, 0.3]);
+
+        // Some(vals) replaces every entry (whole-batch, not masked).
+        let replaced: Vec<f32> = RoutingParamOverride::replace_or_passthrough(
+            param,
+            &Some(vec![0.9, 0.8, 0.7]),
+            &device,
+        )
+        .into_data()
+        .into_vec()
+        .unwrap();
+        assert_eq!(replaced, vec![0.9, 0.8, 0.7]);
+    }
+
+    #[test]
+    #[should_panic(expected = "RoutingParamOverride length")]
+    fn routing_param_override_length_mismatch_panics() {
+        let device = Dev::default();
+        let param: Tensor<B, 1> = Tensor::from_floats([0.1, 0.2, 0.3], &device);
+        RoutingParamOverride::replace_or_passthrough(param, &Some(vec![0.9, 0.8]), &device);
+    }
+
+    /// Build a minimal `RoutingTensors<B>` (inner backend, no Autodiff) for a
+    /// linear chain of `n` reaches with `t` hourly steps and a single gauge
+    /// at the outlet. Mirrors `tests/leakance_off_parity.rs::minimal_routing_tensors`
+    /// but on the inner backend, matching `forward_eval`'s signature.
+    fn minimal_eval_tensors(n: usize, t: usize, f_attrs: usize, device: &Dev) -> RoutingTensors<B> {
+        use crate::data::{RhoWindow, Staid};
+        use crate::sparse::SparseAdjacency;
+        use chrono::NaiveDate;
+
+        let adjacency = {
+            let mut dense = vec![0.0_f32; n * n];
+            for i in 0..n - 1 {
+                dense[(i + 1) * n + i] = 1.0;
+            }
+            SparseAdjacency::from_dense(n, &dense, vec![1000.0; n], vec![0.001; n])
+        };
+
+        let attrs_vec = vec![0.5_f32; n * f_attrs];
+        let spatial_attributes =
+            Tensor::<B, 2>::from_data(TensorData::new(attrs_vec, [n, f_attrs]), device);
+
+        let mut qp_data = vec![0.0_f32; t * n];
+        for ti in 0..t {
+            let phase = (ti as f32) / (t.max(2) - 1) as f32 * 4.0 * std::f32::consts::PI;
+            for ri in 0..n {
+                qp_data[ti * n + ri] = (5.0 + phase.sin() * 2.0).max(0.1);
+            }
+        }
+        let q_prime = Tensor::<B, 2>::from_data(TensorData::new(qp_data, [t, n]), device);
+
+        let q_prime_daily =
+            Tensor::<B, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, n]), device);
+        let precip_hourly =
+            Tensor::<B, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, n]), device);
+        let temp_hourly =
+            Tensor::<B, 2>::from_data(TensorData::new(Vec::<f32>::new(), [0, n]), device);
+
+        let flat_indices = Tensor::<B, 1, Int>::from_data(
+            TensorData::from([(n - 1) as i32].as_slice()),
+            device,
+        );
+        let group_ids =
+            Tensor::<B, 1, Int>::from_data(TensorData::from([0i32].as_slice()), device);
+
+        RoutingTensors {
+            adjacency,
+            spatial_attributes,
+            q_prime,
+            q_prime_daily,
+            precip_hourly,
+            temp_hourly,
+            observations: ndarray::Array2::zeros((1, 1)),
+            flat_indices,
+            group_ids,
+            num_gauges: 1,
+            gauge_staids: vec![Staid::new("dummy")],
+            window: RhoWindow {
+                start_day_idx: 0,
+                rho_days: 1,
+                window_start: NaiveDate::from_ymd_opt(1990, 1, 1).unwrap(),
+            },
+            initial_state: None,
+            impervious_mask: None,
+        }
+    }
+
+    /// Build a KAN head with `learnable_parameters = [n, q_spatial, p_spatial]`
+    /// on the inner backend (no leakance, no disagg) — matches `forward_eval`'s
+    /// `head: &KanHead<I>` signature.
+    fn minimal_eval_head(f_attrs: usize, device: &Dev) -> KanHead<B> {
+        use crate::nn::kan_head::KanHeadConfig;
+        KanHeadConfig::new(
+            (0..f_attrs).map(|i| format!("attr_{i}")).collect(),
+            vec!["n".to_string(), "q_spatial".to_string(), "p_spatial".to_string()],
+            42,
+        )
+        .with_hidden_size(8)
+        .with_num_hidden_layers(1)
+        .init::<B>(device)
+    }
+
+    /// The parity gate H5/H6 must pass before any swap result is trusted:
+    /// round-tripping a head's own `n`/`q_spatial`/`p_spatial` output through
+    /// denormalize -> `physical_to_normalized` -> `RoutingParamOverride` (the
+    /// exact path a real donor-NetCDF injection takes) must reproduce the
+    /// un-overridden forward to the same f32 floor already established by
+    /// `compare_ddr_sandbox` (CLAUDE.md invariant 1, < 1e-3 m3/s absolute).
+    #[test]
+    fn routing_param_override_own_dump_round_trip_matches_baseline() {
+        let device = Dev::default();
+        let n = 5usize;
+        let t = 24usize;
+        let f = 4usize;
+
+        let tensors = minimal_eval_tensors(n, t, f, &device);
+        let head = minimal_eval_head(f, &device);
+        let mut cfg = Config::default();
+        cfg.params.parameter_ranges.n = [0.01, 0.25];
+        cfg.params.parameter_ranges.q_spatial = [0.1, 0.9];
+        cfg.params.parameter_ranges.p_spatial = [1.0, 200.0];
+
+        // Baseline: no override.
+        let baseline = forward_eval::<B>(&cfg, &tensors, &head, &device, false, None, None, None);
+        let baseline_vals: Vec<f32> = baseline.into_data().into_vec().unwrap();
+
+        // Round-trip the head's own normalized output through physical space
+        // and back — mirrors dump_parameters::write_netcdf (denormalize) +
+        // param_dump::load_comid_field + physical_to_normalized (read side).
+        let params_map = head.forward(tensors.spatial_attributes.clone());
+        let log_space = |name: &str| cfg.params.log_space_parameters.iter().any(|s| s == name);
+        let round_trip = |name: &str, range: [f32; 2]| -> Vec<f32> {
+            let norm = params_map.get(name).expect("head missing param").clone();
+            let physical = denormalize(norm, range, log_space(name));
+            let physical_vals: Vec<f32> = physical.into_data().into_vec().unwrap();
+            physical_to_normalized(&physical_vals, range, log_space(name))
+        };
+        let ov = RoutingParamOverride {
+            n: Some(round_trip("n", cfg.params.parameter_ranges.n)),
+            q_spatial: Some(round_trip("q_spatial", cfg.params.parameter_ranges.q_spatial)),
+            p_spatial: Some(round_trip("p_spatial", cfg.params.parameter_ranges.p_spatial)),
+        };
+
+        let overridden =
+            forward_eval::<B>(&cfg, &tensors, &head, &device, false, None, None, Some(&ov));
+        let overridden_vals: Vec<f32> = overridden.into_data().into_vec().unwrap();
+
+        assert_eq!(baseline_vals.len(), overridden_vals.len());
+        let max_abs_diff = baseline_vals
+            .iter()
+            .zip(overridden_vals.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_abs_diff < 1e-3,
+            "own-dump round-trip diverged from baseline: max abs diff {max_abs_diff} m3/s"
+        );
     }
 
     #[test]

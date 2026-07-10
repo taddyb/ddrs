@@ -58,8 +58,6 @@ kan_head:
   # Precip-conditioned mass-preserving daily->hourly disaggregation head.
   disaggregation:
     hidden_size: 16
-    use_attributes: true
-    use_precip: true
 
 params:
   use_leakance: true
