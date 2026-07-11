@@ -1111,20 +1111,28 @@ fn load_merged_stats(
 /// `mean_precip` is this batch's reaches' `meanP` in `precip`'s column
 /// order, length `n`. `meanP`'s native units aren't documented upstream
 /// (the attribute NetCDF carries no `units` attribute); its value range
-/// (~0–9600, mean ~785) is consistent with mm/year, not mm/day. This is a
-/// FIXED, reach-specific divisor, not a physically-dimensioned conversion —
-/// what matters is that it's the same climatological constant for every
-/// window at that reach.
+/// (~0–9600, mean ~785) is consistent with mm/YEAR, not mm/hr — but `precip`
+/// (the numerator) is an hourly rate (mm/hr). Dividing directly crushes real
+/// storms to ~1e-3 (e.g. an 8.6 mm/hr peak / 3740 mm/yr meanP → 0.0023),
+/// ~1000x smaller than the disagg head's other input feature
+/// (`log(daily_q)`, typically O(1)) — numerically inert at the input layer
+/// and undetectable to the trained checkpoint (verified empirically: a real
+/// storm's shape circularly shifted through 8 hour-offsets left the disagg
+/// head's output peak pinned, precip-timing-blind). Converting `meanP` to
+/// mm/hr (÷ hours/year) before dividing keeps both operands on the same
+/// timescale, restoring an O(1) feature.
 fn normalize_precip(mut precip: Array2<f32>, mean_precip: &[f32]) -> Array2<f32> {
+    const HOURS_PER_YEAR: f32 = 365.0 * 24.0;
     let (t, n) = precip.dim();
     if t == 0 {
         return precip;
     }
     debug_assert_eq!(mean_precip.len(), n, "mean_precip must have one entry per reach column");
     for col in 0..n {
-        // Basin-normalize: divide by this reach's climatological mean precip
-        // (guard near-zero meanP — a data gap, not a physically dry basin).
-        let divisor = mean_precip[col].max(1e-3);
+        // Basin-normalize: divide by this reach's climatological mean HOURLY
+        // precip rate (guard near-zero meanP — a data gap, not a physically
+        // dry basin).
+        let divisor = (mean_precip[col] / HOURS_PER_YEAR).max(1e-3);
         // log1p in place. Clamp to ≥0 first: precip is non-negative (mm/hr),
         // and log1p(x≤-1) is NaN/-Inf — a defensive guard in case the store
         // ever surfaces a stray negative (NaN is already zeroed at read time).
@@ -1276,6 +1284,24 @@ mod tests {
         let raw = Array2::<f32>::zeros((0, 3));
         let out = normalize_precip(raw, &[10.0, 20.0, 30.0]);
         assert_eq!(out.dim(), (0, 3));
+    }
+
+    #[test]
+    fn normalize_precip_realistic_storm_is_not_crushed_to_near_zero() {
+        // Regression guard: dividing an hourly precip rate by an ANNUAL
+        // meanP (mm/year) without converting to an hourly rate first crushed
+        // real storms to ~1e-3 (see normalize_precip's doc comment) —
+        // numerically inert to the disagg head, verified to make the trained
+        // checkpoint precip-timing-blind. A realistic storm (8.6 mm/hr) at a
+        // typical CONUS meanP (~785 mm/yr, the attribute's dataset mean)
+        // must normalize to an O(1) value, not O(1e-3).
+        let raw = Array2::<f32>::from_shape_fn((1, 1), |_| 8.6);
+        let out = normalize_precip(raw, &[785.0]);
+        assert!(
+            out[(0, 0)] > 0.5,
+            "realistic storm normalized to {}, expected an O(1) value (annual/hourly units mismatch?)",
+            out[(0, 0)]
+        );
     }
 
     // -----------------------------------------------------------------------
