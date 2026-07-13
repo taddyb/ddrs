@@ -39,9 +39,9 @@ pub struct RoutingBatch {
     /// learnable disaggregation head; `None` of it is upsampled here.
     pub q_prime_daily: Array2<f32>,
     /// Hourly AORC precip, shape `(T_hours, N)`, **already normalized** per
-    /// reach (`log1p(precip / meanP)` — basin-normalized by climatological
-    /// mean precip, see `normalize_precip`). Empty `(0, N)` when no precip
-    /// store is wired. Conditions the disaggregation head.
+    /// reach (per-window z-score of `log1p(precip)`, see `normalize_precip`).
+    /// Empty `(0, N)` when no precip store is wired. Conditions the
+    /// disaggregation head.
     pub precip_hourly: Array2<f32>,
     /// Hourly AORC temperature, shape `(T_hours, N)`, **already normalized**
     /// per reach (z-score). Empty `(0, N)` when temp conditioning is off.
@@ -268,10 +268,6 @@ pub struct MeritGagesDataset {
     /// would ignore.
     pub(crate) want_precip: bool,
     pub(crate) want_temp: bool,
-    /// Per-reach climatological mean precip (`meanP`), keyed by raw COMID —
-    /// the basin-normalization divisor for precip (see `normalize_precip`).
-    /// `Some` iff `want_precip`.
-    pub(crate) mean_precip: Option<Arc<std::collections::HashMap<i64, f32>>>,
     pub(crate) observations: Arc<ObservationsStore>,
     pub(crate) time_axis: TimeAxis,
     pub(crate) attr_names: Vec<String>,
@@ -450,35 +446,6 @@ impl MeritGagesDataset {
             (None, false) => None,
         };
 
-        // Basin-normalization divisor for precip (mhpi/hydroDL `basinNorm`
-        // convention: normalize a per-reach flux by that basin's own
-        // long-term climatological mean precip, `meanP`, so raw mm/hr values
-        // become comparable across basins of very different climates before
-        // the log1p + window z-score in `normalize_precip`). Requires
-        // `meanP` in `kan_head.input_var_names` whenever disagg is enabled —
-        // every tracked disagg config already includes it (shared with the
-        // routing KAN's own attribute set).
-        let mean_precip: Option<Arc<std::collections::HashMap<i64, f32>>> = if want_precip {
-            let row = attr_names.iter().position(|n| n == "meanP").ok_or_else(|| {
-                DataError::Malformed {
-                    path: std::path::PathBuf::from("<config>"),
-                    message: "kan_head.disaggregation is set but 'meanP' is not in \
-                              kan_head.input_var_names — basin-normalizing precip \
-                              requires the reach's climatological mean precip attribute"
-                        .into(),
-                }
-            })?;
-            let mut m = std::collections::HashMap::with_capacity(attrs.index.len());
-            for comid in attrs.index.ids() {
-                if let Some(col) = attrs.index.position(comid) {
-                    m.insert(comid.0, attrs.attrs[(row, col)]);
-                }
-            }
-            Some(Arc::new(m))
-        } else {
-            None
-        };
-
         // Filter 4: drop gauges the observation store has no series for —
         // observation reads hard-error on missing STAIDs, and the global
         // v3.1 gage CSVs list a few dozen gauges absent from the obs zarr.
@@ -526,7 +493,6 @@ impl MeritGagesDataset {
             precip,
             want_precip,
             want_temp,
-            mean_precip,
             observations,
             time_axis,
             attr_names,
@@ -693,20 +659,6 @@ impl MeritGagesDataset {
     // Precip read helpers (precip-driven disaggregation head)
     // -----------------------------------------------------------------------
 
-    /// Gather this batch's reaches' climatological mean precip (`meanP`),
-    /// in `comids` order — the basin-normalization divisor. Missing COMIDs
-    /// (shouldn't happen: `mean_precip` is built from the same attribute
-    /// store `comids` are drawn from) fall back to `1.0` (no-op divisor)
-    /// rather than a hard error, since a batch-time miss here is a data
-    /// coverage gap, not a config error already caught at `open()`.
-    fn gather_mean_precip(&self, comids: &[Comid]) -> Vec<f32> {
-        let table = self
-            .mean_precip
-            .as_ref()
-            .expect("gather_mean_precip called without want_precip");
-        comids.iter().map(|c| table.get(&c.0).copied().unwrap_or(1.0)).collect()
-    }
-
     /// Read + normalize hourly precip for a training rho-window. Returns
     /// `(n_hourly, N)`, or empty `(0, N)` when precip conditioning is off.
     fn read_precip_window(
@@ -716,10 +668,7 @@ impl MeritGagesDataset {
         n: usize,
     ) -> Result<Array2<f32>> {
         match (&self.precip, self.want_precip) {
-            (Some(store), true) => Ok(normalize_precip(
-                store.read_window(window, comids)?,
-                &self.gather_mean_precip(comids),
-            )),
+            (Some(store), true) => Ok(normalize_precip(store.read_window(window, comids)?)),
             _ => Ok(Array2::<f32>::zeros((0, n))),
         }
     }
@@ -732,10 +681,7 @@ impl MeritGagesDataset {
         n: usize,
     ) -> Result<Array2<f32>> {
         match (&self.precip, self.want_precip) {
-            (Some(store), true) => Ok(normalize_precip(
-                store.read_test_window(window, comids)?,
-                &self.gather_mean_precip(comids),
-            )),
+            (Some(store), true) => Ok(normalize_precip(store.read_test_window(window, comids)?)),
             _ => Ok(Array2::<f32>::zeros((0, n))),
         }
     }
@@ -1092,52 +1038,53 @@ fn load_merged_stats(
     Ok((Array1::from(means_vec), Array1::from(stds_vec)))
 }
 
-/// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
-/// Pre-head precip normalization: basin-normalize (divide by that reach's
-/// climatological mean precip `meanP` — the mhpi/hydroDL `basinNorm`
-/// convention, https://github.com/mhpi/hydroDL/blob/release/hydroDL/data/camels.py#L574,
-/// adapted for a flux that's already a depth-rate so no area term is needed),
-/// then `log1p`. That's it — NO subsequent per-window z-score. An earlier
-/// version of this function z-scored per window on top of the basin
-/// normalization, which silently canceled it: z-scoring is invariant to the
-/// scale difference basin-normalization introduces (verified empirically —
-/// two basins with meanP differing 100x produced z-scored output identical
-/// to float precision for the same raw storm pattern), so the network never
-/// actually saw the basin-relative signal. `log1p(precip/meanP)` alone is
-/// already a reasonably-scaled KAN input (log1p compresses the range), and
-/// it's the quantity that actually carries cross-basin comparability through
-/// to the network.
+/// Pre-head precip normalization: per-reach (column), per-WINDOW z-score of
+/// `log1p(precip)` — mean-centered, unit-variance, recomputed fresh over
+/// whatever window of hours is passed in (the training rho-window or the eval
+/// chunk). NOT normalized by a fixed climatological constant.
 ///
-/// `mean_precip` is this batch's reaches' `meanP` in `precip`'s column
-/// order, length `n`. `meanP`'s native units aren't documented upstream
-/// (the attribute NetCDF carries no `units` attribute); its value range
-/// (~0–9600, mean ~785) is consistent with mm/YEAR, not mm/hr — but `precip`
-/// (the numerator) is an hourly rate (mm/hr). Dividing directly crushes real
-/// storms to ~1e-3 (e.g. an 8.6 mm/hr peak / 3740 mm/yr meanP → 0.0023),
-/// ~1000x smaller than the disagg head's other input feature
-/// (`log(daily_q)`, typically O(1)) — numerically inert at the input layer
-/// and undetectable to the trained checkpoint (verified empirically: a real
-/// storm's shape circularly shifted through 8 hour-offsets left the disagg
-/// head's output peak pinned, precip-timing-blind). Converting `meanP` to
-/// mm/hr (÷ hours/year) before dividing keeps both operands on the same
-/// timescale, restoring an O(1) feature.
-fn normalize_precip(mut precip: Array2<f32>, mean_precip: &[f32]) -> Array2<f32> {
-    const HOURS_PER_YEAR: f32 = 365.0 * 24.0;
+/// Why a per-window z-score instead of a fixed-divisor basin normalization
+/// (`log1p(precip / meanP_hourly)`): a fixed-divisor feature is always
+/// non-negative and mostly exact-zero (dry hours), so every hidden unit's
+/// weight gradient shares the same sign and weights for rarely-wet hours get
+/// no gradient signal on dry samples — well-documented to slow convergence
+/// (LeCun et al., *Efficient BackProp*). A mean-centered feature trains every
+/// weight every step. Verified via the synthetic discriminator
+/// `examples/disagg_precip_normalization_discriminator.rs`: at a matched
+/// short training budget the z-scored feature reached 88% precip-timing
+/// accuracy vs 77% for the fixed-divisor feature (both reach 100% given 20x
+/// more steps — a convergence-speed gap, not missing information). This is
+/// the design that produced the documented +0.037 NSE disaggregation win.
+///
+/// Near-constant windows (std < 1e-6, e.g. all-dry) map to all zeros
+/// (neutral), so the head falls back to the daily-Q shape.
+///
+/// `pub(crate)` (not private) so `src/pretrain/` can call the EXACT same
+/// production transform on real hourly ground truth, rather than
+/// reimplementing it and risking drift between pretraining and production
+/// features.
+pub(crate) fn normalize_precip(mut precip: Array2<f32>) -> Array2<f32> {
     let (t, n) = precip.dim();
     if t == 0 {
         return precip;
     }
-    debug_assert_eq!(mean_precip.len(), n, "mean_precip must have one entry per reach column");
     for col in 0..n {
-        // Basin-normalize: divide by this reach's climatological mean HOURLY
-        // precip rate (guard near-zero meanP — a data gap, not a physically
-        // dry basin).
-        let divisor = (mean_precip[col] / HOURS_PER_YEAR).max(1e-3);
-        // log1p in place. Clamp to ≥0 first: precip is non-negative (mm/hr),
-        // and log1p(x≤-1) is NaN/-Inf — a defensive guard in case the store
-        // ever surfaces a stray negative (NaN is already zeroed at read time).
+        // log1p in place.
         for row in 0..t {
-            precip[(row, col)] = (precip[(row, col)].max(0.0) / divisor).ln_1p();
+            precip[(row, col)] = precip[(row, col)].ln_1p();
+        }
+        let mean: f32 = (0..t).map(|r| precip[(r, col)]).sum::<f32>() / t as f32;
+        let var: f32 =
+            (0..t).map(|r| (precip[(r, col)] - mean).powi(2)).sum::<f32>() / t as f32;
+        let std = var.sqrt();
+        if std < 1e-6 {
+            for row in 0..t {
+                precip[(row, col)] = 0.0;
+            }
+        } else {
+            for row in 0..t {
+                precip[(row, col)] = (precip[(row, col)] - mean) / std;
+            }
         }
     }
     precip
@@ -1169,6 +1116,7 @@ fn normalize_temp(mut temp: Array2<f32>) -> Array2<f32> {
     temp
 }
 
+/// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
 fn stats_path_from_attrs(attrs_path: &std::path::Path) -> std::path::PathBuf {
     let dir = attrs_path
         .parent()
@@ -1249,59 +1197,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // normalize_precip: basin normalization (divide by meanP) before log1p+z-score
+    // normalize_precip: per-reach, per-window z-score of log1p(precip)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn normalize_precip_basin_norm_differentiates_identical_raw_precip() {
-        // Two reaches with IDENTICAL raw precip but very different
-        // climatological meanP must come out differently normalized — that's
-        // the whole point of basin normalization (a storm is a bigger
-        // deviation from normal in a dry basin than a wet one).
-        let t = 6;
-        let raw = Array2::<f32>::from_shape_fn((t, 2), |(row, _col)| {
-            if row == 2 { 5.0 } else { 0.1 }
+    fn normalize_precip_storm_hour_is_positive_outlier() {
+        // Within-window RELATIVE contrast: one storm hour amid mostly-dry
+        // hours must z-score to a clear positive outlier, while the dry
+        // hours land below the window mean (negative). This is the timing
+        // signal the disagg head trains on.
+        let t = 24;
+        let raw = Array2::<f32>::from_shape_fn((t, 1), |(row, _)| {
+            if row == 7 { 8.6 } else { 0.0 }
         });
-        let out = normalize_precip(raw, &[50.0, 5000.0]);
-        // Same raw input, different meanP -> different normalized columns.
-        let col0: Vec<f32> = (0..t).map(|r| out[(r, 0)]).collect();
-        let col1: Vec<f32> = (0..t).map(|r| out[(r, 1)]).collect();
-        let diff: f32 = col0.iter().zip(&col1).map(|(a, b)| (a - b).abs()).sum();
-        assert!(diff > 1e-3, "basin-normalized columns should differ: {col0:?} vs {col1:?}");
+        let out = normalize_precip(raw);
+        assert!(
+            out[(7, 0)] > 2.0,
+            "storm hour z-score {} should be a large positive outlier",
+            out[(7, 0)]
+        );
+        for row in (0..t).filter(|&r| r != 7) {
+            assert!(
+                out[(row, 0)] < 0.0,
+                "dry hour {row} z-scored to {} — expected below the window mean",
+                out[(row, 0)]
+            );
+        }
     }
 
     #[test]
-    fn normalize_precip_guards_near_zero_mean_precip() {
-        // A near-zero meanP (data gap) must not produce NaN/Inf.
-        let t = 4;
-        let raw = Array2::<f32>::from_shape_fn((t, 1), |(row, _)| if row == 1 { 3.0 } else { 0.0 });
-        let out = normalize_precip(raw, &[0.0]);
-        assert!(out.iter().all(|v| v.is_finite()), "near-zero meanP produced non-finite output: {out:?}");
+    fn normalize_precip_near_constant_window_maps_to_zeros() {
+        // A (near-)zero-variance window (e.g. all-dry, or a data gap read
+        // as a constant) must map to all zeros — neutral input, not NaN/Inf
+        // from dividing by std ≈ 0.
+        let raw = Array2::<f32>::from_elem((4, 2), 0.3);
+        let out = normalize_precip(raw);
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "near-constant window produced non-finite output: {out:?}"
+        );
+        assert!(
+            out.iter().all(|&v| v == 0.0),
+            "near-constant window should map to all zeros: {out:?}"
+        );
     }
 
     #[test]
     fn normalize_precip_empty_window_is_noop() {
         let raw = Array2::<f32>::zeros((0, 3));
-        let out = normalize_precip(raw, &[10.0, 20.0, 30.0]);
+        let out = normalize_precip(raw);
         assert_eq!(out.dim(), (0, 3));
-    }
-
-    #[test]
-    fn normalize_precip_realistic_storm_is_not_crushed_to_near_zero() {
-        // Regression guard: dividing an hourly precip rate by an ANNUAL
-        // meanP (mm/year) without converting to an hourly rate first crushed
-        // real storms to ~1e-3 (see normalize_precip's doc comment) —
-        // numerically inert to the disagg head, verified to make the trained
-        // checkpoint precip-timing-blind. A realistic storm (8.6 mm/hr) at a
-        // typical CONUS meanP (~785 mm/yr, the attribute's dataset mean)
-        // must normalize to an O(1) value, not O(1e-3).
-        let raw = Array2::<f32>::from_shape_fn((1, 1), |_| 8.6);
-        let out = normalize_precip(raw, &[785.0]);
-        assert!(
-            out[(0, 0)] > 0.5,
-            "realistic storm normalized to {}, expected an O(1) value (annual/hourly units mismatch?)",
-            out[(0, 0)]
-        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,0 +1,90 @@
+# kan_disagg_conus_chunk3.yaml — disaggregation head with chunk_days=3:
+# mass balance relaxed to the trailing 3-day (72h) window instead of each
+# individual calendar day, validated via a standalone real-USGS-hourly
+# pretraining experiment (docs/2026-07-1x-disagg-72h-window-findings.md) —
+# smooth cross-day storm shapes + real peak-timing improvement (6h vs
+# climatology's 9h) vs. the old per-day-exact + boundary_blend approach,
+# which left peak timing exactly tied with climatology. No leakance.
+#
+# Q': CONUS dHBV2-UH retrospective (daily m3/s), gages_3000.csv gauge set —
+# same source as config/sources/conus-hourly.yaml. CPU backend.
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+device: 0
+seed: 42
+np_seed: 42
+
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+
+experiment:
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 5
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    3: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+  # KAN-based disaggregation head. chunk_days=3: mass balance relaxed to
+  # the trailing 72h window (not each calendar day) -- see disagg_head.rs.
+  disaggregation:
+    hidden_size: 16
+    chunk_days: 3
+
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  sparse_solver: cpu
+  use_cuda_graphs: false
+  use_leakance: false
+
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15
+  rho: null

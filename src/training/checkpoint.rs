@@ -41,6 +41,7 @@ use rand_chacha::ChaCha12Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::data::error::{DataError, Result};
+use crate::nn::disagg_head::DisaggHead;
 use crate::nn::kan_head::KanHead;
 
 /// Save KAN head weights to `path` (`.mpk` extension appended by the recorder).
@@ -62,6 +63,28 @@ pub fn load_kan_head<B: Backend>(
     head_template: KanHead<B>,
     device: &B::Device,
 ) -> Result<KanHead<B>> {
+    let record = CompactRecorder::new()
+        .load(path.to_path_buf(), device)
+        .map_err(|e| DataError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
+        })?;
+    Ok(head_template.load_record(record))
+}
+
+/// Load a standalone-pretrained [`DisaggHead`] checkpoint (e.g. from
+/// `pretrain_disagg_capacity`) into `head_template` (`.mpk` extension
+/// appended by the recorder if absent).
+///
+/// `head_template` must be constructed with the same architecture
+/// (hidden_size / num_hidden_layers / grid / k / chunk_days) as the saved
+/// checkpoint; its parameter values are discarded. Used by
+/// `bootstrap_head_and_state` for `kan_head.disaggregation.pretrained_checkpoint`.
+pub fn load_disagg_head<B: Backend>(
+    path: &Path,
+    head_template: DisaggHead<B>,
+    device: &B::Device,
+) -> Result<DisaggHead<B>> {
     let record = CompactRecorder::new()
         .load(path.to_path_buf(), device)
         .map_err(|e| DataError::Io {

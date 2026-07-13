@@ -101,18 +101,48 @@ pub struct DisaggHeadConfig {
     /// Day-boundary shape-continuity blend factor λ ∈ [0, 1]. `0` (default)
     /// reproduces fully independent per-day shapes (no continuity
     /// enforcement); `1` forces the boundary shape fractions exactly equal.
+    /// Only used when `chunk_days <= 1` — see `chunk_days` doc.
     #[config(default = 0.0)]
     pub boundary_blend: f32,
+    /// Mass-balance granularity, in days. `1` (default) is the ORIGINAL
+    /// contract: each individual calendar day gets its own independent
+    /// softmax and must sum to exactly that day's `daily_q` (config absent
+    /// ⇒ byte-identical to every checkpoint trained before this field
+    /// existed). `> 1` relaxes the constraint to a JOINT softmax over
+    /// `chunk_days` consecutive days at once: only the WHOLE chunk's mean
+    /// must equal the chunk's mean `daily_q` — an individual day within the
+    /// chunk is free to receive more or less than its own observed value,
+    /// which is what lets a storm that spans a day boundary be represented
+    /// as one continuous rise instead of being artificially clipped at
+    /// hour 0/23. Verified (`docs/2026-07-1x-disagg-72h-window-findings.md`):
+    /// a standalone 3-day-chunk pretrain on real USGS hourly data showed
+    /// smooth cross-day storm shapes (vs. climatology's persistent blocky
+    /// steps at the old day boundaries) and a real peak-timing improvement
+    /// (median error 6h vs. climatology's 9h on a 72h scale), whereas
+    /// `boundary_blend` alone (post-hoc smoothing, no relaxed constraint)
+    /// left peak timing exactly tied with climatology. `d_use` need not be
+    /// a multiple of `chunk_days` — a shorter remainder chunk at the end is
+    /// handled by padding (repeating the last real day) up to `chunk_days`,
+    /// forwarding, then keeping only the real days' hours.
+    #[config(default = 1)]
+    pub chunk_days: usize,
 }
 
 impl DisaggHeadConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> DisaggHead<B> {
         let h = self.hidden_size;
+        let chunk_days = self.chunk_days.max(1);
+        // chunk_days=1: 1 (log daily_q) + 24 (precip) = 25, matching the
+        // original NUM_FEATURES exactly. chunk_days>1: chunk_days (one log
+        // daily_q per day) + chunk_days*24 (precip) features; output width
+        // is chunk_days*24 (one joint softmax over the whole chunk).
+        let input_dim = if chunk_days <= 1 { NUM_FEATURES } else { chunk_days * NUM_FEATURES };
+        let output_dim = if chunk_days <= 1 { 24 } else { chunk_days * 24 };
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
-        let input_weight = crate::nn::init::sample_kaiming_normal_relu(&mut rng, NUM_FEATURES, h);
+        let input_weight = crate::nn::init::sample_kaiming_normal_relu(&mut rng, input_dim, h);
         let output_weight =
-            crate::nn::init::sample_xavier_normal(&mut rng, h, 24, DISAGG_OUTPUT_GAIN);
+            crate::nn::init::sample_xavier_normal(&mut rng, h, output_dim, DISAGG_OUTPUT_GAIN);
 
         let input = Linear {
             weight: crate::nn::init::to_param_weight::<B>(input_weight, device),
@@ -122,7 +152,7 @@ impl DisaggHeadConfig {
         // init (bias zero). Mass is still conserved (softmax sums to 1).
         let output = Linear {
             weight: crate::nn::init::to_param_weight::<B>(output_weight, device),
-            bias: Some(crate::nn::init::zero_bias_tensor::<B>(24, device)),
+            bias: Some(crate::nn::init::zero_bias_tensor::<B>(output_dim, device)),
         };
 
         // Same seed passed to every inner KanLayer (matches KanHead's
@@ -141,6 +171,7 @@ impl DisaggHeadConfig {
             hidden,
             output,
             boundary_blend: self.boundary_blend,
+            chunk_days,
         }
     }
 }
@@ -154,6 +185,7 @@ pub struct DisaggHead<B: Backend> {
     pub hidden: Vec<KanLayer<B>>,
     pub output: Linear<B>,
     boundary_blend: f32,
+    chunk_days: usize,
 }
 
 impl<B: Backend> DisaggHead<B> {
@@ -184,6 +216,22 @@ impl<B: Backend> DisaggHead<B> {
             "precip_hourly must be exactly (n_hourly, N)"
         );
 
+        if self.chunk_days <= 1 {
+            return self.forward_per_day(daily_q, precip_hourly, d_use, n);
+        }
+        self.forward_chunked(daily_q, precip_hourly, d_use, n)
+    }
+
+    /// Original per-day-independent path (`chunk_days <= 1`) — UNCHANGED
+    /// from before `chunk_days` existed, byte-identical to every checkpoint
+    /// trained under the old contract.
+    fn forward_per_day(
+        &self,
+        daily_q: Tensor<B, 2>,
+        precip_hourly: Tensor<B, 2>,
+        d_use: usize,
+        n: usize,
+    ) -> Tensor<B, 2> {
         let center = daily_q.slice([0..d_use, 0..n]); // (d_use, N)
 
         // Log daily-Q feature: (d_use·N, 1), row-major index = day·N + reach.
@@ -222,6 +270,93 @@ impl<B: Backend> DisaggHead<B> {
         // (d_use, N, 24) -> (d_use, 24, N) -> (d_use·24, N) so row h = day·24 + k,
         // matching daily_to_hourly_trim's hour->day mapping.
         hourly.swap_dims(1, 2).reshape([d_use * 24, n])
+    }
+
+    /// `chunk_days > 1` path: split `d_use` days into non-overlapping
+    /// chunks of `chunk_days` (a shorter remainder chunk at the end, if
+    /// any, is zero-padded up to `chunk_days` by repeating the last real
+    /// day, forwarded normally, then only its real days' hours are kept —
+    /// see `chunk_days` doc comment on `DisaggHeadConfig`). Each chunk gets
+    /// ONE joint softmax over `chunk_days*24` hours: the chunk's mean must
+    /// equal the mean of its `chunk_days` `daily_q` values, but an
+    /// individual day within the chunk is free to deviate from its own
+    /// observed value — this is the deliberate mass-balance relaxation.
+    fn forward_chunked(
+        &self,
+        daily_q: Tensor<B, 2>,
+        precip_hourly: Tensor<B, 2>,
+        d_use: usize,
+        n: usize,
+    ) -> Tensor<B, 2> {
+        let cd = self.chunk_days;
+        let n_chunks = d_use.div_ceil(cd);
+        let mut outputs = Vec::with_capacity(n_chunks);
+
+        for c in 0..n_chunks {
+            let start_day = c * cd;
+            let real_days = (d_use - start_day).min(cd);
+
+            let daily_real = daily_q.clone().slice([start_day..start_day + real_days, 0..n]); // (real_days, N)
+            let precip_real = precip_hourly
+                .clone()
+                .slice([start_day * 24..(start_day + real_days) * 24, 0..n]); // (real_days*24, N)
+
+            if real_days < cd {
+                // Remainder chunk: pad up to `cd` days (repeating the last
+                // real day) so the network can be evaluated, but the mass
+                // constraint must be against the REAL `real_days`, not the
+                // padded `cd` (the padded fake day must not leak volume
+                // into the kept output). Slice the joint shape down to the
+                // real hours, RENORMALIZE it to sum to 1 over just those
+                // hours, then scale by the REAL mean -- not the shape
+                // computed over the padded window directly.
+                let pad_days = cd - real_days;
+                let last_daily = daily_real.clone().slice([real_days - 1..real_days, 0..n]); // (1, N)
+                let daily_pad = last_daily.repeat_dim(0, pad_days); // (pad_days, N)
+                let last_precip_day = precip_real.clone().slice([(real_days - 1) * 24..real_days * 24, 0..n]); // (24, N)
+                let precip_pad = last_precip_day.repeat_dim(0, pad_days); // (pad_days*24, N)
+                let daily_chunk = Tensor::cat(vec![daily_real.clone(), daily_pad], 0);
+                let precip_chunk = Tensor::cat(vec![precip_real, precip_pad], 0);
+
+                let shape_full = self.forward_joint_shape(daily_chunk, precip_chunk, n); // (N, cd*24)
+                let real_hours = real_days * 24;
+                let shape_real = shape_full.slice([0..n, 0..real_hours]); // (N, real_hours) -- does NOT sum to 1
+                let row_sum = shape_real.clone().sum_dim(1); // (N, 1)
+                let shape_renorm = shape_real / row_sum; // renormalized to sum to 1 over just the real hours
+
+                let real_mean = daily_real.mean_dim(0).reshape([n, 1]); // (N, 1), REAL mean only
+                let hourly = (shape_renorm * real_mean * (real_hours as f32)).transpose(); // (real_hours, N)
+                outputs.push(hourly);
+            } else {
+                let shape = self.forward_joint_shape(daily_real.clone(), precip_real, n); // (N, cd*24)
+                let chunk_mean = daily_real.mean_dim(0).reshape([n, 1]); // (N, 1)
+                let hourly = (shape * chunk_mean * ((cd * 24) as f32)).transpose(); // (cd*24, N)
+                outputs.push(hourly);
+            }
+        }
+
+        Tensor::cat(outputs, 0) // (d_use*24, N)
+    }
+
+    /// ONE joint softmax over a full `chunk_days`-day window, returned as
+    /// the raw shape (sums to 1 per row over the WHOLE `chunk_days*24`
+    /// axis) — scaling to physical hourly values is the caller's job (it
+    /// differs for full vs. padded-remainder chunks, see `forward_chunked`).
+    /// `daily_q_chunk`: (chunk_days, N). `precip_chunk`: (chunk_days*24, N).
+    /// Returns (N, chunk_days*24).
+    fn forward_joint_shape(&self, daily_q_chunk: Tensor<B, 2>, precip_chunk: Tensor<B, 2>, _n: usize) -> Tensor<B, 2> {
+        // Per-day log-Q features, one column per day: (N, cd).
+        let logq = daily_q_chunk.add_scalar(LOG_EPS).log().transpose(); // (N, cd)
+        // Whole-chunk precip, one column per hour: (N, cd*24).
+        let precip_feat = precip_chunk.transpose(); // (N, cd*24)
+        let feats = Tensor::cat(vec![logq, precip_feat], 1); // (N, cd*(1+24))
+
+        let mut x = self.input.forward(feats);
+        for layer in &self.hidden {
+            x = layer.forward(x);
+        }
+        let logits = self.output.forward(x); // (N, cd*24)
+        softmax(logits, 1) // (N, cd*24), sums to 1 per row over the WHOLE chunk
     }
 }
 
@@ -623,5 +758,112 @@ mod tests {
             let hourly = head.forward(q.clone(), p, 48);
             assert_mass_conserved(&hourly, &q, 2);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // chunk_days > 1: relaxed (chunk-aggregate, not per-day) mass balance
+    // -----------------------------------------------------------------------
+
+    /// Asserts the MEAN over `chunk_days` consecutive days of `hourly`
+    /// equals the mean of the corresponding `chunk_days` `daily_q` values —
+    /// the chunk-aggregate invariant, deliberately weaker than per-day
+    /// exactness (see `assert_mass_conserved` for the `chunk_days<=1` one).
+    fn assert_chunk_mass_conserved(hourly: &Tensor<Bp, 2>, q: &Tensor<Bp, 2>, day_start: usize, chunk_days: usize) {
+        let n = hourly.dims()[1];
+        let chunk_mean_hourly = hourly
+            .clone()
+            .slice([day_start * 24..(day_start + chunk_days) * 24, 0..n])
+            .mean_dim(0)
+            .reshape([n]);
+        let got: Vec<f32> = chunk_mean_hourly.into_data().to_vec().unwrap();
+        let chunk_mean_q = q
+            .clone()
+            .slice([day_start..day_start + chunk_days, 0..n])
+            .mean_dim(0)
+            .reshape([n]);
+        let want: Vec<f32> = chunk_mean_q.into_data().to_vec().unwrap();
+        for i in 0..n {
+            assert!(
+                (got[i] - want[i]).abs() < 1e-3,
+                "chunk [{day_start}, {}): reach {i}: {} vs {}",
+                day_start + chunk_days,
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_days_two_conserves_chunk_mass_exactly() {
+        let device = Default::default();
+        let cfg = DisaggHeadConfig::new(7).with_chunk_days(2);
+        let head = cfg.init::<Bp>(&device);
+        let q = daily::<Bp>(&[[5.0, 1.0], [20.0, 3.0], [8.0, 0.5], [2.0, 9.0]]); // D=4
+        let p = precip::<Bp>(96, |h, r| if h % 24 == 13 { 5.0 + r as f32 } else { 0.1 });
+        let hourly = head.forward(q.clone(), p, 96); // 4 days = 2 chunks of 2
+        assert_eq!(hourly.dims(), [96, 2]);
+        assert_chunk_mass_conserved(&hourly, &q, 0, 2);
+        assert_chunk_mass_conserved(&hourly, &q, 2, 2);
+    }
+
+    #[test]
+    fn chunk_days_relaxes_per_day_exactness() {
+        // With chunk_days=2 and two days with very different daily_q, an
+        // individual day's OWN 24h mean is free to deviate from its own
+        // daily_q (only the 2-day chunk aggregate must match) -- verify
+        // this is genuinely happening, not accidentally still per-day-exact.
+        let device = Default::default();
+        let cfg = DisaggHeadConfig::new(3).with_chunk_days(2);
+        let mut head = cfg.init::<Bp>(&device);
+        // Bias the output layer heavily toward early hours so mass shifts
+        // away from an even per-day split.
+        let biased = Array2::<f32>::from_shape_fn((cfg.hidden_size, 48), |(_, j)| if j < 10 { 3.0 } else { -1.0 });
+        head.output.weight = crate::nn::init::to_param_weight::<Bp>(biased, &device);
+
+        let q = daily::<Bp>(&[[1.0, 1.0], [50.0, 50.0]]); // D=2, one chunk of 2, very different days
+        let p = precip::<Bp>(48, |_, _| 0.1);
+        let hourly = head.forward(q.clone(), p, 48);
+        let v: Vec<f32> = hourly.clone().into_data().to_vec().unwrap();
+
+        // Reach 0's values are at even indices (row-major (h, reach)).
+        let day0_mean: f32 = (0..24).map(|h| v[h * 2]).sum::<f32>() / 24.0;
+        let day1_mean: f32 = (24..48).map(|h| v[h * 2]).sum::<f32>() / 24.0;
+        assert!(
+            (day0_mean - 1.0).abs() > 0.5 || (day1_mean - 50.0).abs() > 0.5,
+            "per-day means [{day0_mean}, {day1_mean}] suspiciously close to [1, 50] -- relaxation may not be active"
+        );
+        // But the 2-day chunk aggregate must still be exact.
+        assert_chunk_mass_conserved(&hourly, &q, 0, 2);
+    }
+
+    #[test]
+    fn chunk_days_remainder_chunk_is_handled_correctly() {
+        // d_use=5, chunk_days=3 -> chunks of [3, 2] (a genuine remainder,
+        // internally padded then trimmed back). Both chunks' own aggregate
+        // mass must still conserve, and the output must have exactly 5*24
+        // hours (no leftover padding leaking into the result).
+        let device = Default::default();
+        let cfg = DisaggHeadConfig::new(11).with_chunk_days(3);
+        let head = cfg.init::<Bp>(&device);
+        let q = daily::<Bp>(&[[4.0, 4.0], [9.0, 9.0], [2.0, 2.0], [30.0, 30.0], [15.0, 15.0]]); // D=5
+        let p = precip::<Bp>(120, |h, _| if h % 24 == 6 { 6.0 } else { 0.1 });
+        let hourly = head.forward(q.clone(), p, 120); // 5 days -> chunks [3, 2]
+        assert_eq!(hourly.dims(), [120, 2], "remainder chunk must not leak padded hours into the output");
+        assert_chunk_mass_conserved(&hourly, &q, 0, 3);
+        assert_chunk_mass_conserved(&hourly, &q, 3, 2);
+    }
+
+    #[test]
+    fn chunk_days_one_matches_per_day_path_exactly() {
+        // chunk_days=1 must dispatch to forward_per_day and reproduce the
+        // ORIGINAL per-day-exact invariant -- the byte-identical-when-absent
+        // guarantee for every checkpoint trained before chunk_days existed.
+        let device = Default::default();
+        let cfg = DisaggHeadConfig::new(7).with_chunk_days(1);
+        let head = cfg.init::<Bp>(&device);
+        let q = daily::<Bp>(&[[5.0, 1.0], [20.0, 3.0], [8.0, 0.5], [2.0, 9.0]]);
+        let p = precip::<Bp>(72, |h, r| if h % 24 == 13 { 5.0 + r as f32 } else { 0.1 });
+        let hourly = head.forward(q.clone(), p, 72);
+        assert_mass_conserved(&hourly, &q, 3);
     }
 }

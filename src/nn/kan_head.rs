@@ -97,8 +97,14 @@ pub struct KanHeadConfig {
     #[config(default = 3)]
     pub disagg_k: usize,
     /// Day-boundary shape-continuity blend factor (see `disagg_head.rs`).
+    /// Only used when `disagg_chunk_days <= 1`.
     #[config(default = 0.0)]
     pub disagg_boundary_blend: f32,
+    /// Mass-balance chunk size, in days (see `DisaggHeadConfig::chunk_days`
+    /// doc in `disagg_head.rs`). `1` (default) is byte-identical to every
+    /// checkpoint trained before this field existed.
+    #[config(default = 1)]
+    pub disagg_chunk_days: usize,
 }
 
 impl KanHeadConfig {
@@ -163,6 +169,7 @@ impl KanHeadConfig {
                     .with_grid(self.disagg_grid)
                     .with_k(self.disagg_k)
                     .with_boundary_blend(self.disagg_boundary_blend)
+                    .with_chunk_days(self.disagg_chunk_days)
                     .init::<B>(device),
             )
         } else {
