@@ -8,20 +8,24 @@
 //! `Box<dyn Store>` — premature unification across three different I/O
 //! models. Composition over abstraction at this layer.
 
+pub mod camels_hourly;
 pub mod gage_csv;
 pub mod icechunk;
 pub mod netcdf;
 pub mod obs_writer;
+pub mod param_dump;
 pub mod state_cache;
 pub mod zarr;
 pub mod zarr_aorc;
 pub mod zarr_obs;
 pub mod zarr_qprime;
 
+pub use camels_hourly::CamelsHourlyStore;
 pub use gage_csv::{GageMetadata, GageRow};
 pub use zarr_aorc::AorcPrecipStore;
 pub use icechunk::{StreamflowStore, UsgsObservationsStore};
 pub use netcdf::AttributesStore;
+pub use param_dump::load_comid_field;
 pub use state_cache::StateCache;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
 pub use zarr_obs::GlobalObservationsStore;

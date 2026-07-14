@@ -76,6 +76,70 @@
 //!       --checkpoint output/recoverability/init_head \
 //!       --eval-days 999999 \
 //!       --output output/floor_fix/state_cache_teacher.nc
+//!
+//! Stage 6 (`--mode eval-loss`): H5/H6 selective-equifinality parameter-swap
+//! test (docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
+//! Samples the SAME deterministic rho-window/gauge plan as floor/grad mode,
+//! then evaluates the training L1 loss over that fixed plan under each of
+//! `own`/`n-swap`/`geo-swap`/`full-swap` — injecting `n`/`q_spatial`/
+//! `p_spatial` from `--donor-params-nc` (a `dump_parameters::write_netcdf`
+//! dump) in place of the checkpoint's own KAN-head output. `--checkpoint` is
+//! REQUIRED; `--loss-output` writes a tidy CSV (`composition,window,
+//! mean_loss`). Optional `--per-gauge-output` additionally writes a
+//! per-gauge tidy CSV (`composition,window,staid,gauge_loss`) — one row per
+//! surviving gauge per window per composition, for per-gauge distributions /
+//! DA-stratified medians (the aggregate CSV above cannot be un-averaged back
+//! into per-gauge values).
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode eval-loss --backend cpu \
+//!       --config .ddrs/runs/<r1-id>/config.yaml \
+//!       --checkpoint .ddrs/runs/<r1-id>/checkpoints/epoch_5_mb_9 \
+//!       --donor-params-nc output/equif/R3_kan_parameters.nc \
+//!       --windows 96 --seed 42 \
+//!       --loss-output output/equif/h5_r1_under_r1.csv
+//!
+//! Stage 7 (`--mode landscape`): H6 loss-landscape grid scan + linear barrier
+//! (same spec, "H6 — Forcing-indexed valley"). BOTH arms' `dump_parameters`
+//! NetCDFs are ALWAYS required (`--params-nc-a`, `--params-nc-b`) regardless
+//! of which arm's forcing `--config`/`--checkpoint` select — the anchor field
+//! is derived from both dumps and is identical across the two per-forcing
+//! invocations. Two measurements, each optional via its output flag (at least
+//! one required):
+//!
+//! - Surface (`--surface-output`, CSV `log2_alpha,log2_beta,window,mean_loss`):
+//!   evaluates the (α, β)-scaled arm-mean ANCHOR field on a `--grid-n` ×
+//!   `--grid-n` grid over (log2 α, log2 β) ∈ [-1.5, 1.5]². Anchor = per-COMID
+//!   arm mean of the two dumps — geometric mean for config-log-space fields,
+//!   arithmetic otherwise (the same per-field convention `denormalize`/
+//!   `physical_to_normalized` use). n is scaled by α = 2^log2_alpha,
+//!   p_spatial by β = 2^log2_beta; q_spatial is HELD at the anchor value at
+//!   every grid point (only 2 axes are scanned). `--single-point
+//!   "<log2_alpha>,<log2_beta>"` restricts the surface to one point (the
+//!   full-96-window re-evaluation of the grid argmin).
+//! - Barrier (`--barrier-output`, CSV `t,window,mean_loss`): evaluates
+//!   θ(t) = exp((1−t)·ln θ_A + t·ln θ_B) per-COMID for ALL THREE of
+//!   n/q_spatial/p_spatial (log-space interpolation for all three regardless
+//!   of each field's own log/linear config flag — the registered formula,
+//!   deliberate) at t = i/(`--barrier-points`−1). t=0 reproduces arm A's own
+//!   dump exactly, t=1 arm B's. The barrier statistic printed at the end is
+//!   informational; the authoritative statistics/verdicts come from the
+//!   Python analysis step.
+//!
+//! The window/gauge plan is sampled ONCE per (config, seed) — the same
+//! Phase-1 machinery as eval-loss — and replayed unchanged across every
+//! grid/barrier point. Registered H6 runs pass `--windows 16` explicitly
+//! (the CLI default is 32) and leave `--grid-n`/`--barrier-points` at their
+//! registered defaults (11, 21); smaller values exist for smoke tests only.
+//! The split-half noise floor is a re-invocation with a different `--seed`.
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode landscape --backend cpu \
+//!       --config .ddrs/runs/<r1-id>/config.yaml \
+//!       --checkpoint .ddrs/runs/<r1-id>/checkpoints/epoch_5_mb_35 \
+//!       --params-nc-a output/equif/R1_kan_parameters.nc \
+//!       --params-nc-b output/equif/R3_kan_parameters.nc \
+//!       --windows 16 --seed 42 \
+//!       --surface-output output/equif/h6/r1_surface.csv \
+//!       --barrier-output output/equif/h6/r1_barrier.csv
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -91,14 +155,18 @@ use ndarray::Array2;
 
 use ddrs::config::{kan_config, Config, ConfigMode, SparseSolver};
 use ddrs::data::dataset::{MeritGagesDataset, RoutingTensors};
-use ddrs::data::GageMetadata;
+use ddrs::data::{load_comid_field, GageMetadata, RhoWindow, Staid};
 use ddrs::data::sampler::{BatchSource, RandomSampler};
 use ddrs::data::TestWindow;
 use ddrs::dump_parameters::{write_grad_netcdf, write_param_grad_netcdf, write_zeta_netcdf};
 use ddrs::nn::kan_head::KanHead;
 use ddrs::training::checkpoint::{head_base, load_kan_head};
 use ddrs::training::probe::{probe_forward, GradAccum};
-use ddrs::training::{batch_loss, forward_eval, forward_eval_reaches, scatter_add_by_group, tau_trim_and_downsample, LeakanceOverride, ZetaSums};
+use ddrs::training::{
+    batch_loss, filter_nan_gauges, forward_eval, forward_eval_reaches, l1_loss_post_warmup,
+    physical_to_normalized, scatter_add_by_group, tau_trim_and_downsample, FilteredPair,
+    LeakanceOverride, RoutingParamOverride, ZetaSums,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "probe_zeta_gradient", about = "leakance zeta gradient probe (stage 1)")]
@@ -156,6 +224,71 @@ struct Cli {
     /// Example: --params n,q_spatial,p_spatial
     #[arg(long)]
     params: Option<String>,
+
+    /// eval-loss mode: donor NetCDF (dump_parameters::write_netcdf schema,
+    /// COMID-keyed, physical units) supplying n/q_spatial/p_spatial for any
+    /// composition other than "own". Required unless --compositions is "own"
+    /// only.
+    #[arg(long)]
+    donor_params_nc: Option<PathBuf>,
+
+    /// eval-loss mode: comma-separated compositions to evaluate, from
+    /// {own, n-swap, geo-swap, full-swap}. Default: all four.
+    #[arg(long)]
+    compositions: Option<String>,
+
+    /// eval-loss mode: output CSV path (tidy long format:
+    /// composition,window,mean_loss).
+    #[arg(long)]
+    loss_output: Option<PathBuf>,
+
+    /// eval-loss mode: optional per-gauge output CSV (tidy long format:
+    /// composition,window,staid,gauge_loss). Absent by default — the
+    /// existing --loss-output CSV schema is unchanged either way.
+    #[arg(long)]
+    per_gauge_output: Option<PathBuf>,
+
+    /// landscape mode: arm A's parameter dump (dump_parameters::write_netcdf
+    /// schema, COMID-keyed, physical units). ALWAYS required in landscape
+    /// mode — together with --params-nc-b it defines the anchor field
+    /// (surface) and the t=0 barrier endpoint, independent of which arm's
+    /// forcing --config/--checkpoint select.
+    #[arg(long)]
+    params_nc_a: Option<PathBuf>,
+
+    /// landscape mode: arm B's parameter dump (see --params-nc-a); the t=1
+    /// barrier endpoint.
+    #[arg(long)]
+    params_nc_b: Option<PathBuf>,
+
+    /// landscape mode: surface CSV output (tidy long format:
+    /// log2_alpha,log2_beta,window,mean_loss). Enables the (α, β) grid scan.
+    #[arg(long)]
+    surface_output: Option<PathBuf>,
+
+    /// landscape mode: barrier CSV output (tidy long format:
+    /// t,window,mean_loss). Enables the linear (log-space) barrier scan
+    /// between the two arms' own fields.
+    #[arg(long)]
+    barrier_output: Option<PathBuf>,
+
+    /// landscape mode: evaluate a SINGLE grid point "log2_alpha,log2_beta"
+    /// instead of the full grid (e.g. the 16-window grid's argmin re-checked
+    /// at --windows 96). Requires --surface-output.
+    #[arg(long)]
+    single_point: Option<String>,
+
+    /// landscape mode: grid resolution per axis over [-1.5, 1.5]. The
+    /// registered H6 protocol uses the default 11 (11×11); smaller values
+    /// (e.g. 3) exist for smoke tests only.
+    #[arg(long, default_value_t = 11)]
+    grid_n: usize,
+
+    /// landscape mode: number of barrier t-points over [0, 1]. The
+    /// registered H6 protocol uses the default 21 (t = 0, 0.05, …, 1);
+    /// smaller values exist for smoke tests only.
+    #[arg(long, default_value_t = 21)]
+    barrier_points: usize,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -165,6 +298,8 @@ enum Mode {
     Teacher,
     Floor,
     StateCache,
+    EvalLoss,
+    Landscape,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -176,11 +311,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "teacher" => Mode::Teacher,
         "floor" => Mode::Floor,
         "state-cache" => Mode::StateCache,
+        "eval-loss" => Mode::EvalLoss,
+        "landscape" => Mode::Landscape,
         other => {
             return Err(
                 format!(
                     "unknown --mode {other} \
-                     (expected \"grad\", \"perturb\", \"teacher\", \"floor\", or \"state-cache\")"
+                     (expected \"grad\", \"perturb\", \"teacher\", \"floor\", \"state-cache\", \
+                     \"eval-loss\", or \"landscape\")"
                 )
                 .into(),
             )
@@ -196,11 +334,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    // grad/floor: training-mode config (probe batches replicate the training
-    // sampler). perturb/teacher/state-cache: testing-mode config (replicates
-    // the eval loop over the test window).
+    // --donor-params-nc/--compositions/--loss-output/--per-gauge-output are
+    // only valid in eval-loss mode.
+    if (cli.donor_params_nc.is_some()
+        || cli.compositions.is_some()
+        || cli.loss_output.is_some()
+        || cli.per_gauge_output.is_some())
+        && mode != Mode::EvalLoss
+    {
+        return Err(format!(
+            "--donor-params-nc/--compositions/--loss-output/--per-gauge-output are only \
+             valid in --mode eval-loss (got --mode {})",
+            cli.mode
+        )
+        .into());
+    }
+
+    // --params-nc-a/--params-nc-b/--surface-output/--barrier-output/
+    // --single-point are only valid in landscape mode.
+    if (cli.params_nc_a.is_some()
+        || cli.params_nc_b.is_some()
+        || cli.surface_output.is_some()
+        || cli.barrier_output.is_some()
+        || cli.single_point.is_some())
+        && mode != Mode::Landscape
+    {
+        return Err(format!(
+            "--params-nc-a/--params-nc-b/--surface-output/--barrier-output/--single-point \
+             are only valid in --mode landscape (got --mode {})",
+            cli.mode
+        )
+        .into());
+    }
+
+    // grad/floor/eval-loss/landscape: training-mode config (probe batches
+    // replicate the training sampler). perturb/teacher/state-cache:
+    // testing-mode config (replicates the eval loop over the test window).
     let cfg_mode = match mode {
-        Mode::Grad | Mode::Floor => ConfigMode::Training,
+        Mode::Grad | Mode::Floor | Mode::EvalLoss | Mode::Landscape => ConfigMode::Training,
         Mode::Perturb | Mode::Teacher | Mode::StateCache => ConfigMode::Testing,
     };
     let mut cfg = Config::from_yaml_file_with_mode(&cli.config, cfg_mode)?;
@@ -218,6 +389,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Teacher => run_teacher::<I>(cfg, cli, device),
                 Mode::Floor => run_floor::<I>(cfg, cli, device),
                 Mode::StateCache => run_state_cache::<I>(cfg, cli, device),
+                Mode::EvalLoss => run_eval_loss::<I>(cfg, cli, device),
+                Mode::Landscape => run_landscape::<I>(cfg, cli, device),
             }
         }
         "cuda" => {
@@ -231,6 +404,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Teacher => run_teacher::<I>(cfg, cli, device),
                 Mode::Floor => run_floor::<I>(cfg, cli, device),
                 Mode::StateCache => run_state_cache::<I>(cfg, cli, device),
+                Mode::EvalLoss => run_eval_loss::<I>(cfg, cli, device),
+                Mode::Landscape => run_landscape::<I>(cfg, cli, device),
             }
         }
         other => Err(format!("unknown --backend {other} (expected \"cpu\" or \"cuda\")").into()),
@@ -715,7 +890,8 @@ fn run_perturb<I: Backend>(
                 RoutingTensors::<I> { q_prime, q_prime_daily, ..tensors }
             };
 
-            let pred = forward_eval::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0, None, None);
+            let pred =
+                forward_eval::<I>(&cfg, &tensors, &head, &device, chunk_idx > 0, None, None, None);
             let dims = pred.dims();
             debug_assert_eq!(dims[0], n_all_gauges);
             debug_assert_eq!(dims[1], win.n_hourly());
@@ -1026,6 +1202,7 @@ fn run_teacher<I: Backend>(
             false,
             Some(&mut zeta_sink),
             Some(&ov),
+            None,
         );
         let chunk_hours = win.n_hourly();
         let runoff_vec: Vec<f32> = runoff.clone().into_data().into_vec().unwrap();
@@ -1269,7 +1446,7 @@ fn run_floor<I: Backend>(
         // being measured (contrast: perturb/teacher pass chunk_idx > 0 to
         // continue one long eval).
         let pred_hourly =
-            forward_eval::<I>(&cfg, &tensors, &head, &device, false, None, None);
+            forward_eval::<I>(&cfg, &tensors, &head, &device, false, None, None, None);
         let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
         let dims = daily.dims();
         let (g, t_days) = (dims[0], dims[1]);
@@ -1352,6 +1529,871 @@ fn run_floor<I: Backend>(
         n_slots,
         n_days_expected.unwrap()
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6: --mode eval-loss (H5/H6 selective-equifinality parameter swap)
+// ---------------------------------------------------------------------------
+
+/// The four H5/H6 parameter compositions
+/// (`docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`).
+/// `own` needs no donor file; the other three swap a subset of
+/// `n`/`q_spatial`/`p_spatial` in from `--donor-params-nc`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Composition {
+    Own,
+    NSwap,
+    GeoSwap,
+    FullSwap,
+}
+
+impl Composition {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "own" => Ok(Self::Own),
+            "n-swap" => Ok(Self::NSwap),
+            "geo-swap" => Ok(Self::GeoSwap),
+            "full-swap" => Ok(Self::FullSwap),
+            other => Err(format!(
+                "unknown composition '{other}' (expected own, n-swap, geo-swap, full-swap)"
+            )),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Own => "own",
+            Self::NSwap => "n-swap",
+            Self::GeoSwap => "geo-swap",
+            Self::FullSwap => "full-swap",
+        }
+    }
+
+    fn needs_donor(self) -> bool {
+        !matches!(self, Self::Own)
+    }
+
+    /// `None` = no override (the "own" composition, the true
+    /// checkpoint-native baseline); `Some` selects which of the
+    /// already-gathered-and-normalized donor fields replace this window's
+    /// head output.
+    fn build_override(
+        self,
+        donor_n: &Option<Vec<f32>>,
+        donor_q: &Option<Vec<f32>>,
+        donor_p: &Option<Vec<f32>>,
+    ) -> Option<RoutingParamOverride> {
+        match self {
+            Self::Own => None,
+            Self::NSwap => Some(RoutingParamOverride {
+                n: donor_n.clone(),
+                q_spatial: None,
+                p_spatial: None,
+            }),
+            Self::GeoSwap => Some(RoutingParamOverride {
+                n: None,
+                q_spatial: donor_q.clone(),
+                p_spatial: donor_p.clone(),
+            }),
+            Self::FullSwap => Some(RoutingParamOverride {
+                n: donor_n.clone(),
+                q_spatial: donor_q.clone(),
+                p_spatial: donor_p.clone(),
+            }),
+        }
+    }
+}
+
+/// Gather a COMID-keyed donor map into a batch's reach column order.
+/// Hard-errors on a missing COMID: a missing routing parameter here means
+/// the donor dump doesn't actually cover this arm's network, which would
+/// silently corrupt the routing solve if allowed through (unlike attribute
+/// NaN-fill, which handles genuinely absent coverage).
+fn gather_by_comid(donor: &HashMap<i64, f32>, comids: &[i64]) -> Result<Vec<f32>, String> {
+    comids
+        .iter()
+        .map(|c| {
+            donor
+                .get(c)
+                .copied()
+                .ok_or_else(|| format!("COMID {c} missing from donor NetCDF"))
+        })
+        .collect()
+}
+
+/// Post-tau-trim daily length for a fixed `rho`-day window. Mirrors
+/// `tau_trim_and_downsample`'s arithmetic without running the tensor op:
+/// `n_hourly = (rho - 1) * 24` depends only on `rho` (`RhoWindow::n_hourly`),
+/// so this is constant across every window at a fixed `rho` and lets the
+/// plan-building pass (Phase 1 below) check obs validity without a routing
+/// forward pass.
+fn trimmed_days(rho: usize, tau: u32) -> usize {
+    let n_hourly = (rho - 1) * 24;
+    let start = 13 + tau as usize;
+    let end = n_hourly - 11 + tau as usize;
+    (end - start) / 24
+}
+
+fn write_loss_csv(
+    path: &Path,
+    rows: &[(String, usize, f32)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "composition,window,mean_loss")?;
+    for (composition, window, loss) in rows {
+        writeln!(f, "{composition},{window},{loss}")?;
+    }
+    Ok(())
+}
+
+/// Column-wise mean absolute error: for each surviving gauge column, its own
+/// mean `|pred - obs|` over time — the per-gauge counterpart of
+/// `l1_loss_post_warmup`, which instead averages over ALL columns into one
+/// scalar. Both arrays are `(T_days, G_kept)` (the `FilteredPair` layout
+/// `filter_nan_gauges` produces).
+fn per_gauge_l1(predictions: &Array2<f32>, observations: &Array2<f32>) -> Vec<f32> {
+    let (t_days, g) = predictions.dim();
+    assert_eq!(observations.dim(), (t_days, g));
+    (0..g)
+        .map(|j| {
+            let col_p = predictions.column(j);
+            let col_o = observations.column(j);
+            col_p
+                .iter()
+                .zip(col_o.iter())
+                .map(|(p, o)| (p - o).abs())
+                .sum::<f32>()
+                / (t_days as f32)
+        })
+        .collect()
+}
+
+/// Recover, in kept-column order, the `Staid` of each gauge that survived
+/// `filter_nan_gauges`. `mask` has length = original G (pre-filter) and is
+/// `true` at the columns that were kept, in the same relative order they
+/// appear in the filtered arrays' columns.
+fn kept_gauge_staids(all_staids: &[Staid], mask: &[bool]) -> Vec<Staid> {
+    all_staids
+        .iter()
+        .zip(mask.iter())
+        .filter(|(_, &kept)| kept)
+        .map(|(s, _)| s.clone())
+        .collect()
+}
+
+fn write_per_gauge_loss_csv(
+    path: &Path,
+    rows: &[(String, usize, Staid, f32)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "composition,window,staid,gauge_loss")?;
+    for (composition, window, staid, loss) in rows {
+        writeln!(f, "{composition},{window},{staid},{loss}")?;
+    }
+    Ok(())
+}
+
+/// Sample the deterministic rho-window/gauge plan EXACTLY ONCE (Phase 1 of
+/// eval-loss and landscape modes). Replicates `run_floor`/grad mode's
+/// sampler (LOCAL ChaCha12 rng from `seed`, same draw sequence), keeping a
+/// window iff at least one gauge has a NaN-free post-warmup obs record —
+/// a rule that depends only on `batch.observations`, never on any parameter,
+/// so the plan cannot diverge between the conditions later replayed over it
+/// (mirrors grad mode's all-NaN skip rule, `run` above).
+fn sample_window_plan(
+    dataset: &MeritGagesDataset,
+    batch_size: usize,
+    rho: usize,
+    warmup: usize,
+    t_days: usize,
+    windows: usize,
+    seed: u64,
+) -> Result<Vec<(Vec<Staid>, RhoWindow)>, Box<dyn std::error::Error>> {
+    let mut rng = ChaCha12Rng::seed_from_u64(seed);
+    let mut sampler =
+        BatchSource::Shuffle(RandomSampler::new(dataset.len(), batch_size, true));
+    sampler.reshuffle(&mut rng);
+
+    let mut plan: Vec<(Vec<Staid>, RhoWindow)> = Vec::with_capacity(windows);
+    let mut processed = 0usize;
+    let mut total = 0usize;
+    while processed < windows {
+        if total > 10 * windows {
+            return Err(format!(
+                "retry cap exceeded: sampled {total} batches but only {processed}/{windows} \
+                 windows planned — check dataset NaN coverage"
+            )
+            .into());
+        }
+
+        let idx = match sampler.next_batch() {
+            Some(idx) => idx,
+            None => {
+                sampler.reshuffle(&mut rng);
+                continue;
+            }
+        };
+        total += 1;
+
+        let staids: Vec<Staid> = idx.iter().map(|&i| dataset.staids()[i].clone()).collect();
+        let window = dataset.time_axis().sample_rho_window(&mut rng, rho);
+        let batch = dataset.collate(&staids, &window)?;
+
+        assert!(
+            batch.observations.nrows() >= 2 + t_days,
+            "obs/pred shape mismatch: obs rows={} t_days={t_days}",
+            batch.observations.nrows()
+        );
+        let surviving = (0..batch.gauge_staids.len()).any(|gi| {
+            (warmup..t_days).all(|ti| !batch.observations[(ti + 1, gi)].is_nan())
+        });
+        if !surviving {
+            eprintln!("  window skipped: all gauges have NaN in post-warmup window");
+            continue;
+        }
+
+        plan.push((staids, window));
+        processed += 1;
+        eprintln!("plan {processed}/{windows}");
+    }
+    Ok(plan)
+}
+
+/// One forward-eval of an already-collated window under an optional
+/// parameter override, reduced to the NaN-filtered (pred, obs) pair the L1
+/// loss is computed from. Shared by eval-loss (H5) and landscape (H6):
+/// `forward_eval` → tau-trim/daily downsample → post-warmup slice with the
+/// training +1-day obs alignment (matches driver.rs and grad mode `run`,
+/// above, exactly) → `filter_nan_gauges`. `predictions` are `(G, T_post)`
+/// and `observations` `(T_post, G)` going into the filter, per its
+/// convention; the returned pair is `(T_post, G_kept)`.
+#[allow(clippy::too_many_arguments)]
+fn eval_window_filtered<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    head: &KanHead<I>,
+    device: &I::Device,
+    obs_arr: &Array2<f32>,
+    warmup: usize,
+    t_days: usize,
+    ov: Option<&RoutingParamOverride>,
+) -> FilteredPair {
+    let pred_hourly = forward_eval::<I>(cfg, tensors, head, device, false, None, None, ov);
+    let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
+    let dims = daily.dims();
+    let daily_arr: Array2<f32> = {
+        let flat: Vec<f32> = daily.into_data().into_vec().unwrap();
+        Array2::from_shape_vec((dims[0], dims[1]), flat).unwrap()
+    };
+
+    let g = daily_arr.nrows();
+    let pred_post = daily_arr.slice(ndarray::s![.., warmup..t_days]).to_owned();
+    let mut obs_post = Array2::<f32>::zeros((t_days - warmup, g));
+    for gi in 0..g {
+        for ti in warmup..t_days {
+            obs_post[(ti - warmup, gi)] = obs_arr[(ti + 1, gi)];
+        }
+    }
+
+    filter_nan_gauges(&pred_post, &obs_post)
+}
+
+/// H5/H6 parameter-swap evaluation. Samples the SAME deterministic
+/// rho-window/gauge plan as `run_floor`/grad mode (LOCAL ChaCha12 rng from
+/// `--seed`), then replays that fixed plan unchanged across every requested
+/// composition (`own`/`n-swap`/`geo-swap`/`full-swap`) — so any loss
+/// difference between compositions is attributable only to the parameter
+/// swap, never to different data. `RoutingTensors` is borrowed (not
+/// consumed) by `forward_eval`, so one `dataset.collate` per window is
+/// reused across all compositions rather than re-collated per composition.
+///
+/// The window/gauge plan is sampled ONCE, before any composition is even
+/// considered — `sample_window_plan` decides which windows to keep using
+/// only `batch.observations` (never routes anything), so the plan cannot
+/// diverge between compositions: no parameter ever influences which windows
+/// are drawn or skipped.
+fn run_eval_loss<I: Backend>(
+    cfg: Config,
+    cli: Cli,
+    device: I::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let checkpoint = cli
+        .checkpoint
+        .as_ref()
+        .ok_or("--checkpoint is required in eval-loss mode")?;
+    let loss_output = cli
+        .loss_output
+        .as_ref()
+        .ok_or("--loss-output is required in eval-loss mode")?;
+
+    let compositions: Vec<Composition> = cli
+        .compositions
+        .as_deref()
+        .unwrap_or("own,n-swap,geo-swap,full-swap")
+        .split(',')
+        .map(|s| Composition::parse(s.trim()))
+        .collect::<Result<_, _>>()?;
+    if compositions.is_empty() {
+        return Err("--compositions must name at least one composition".into());
+    }
+
+    let needs_donor = compositions.iter().any(|c| c.needs_donor());
+    let donor_maps = if needs_donor {
+        let donor_path = cli
+            .donor_params_nc
+            .as_ref()
+            .ok_or("--donor-params-nc is required unless --compositions is \"own\" only")?;
+        Some((
+            load_comid_field(donor_path, "n")?,
+            load_comid_field(donor_path, "q_spatial")?,
+            load_comid_field(donor_path, "p_spatial")?,
+        ))
+    } else {
+        None
+    };
+
+    // Head on the inner backend I — forward-only, no autograd (same as floor/perturb/teacher).
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = kan_config(head_section, cfg.seed);
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+    eprintln!("loaded checkpoint: {}", head_base(checkpoint).display());
+
+    let dataset = MeritGagesDataset::open(&cfg)?;
+    let exp = cfg.experiment.as_ref().expect("experiment section required");
+    let rho = exp
+        .rho
+        .expect("eval-loss mode requires experiment.rho (training-style windows)");
+    let warmup = exp.warmup;
+    let t_days = trimmed_days(rho, cfg.params.tau);
+
+    // H5/H6 report the "training L1 loss" specifically (spec:
+    // docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
+    // l1_loss_post_warmup below always computes L1 regardless of
+    // experiment.loss.kind — assert the config agrees so a non-L1 config
+    // can't silently produce numbers under the wrong objective.
+    assert_eq!(
+        exp.loss.kind,
+        ddrs::config::LossKind::L1,
+        "eval-loss mode always computes L1 (docs/superpowers/specs/2026-07-08-\
+         landscape-hypotheses-h5-h6-draft.md); config has experiment.loss.kind={:?}",
+        exp.loss.kind
+    );
+
+    // ----- Phase 1: sample the window/gauge plan EXACTLY ONCE -----
+    let plan =
+        sample_window_plan(&dataset, exp.batch_size, rho, warmup, t_days, cli.windows, cli.seed)?;
+
+    // ----- Phase 2: replay the fixed plan across every composition -----
+    let mut rows: Vec<(String, usize, f32)> = Vec::with_capacity(plan.len() * compositions.len());
+    let mut per_gauge_rows: Vec<(String, usize, Staid, f32)> = Vec::new();
+    for (window_idx, (staids, window)) in plan.iter().enumerate() {
+        let batch = dataset.collate(staids, window)?;
+        let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
+        let obs_arr = batch.observations.clone();
+        let gauge_staids = batch.gauge_staids.clone();
+        let tensors = batch.to_tensors::<I>(&device);
+
+        // Gather + normalize donor fields ONCE per window, reused by every
+        // composition that needs them (not recomputed per composition).
+        let log_space = |name: &str| cfg.params.log_space_parameters.iter().any(|s| s == name);
+        let (donor_n, donor_q, donor_p) = match &donor_maps {
+            Some((n_map, q_map, p_map)) => {
+                let n_vals = gather_by_comid(n_map, &comids)?;
+                let q_vals = gather_by_comid(q_map, &comids)?;
+                let p_vals = gather_by_comid(p_map, &comids)?;
+                (
+                    Some(physical_to_normalized(
+                        &n_vals,
+                        cfg.params.parameter_ranges.n,
+                        log_space("n"),
+                    )),
+                    Some(physical_to_normalized(
+                        &q_vals,
+                        cfg.params.parameter_ranges.q_spatial,
+                        log_space("q_spatial"),
+                    )),
+                    Some(physical_to_normalized(
+                        &p_vals,
+                        cfg.params.parameter_ranges.p_spatial,
+                        log_space("p_spatial"),
+                    )),
+                )
+            }
+            None => (None, None, None),
+        };
+
+        for &composition in &compositions {
+            let ov = composition.build_override(&donor_n, &donor_q, &donor_p);
+            let filtered = eval_window_filtered::<I>(
+                &cfg,
+                &tensors,
+                &head,
+                &device,
+                &obs_arr,
+                warmup,
+                t_days,
+                ov.as_ref(),
+            );
+            let n_kept = filtered.mask.iter().filter(|&&v| v).count();
+            if n_kept == 0 {
+                return Err(format!(
+                    "window {window_idx} composition {}: all gauges NaN post-filter — \
+                     Phase 1's validity check should have excluded this window",
+                    composition.label()
+                )
+                .into());
+            }
+            let loss = l1_loss_post_warmup(&filtered.predictions, &filtered.observations, 0);
+            rows.push((composition.label().to_string(), window_idx, loss));
+
+            if cli.per_gauge_output.is_some() {
+                let kept_staids = kept_gauge_staids(&gauge_staids, &filtered.mask);
+                let gauge_losses = per_gauge_l1(&filtered.predictions, &filtered.observations);
+                debug_assert_eq!(kept_staids.len(), gauge_losses.len());
+                for (staid, gauge_loss) in kept_staids.into_iter().zip(gauge_losses) {
+                    per_gauge_rows.push((
+                        composition.label().to_string(),
+                        window_idx,
+                        staid,
+                        gauge_loss,
+                    ));
+                }
+            }
+        }
+
+        eprintln!(
+            "window {}/{} evaluated ({} compositions)",
+            window_idx + 1,
+            plan.len(),
+            compositions.len()
+        );
+    }
+
+    write_loss_csv(loss_output, &rows)?;
+    println!(
+        "wrote {} ({} windows x {} compositions)",
+        loss_output.display(),
+        plan.len(),
+        compositions.len()
+    );
+
+    if let Some(per_gauge_output) = &cli.per_gauge_output {
+        write_per_gauge_loss_csv(per_gauge_output, &per_gauge_rows)?;
+        println!(
+            "wrote {} ({} rows: windows x compositions x kept-gauges, varies per window)",
+            per_gauge_output.display(),
+            per_gauge_rows.len()
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7: --mode landscape (H6 loss-landscape grid scan + linear barrier)
+// ---------------------------------------------------------------------------
+
+/// Evenly-spaced grid coordinates over [-1.5, 1.5] (per axis). `n = 11` is
+/// the registered H6 resolution (spacing 0.3); smaller `n` is for smoke
+/// tests. Computed in f64 then narrowed so interior points land on the
+/// nearest-f32 of the exact decimal (clean CSV strings) and the endpoints
+/// are exactly ±1.5.
+fn grid_coords(n: usize) -> Vec<f32> {
+    assert!(n >= 2, "--grid-n must be >= 2 (got {n})");
+    (0..n)
+        .map(|i| (-1.5 + i as f64 * 3.0 / (n - 1) as f64) as f32)
+        .collect()
+}
+
+/// Barrier interpolation coordinates t = i/(n-1) over [0, 1]. `n = 21` is
+/// the registered H6 resolution (t = 0, 0.05, …, 1). Endpoints are exactly
+/// 0 and 1 (the special-cased own-field reproductions in `log_interp`).
+fn barrier_ts(n: usize) -> Vec<f32> {
+    assert!(n >= 2, "--barrier-points must be >= 2 (got {n})");
+    (0..n).map(|i| (i as f64 / (n - 1) as f64) as f32).collect()
+}
+
+/// Per-COMID arm-mean of two dumps' fields — the H6 anchor θ̄. Geometric
+/// mean `exp((ln a + ln b)/2)` when the field is config-flagged log-space,
+/// arithmetic mean `(a+b)/2` otherwise — the SAME per-field convention
+/// `denormalize`/`physical_to_normalized` use, read from
+/// `params.log_space_parameters` at the call site (never hardcoded).
+///
+/// Only COMIDs present in BOTH maps are averaged: a one-sided COMID has no
+/// defined arm mean, so it is SKIPPED here rather than erroring — the
+/// downstream `gather_by_comid` hard-errors if a batch ever needs a skipped
+/// COMID, so a coverage gap cannot silently pass through (the caller
+/// reports the intersection/skip counts).
+fn arm_mean_field(
+    a: &HashMap<i64, f32>,
+    b: &HashMap<i64, f32>,
+    log_space: bool,
+) -> HashMap<i64, f32> {
+    a.iter()
+        .filter_map(|(comid, &va)| {
+            b.get(comid).map(|&vb| {
+                let mean = if log_space {
+                    assert!(
+                        va > 0.0 && vb > 0.0,
+                        "geometric arm-mean requires positive values \
+                         (COMID {comid}: {va}, {vb})"
+                    );
+                    ((va.ln() + vb.ln()) / 2.0).exp()
+                } else {
+                    (va + vb) / 2.0
+                };
+                (*comid, mean)
+            })
+        })
+        .collect()
+}
+
+/// Global multiplicative grid-point scaling: `v · 2^log2_factor` per COMID.
+/// `log2_factor = 0` is the exact identity (`exp2(0) == 1`).
+fn scale_by_log2(vals: &[f32], log2_factor: f32) -> Vec<f32> {
+    let factor = log2_factor.exp2();
+    vals.iter().map(|v| v * factor).collect()
+}
+
+/// The registered H6 barrier path: `θ(t) = exp((1−t)·ln a + t·ln b)`
+/// per-COMID — log-space interpolation for EVERY field regardless of its own
+/// log/linear config flag (the pre-registered formula, deliberate; do not
+/// swap in per-field linear interpolation). `t = 0`/`t = 1` are
+/// special-cased to return the endpoint fields bit-exactly (avoiding the
+/// 1-ulp `exp(ln x)` wobble), so the barrier endpoints reproduce each arm's
+/// own dump exactly.
+fn log_interp(a: &[f32], b: &[f32], t: f32) -> Vec<f32> {
+    assert_eq!(a.len(), b.len(), "log_interp length mismatch");
+    if t == 0.0 {
+        return a.to_vec();
+    }
+    if t == 1.0 {
+        return b.to_vec();
+    }
+    a.iter()
+        .zip(b.iter())
+        .map(|(&va, &vb)| {
+            assert!(
+                va > 0.0 && vb > 0.0,
+                "log_interp requires positive values (got {va}, {vb})"
+            );
+            ((1.0 - t) * va.ln() + t * vb.ln()).exp()
+        })
+        .collect()
+}
+
+/// Parse `--single-point "<log2_alpha>,<log2_beta>"`.
+fn parse_single_point(s: &str) -> Result<(f32, f32), String> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "--single-point expects \"<log2_alpha>,<log2_beta>\" (got '{s}')"
+        ));
+    }
+    let la: f32 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|e| format!("--single-point log2_alpha '{}': {e}", parts[0].trim()))?;
+    let lb: f32 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|e| format!("--single-point log2_beta '{}': {e}", parts[1].trim()))?;
+    Ok((la, lb))
+}
+
+fn write_surface_csv(
+    path: &Path,
+    rows: &[(f32, f32, usize, f32)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "log2_alpha,log2_beta,window,mean_loss")?;
+    for (la, lb, window, loss) in rows {
+        writeln!(f, "{la},{lb},{window},{loss}")?;
+    }
+    Ok(())
+}
+
+fn write_barrier_csv(
+    path: &Path,
+    rows: &[(f32, usize, f32)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    writeln!(f, "t,window,mean_loss")?;
+    for (t, window, loss) in rows {
+        writeln!(f, "{t},{window},{loss}")?;
+    }
+    Ok(())
+}
+
+/// H6 loss-landscape driver (`--mode landscape`). Loads BOTH arms' dumps,
+/// builds the anchor field (surface) and the endpoint fields (barrier),
+/// samples the deterministic window plan ONCE via `sample_window_plan`, and
+/// replays it unchanged across every grid/barrier point — per window, the
+/// batch is collated and `to_tensors`'d once and the COMID gathers happen
+/// once; each grid point is only a cheap scale-then-renormalize on top of
+/// the gathered anchor vectors. All three of n/q_spatial/p_spatial are
+/// overridden at every point (the head's own output never leaks into the
+/// scanned surface), through the SAME `RoutingParamOverride` seam H5 uses —
+/// so the loud p_spatial-missing panic in `forward_eval_core` is inherited.
+fn run_landscape<I: Backend>(
+    cfg: Config,
+    cli: Cli,
+    device: I::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let checkpoint = cli
+        .checkpoint
+        .as_ref()
+        .ok_or("--checkpoint is required in landscape mode")?;
+    let params_a = cli
+        .params_nc_a
+        .as_ref()
+        .ok_or("--params-nc-a is required in landscape mode (both arms' dumps, always)")?;
+    let params_b = cli
+        .params_nc_b
+        .as_ref()
+        .ok_or("--params-nc-b is required in landscape mode (both arms' dumps, always)")?;
+    if cli.surface_output.is_none() && cli.barrier_output.is_none() {
+        return Err(
+            "landscape mode requires --surface-output and/or --barrier-output".into(),
+        );
+    }
+    let single_point = match &cli.single_point {
+        Some(s) => {
+            if cli.surface_output.is_none() {
+                return Err("--single-point requires --surface-output".into());
+            }
+            Some(parse_single_point(s)?)
+        }
+        None => None,
+    };
+
+    // Head on the inner backend I — forward-only, no autograd (same as eval-loss).
+    let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
+    let head_cfg = kan_config(head_section, cfg.seed);
+    let head_template: KanHead<I> = head_cfg.init::<I>(&device);
+    let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+    eprintln!("loaded checkpoint: {}", head_base(checkpoint).display());
+
+    let dataset = MeritGagesDataset::open(&cfg)?;
+    let exp = cfg.experiment.as_ref().expect("experiment section required");
+    let rho = exp
+        .rho
+        .expect("landscape mode requires experiment.rho (training-style windows)");
+    let warmup = exp.warmup;
+    let t_days = trimmed_days(rho, cfg.params.tau);
+
+    // Same L1 guard as eval-loss: H6 reports the training L1 loss.
+    assert_eq!(
+        exp.loss.kind,
+        ddrs::config::LossKind::L1,
+        "landscape mode always computes L1 (docs/superpowers/specs/2026-07-08-\
+         landscape-hypotheses-h5-h6-draft.md); config has experiment.loss.kind={:?}",
+        exp.loss.kind
+    );
+
+    let ranges = &cfg.params.parameter_ranges;
+    let log_space = |name: &str| cfg.params.log_space_parameters.iter().any(|s| s == name);
+
+    // Both arms' dumps, always (the anchor does not depend on which arm's
+    // forcing this invocation evaluates under).
+    let a_n = load_comid_field(params_a, "n")?;
+    let a_q = load_comid_field(params_a, "q_spatial")?;
+    let a_p = load_comid_field(params_a, "p_spatial")?;
+    let b_n = load_comid_field(params_b, "n")?;
+    let b_q = load_comid_field(params_b, "q_spatial")?;
+    let b_p = load_comid_field(params_b, "p_spatial")?;
+
+    // Anchor θ̄ (intersection of the two dumps' COMID sets, per-field
+    // log/linear arm mean). Only needed for the surface, but cheap.
+    let anchor_n = arm_mean_field(&a_n, &b_n, log_space("n"));
+    let anchor_q = arm_mean_field(&a_q, &b_q, log_space("q_spatial"));
+    let anchor_p = arm_mean_field(&a_p, &b_p, log_space("p_spatial"));
+    eprintln!(
+        "anchor: {} common COMIDs (A: {}, B: {}); log-space: n={} q_spatial={} p_spatial={}",
+        anchor_n.len(),
+        a_n.len(),
+        b_n.len(),
+        log_space("n"),
+        log_space("q_spatial"),
+        log_space("p_spatial")
+    );
+    if anchor_n.len() < a_n.len().max(b_n.len()) {
+        eprintln!(
+            "warning: {} COMIDs present in only one dump were skipped from the anchor — \
+             a batch that needs one of them will hard-error at gather time",
+            a_n.len() + b_n.len() - 2 * anchor_n.len()
+        );
+    }
+
+    // Grid points (row-major over (log2_alpha, log2_beta)), or the single
+    // re-check point.
+    let grid: Vec<(f32, f32)> = match single_point {
+        Some(pt) => vec![pt],
+        None => {
+            let coords = grid_coords(cli.grid_n);
+            coords
+                .iter()
+                .flat_map(|&la| coords.iter().map(move |&lb| (la, lb)))
+                .collect()
+        }
+    };
+    let ts = barrier_ts(cli.barrier_points);
+
+    // ----- Phase 1: sample the window/gauge plan EXACTLY ONCE -----
+    let plan =
+        sample_window_plan(&dataset, exp.batch_size, rho, warmup, t_days, cli.windows, cli.seed)?;
+
+    // ----- Phase 2: replay the fixed plan across every grid/barrier point -----
+    let mut surface_rows: Vec<(f32, f32, usize, f32)> = Vec::new();
+    let mut barrier_rows: Vec<(f32, usize, f32)> = Vec::new();
+    for (window_idx, (staids, window)) in plan.iter().enumerate() {
+        let batch = dataset.collate(staids, window)?;
+        let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
+        let obs_arr = batch.observations.clone();
+        let tensors = batch.to_tensors::<I>(&device);
+
+        // Loss for one override at this window; hard-errors on a
+        // parameter-induced all-NaN filter result (Phase 1 guarantees at
+        // least one clean gauge exists, so n_kept == 0 here is a bug).
+        let eval_point = |ov: &RoutingParamOverride,
+                          label: &str|
+         -> Result<f32, Box<dyn std::error::Error>> {
+            let filtered = eval_window_filtered::<I>(
+                &cfg, &tensors, &head, &device, &obs_arr, warmup, t_days, Some(ov),
+            );
+            let n_kept = filtered.mask.iter().filter(|&&v| v).count();
+            if n_kept == 0 {
+                return Err(format!(
+                    "window {window_idx} point {label}: all gauges NaN post-filter — \
+                     Phase 1's validity check should have excluded this window"
+                )
+                .into());
+            }
+            Ok(l1_loss_post_warmup(&filtered.predictions, &filtered.observations, 0))
+        };
+
+        if cli.surface_output.is_some() {
+            // Gather the anchor ONCE per window; q_spatial is never scaled,
+            // so its normalization is also once per window.
+            let anc_n = gather_by_comid(&anchor_n, &comids)?;
+            let anc_q = gather_by_comid(&anchor_q, &comids)?;
+            let anc_p = gather_by_comid(&anchor_p, &comids)?;
+            let q_norm =
+                physical_to_normalized(&anc_q, ranges.q_spatial, log_space("q_spatial"));
+
+            for (pi, &(la, lb)) in grid.iter().enumerate() {
+                let n_phys = scale_by_log2(&anc_n, la);
+                let p_phys = scale_by_log2(&anc_p, lb);
+                let ov = RoutingParamOverride {
+                    n: Some(physical_to_normalized(&n_phys, ranges.n, log_space("n"))),
+                    q_spatial: Some(q_norm.clone()),
+                    p_spatial: Some(physical_to_normalized(
+                        &p_phys,
+                        ranges.p_spatial,
+                        log_space("p_spatial"),
+                    )),
+                };
+                let loss = eval_point(&ov, &format!("(log2_alpha={la}, log2_beta={lb})"))?;
+                surface_rows.push((la, lb, window_idx, loss));
+                eprintln!(
+                    "window {}/{} surface {}/{} (log2_alpha={la}, log2_beta={lb}) \
+                     loss={loss:.5}",
+                    window_idx + 1,
+                    plan.len(),
+                    pi + 1,
+                    grid.len()
+                );
+            }
+        }
+
+        if cli.barrier_output.is_some() {
+            // Endpoint fields gathered ONCE per window.
+            let a_nv = gather_by_comid(&a_n, &comids)?;
+            let a_qv = gather_by_comid(&a_q, &comids)?;
+            let a_pv = gather_by_comid(&a_p, &comids)?;
+            let b_nv = gather_by_comid(&b_n, &comids)?;
+            let b_qv = gather_by_comid(&b_q, &comids)?;
+            let b_pv = gather_by_comid(&b_p, &comids)?;
+
+            for (ti, &t) in ts.iter().enumerate() {
+                let n_phys = log_interp(&a_nv, &b_nv, t);
+                let q_phys = log_interp(&a_qv, &b_qv, t);
+                let p_phys = log_interp(&a_pv, &b_pv, t);
+                let ov = RoutingParamOverride {
+                    n: Some(physical_to_normalized(&n_phys, ranges.n, log_space("n"))),
+                    q_spatial: Some(physical_to_normalized(
+                        &q_phys,
+                        ranges.q_spatial,
+                        log_space("q_spatial"),
+                    )),
+                    p_spatial: Some(physical_to_normalized(
+                        &p_phys,
+                        ranges.p_spatial,
+                        log_space("p_spatial"),
+                    )),
+                };
+                let loss = eval_point(&ov, &format!("(t={t})"))?;
+                barrier_rows.push((t, window_idx, loss));
+                eprintln!(
+                    "window {}/{} barrier {}/{} (t={t}) loss={loss:.5}",
+                    window_idx + 1,
+                    plan.len(),
+                    ti + 1,
+                    ts.len()
+                );
+            }
+        }
+    }
+
+    if let Some(surface_output) = &cli.surface_output {
+        write_surface_csv(surface_output, &surface_rows)?;
+        println!(
+            "wrote {} ({} grid points x {} windows)",
+            surface_output.display(),
+            grid.len(),
+            plan.len()
+        );
+    }
+
+    if let Some(barrier_output) = &cli.barrier_output {
+        write_barrier_csv(barrier_output, &barrier_rows)?;
+        println!(
+            "wrote {} ({} t-points x {} windows)",
+            barrier_output.display(),
+            ts.len(),
+            plan.len()
+        );
+
+        // Informational barrier statistic (window-mean per t). The
+        // AUTHORITATIVE H6 statistics/verdicts are computed by the Python
+        // analysis script over the CSV — this print is a smoke-check only.
+        let mean_at = |t: f32| -> f32 {
+            let vals: Vec<f32> = barrier_rows
+                .iter()
+                .filter(|(rt, _, _)| *rt == t)
+                .map(|(_, _, l)| *l)
+                .collect();
+            vals.iter().sum::<f32>() / vals.len() as f32
+        };
+        let l0 = mean_at(ts[0]);
+        let l1 = mean_at(*ts.last().unwrap());
+        let (t_max, l_max) = ts
+            .iter()
+            .map(|&t| (t, mean_at(t)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        println!(
+            "barrier (informational): L(t=0)={l0:.5} L(t=1)={l1:.5} \
+             max_t L={l_max:.5} at t={t_max} => B = {:.5}",
+            l_max - l0.max(l1)
+        );
+    }
+
     Ok(())
 }
 
@@ -1515,7 +2557,8 @@ fn run_state_cache<I: Backend>(
 
         // Per-reach hourly discharge: (n_reaches, chunk_n * 24).
         // carry_state=false: continuity is provided by tensors.initial_state above.
-        let runoff = forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, false, None, None);
+        let runoff =
+            forward_eval_reaches::<I>(&cfg, &tensors, &head, &device, false, None, None, None);
         let chunk_hours = chunk_n * 24;
         let runoff_vec: Vec<f32> = runoff.into_data().into_vec().unwrap();
 
@@ -1666,5 +2709,308 @@ mod tests {
         let g = f.variable("gauge_staid").unwrap();
         assert_eq!(g.get_string(0).unwrap(), "01010000");
         assert_eq!(g.get_string(1).unwrap(), "USGS__02020000");
+    }
+
+    // -----------------------------------------------------------------------
+    // eval-loss mode: Composition parsing + gather_by_comid + trimmed_days
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn composition_parse_accepts_all_four_names() {
+        assert!(Composition::parse("own") == Ok(Composition::Own));
+        assert!(Composition::parse("n-swap") == Ok(Composition::NSwap));
+        assert!(Composition::parse("geo-swap") == Ok(Composition::GeoSwap));
+        assert!(Composition::parse("full-swap") == Ok(Composition::FullSwap));
+    }
+
+    #[test]
+    fn composition_parse_rejects_unknown_name() {
+        let err = Composition::parse("bogus").unwrap_err();
+        assert!(err.contains("bogus"), "error should name the bad input: {err}");
+    }
+
+    #[test]
+    fn composition_needs_donor_only_for_non_own() {
+        assert!(!Composition::Own.needs_donor());
+        assert!(Composition::NSwap.needs_donor());
+        assert!(Composition::GeoSwap.needs_donor());
+        assert!(Composition::FullSwap.needs_donor());
+    }
+
+    #[test]
+    fn composition_build_override_selects_the_right_fields() {
+        let n = Some(vec![0.1_f32]);
+        let q = Some(vec![0.2_f32]);
+        let p = Some(vec![0.3_f32]);
+
+        assert!(Composition::Own.build_override(&n, &q, &p).is_none());
+
+        let ov = Composition::NSwap.build_override(&n, &q, &p).unwrap();
+        assert_eq!(ov.n, n);
+        assert_eq!(ov.q_spatial, None);
+        assert_eq!(ov.p_spatial, None);
+
+        let ov = Composition::GeoSwap.build_override(&n, &q, &p).unwrap();
+        assert_eq!(ov.n, None);
+        assert_eq!(ov.q_spatial, q);
+        assert_eq!(ov.p_spatial, p);
+
+        let ov = Composition::FullSwap.build_override(&n, &q, &p).unwrap();
+        assert_eq!(ov.n, n);
+        assert_eq!(ov.q_spatial, q);
+        assert_eq!(ov.p_spatial, p);
+    }
+
+    #[test]
+    fn gather_by_comid_preserves_batch_order() {
+        let donor: HashMap<i64, f32> = [(10i64, 1.0f32), (20, 2.0), (30, 3.0)].into_iter().collect();
+        // Request in a different order than the map's insertion/iteration order.
+        let got = gather_by_comid(&donor, &[30, 10, 20]).unwrap();
+        assert_eq!(got, vec![3.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn gather_by_comid_errors_on_missing_comid() {
+        let donor: HashMap<i64, f32> = [(10i64, 1.0f32)].into_iter().collect();
+        let err = gather_by_comid(&donor, &[10, 99]).unwrap_err();
+        assert!(err.contains("99"), "error should name the missing COMID: {err}");
+    }
+
+    #[test]
+    fn trimmed_days_matches_tau_trim_and_downsample_arithmetic() {
+        // rho=90 -> n_hourly=(90-1)*24=2136; tau=0 -> start=13,end=2125,
+        // trimmed=2112, days=2112/24=88.
+        assert_eq!(trimmed_days(90, 0), 88);
+    }
+
+    // -----------------------------------------------------------------------
+    // eval-loss mode: per-gauge output (H5/H6 gap 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn per_gauge_l1_matches_hand_computed_column_means() {
+        // (T_days=3, G_kept=2).
+        let pred = Array2::from_shape_vec(
+            (3, 2),
+            vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+        )
+        .unwrap();
+        let obs = Array2::from_shape_vec(
+            (3, 2),
+            vec![1.0_f32, 2.0, 4.0, 4.0, 5.0, 9.0],
+        )
+        .unwrap();
+        // Column 0 (gauge A): |1-1|+|3-4|+|5-5| = 0+1+0 = 1; mean = 1/3.
+        // Column 1 (gauge B): |2-2|+|4-4|+|6-9| = 0+0+3 = 3; mean = 1.0.
+        let losses = per_gauge_l1(&pred, &obs);
+        assert_eq!(losses.len(), 2);
+        assert!((losses[0] - 1.0 / 3.0).abs() < 1e-6, "got {}", losses[0]);
+        assert!((losses[1] - 1.0).abs() < 1e-6, "got {}", losses[1]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn per_gauge_l1_asserts_matching_shapes() {
+        let pred = Array2::<f32>::zeros((3, 2));
+        let obs = Array2::<f32>::zeros((3, 3));
+        let _ = per_gauge_l1(&pred, &obs);
+    }
+
+    #[test]
+    fn kept_gauge_staids_selects_and_orders_by_mask() {
+        let staids: Vec<Staid> = vec!["A".into(), "B".into(), "C".into()];
+        let mask = vec![true, false, true];
+        let kept = kept_gauge_staids(&staids, &mask);
+        assert_eq!(kept, vec![Staid::from("A"), Staid::from("C")]);
+    }
+
+    #[test]
+    fn write_per_gauge_loss_csv_roundtrips_and_has_expected_row_count() {
+        let dir = std::env::temp_dir().join("probe_per_gauge_csv_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("per_gauge_test.csv");
+        let _ = std::fs::remove_file(&path);
+
+        // Synthetic 2-window x 2-composition plan where kept-gauge count
+        // VARIES per window (window 0: 2 gauges kept; window 1: 1 gauge
+        // kept, mirroring how a real NaN-filtered window can drop gauges)
+        // — the row count must be n_windows * n_compositions * n_kept_gauges
+        // summed per window, NOT a fixed n_windows * n_compositions * G.
+        let rows: Vec<(String, usize, Staid, f32)> = vec![
+            ("own".to_string(), 0, Staid::from("A"), 0.5),
+            ("own".to_string(), 0, Staid::from("B"), 0.7),
+            ("own".to_string(), 1, Staid::from("A"), 0.9),
+            ("n-swap".to_string(), 0, Staid::from("A"), 0.6),
+            ("n-swap".to_string(), 0, Staid::from("B"), 0.8),
+            ("n-swap".to_string(), 1, Staid::from("A"), 1.0),
+        ];
+        write_per_gauge_loss_csv(&path, &rows).unwrap();
+
+        let csv = std::fs::read_to_string(&path).unwrap();
+        let mut lines = csv.lines();
+        assert_eq!(lines.next().unwrap(), "composition,window,staid,gauge_loss");
+        let data_rows: Vec<&str> = lines.collect();
+        assert_eq!(data_rows.len(), rows.len());
+        // Staid zero-pads to 8 chars (Staid::new) — assert against that
+        // canonical form, not the raw literal passed to `Staid::from`.
+        assert_eq!(data_rows[0], "own,0,0000000A,0.5");
+        assert_eq!(data_rows[2], "own,1,0000000A,0.9");
+    }
+
+    // -----------------------------------------------------------------------
+    // landscape mode (H6): grid coords, anchor, scaling, barrier, CSVs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn grid_coords_registered_11_points_span_and_spacing() {
+        let c = grid_coords(11);
+        assert_eq!(c.len(), 11);
+        assert_eq!(c[0], -1.5, "first coord must be exactly -1.5");
+        assert_eq!(c[10], 1.5, "last coord must be exactly 1.5");
+        for w in c.windows(2) {
+            assert!(
+                (w[1] - w[0] - 0.3).abs() < 1e-6,
+                "spacing must be 0.3, got {}",
+                w[1] - w[0]
+            );
+        }
+        // Interior points land on clean nearest-f32 decimals (f64 compute).
+        assert_eq!(c[2], -0.9_f32);
+        assert_eq!(c[5], 0.0_f32);
+    }
+
+    #[test]
+    fn grid_coords_smoke_3_points() {
+        assert_eq!(grid_coords(3), vec![-1.5, 0.0, 1.5]);
+    }
+
+    #[test]
+    fn barrier_ts_registered_21_points() {
+        let t = barrier_ts(21);
+        assert_eq!(t.len(), 21);
+        assert_eq!(t[0], 0.0);
+        assert_eq!(t[20], 1.0);
+        assert!((t[1] - 0.05).abs() < 1e-7);
+        assert!((t[10] - 0.5).abs() < 1e-7);
+    }
+
+    #[test]
+    fn arm_mean_field_geometric_for_log_space() {
+        let a: HashMap<i64, f32> = [(1i64, 2.0f32), (2, 8.0)].into_iter().collect();
+        let b: HashMap<i64, f32> = [(1i64, 8.0f32), (2, 2.0)].into_iter().collect();
+        let m = arm_mean_field(&a, &b, true);
+        // Geometric mean of {2, 8} is 4 for both COMIDs.
+        assert!((m[&1] - 4.0).abs() < 1e-6, "got {}", m[&1]);
+        assert!((m[&2] - 4.0).abs() < 1e-6, "got {}", m[&2]);
+    }
+
+    #[test]
+    fn arm_mean_field_arithmetic_for_linear() {
+        let a: HashMap<i64, f32> = [(1i64, 2.0f32), (2, 8.0)].into_iter().collect();
+        let b: HashMap<i64, f32> = [(1i64, 8.0f32), (2, 2.0)].into_iter().collect();
+        let m = arm_mean_field(&a, &b, false);
+        // Arithmetic mean of {2, 8} is 5.
+        assert!((m[&1] - 5.0).abs() < 1e-6, "got {}", m[&1]);
+        assert!((m[&2] - 5.0).abs() < 1e-6, "got {}", m[&2]);
+    }
+
+    #[test]
+    fn arm_mean_field_skips_one_sided_comids() {
+        let a: HashMap<i64, f32> = [(1i64, 2.0f32), (3, 6.0)].into_iter().collect();
+        let b: HashMap<i64, f32> = [(1i64, 4.0f32), (4, 9.0)].into_iter().collect();
+        let m = arm_mean_field(&a, &b, false);
+        // Only COMID 1 is in both; 3 and 4 are skipped (documented choice —
+        // gather_by_comid hard-errors later if a batch needs them).
+        assert_eq!(m.len(), 1);
+        assert!((m[&1] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scale_by_log2_matches_pow2_by_hand() {
+        // anchor 0.04 at log2_alpha = 1.5: 0.04 * 2^1.5 = 0.04 * 2.8284271...
+        let got = scale_by_log2(&[0.04], 1.5);
+        assert!((got[0] - 0.04 * 2.828_427_1).abs() < 1e-7, "got {}", got[0]);
+        // log2 = -1.5 halves-and-halves-again-and-sqrt: 0.04 / 2.8284271.
+        let got = scale_by_log2(&[0.04], -1.5);
+        assert!((got[0] - 0.04 / 2.828_427_1).abs() < 1e-7, "got {}", got[0]);
+        // log2 = 0 is the exact identity.
+        assert_eq!(scale_by_log2(&[0.123_456], 0.0), vec![0.123_456]);
+    }
+
+    #[test]
+    fn log_interp_endpoints_reproduce_own_fields_exactly() {
+        let a = vec![0.031_f32, 21.7, 0.999];
+        let b = vec![0.187_f32, 3.2, 0.001];
+        // Bit-exact at both endpoints (special-cased; no exp(ln x) wobble).
+        assert_eq!(log_interp(&a, &b, 0.0), a);
+        assert_eq!(log_interp(&a, &b, 1.0), b);
+    }
+
+    #[test]
+    fn log_interp_midpoint_is_geometric_mean() {
+        // t = 0.5: exp((ln 2 + ln 8)/2) = 4.
+        let got = log_interp(&[2.0], &[8.0], 0.5);
+        assert!((got[0] - 4.0).abs() < 1e-6, "got {}", got[0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "log_interp requires positive values")]
+    fn log_interp_rejects_nonpositive_values() {
+        let _ = log_interp(&[0.0], &[1.0], 0.5);
+    }
+
+    #[test]
+    fn parse_single_point_accepts_signed_pair() {
+        assert_eq!(parse_single_point("0.3,-0.6"), Ok((0.3, -0.6)));
+        assert_eq!(parse_single_point(" -1.5 , 1.5 "), Ok((-1.5, 1.5)));
+    }
+
+    #[test]
+    fn parse_single_point_rejects_malformed_input() {
+        assert!(parse_single_point("0.3").is_err());
+        assert!(parse_single_point("0.3,0.4,0.5").is_err());
+        assert!(parse_single_point("abc,0.4").is_err());
+    }
+
+    #[test]
+    fn write_surface_csv_roundtrips() {
+        let dir = std::env::temp_dir().join("probe_surface_csv_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("surface_test.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let rows: Vec<(f32, f32, usize, f32)> = vec![
+            (-1.5, -1.5, 0, 12.34),
+            (-1.5, 0.0, 0, 11.98),
+            (-1.5, -1.5, 1, 13.01),
+        ];
+        write_surface_csv(&path, &rows).unwrap();
+
+        let csv = std::fs::read_to_string(&path).unwrap();
+        let mut lines = csv.lines();
+        assert_eq!(lines.next().unwrap(), "log2_alpha,log2_beta,window,mean_loss");
+        let data: Vec<&str> = lines.collect();
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0], "-1.5,-1.5,0,12.34");
+        assert_eq!(data[1], "-1.5,0,0,11.98");
+    }
+
+    #[test]
+    fn write_barrier_csv_roundtrips() {
+        let dir = std::env::temp_dir().join("probe_barrier_csv_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("barrier_test.csv");
+        let _ = std::fs::remove_file(&path);
+
+        let rows: Vec<(f32, usize, f32)> = vec![(0.0, 0, 5.5), (0.05, 0, 5.7), (1.0, 1, 6.1)];
+        write_barrier_csv(&path, &rows).unwrap();
+
+        let csv = std::fs::read_to_string(&path).unwrap();
+        let mut lines = csv.lines();
+        assert_eq!(lines.next().unwrap(), "t,window,mean_loss");
+        let data: Vec<&str> = lines.collect();
+        assert_eq!(data.len(), 3);
+        assert_eq!(data[0], "0,0,5.5");
+        assert_eq!(data[1], "0.05,0,5.7");
     }
 }

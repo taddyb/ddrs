@@ -39,8 +39,9 @@ pub struct RoutingBatch {
     /// learnable disaggregation head; `None` of it is upsampled here.
     pub q_prime_daily: Array2<f32>,
     /// Hourly AORC precip, shape `(T_hours, N)`, **already normalized** per
-    /// reach (z-scored `log1p`). Empty `(0, N)` when no precip store is wired.
-    /// Conditions the precip-driven disaggregation head.
+    /// reach (per-window z-score of `log1p(precip)`, see `normalize_precip`).
+    /// Empty `(0, N)` when no precip store is wired. Conditions the
+    /// disaggregation head.
     pub precip_hourly: Array2<f32>,
     /// Hourly AORC temperature, shape `(T_hours, N)`, **already normalized**
     /// per reach (z-score). Empty `(0, N)` when temp conditioning is off.
@@ -417,14 +418,15 @@ impl MeritGagesDataset {
         )?;
         let observations = Arc::new(ObservationsStore::open(&ds.observations)?);
 
-        // Optional hourly precip store for the precip-driven disaggregation
-        // head. Validate the use_precip ⇔ aorc_precip coupling up front.
-        let (want_precip, want_temp) = head_cfg
-            .disaggregation
-            .as_ref()
-            .map(|d| (d.use_precip, d.use_temp))
-            .unwrap_or((false, false));
-        let precip = match (&ds.aorc_precip, want_precip || want_temp) {
+        // Optional hourly precip store for the disaggregation head. The head
+        // always requires precip when enabled — no separate toggle. (`temp`
+        // conditioning was removed from the disagg head; `want_temp` stays
+        // hardcoded false so `read_temp_window`/`read_temp_test_window` keep
+        // compiling as dead-but-harmless empty-array paths rather than a
+        // wider dataset.rs refactor out of scope for this change.)
+        let want_precip = head_cfg.disaggregation.is_some();
+        let want_temp = false;
+        let precip = match (&ds.aorc_precip, want_precip) {
             (Some(p), _) => {
                 let store = AorcPrecipStore::open(p)?;
                 eprintln!(
@@ -437,8 +439,8 @@ impl MeritGagesDataset {
             (None, true) => {
                 return Err(DataError::Malformed {
                     path: std::path::PathBuf::from("<config>"),
-                    message: "kan_head.disaggregation.use_precip/use_temp is true but \
-                              data_sources.aorc_precip is not set".into(),
+                    message: "kan_head.disaggregation is set but data_sources.aorc_precip \
+                              is not — the disaggregation head always requires precip".into(),
                 });
             }
             (None, false) => None,
@@ -1036,24 +1038,40 @@ fn load_merged_stats(
     Ok((Array1::from(means_vec), Array1::from(stds_vec)))
 }
 
-/// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
-/// Pre-head precip normalization: per-reach (column) z-score of `log1p(precip)`
-/// over the window's hours. The disaggregation head only cares about the
-/// *within-day shape*, not a reach's absolute precip magnitude, so each column
-/// is centered and scaled independently; all-dry / constant columns (std≈0,
-/// including the ~55k AORC-coverage-gap reaches that read as 0.0) map to 0,
-/// giving the head a flat precip window for those reaches (→ daily-Q fallback).
-fn normalize_precip(mut precip: Array2<f32>) -> Array2<f32> {
+/// Pre-head precip normalization: per-reach (column), per-WINDOW z-score of
+/// `log1p(precip)` — mean-centered, unit-variance, recomputed fresh over
+/// whatever window of hours is passed in (the training rho-window or the eval
+/// chunk). NOT normalized by a fixed climatological constant.
+///
+/// Why a per-window z-score instead of a fixed-divisor basin normalization
+/// (`log1p(precip / meanP_hourly)`): a fixed-divisor feature is always
+/// non-negative and mostly exact-zero (dry hours), so every hidden unit's
+/// weight gradient shares the same sign and weights for rarely-wet hours get
+/// no gradient signal on dry samples — well-documented to slow convergence
+/// (LeCun et al., *Efficient BackProp*). A mean-centered feature trains every
+/// weight every step. Verified via the synthetic discriminator
+/// `examples/disagg_precip_normalization_discriminator.rs`: at a matched
+/// short training budget the z-scored feature reached 88% precip-timing
+/// accuracy vs 77% for the fixed-divisor feature (both reach 100% given 20x
+/// more steps — a convergence-speed gap, not missing information). This is
+/// the design that produced the documented +0.037 NSE disaggregation win.
+///
+/// Near-constant windows (std < 1e-6, e.g. all-dry) map to all zeros
+/// (neutral), so the head falls back to the daily-Q shape.
+///
+/// `pub(crate)` (not private) so `src/pretrain/` can call the EXACT same
+/// production transform on real hourly ground truth, rather than
+/// reimplementing it and risking drift between pretraining and production
+/// features.
+pub(crate) fn normalize_precip(mut precip: Array2<f32>) -> Array2<f32> {
     let (t, n) = precip.dim();
     if t == 0 {
         return precip;
     }
     for col in 0..n {
-        // log1p in place. Clamp to ≥0 first: precip is non-negative (mm/hr),
-        // and log1p(x≤-1) is NaN/-Inf — a defensive guard in case the store
-        // ever surfaces a stray negative (NaN is already zeroed at read time).
+        // log1p in place.
         for row in 0..t {
-            precip[(row, col)] = precip[(row, col)].max(0.0).ln_1p();
+            precip[(row, col)] = precip[(row, col)].ln_1p();
         }
         let mean: f32 = (0..t).map(|r| precip[(r, col)]).sum::<f32>() / t as f32;
         let var: f32 =
@@ -1098,6 +1116,7 @@ fn normalize_temp(mut temp: Array2<f32>) -> Array2<f32> {
     temp
 }
 
+/// Default statistics JSON path: `<attrs_dir>/statistics/merit_attribute_statistics_<attrs_filename>.json`.
 fn stats_path_from_attrs(attrs_path: &std::path::Path) -> std::path::PathBuf {
     let dir = attrs_path
         .parent()
@@ -1175,6 +1194,59 @@ mod tests {
         let raw = [0.8_f32, 0.9, 1.0];
         let mask = build_mask_from_raw_col(&raw, 0.7);
         assert!(mask.iter().all(|&v| v == 0.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_precip: per-reach, per-window z-score of log1p(precip)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_precip_storm_hour_is_positive_outlier() {
+        // Within-window RELATIVE contrast: one storm hour amid mostly-dry
+        // hours must z-score to a clear positive outlier, while the dry
+        // hours land below the window mean (negative). This is the timing
+        // signal the disagg head trains on.
+        let t = 24;
+        let raw = Array2::<f32>::from_shape_fn((t, 1), |(row, _)| {
+            if row == 7 { 8.6 } else { 0.0 }
+        });
+        let out = normalize_precip(raw);
+        assert!(
+            out[(7, 0)] > 2.0,
+            "storm hour z-score {} should be a large positive outlier",
+            out[(7, 0)]
+        );
+        for row in (0..t).filter(|&r| r != 7) {
+            assert!(
+                out[(row, 0)] < 0.0,
+                "dry hour {row} z-scored to {} — expected below the window mean",
+                out[(row, 0)]
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_precip_near_constant_window_maps_to_zeros() {
+        // A (near-)zero-variance window (e.g. all-dry, or a data gap read
+        // as a constant) must map to all zeros — neutral input, not NaN/Inf
+        // from dividing by std ≈ 0.
+        let raw = Array2::<f32>::from_elem((4, 2), 0.3);
+        let out = normalize_precip(raw);
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "near-constant window produced non-finite output: {out:?}"
+        );
+        assert!(
+            out.iter().all(|&v| v == 0.0),
+            "near-constant window should map to all zeros: {out:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_precip_empty_window_is_noop() {
+        let raw = Array2::<f32>::zeros((0, 3));
+        let out = normalize_precip(raw);
+        assert_eq!(out.dim(), (0, 3));
     }
 
     // -----------------------------------------------------------------------

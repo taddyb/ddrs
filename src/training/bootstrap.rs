@@ -8,6 +8,7 @@
 //! restored from the checkpoint + its sidecars (see `checkpoint.rs`).
 
 use burn::backend::Autodiff;
+use burn::module::Module;
 use burn::optim::Optimizer;
 use burn::tensor::backend::{AutodiffBackend, Backend};
 use rand::SeedableRng;
@@ -17,7 +18,8 @@ use crate::config::Config;
 use crate::data::error::Result;
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    head_base, load_kan_head, load_optimizer, load_train_state, optim_base, state_path,
+    head_base, load_disagg_head, load_kan_head, load_optimizer, load_train_state, optim_base,
+    state_path,
 };
 use crate::training::driver::TrainState;
 use crate::training::optimizer::build_adam;
@@ -56,8 +58,33 @@ where
     let head_cfg = crate::config::kan_config(head_section, cfg.seed);
 
     <Autodiff<I> as Backend>::seed(device, cfg.seed);
-    let head: KanHead<Autodiff<I>> = head_cfg.init::<Autodiff<I>>(device);
+    let mut head: KanHead<Autodiff<I>> = head_cfg.init::<Autodiff<I>>(device);
     let mut optimizer = build_adam::<KanHead<Autodiff<I>>, Autodiff<I>>();
+
+    // Warm-start the disaggregation submodule from a standalone-pretrained
+    // checkpoint (`kan_head.disaggregation.pretrained_checkpoint`), optionally
+    // freezing it. Runs BEFORE the `experiment.checkpoint` resume below: a
+    // full-head resume overwrites the *values*, but `Param::transform_for_load`
+    // preserves the template's `require_grad`, so a frozen disagg head stays
+    // frozen across resume.
+    if let Some(d) = cfg.kan_head.as_ref().and_then(|k| k.disaggregation.as_ref()) {
+        if let Some(path) = d.pretrained_checkpoint.as_ref() {
+            let template = head
+                .disagg
+                .take()
+                .expect("disaggregation section present but head has no disagg submodule");
+            let mut disagg = load_disagg_head::<Autodiff<I>>(path, template, device)?;
+            println!(
+                "disagg warm start: loaded pretrained DisaggHead from {}",
+                path.display()
+            );
+            if d.freeze {
+                disagg = disagg.no_grad();
+                println!("disagg warm start: froze DisaggHead params (no further training)");
+            }
+            head.disagg = Some(disagg);
+        }
+    }
 
     let mut state = TrainState::<I> {
         head,

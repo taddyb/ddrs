@@ -244,21 +244,47 @@ pub struct KanHeadConfigSection {
 }
 
 /// YAML `kan_head.disaggregation:` block (presence enables the head).
+/// The head always consumes `(daily Q', that day's 24h precip)` — requires
+/// `data_sources.aorc_precip` to be set. See `src/nn/disagg_head.rs`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DisaggregationSection {
     #[serde(default = "default_disagg_hidden")]
     pub hidden_size: usize,
-    #[serde(default = "default_true")]
-    pub use_attributes: bool,
-    /// Condition the within-day shape on hourly AORC precip (the full
-    /// `[d-1,d,d+1]` = 72-hour window per reach). Requires
-    /// `data_sources.aorc_precip` to be set. Default false ⇒ daily-Q-only head.
+    #[serde(default = "default_disagg_num_hidden_layers")]
+    pub num_hidden_layers: usize,
+    #[serde(default = "default_disagg_grid")]
+    pub grid: usize,
+    #[serde(default = "default_disagg_k")]
+    pub k: usize,
+    /// Day-boundary shape-continuity blend factor λ ∈ [0, 1]. Default 0.0 ⇒
+    /// fully independent per-day shapes (no continuity enforcement). Only
+    /// used when `chunk_days <= 1`.
     #[serde(default)]
-    pub use_precip: bool,
-    /// Condition the within-day shape on hourly AORC temperature (another
-    /// `[d-1,d,d+1]` window). Also requires `data_sources.aorc_precip`.
+    pub boundary_blend: f32,
+    /// Mass-balance chunk size, in days. Default `1` (absent ⇒
+    /// byte-identical to every checkpoint trained before this field
+    /// existed) preserves the original per-calendar-day-exact contract.
+    /// `> 1` relaxes mass conservation to the CHUNK aggregate (see
+    /// `DisaggHeadConfig::chunk_days` in `src/nn/disagg_head.rs`), letting
+    /// storms that span a day boundary be represented as one continuous
+    /// event instead of being clipped at hour 0/23.
+    #[serde(default = "default_disagg_chunk_days")]
+    pub chunk_days: usize,
+    /// Path to a standalone-pretrained DisaggHead checkpoint (CompactRecorder
+    /// `.mpk`, e.g. from `pretrain_disagg_capacity`) to warm-start from
+    /// instead of a fresh random init. Absent (default) = current behavior
+    /// exactly. The architecture fields above (hidden_size /
+    /// num_hidden_layers / grid / k / chunk_days) MUST match what the
+    /// checkpoint was trained with — `load_record` fails loudly otherwise.
+    /// Operational, not architecture: deliberately NOT threaded into
+    /// [`kan_config`], mirroring how `experiment.checkpoint` bypasses it.
     #[serde(default)]
-    pub use_temp: bool,
+    pub pretrained_checkpoint: Option<std::path::PathBuf>,
+    /// Freeze this head's params after loading (`Module::no_grad()`, no
+    /// further training). Default false. Requires `pretrained_checkpoint` to
+    /// be set — enforced by `validate_disagg_pretrained` at config load.
+    #[serde(default)]
+    pub freeze: bool,
 }
 
 /// Build a [`KanHeadConfig`] from a parsed YAML section + seed, threading the
@@ -282,9 +308,11 @@ pub fn kan_config(
         Some(d) => cfg
             .with_disagg_enabled(true)
             .with_disagg_hidden_size(d.hidden_size)
-            .with_disagg_use_attributes(d.use_attributes)
-            .with_disagg_use_precip(d.use_precip)
-            .with_disagg_use_temp(d.use_temp),
+            .with_disagg_num_hidden_layers(d.num_hidden_layers)
+            .with_disagg_grid(d.grid)
+            .with_disagg_k(d.k)
+            .with_disagg_boundary_blend(d.boundary_blend)
+            .with_disagg_chunk_days(d.chunk_days),
         None => cfg,
     }
 }
@@ -298,8 +326,17 @@ fn default_k() -> usize {
 fn default_disagg_hidden() -> usize {
     16
 }
-fn default_true() -> bool {
-    true
+fn default_disagg_chunk_days() -> usize {
+    1
+}
+fn default_disagg_num_hidden_layers() -> usize {
+    1
+}
+fn default_disagg_grid() -> usize {
+    3
+}
+fn default_disagg_k() -> usize {
+    3
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +669,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_disagg_pretrained(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
@@ -708,6 +749,21 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// `freeze: true` without a `pretrained_checkpoint` would permanently pin the
+/// disaggregation head at its random init — reject at load time.
+fn validate_disagg_pretrained(cfg: &Config) -> std::result::Result<(), String> {
+    if let Some(d) = cfg.kan_head.as_ref().and_then(|k| k.disaggregation.as_ref()) {
+        if d.freeze && d.pretrained_checkpoint.is_none() {
+            return Err(
+                "kan_head.disaggregation: `freeze: true` requires `pretrained_checkpoint` \
+                 — freezing a randomly-initialized disaggregation head would train nothing."
+                    .to_string(),
+            );
+        }
     }
     Ok(())
 }
@@ -866,6 +922,69 @@ workflow: train-and-test
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("load yaml");
         assert_eq!(cfg.workflow, Some(Workflow::TrainAndTest));
+    }
+
+    #[test]
+    fn disagg_freeze_without_pretrained_checkpoint_fails_to_load() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+kan_head:
+  hidden_size: 8
+  num_hidden_layers: 1
+  input_var_names: [a, b]
+  learnable_parameters: [n]
+  disaggregation:
+    freeze: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_disagg_freeze_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).expect_err("freeze without checkpoint must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("pretrained_checkpoint"),
+            "error should name the missing key, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn disagg_pretrained_fields_default_to_none_and_false() {
+        // An existing tracked disagg config (predates the two fields) must
+        // parse to (pretrained_checkpoint: None, freeze: false).
+        let cfg = Config::from_yaml_file("config/experiments/kan_disagg_conus_no_leakance.yaml")
+            .expect("load tracked disagg config");
+        let d = cfg
+            .kan_head
+            .as_ref()
+            .unwrap()
+            .disaggregation
+            .as_ref()
+            .expect("disaggregation block present");
+        assert!(d.pretrained_checkpoint.is_none());
+        assert!(!d.freeze);
+
+        // And the new frozen-arm config round-trips both fields.
+        let cfg = Config::from_yaml_file("config/experiments/kan_disagg_conus_frozen_chunk1.yaml")
+            .expect("load frozen-arm config");
+        let d = cfg.kan_head.as_ref().unwrap().disaggregation.as_ref().unwrap();
+        assert!(d.freeze);
+        assert_eq!(
+            d.pretrained_checkpoint.as_deref(),
+            Some(std::path::Path::new(
+                "/home/tbindas/projects/ddrs/output/disagg_pretrain/capacity_chunk1.mpk"
+            ))
+        );
+        assert_eq!((d.hidden_size, d.num_hidden_layers, d.grid, d.k), (16, 2, 20, 3));
+
+        // Fine-tune arm: same checkpoint, freeze: false.
+        let cfg =
+            Config::from_yaml_file("config/experiments/kan_disagg_conus_finetune_chunk1.yaml")
+                .expect("load finetune-arm config");
+        let d = cfg.kan_head.as_ref().unwrap().disaggregation.as_ref().unwrap();
+        assert!(!d.freeze);
+        assert!(d.pretrained_checkpoint.is_some());
     }
 
     #[test]

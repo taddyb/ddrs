@@ -22,12 +22,13 @@ pub mod zarr_io;
 
 pub use bootstrap::bootstrap_head_and_state;
 pub use checkpoint::{
-    head_base, load_kan_head, load_optimizer, load_train_state, optim_base, save_kan_head,
-    save_optimizer, save_train_state, state_path, TrainCkptState,
+    head_base, load_disagg_head, load_kan_head, load_optimizer, load_train_state, optim_base,
+    save_kan_head, save_optimizer, save_train_state, state_path, TrainCkptState,
 };
 pub use forward::{
     scatter_add_by_group, forward_with_frozen_params, forward_eval, forward_eval_reaches,
-    FrozenParams, ZetaSums, LeakanceOverride, FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
+    physical_to_normalized, FrozenParams, ZetaSums, LeakanceOverride, RoutingParamOverride,
+    FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
 pub use loss::{
     batch_loss, filter_nan_gauges, l1_loss_post_warmup, nnse_kge_loss, tau_trim_and_downsample,
