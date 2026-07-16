@@ -166,6 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         EvalParams::KanHead(&head),
         &device,
         cli.batch_size_days,
+        &latest_ckpt,
     )?;
     let phase2_elapsed = phase2_start.elapsed();
     println!("Phase 2 complete in {:.2} min", phase2_elapsed.as_secs_f32() / 60.0);

@@ -6,13 +6,15 @@
 //! threaded via `tensors.initial_state` (the final per-reach discharge column
 //! of each chunk is injected as the initial discharge of the next chunk).
 
+use std::path::Path;
+
 use burn::tensor::backend::Backend;
 use chrono::NaiveDate;
 use ndarray::{s, Array2};
 
 use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
-use crate::data::error::Result;
+use crate::data::error::{DataError, Result};
 use crate::data::TestWindow;
 use crate::nn::kan_head::KanHead;
 use crate::training::{
@@ -47,12 +49,29 @@ pub struct EvalOutput {
     pub zeta_comids: Option<Vec<i64>>,
 }
 
+/// Returns a diagnostic reason when a chunk's predictions are provably wrong
+/// rather than merely low-skill: all exactly zero, or containing a
+/// non-finite value. This is the fingerprint of the silent-corruption
+/// failure mode where a cubecl-cuda background worker thread panics on an
+/// OOM allocation and the panic never propagates to the caller — the main
+/// thread just keeps looping with whatever half-written buffer it has.
+fn corrupted_chunk_reason(pred: &Array2<f32>) -> Option<String> {
+    if pred.iter().any(|v| !v.is_finite()) {
+        return Some("non-finite value(s) in predictions".to_string());
+    }
+    if pred.iter().all(|&v| v == 0.0) {
+        return Some("all-zero predictions".to_string());
+    }
+    None
+}
+
 pub fn evaluate<I: Backend>(
     cfg: &Config,
     dataset: &MeritGagesDataset,
     params: EvalParams<I>,
     device: &I::Device,
     batch_size_days: usize,
+    checkpoint_path: &Path,
 ) -> Result<EvalOutput> {
     let axis = dataset.time_axis().clone();
     let n_days_total = axis.num_days;
@@ -170,6 +189,14 @@ pub fn evaluate<I: Backend>(
             }
         }
         let (pred_arr, final_col) = run_chunk(&win, prev_final_state.take())?;
+        if let Some(message) = corrupted_chunk_reason(&pred_arr) {
+            return Err(DataError::CorruptedEvalChunk {
+                path: checkpoint_path.to_path_buf(),
+                chunk: chunk_idx + 1,
+                total: n_chunks_total,
+                message,
+            });
+        }
         prev_final_state = final_col;
         let h_start = day_offset * 24;
         let h_end = h_start + win.n_hourly();
@@ -284,4 +311,45 @@ pub fn evaluate<I: Backend>(
         zeta_q_mean,
         zeta_comids,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::corrupted_chunk_reason;
+    use ndarray::Array2;
+
+    #[test]
+    fn healthy_chunk_is_not_corrupted() {
+        let pred = Array2::from_shape_vec((2, 3), vec![0.1, 1.0, 2.5, 0.0, 3.0, 4.0]).unwrap();
+        assert!(corrupted_chunk_reason(&pred).is_none());
+    }
+
+    #[test]
+    fn all_zero_chunk_is_corrupted() {
+        let pred = Array2::<f32>::zeros((2, 3));
+        assert_eq!(
+            corrupted_chunk_reason(&pred),
+            Some("all-zero predictions".to_string())
+        );
+    }
+
+    #[test]
+    fn nan_chunk_is_corrupted() {
+        let mut pred = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        pred[[1, 1]] = f32::NAN;
+        assert_eq!(
+            corrupted_chunk_reason(&pred),
+            Some("non-finite value(s) in predictions".to_string())
+        );
+    }
+
+    #[test]
+    fn inf_chunk_is_corrupted() {
+        let mut pred = Array2::from_shape_vec((1, 2), vec![1.0, 2.0]).unwrap();
+        pred[[0, 1]] = f32::INFINITY;
+        assert_eq!(
+            corrupted_chunk_reason(&pred),
+            Some("non-finite value(s) in predictions".to_string())
+        );
+    }
 }

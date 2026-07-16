@@ -386,7 +386,8 @@ fn v4_test_period_matches_ddr_for_frozen_constant_params() {
 
     // Single batch covering the whole window — mirrors the dump script.
     let output = evaluate::<I>(&cfg, &dataset, EvalParams::Frozen(&frozen),
-                                &device, n_days_total).expect("evaluate");
+                                &device, n_days_total, std::path::Path::new("test-fixture"))
+        .expect("evaluate");
     let pred_ddrs = &output.predictions_daily;
     eprintln!("V4: pred_ddrs shape {:?}", pred_ddrs.shape());
     let ddrs_mean = pred_ddrs.mean().unwrap_or(0.0);
