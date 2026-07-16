@@ -334,7 +334,9 @@ where
 
 /// GPU per-nnz grada scatter using pure BURN tensor ops:
 ///
-///     grada[k] = -gradb[row_for_nnz[k]] * x[col[k]]
+/// ```text
+/// grada[k] = -gradb[row_for_nnz[k]] * x[col[k]]
+/// ```
 ///
 /// No custom CUDA kernel — `Tensor::select` (gather) compiles on any backend
 /// (NdArray for CPU tests, Cuda for the GPU path). This path runs entirely on
