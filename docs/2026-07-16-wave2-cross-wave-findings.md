@@ -111,6 +111,15 @@ correct). Cosmetic upstream-DDR quirk, not a data error.
 
 ## 5. Open follow-ups
 
+- **2026-07-21 correction:** wave 1's AORC2F-distributed-vs-lumped
+  backend-mismatch dismissal was based on an inapplicable test tolerance;
+  see the corrected §3 discussion in `docs/2026-07-16-aorc2f-wave1-findings.md`
+  for the actual (mb=0 loss ordering) evidence and the leading untested
+  hypothesis (the distributed store may already be UH-routed, causing
+  double-routing). An adversarial review of this whole campaign's controls
+  is at `/tmp/experiment-handoff-aorc2f-lstm-routing.md` — no replicate
+  seeds, no backend-consistent control run, and no per-gauge/spatial
+  diagnostics were done for any of the 4 arms.
 - Try `testing.batch_size` < 15 days to see if Phase 2 becomes GPU-viable
   (would meaningfully speed up future campaigns — each of these runs took
   2–8.5 hours, dominated by the 366-chunk CPU testing phase).

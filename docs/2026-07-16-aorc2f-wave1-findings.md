@@ -76,11 +76,22 @@ NSE −0.105 → trained 0.526), whereas distributed's raw Q′ was already
 directionally reasonable (baseline NSE 0.233) and routing helps far less in
 relative terms.
 
-**Backend caveat:** distributed trained on GPU, tested on CPU (via the
-recovery path); lumped ran entirely on CPU. Per prior parity testing
-(`tests/sparse_cusparse_v5.rs`), CPU/CUDA numerical drift is ULP-scale
-(~1e-4 rel tolerance) — far smaller than the 0.18 NSE gap observed here, so
-the lumped > distributed ranking is not a backend artifact.
+**Backend caveat — corrected 2026-07-21.** An earlier version of this note
+dismissed the distributed-trained-on-GPU / lumped-trained-on-CPU mismatch by
+citing `tests/sparse_cusparse_v5.rs`'s ULP-scale (~1e-4 rel) single-timestep
+bit-match tolerance. That citation is not valid evidence here: it bounds one
+forward+backward solve, not 5 epochs of Adam-driven weight divergence plus a
+15-year autoregressive eval rollout, where compounding numerical drift could
+plausibly matter. The correct, decisive evidence was sitting in the run
+logs and wasn't checked at the time: **mb=0 training loss — logged before
+any weight update, with both arms starting from the identical seed-42 KAN
+initialization — already orders the arms exactly as the final results do**
+(distributed 12.29 > lumped 9.22 > daily-lstm 7.32 ≈ hourly-lstm 7.29, see
+`.ddrs/runs/*/run.log`). Since this ordering exists before any
+backend-dependent training has occurred, the distributed-vs-lumped gap is
+data-borne, not a training-backend artifact — though a same-seed
+`--backend cpu` re-run of the distributed arm (not yet done) would be the
+direct confirmation.
 
 ## 4. Interpretation
 
@@ -88,7 +99,33 @@ Neither AORC2F Q′ store is a drop-in replacement for the standard
 `merit_dhbv2_UH_retrospective.ic` under this routing configuration — both
 lose substantial skill relative to the standing benchmark. Of the two, the
 lumped (AORC) dHBV variant is the better Q′ source for this KAN+disagg
-routing setup. Follow-up (not yet done): check whether the AORC2F stores'
-lower coverage assumptions, different training windows, or different
-input-forcing pipeline (vs the retrospective store) explain the gap before
-concluding this is a routing-model limitation.
+routing setup.
+
+**Leading untested hypothesis (added 2026-07-21):** the distributed store
+is labeled "Distributed + UH routing" — i.e. its upstream dHBV model may
+already apply unit-hydrograph routing (temporal lag/attenuation) to each
+divide's Q′ before ddrs ever sees it. `docs/nh-qprime-store-contract.md`
+requires Qr to be local lateral inflow with **no routing already applied**;
+`ddrs import --dry-run` validates schema/coverage/units, not this semantic
+contract, so a pre-routed store would pass import validation silently. If
+true, this would explain both halves of the anomaly: (a) the modest-but-not-
+negative raw baseline (0.233 NSE, vs lumped's fully-unrouted −0.105) is
+consistent with Q′ that already carries some routing signal, and (b) MC
+routing on top would double-route it — attenuating/lagging an
+already-attenuated/lagged signal — explaining why distributed gains the
+*least* from routing (+0.111 NSE) of all four arms despite starting from
+the weakest raw NSE. Not yet tested: cross-correlate distributed vs lumped
+Q′ at shared divides, and summed distributed Q′ vs USGS peak timing, to
+check for an extra lag signature.
+
+**Other gaps identified in a 2026-07-21 adversarial review of this
+campaign** (`/tmp/experiment-handoff-aorc2f-lstm-routing.md`): no
+replicate seeds per arm (single seed=42 run each, so run-to-run noise is
+unquantified — the 0.041 daily-lstm-vs-hourly-lstm gap is plausibly within
+noise, the 0.18+ distributed gap probably is not, but neither is
+rigorously bounded); no backend-consistent control run for the distributed
+arm (never run fully CPU or fully GPU end-to-end); the 0.7152/0.7106
+reference benchmark predates two mid-campaign changes to the eval code
+path, so the "vs benchmark" deltas compare across code states, not a
+frozen baseline; no per-gauge/spatial diagnostics or KGE α/β/r
+decomposition — all four arms were compared only by scalar medians.
