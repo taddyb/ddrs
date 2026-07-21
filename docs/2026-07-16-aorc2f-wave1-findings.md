@@ -101,22 +101,46 @@ lose substantial skill relative to the standing benchmark. Of the two, the
 lumped (AORC) dHBV variant is the better Q′ source for this KAN+disagg
 routing setup.
 
-**Leading untested hypothesis (added 2026-07-21):** the distributed store
-is labeled "Distributed + UH routing" — i.e. its upstream dHBV model may
-already apply unit-hydrograph routing (temporal lag/attenuation) to each
-divide's Q′ before ddrs ever sees it. `docs/nh-qprime-store-contract.md`
-requires Qr to be local lateral inflow with **no routing already applied**;
-`ddrs import --dry-run` validates schema/coverage/units, not this semantic
-contract, so a pre-routed store would pass import validation silently. If
-true, this would explain both halves of the anomaly: (a) the modest-but-not-
-negative raw baseline (0.233 NSE, vs lumped's fully-unrouted −0.105) is
-consistent with Q′ that already carries some routing signal, and (b) MC
-routing on top would double-route it — attenuating/lagging an
-already-attenuated/lagged signal — explaining why distributed gains the
-*least* from routing (+0.111 NSE) of all four arms despite starting from
-the weakest raw NSE. Not yet tested: cross-correlate distributed vs lumped
-Q′ at shared divides, and summed distributed Q′ vs USGS peak timing, to
-check for an extra lag signature.
+**Double-routing hypothesis — partially tested 2026-07-21, mixed result.**
+The distributed store is labeled "Distributed + UH routing." Reading Song,
+Bindas, Shen et al. (2025, WRR, 10.1029/2024WR038928 — the δHBV2.0/δMC
+paper this campaign's model family descends from) clarifies the exact
+mechanism: δHBV2.0UH runs HBV per MERIT unit basin to get `q_m` (distinct
+per unit), **sums** all upstream units' `q_m` into one value per gage basin
+(`q''_b`, Eq. 7), then applies gamma-distribution unit-hydrograph routing to
+produce `q_b` — a single time series per gage basin, architecturally
+incapable of native per-unit resolution. Critically, the paper's own
+Muskingum-Cunge arm (δHBV2.0δMC) is fed `q_m` — the **pre-aggregation,
+pre-UH-routing** per-unit runoff — not `q_b`; that is what our ddrs MC
+routing should also receive.
+
+Tested the naive version of the hypothesis directly against the store: for
+a 578-reach gauge subgraph (USGS 01184000), pulled `Qr` for 20 COMIDs
+spanning headwater to near-outlet from both `daily_dhbv_aorc2f_...ic`
+(distributed) and `daily_dhbv2_...ic` (lumped) via icechunk/zarr. **Result:
+zero bit-identical pairs in either store** (0/190 pairwise comparisons,
+1e-6 tolerance) — every COMID has a genuinely distinct time series in both
+stores. Since `q_b` is architecturally one value per gage basin, distinct
+per-COMID values rule out the simplest failure mode (the whole-basin
+UH-routed `q_b` naively replicated across every upstream unit); this store
+is very likely storing something closer to genuine per-unit `q_m`, not a
+disaggregated `q_b`. A secondary check (median lag-1 day autocorrelation,
+day-to-day-difference volatility, 4-year window, same 20 COMIDs) found
+distributed *somewhat* smoother than lumped (day-to-day volatility 0.61 vs
+0.98, autocorrelation 0.74 vs 0.77 — comparable) — a weak signal consistent
+with, but far from proof of, *some* additional smoothing/partial routing in
+the distributed store; a single-basin, two-metric comparison is not
+statistically powered to decide this. **Net effect: the strong form of the
+double-routing hypothesis (replicated basin-outlet flow) is refuted; a
+weaker form (some partial pre-smoothing) remains an open, inconclusive
+question.** Given the store's provenance is an internal `AORC2F`/`CONUS2717`
+checkpoint from the same model family as the cited paper (not named in the
+paper itself), the fastest way to close this out is to check the actual
+export/postprocessing script that generated `daily_dhbv_aorc2f_merit_unit_catchments.ic`
+for whether it exports `q_m` directly or something derived from `q_b`, rather
+than inferring it purely from the stored values. Not yet tried: repeat this
+comparison across multiple basins of varying size, and cross-correlate
+against USGS peak timing directly.
 
 **Other gaps identified in a 2026-07-21 adversarial review of this
 campaign** (`/tmp/experiment-handoff-aorc2f-lstm-routing.md`): no
