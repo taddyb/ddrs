@@ -417,6 +417,15 @@ where
                 drop(train_dataset);
 
                 // --- Phase 2: testing ---
+                // Testing's per-chunk buffers are far larger than a training
+                // minibatch's (whole-network dense state over batch_size_days),
+                // so free memory here is worth a log line even though it's not
+                // gated (see `system::free_gpu_gb` doc comment).
+                if !force_cpu {
+                    if let Some(free_gb) = crate::cli::system::free_gpu_gb() {
+                        eprintln!("Phase 2 (testing): free GPU memory {free_gb:.1} GB");
+                    }
+                }
                 let phase2_start = Instant::now();
                 let mut test_cfg = Config::from_yaml_file_with_mode(&input.config_path, ConfigMode::Testing)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
@@ -449,6 +458,7 @@ where
                     EvalParams::KanHead(&head),
                     &device,
                     batch_size_days,
+                    &latest,
                 )
                 .map_err(|e| CliError::Other(Box::new(e)))?;
 

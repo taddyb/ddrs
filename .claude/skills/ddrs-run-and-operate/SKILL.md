@@ -1,6 +1,6 @@
 ---
 name: ddrs-run-and-operate
-description: "Use when you need to install, configure, launch, or monitor a ddrs training/eval run; diagnose a stale binary; resume from a checkpoint; select a CUDA device; manage data-source groups; or understand workspace artifact layout. Also use when troubleshooting silent correctness failures caused by stale PATH binaries or CUDA graphs masking NaN."
+description: "Use when you need to install, configure, launch, or monitor a ddrs training/eval run; diagnose a stale binary; resume from a checkpoint; select a CUDA device; manage data-source groups; or understand workspace artifact layout. Also use when troubleshooting silent correctness failures caused by stale PATH binaries, CUDA graphs masking NaN, or a GPU eval Phase 2 that spins at high CPU without exiting (cubecl worker-thread OOM panic — see §14)."
 ---
 
 # ddrs: Run and Operate
@@ -305,6 +305,8 @@ Best trained result (precip-driven disagg + L1 loss, 2365 gauges, 2026-06-23): N
 
 Note: KGE does NOT beat the summed-Q' baseline in any config as of 2026-07-05. NSE beats it (+0.037 with precip disagg). This is a known open problem.
 
+These numbers are for the default `merit_dhbv2_UH_retrospective.ic` streamflow store. Swapping in an alternative Q' store (dHBV AORC2F variants, NH LSTM daily/hourly) changes both the baseline and the trained result substantially — see `docs/2026-07-16-aorc2f-wave1-findings.md` / `docs/2026-07-16-wave2-cross-wave-findings.md` for a 4-store comparison (all four came in below this benchmark).
+
 ---
 
 ## 11. Legacy Binaries (deprecated, removed in 0.4)
@@ -346,6 +348,69 @@ Caveat (2026-06-06): the reference DDR state lives only on the local desktop's `
 | Flat files `epoch_E_mb_M.mpk` in checkpoints/ | Stale pre-checkpoint-resume binary | `cargo install --path .` |
 | Hourly run uses flat repeat-24 | Missing `aorc_precip` source OR `use_precip: false` | Add `conus-hourly` source group AND set `use_precip: true` |
 | Dataset open error with `use_precip: true` | `aorc_precip` not in `data_sources` | `ddrs sources use conus-hourly` |
+| `train-and-test`'s Phase 2 (testing) spins at 900%+ CPU, repeatedly logging `thread 'DSD-0-0' panicked ... can't allocate buffer` without ever exiting | cubecl-cuda background-worker OOM panic that doesn't propagate to the caller (Phase 2's per-chunk buffer, ~4.2 GB at `batch_size: 15` days, is far larger than a training minibatch's) | Kill the process; recover via the standalone `eval` binary against the last checkpoint with `--backend cpu` (see §14). Since 2026-07-16 a fresh binary hard-fails instead of spinning — reinstall if you see this. |
+
+---
+
+## 14. GPU Eval OOM — Silent Corruption Bug (fixed 2026-07-16)
+
+**Symptom:** `--backend cuda` `train-and-test`/`eval` completes training fine,
+then Phase 2 (testing) hits a CUDA OOM inside a cubecl-cuda background
+worker thread (`thread 'DSD-0-0' panicked ... can't allocate buffer of size:
+4178264064`). The panic does **not** propagate to the caller — cubecl's
+server loop catches it, logs, and drops the task — so the main thread just
+keeps looping through all 366 eval chunks, writing whatever half-written GPU
+buffer is left. **This happens even with no other process on the GPU** —
+Phase 1 alone can leave too little headroom for Phase 2's much larger
+per-chunk buffer at the default `testing.batch_size: 15` (days/chunk) on a
+16 GB card. Confirmed twice independently (2026-07-16, distributed-source
+and daily-lstm-source arms), including once running solo.
+
+**Fixed as of 2026-07-16** (`src/training/eval.rs`): `evaluate()` now
+detects this via two layered checks and returns
+`DataError::CorruptedEvalChunk` instead of silently continuing —
+1. `corrupted_chunk_reason` — all-zero or non-finite chunk values (kept as
+   defense-in-depth; alone it MISSED the second incident because the
+   corrupted chunk happened to contain plausible-looking stale finite
+   values).
+2. `WORKER_PANICKED` — a process-global flag set by a custom panic hook
+   (`ensure_panic_hook_installed`), checked after every chunk and once more
+   after the post-loop tensor readback. This is the reliable detector — it
+   fires on ANY background-thread panic regardless of what ends up in the
+   output buffer.
+
+A binary built before 2026-07-16 will still exhibit the silent-spin
+behavior — `cargo install --path .` to pick up the fix (see the
+stale-binary trap in §1). 6 unit tests cover both detectors:
+`cargo test --lib training::eval::tests`.
+
+**Practical recommendation:** on hardware where this triggers, either (a)
+default to `--backend cpu` for `train-and-test`/`eval` workflows (training
+alone is fine on GPU), or (b) try lowering `testing.batch_size` (days/chunk)
+to shrink the per-chunk buffer — not yet validated as a GPU fix. **Recovery
+without retraining:** the standalone `eval` binary reads any completed
+checkpoint directly and supports `--backend cpu` independent of what backend
+Phase 1 used:
+
+```bash
+cargo install --path .   # only if your eval binary predates the fix
+~/.cargo/bin/eval --config <run_dir>/config.yaml \
+  --checkpoint <run_dir>/checkpoints/epoch_E_mb_M/head \
+  --output <run_dir>/eval/predictions.zarr \
+  --backend cpu
+```
+
+**Running two arms in parallel on one GPU:** don't co-schedule two
+`--backend cuda` trainings — Phase 1 alone uses ~9.9 GB on a 16 GB card, so
+a second concurrent process reliably OOMs within seconds. Give each arm a
+different backend from the start (one `--backend cuda`, one `--backend
+cpu`) rather than launching both on GPU and recovering after a crash. See
+`config/experiments/aorc2f_distributed_frozen_chunk1.yaml` /
+`aorc2f_lumped_frozen_chunk1.yaml` / `lstm_daily_frozen_chunk1.yaml` /
+`lstm_hourly_native.yaml` and
+`docs/2026-07-16-aorc2f-wave1-findings.md` /
+`docs/2026-07-16-wave2-cross-wave-findings.md` for a full worked campaign
+(4 CONUS train-and-test arms, 2 OOM incidents, full recovery).
 
 ---
 
@@ -372,6 +437,16 @@ ls /home/tbindas/projects/ddrs/config/sources/
 
 # Re-verify stale-binary trap documentation:
 grep -A 20 "STALE-BINARY TRAP" /home/tbindas/projects/ddrs/CLAUDE.md
+
+# Re-verify the GPU eval OOM fix (§14):
+grep -n "CorruptedEvalChunk\|WORKER_PANICKED" /home/tbindas/projects/ddrs/src/training/eval.rs /home/tbindas/projects/ddrs/src/data/error.rs
 ```
 
 Volatile facts dated 2026-07-05: baseline metrics, best-run metrics, leakance GO verdict, K_D ceiling observation, KGE vs baseline status. Re-check these after any new experiment campaign.
+
+Volatile facts dated 2026-07-16: the GPU eval OOM bug (§14) and its fix; the
+4-arm AORC2F/LSTM campaign benchmark numbers in
+`docs/2026-07-16-aorc2f-wave1-findings.md` and
+`docs/2026-07-16-wave2-cross-wave-findings.md`. Re-check the OOM fix is
+still present (grep above) before trusting a GPU `train-and-test` run's
+Phase 2 output on new hardware.

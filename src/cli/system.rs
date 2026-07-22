@@ -98,6 +98,20 @@ pub fn record_smoke(probe: &mut SystemProbe, key: String, backend: &str) {
     });
 }
 
+/// Best-effort free-GPU-memory read for warn-level logging around a phase
+/// transition (e.g. before Phase 2/testing, whose per-chunk buffers are far
+/// larger than a training minibatch's). NOT a hard gate — cubecl's retained
+/// memory pool means a moment-in-time free-memory read here is unreliable as
+/// a threshold check (see the 2026-07-16 silent-eval-corruption incident,
+/// `tests/eval_chunk_continuity.rs` and `DataError::CorruptedEvalChunk`,
+/// which catch the actual failure mode instead). Returns `None` when no CUDA
+/// context is current in this process.
+pub fn free_gpu_gb() -> Option<f32> {
+    result::mem_get_info()
+        .ok()
+        .map(|(free, _total)| free as f32 / (1u64 << 30) as f32)
+}
+
 /// Result of [`ensure_system_ready`].
 pub struct SystemReadiness {
     /// Post-write probe snapshot (matches what was persisted to

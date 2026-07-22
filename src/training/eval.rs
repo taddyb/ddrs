@@ -6,13 +6,17 @@
 //! threaded via `tensors.initial_state` (the final per-reach discharge column
 //! of each chunk is injected as the initial discharge of the next chunk).
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
+
 use burn::tensor::backend::Backend;
 use chrono::NaiveDate;
 use ndarray::{s, Array2};
 
 use crate::config::Config;
 use crate::data::dataset::MeritGagesDataset;
-use crate::data::error::Result;
+use crate::data::error::{DataError, Result};
 use crate::data::TestWindow;
 use crate::nn::kan_head::KanHead;
 use crate::training::{
@@ -47,13 +51,65 @@ pub struct EvalOutput {
     pub zeta_comids: Option<Vec<i64>>,
 }
 
+/// Returns a diagnostic reason when a chunk's predictions are provably wrong
+/// rather than merely low-skill: all exactly zero, or containing a
+/// non-finite value. This is ONE fingerprint of the silent-corruption
+/// failure mode below — kept as defense-in-depth alongside
+/// [`worker_panic_detected`], since it doesn't depend on the panic hook
+/// having fired.
+fn corrupted_chunk_reason(pred: &Array2<f32>) -> Option<String> {
+    if pred.iter().any(|v| !v.is_finite()) {
+        return Some("non-finite value(s) in predictions".to_string());
+    }
+    if pred.iter().all(|&v| v == 0.0) {
+        return Some("all-zero predictions".to_string());
+    }
+    None
+}
+
+/// Set by a global panic hook whenever ANY thread panics during an
+/// `evaluate()` call. Primary detector for the silent-corruption failure
+/// mode: a cubecl-cuda background worker thread (`DSD-0-0`) panics on a CUDA
+/// OOM, but the panic never propagates to the caller and the main thread
+/// keeps looping with whatever half-written buffer cubecl left behind.
+/// `corrupted_chunk_reason`'s all-zero/non-finite check is NOT sufficient on
+/// its own — confirmed 2026-07-16: a repeat of this exact incident produced
+/// a chunk with plausible-looking finite, non-zero values (stale GPU memory
+/// from a previous op) that slipped past it while the worker thread
+/// panicked dozens of times underneath.
+static WORKER_PANICKED: AtomicBool = AtomicBool::new(false);
+static INSTALL_PANIC_HOOK: Once = Once::new();
+
+/// Idempotent; wraps (does not replace) the default hook so panic messages
+/// still print. Must be called before the eval chunk loop starts.
+fn ensure_panic_hook_installed() {
+    INSTALL_PANIC_HOOK.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            WORKER_PANICKED.store(true, Ordering::SeqCst);
+            default_hook(info);
+        }));
+    });
+}
+
+/// Clears any panic recorded before this call (e.g. from an unrelated prior
+/// `evaluate()` invocation in the same process) and reports whether a panic
+/// happened since.
+fn take_worker_panicked() -> bool {
+    WORKER_PANICKED.swap(false, Ordering::SeqCst)
+}
+
 pub fn evaluate<I: Backend>(
     cfg: &Config,
     dataset: &MeritGagesDataset,
     params: EvalParams<I>,
     device: &I::Device,
     batch_size_days: usize,
+    checkpoint_path: &Path,
 ) -> Result<EvalOutput> {
+    ensure_panic_hook_installed();
+    take_worker_panicked(); // clear any stale flag from an unrelated prior call
+
     let axis = dataset.time_axis().clone();
     let n_days_total = axis.num_days;
     assert!(batch_size_days > 0, "batch_size_days must be positive");
@@ -170,6 +226,16 @@ pub fn evaluate<I: Backend>(
             }
         }
         let (pred_arr, final_col) = run_chunk(&win, prev_final_state.take())?;
+        let panic_message = take_worker_panicked()
+            .then(|| "a background thread panicked during this chunk".to_string());
+        if let Some(message) = panic_message.or_else(|| corrupted_chunk_reason(&pred_arr)) {
+            return Err(DataError::CorruptedEvalChunk {
+                path: checkpoint_path.to_path_buf(),
+                chunk: chunk_idx + 1,
+                total: n_chunks_total,
+                message,
+            });
+        }
         prev_final_state = final_col;
         let h_start = day_offset * 24;
         let h_end = h_start + win.n_hourly();
@@ -271,6 +337,18 @@ pub fn evaluate<I: Backend>(
             _ => (None, None, None, None, None, None),
         };
 
+    // Final gate: the tau-trim/downsample and zeta-mean readbacks above also
+    // run on the device, after the last per-chunk check — a worker panic
+    // there would otherwise slip through as a clean `Ok`.
+    if take_worker_panicked() {
+        return Err(DataError::CorruptedEvalChunk {
+            path: checkpoint_path.to_path_buf(),
+            chunk: n_chunks_total,
+            total: n_chunks_total,
+            message: "a background thread panicked during post-loop tensor readback".to_string(),
+        });
+    }
+
     Ok(EvalOutput {
         predictions_daily,
         observations_daily,
@@ -284,4 +362,71 @@ pub fn evaluate<I: Backend>(
         zeta_q_mean,
         zeta_comids,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{corrupted_chunk_reason, ensure_panic_hook_installed, take_worker_panicked};
+    use ndarray::Array2;
+    use std::sync::Mutex;
+
+    // WORKER_PANICKED is a process-global static; serialize the two tests
+    // that touch it so they can't race against each other under the default
+    // parallel test harness.
+    static PANIC_FLAG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn worker_thread_panic_sets_flag() {
+        let _guard = PANIC_FLAG_TEST_LOCK.lock().unwrap();
+        ensure_panic_hook_installed();
+        take_worker_panicked(); // clear any residual state before asserting
+
+        let result = std::thread::spawn(|| panic!("simulated cubecl worker panic")).join();
+        assert!(result.is_err());
+        assert!(take_worker_panicked(), "flag should be set after a background thread panic");
+        assert!(!take_worker_panicked(), "flag should be cleared by the previous take");
+    }
+
+    #[test]
+    fn no_panic_leaves_flag_clear() {
+        let _guard = PANIC_FLAG_TEST_LOCK.lock().unwrap();
+        ensure_panic_hook_installed();
+        take_worker_panicked(); // clear any residual state
+        assert!(!take_worker_panicked());
+    }
+
+    #[test]
+    fn healthy_chunk_is_not_corrupted() {
+        let pred = Array2::from_shape_vec((2, 3), vec![0.1, 1.0, 2.5, 0.0, 3.0, 4.0]).unwrap();
+        assert!(corrupted_chunk_reason(&pred).is_none());
+    }
+
+    #[test]
+    fn all_zero_chunk_is_corrupted() {
+        let pred = Array2::<f32>::zeros((2, 3));
+        assert_eq!(
+            corrupted_chunk_reason(&pred),
+            Some("all-zero predictions".to_string())
+        );
+    }
+
+    #[test]
+    fn nan_chunk_is_corrupted() {
+        let mut pred = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        pred[[1, 1]] = f32::NAN;
+        assert_eq!(
+            corrupted_chunk_reason(&pred),
+            Some("non-finite value(s) in predictions".to_string())
+        );
+    }
+
+    #[test]
+    fn inf_chunk_is_corrupted() {
+        let mut pred = Array2::from_shape_vec((1, 2), vec![1.0, 2.0]).unwrap();
+        pred[[0, 1]] = f32::INFINITY;
+        assert_eq!(
+            corrupted_chunk_reason(&pred),
+            Some("non-finite value(s) in predictions".to_string())
+        );
+    }
 }

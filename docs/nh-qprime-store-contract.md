@@ -41,14 +41,20 @@ lives here.
 hourly-native — disaggregating an already-hourly signal is a config
 contradiction (`src/data/dataset.rs::validate_disagg_vs_resolution`).
 
-## Conforming stores (2026-07-01)
+## Conforming stores (2026-07-01, `daily_dhbv2`/`daily_dhbv_aorc2f` re-verified 2026-07-15 after a 2026-07-10 rebuild)
 
 | Store (`/mnt/ssd1/data/icechunk/`) | resolution | range | divides |
 |---|---|---|---|
 | `daily_lstm_merit_unit_catchments.ic` | daily | 1981-01-01 → 2020-12-30 | 288,421 |
 | `hourly_lstm_merit_unit_catchments.ic` | hourly | 1981-01-01 → 2020-12-31T23 | 197,088 |
-| `daily_dhbv2_merit_unit_catchments.ic` | daily | 1980-01-01 → 2020-12-30 | 288,421 |
+| `daily_dhbv2_merit_unit_catchments.ic` | daily | 1980-01-01 → 2020-12-31 | 197,088 |
+| `daily_dhbv_aorc2f_merit_unit_catchments.ic` | daily | 1980-01-01 → 2020-12-31 | 197,088 |
 | `merit_dhbv2_UH_retrospective.ic` | daily | 1980-01-01 → 2020-12-31 | 197,088 |
+
+`daily_dhbv2_merit_unit_catchments.ic` was rebuilt 2026-07-10 (previously
+288,421 divides as of 2026-07-01); `ddrs import --dry-run` is the source of
+truth for the current 197,088/197,084-fabric-coverage numbers, not this
+table.
 
 Note the hourly store starts **1981-01-01** (1980 was LSTM warmup): an
 experiment window reaching into 1980 hard-errors rather than clamping.

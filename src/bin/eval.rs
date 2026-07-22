@@ -117,7 +117,14 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         let probe_window = TestWindow::new(&axis, 0, 1);
         let probe = dataset.collate_window(&probe_window)?;
         let frozen = FrozenParams::constant(probe.adjacency.n);
-        evaluate::<I>(&cfg, &dataset, EvalParams::Frozen(&frozen), &device, cli.batch_size_days)?
+        evaluate::<I>(
+            &cfg,
+            &dataset,
+            EvalParams::Frozen(&frozen),
+            &device,
+            cli.batch_size_days,
+            &cli.output,
+        )?
     } else {
         let head_section = cfg
             .kan_head
@@ -125,8 +132,16 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
             .expect("kan_head config required for KAN-head eval");
         let head_cfg = ddrs::config::kan_config(head_section, cfg.seed);
         let head_template: KanHead<I> = head_cfg.init::<I>(&device);
-        let head = load_kan_head::<I>(&head_base(cli.checkpoint.as_ref().unwrap()), head_template, &device)?;
-        evaluate::<I>(&cfg, &dataset, EvalParams::KanHead(&head), &device, cli.batch_size_days)?
+        let checkpoint = cli.checkpoint.as_ref().unwrap();
+        let head = load_kan_head::<I>(&head_base(checkpoint), head_template, &device)?;
+        evaluate::<I>(
+            &cfg,
+            &dataset,
+            EvalParams::KanHead(&head),
+            &device,
+            cli.batch_size_days,
+            checkpoint,
+        )?
     };
 
     // Write the zarr.

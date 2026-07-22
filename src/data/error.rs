@@ -60,6 +60,19 @@ pub enum DataError {
         #[source]
         source: csv::Error,
     },
+
+    #[error(
+        "eval chunk {chunk}/{total} looks corrupted ({message}); context path {path:?} — \
+         likely a silent GPU worker-thread failure (e.g. a cubecl OOM in a background thread, \
+         which logs-and-drops the task instead of propagating an error); retry with \
+         --backend cpu or a smaller batch_size_days"
+    )]
+    CorruptedEvalChunk {
+        path: PathBuf,
+        chunk: usize,
+        total: usize,
+        message: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, DataError>;

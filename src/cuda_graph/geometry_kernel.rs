@@ -10,7 +10,9 @@
 //!    (trapezoidal geometry + Muskingum coefficients) with 19 outputs. The
 //!    captured forward region for SP-10 will be:
 //!
-//!        K1 → cuSPARSE SpMV → K2 (b_rhs) → assemble → cuSPARSE SpSV → K3 (clamp)
+//! ```text
+//! K1 → cuSPARSE SpMV → K2 (b_rhs) → assemble → cuSPARSE SpSV → K3 (clamp)
+//! ```
 //!
 //!    K1 produces every saved-state intermediate that `TimestepOp::backward`
 //!    consumes from the pre-SpMV part of the chain — i.e., everything in
@@ -351,7 +353,9 @@ pub fn forward_k1_kernel<F: Float + cubecl::CubeElement>(
 
 /// SP-10 Phase 2 K2: fused S25 of `forward_chain_inner`.
 ///
-///     b_rhs = c2 * i_t + c3 * q_t + c4 * q_prime_t
+/// ```text
+/// b_rhs = c2 * i_t + c3 * q_t + c4 * q_prime_t
+/// ```
 ///
 /// Single elementwise linear combination over `[n_segments]`. `c2`, `c3`, `c4`
 /// come from K1; `i_t` is the cuSPARSE SpMV output; `qt`, `qpt` are per-step
@@ -405,7 +409,9 @@ pub fn assemble_kernel<F: Float + cubecl::CubeElement>(
 
 /// SP-10 Phase 2 K3: fused S28 of `forward_chain_inner`.
 ///
-///     q_next = max(x_sol, discharge_lb)
+/// ```text
+/// q_next = max(x_sol, discharge_lb)
+/// ```
 ///
 /// Single elementwise lower-clamp over `[n_segments]`. `x_sol` is the
 /// cuSPARSE SpSV solve output. Mirrors `mmc_op.rs:653-654`
