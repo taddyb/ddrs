@@ -26,15 +26,23 @@ SEED = 42
 
 
 def leopold_maddock_n(log10_uparea: np.ndarray) -> np.ndarray:
-    """Decreasing power law: n = clip(N_CENTER * (uparea/uparea_median)^-b, N_LO, N_HI).
-
-    b is calibrated so the field spans roughly [N_LO, N_HI] across the real
-    CONUS log10_uparea distribution (see design spec §1 footnote — a tuning
-    detail, not a design fork).
+    """Decreasing power law, calibrated against the REAL CONUS log10_uparea
+    distribution so the field actually spans [N_LO, N_HI] (not just
+    approximately): n falls linearly in log-log space from N_HI at the 1st
+    percentile of log10_uparea (smallest headwaters) to N_LO at the 99th
+    percentile (largest rivers). Anchoring on the 1st/99th percentile rather
+    than the true min/max avoids a handful of extreme-tail reaches
+    compressing the realized range for everyone else — log10_uparea here is
+    right-skewed (median much closer to the min than the max), so a fixed
+    exponent centered on the median (an earlier version of this function)
+    undershoots both bounds; this anchors directly to the bounds instead.
+    Reaches beyond the 1st/99th percentile are clipped to N_HI/N_LO.
     """
-    median = np.median(log10_uparea)
-    b = 0.15
-    n = N_CENTER * 10.0 ** (-b * (log10_uparea - median))
+    lo_x, hi_x = np.percentile(log10_uparea, [1, 99])
+    log_n = np.log10(N_HI) + (log10_uparea - lo_x) * (
+        np.log10(N_LO) - np.log10(N_HI)
+    ) / (hi_x - lo_x)
+    n = 10.0**log_n
     return np.clip(n, N_LO, N_HI).astype(np.float32)
 
 
