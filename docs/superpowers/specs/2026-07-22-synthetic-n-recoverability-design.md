@@ -36,6 +36,17 @@ stay close to truth), that is a direct, ground-truth-anchored demonstration
 of the bias-absorption mechanism — no real roughness observations needed,
 because the roughness observations are built by construction.
 
+**Naming — do not conflate with the registered campaign.** This experiment's
+4 arms are this AORC2F/LSTM wave campaign's own naming
+(`aorc2f_distributed`/`aorc2f_lumped`/`daily_lstm`/`hourly_lstm`, from
+`docs/2026-07-16-aorc2f-wave1-findings.md` and
+`docs/2026-07-16-wave2-cross-wave-findings.md`) — a DIFFERENT arm set from
+the pre-registered LSTM-equifinality campaign's R1/R2/R3 naming (the paper's
+`tab:arms` table). Any findings doc or paper section drawing on this
+experiment must keep the two naming schemes and the two campaigns'
+provenance clearly separated; this experiment informs, but does not
+replace, extend, or amend, the registered campaign's own R1-R3 results.
+
 Unlike the leakance recoverability experiment (which planted a *subtle*,
 sub-percent per-reach flux perturbation that turned out to be invisible below
 the windowed training objective's ~130× noise floor), this design swaps the
@@ -189,17 +200,21 @@ explicit instruction).
 
 ## 6. Concerns
 
-1. **Disagg-head architecture is NOT shared between the consensus-geometry
-   source (this campaign's 4 checkpoints, capacity-boosted frozen chunk1
-   head) and the teacher's forward pass.** Why accepted: geometry
+1. **Disagg-head architecture IS shared across the teacher and all 4
+   students (the same frozen capacity-boosted chunk1 head, matching this
+   campaign's own configs) — but that shared-ness is itself an unverified
+   assumption, not a proven non-confound.** The claim "geometry
    (q_spatial/p_spatial) is independent of the disagg head's daily→hourly
-   precip translation; the disagg head only affects Q' timing, not the main
-   KAN head's attribute→n/q/p mapping. All 4 real checkpoints already share
-   the SAME disagg-head architecture as each other (and as the students that
-   will reuse it), so this only matters for the teacher's own forward pass
-   (which needs *some* disagg head to translate daily Q'_true → hourly if the
-   config calls for it) — using the same frozen capacity-boosted chunk1 head
-   as the students is the natural, zero-new-code choice.
+   precip translation" is asserted here, not tested. Why it matters: S3
+   (geometry recovery error) is the experiment's cross-arm CONSISTENCY
+   check — the headline S4 ratio depends on geometry error staying small
+   and stable while n's varies. Since every arm freezes the SAME disagg
+   head, a latent disagg-head effect on q/p would masquerade as "geometry
+   converges because it's physically identifiable" when the real cause is
+   "geometry converges because the disagg head never changes." This is NOT
+   fully closed by the current design — the findings doc (plan Task 7) must
+   carry an explicit sanity note flagging this as an open confound in S3's
+   interpretation, not a settled non-issue.
 2. **Cold-start students could reintroduce the leakance experiment's ~130×
    windowed-objective noise floor.** Why judged low-risk here: that floor
    swamped a SMALL per-reach flux signal; a full Q'-source swap changes
