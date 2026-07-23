@@ -32,11 +32,22 @@
 //!       --probe-plan output/probe_plan.csv --eval-days 1095 \
 //!       --output output/perturb_runs/
 //!
-//! Stage 3 (`--mode teacher`): planted-leakance world — overrides the KAN
-//! head's normalized leakance outputs at specified reaches with values from a
-//! CSV, then runs the chunked eval loop and writes (a) synthetic daily gauge
-//! observations as a zarr-v2 store and (b) a per-reach zeta answer key netCDF.
+//! Stage 3 (`--mode teacher`): synthetic-twin ground-truth generator — runs
+//! the chunked eval loop and writes synthetic daily gauge observations as a
+//! zarr-v2 store. Two INDEPENDENT, orthogonal overrides may be combined or
+//! used alone:
+//!   (a) planted-leakance world (`--plant-file` + `--zeta-output`) — overrides
+//!       the KAN head's normalized leakance outputs at specified reaches with
+//!       values from a CSV; also writes a per-reach zeta answer-key netCDF.
+//!       Requires `params.use_leakance: true`.
+//!   (b) routing-parameter donor world (`--donor-params-nc`, docs:
+//!       docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md)
+//!       — overrides ALL THREE of n/q_spatial/p_spatial from a
+//!       `dump_parameters::write_netcdf`-schema donor NetCDF (the same
+//!       mechanism `--mode eval-loss`'s "full-swap" composition uses).
 //! `--output` is not used in teacher mode.
+//!
+//! Leakance-only (original usage, unchanged):
 //!   cargo run --release --bin probe_zeta_gradient -- \
 //!       --mode teacher \
 //!       --config config/experiments/leakance_hourly_on.yaml \
@@ -45,6 +56,15 @@
 //!       --plant-file output/plant_sites.csv \
 //!       --obs-output output/teacher_obs/ \
 //!       --zeta-output output/teacher_zeta.nc
+//!
+//! Routing-parameter donor only (no leakance, no --plant-file/--zeta-output):
+//!   cargo run --release --bin probe_zeta_gradient -- \
+//!       --mode teacher --backend cpu \
+//!       --config config/experiments/synthetic_n_teacher.yaml \
+//!       --checkpoint .ddrs/runs/2026-07-16T02-22-14Z-train-and-test/checkpoints/epoch_5_mb_35 \
+//!       --eval-days 999999 \
+//!       --donor-params-nc output/synthetic_n/truth_leopold_maddock.nc \
+//!       --obs-output output/synthetic_n/synthetic_obs/
 //!
 //! Stage 4 (`--mode floor`): per-day windowed |pred-obs| residuals for
 //! transient-floor curves. Teacher weights + self-generated synthetic obs →
@@ -200,14 +220,19 @@ struct Cli {
     probe_plan: Option<PathBuf>,
 
     /// teacher mode: plant CSV (comid,k_d_norm,d_gw_norm,factor_norm,...).
+    /// Optional — omit together with --zeta-output when only overriding
+    /// n/q_spatial/p_spatial via --donor-params-nc (no leakance planting).
     #[arg(long)]
     plant_file: Option<PathBuf>,
 
-    /// teacher mode: directory for the synthetic-obs zarr-v2 store.
+    /// teacher mode: directory for the synthetic-obs zarr-v2 store. Always
+    /// required in teacher mode regardless of which override(s) are active.
     #[arg(long)]
     obs_output: Option<PathBuf>,
 
     /// teacher mode: answer-key netCDF (zeta accumulation over the window).
+    /// Required IFF --plant-file is given (leakance-planting world only);
+    /// omit both together for a routing-parameter-donor-only teacher run.
     #[arg(long)]
     zeta_output: Option<PathBuf>,
 
@@ -229,6 +254,12 @@ struct Cli {
     /// COMID-keyed, physical units) supplying n/q_spatial/p_spatial for any
     /// composition other than "own". Required unless --compositions is "own"
     /// only.
+    ///
+    /// teacher mode: same donor-NetCDF schema, but ALL THREE of
+    /// n/q_spatial/p_spatial are always overridden together (no partial
+    /// swap) — the synthetic-twin ground-truth generator (see
+    /// docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+    /// Optional; independent of --plant-file/--zeta-output.
     #[arg(long)]
     donor_params_nc: Option<PathBuf>,
 
@@ -334,17 +365,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    // --donor-params-nc/--compositions/--loss-output/--per-gauge-output are
-    // only valid in eval-loss mode.
-    if (cli.donor_params_nc.is_some()
-        || cli.compositions.is_some()
-        || cli.loss_output.is_some()
-        || cli.per_gauge_output.is_some())
+    // --compositions/--loss-output/--per-gauge-output are only valid in
+    // eval-loss mode. --donor-params-nc is ALSO valid in teacher mode (the
+    // synthetic-n routing-parameter donor override).
+    if (cli.compositions.is_some() || cli.loss_output.is_some() || cli.per_gauge_output.is_some())
         && mode != Mode::EvalLoss
     {
         return Err(format!(
-            "--donor-params-nc/--compositions/--loss-output/--per-gauge-output are only \
+            "--compositions/--loss-output/--per-gauge-output are only \
              valid in --mode eval-loss (got --mode {})",
+            cli.mode
+        )
+        .into());
+    }
+    if cli.donor_params_nc.is_some() && mode != Mode::EvalLoss && mode != Mode::Teacher {
+        return Err(format!(
+            "--donor-params-nc is only valid in --mode eval-loss or --mode teacher (got --mode {})",
             cli.mode
         )
         .into());
@@ -1065,11 +1101,19 @@ fn run_teacher<I: Backend>(
     // only ~14 times over 5115 teacher days (0.82%), vs 341 times with C=15 (20%).
     // 70 GB RAM easily holds a 365-day AORC precip chunk (~2.3 GB).
     const BATCH_SIZE_DAYS: usize = 365;
-    assert!(cfg.params.use_leakance, "teacher requires params.use_leakance: true");
 
-    let plants = parse_plant_file(
-        cli.plant_file.as_ref().ok_or("--plant-file is required in teacher mode")?,
-    )?;
+    let plants = match &cli.plant_file {
+        Some(p) => parse_plant_file(p)?,
+        None => Vec::new(),
+    };
+    let leakance_active = !plants.is_empty();
+    if leakance_active {
+        assert!(
+            cfg.params.use_leakance,
+            "teacher requires params.use_leakance: true when --plant-file is given"
+        );
+    }
+
     let obs_dir = cli.obs_output.as_ref().ok_or("--obs-output is required in teacher mode")?;
     if obs_dir.exists() && obs_dir.read_dir()?.next().is_some() {
         return Err(format!(
@@ -1079,14 +1123,23 @@ fn run_teacher<I: Backend>(
         )
         .into());
     }
-    let zeta_path = cli.zeta_output.as_ref().ok_or("--zeta-output is required in teacher mode")?;
-    if let Some(p) = zeta_path.parent() {
-        if !p.as_os_str().is_empty() && !p.exists() {
-            return Err(
-                format!("--zeta-output parent dir does not exist: {}", p.display()).into(),
-            );
+    let zeta_path: Option<PathBuf> = if leakance_active {
+        let p = cli
+            .zeta_output
+            .as_ref()
+            .ok_or("--zeta-output is required in teacher mode when --plant-file is given")?;
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(
+                    format!("--zeta-output parent dir does not exist: {}", parent.display())
+                        .into(),
+                );
+            }
         }
-    }
+        Some(p.clone())
+    } else {
+        None
+    };
     let checkpoint = cli.checkpoint.as_ref().ok_or("--checkpoint is required in teacher mode")?;
 
     let head_section = cfg.kan_head.as_ref().expect("kan_head config required");
@@ -1138,19 +1191,61 @@ fn run_teacher<I: Backend>(
     let comid_col: HashMap<i64, usize> =
         network_comids.iter().enumerate().map(|(i, &c)| (c, i)).collect();
     let n_reaches = network_comids.len();
-    let mut ov = LeakanceOverride {
-        mask: vec![0.0; n_reaches],
-        k_d: vec![0.0; n_reaches],
-        d_gw: vec![0.0; n_reaches],
-        factor: vec![0.0; n_reaches],
+
+    let leakance_ov: Option<LeakanceOverride> = if leakance_active {
+        let mut ov = LeakanceOverride {
+            mask: vec![0.0; n_reaches],
+            k_d: vec![0.0; n_reaches],
+            d_gw: vec![0.0; n_reaches],
+            factor: vec![0.0; n_reaches],
+        };
+        for &(comid, k, d, f) in &plants {
+            let col = comid_col[&comid];
+            ov.mask[col] = 1.0;
+            ov.k_d[col] = k;
+            ov.d_gw[col] = d;
+            ov.factor[col] = f;
+        }
+        Some(ov)
+    } else {
+        None
     };
-    for &(comid, k, d, f) in &plants {
-        let col = comid_col[&comid];
-        ov.mask[col] = 1.0;
-        ov.k_d[col] = k;
-        ov.d_gw[col] = d;
-        ov.factor[col] = f;
-    }
+
+    // Optional n/q_spatial/p_spatial donor override (the synthetic-n
+    // routing-parameter twin — docs/superpowers/specs/2026-07-22-synthetic-n-
+    // recoverability-design.md). Reuses the same --donor-params-nc /
+    // load_comid_field / gather_by_comid / physical_to_normalized machinery
+    // as --mode eval-loss's full-swap composition.
+    let param_ov: Option<RoutingParamOverride> = match &cli.donor_params_nc {
+        Some(donor_path) => {
+            let log_space =
+                |name: &str| cfg.params.log_space_parameters.iter().any(|s| s == name);
+            let n_map = load_comid_field(donor_path, "n")?;
+            let q_map = load_comid_field(donor_path, "q_spatial")?;
+            let p_map = load_comid_field(donor_path, "p_spatial")?;
+            let n_vals = gather_by_comid(&n_map, &network_comids)?;
+            let q_vals = gather_by_comid(&q_map, &network_comids)?;
+            let p_vals = gather_by_comid(&p_map, &network_comids)?;
+            Some(RoutingParamOverride {
+                n: Some(physical_to_normalized(
+                    &n_vals,
+                    cfg.params.parameter_ranges.n,
+                    log_space("n"),
+                )),
+                q_spatial: Some(physical_to_normalized(
+                    &q_vals,
+                    cfg.params.parameter_ranges.q_spatial,
+                    log_space("q_spatial"),
+                )),
+                p_spatial: Some(physical_to_normalized(
+                    &p_vals,
+                    cfg.params.parameter_ranges.p_spatial,
+                    log_space("p_spatial"),
+                )),
+            })
+        }
+        None => None,
+    };
 
     // Chunked CONTINUOUS forward with overrides + zeta accumulation. Continuity
     // across chunks is maintained by injecting the previous chunk's final
@@ -1161,7 +1256,7 @@ fn run_teacher<I: Backend>(
     // leaving 15-day-periodic discontinuities 10-15x the day-to-day baseline on
     // large basins). The per-reach forward is used so the final column can be
     // extracted; gauge aggregation happens here via scatter_add_by_group.
-    let mut zeta_sink = ZetaSums::<I>::new();
+    let mut zeta_sink: Option<ZetaSums<I>> = leakance_active.then(ZetaSums::<I>::new);
     let mut predictions_full = Array2::<f32>::zeros((n_all_gauges, n_hours));
     let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
     let mut day_offset = 0usize;
@@ -1200,9 +1295,9 @@ fn run_teacher<I: Backend>(
             &head,
             &device,
             false,
-            Some(&mut zeta_sink),
-            Some(&ov),
-            None,
+            zeta_sink.as_mut(),
+            leakance_ov.as_ref(),
+            param_ov.as_ref(),
         );
         let chunk_hours = win.n_hourly();
         let runoff_vec: Vec<f32> = runoff.clone().into_data().into_vec().unwrap();
@@ -1250,24 +1345,31 @@ fn run_teacher<I: Backend>(
         daily.dim().1
     );
 
-    // Answer key: zeta means over the routed window.
-    let scale = 1.0_f32 / zeta_sink.steps as f32;
-    assert!(scale.is_finite() && scale > 0.0, "zeta accumulation empty — leakance inactive?");
-    let mean_vec = |t: Option<Tensor<I, 1>>| -> Vec<f32> {
-        (t.expect("zeta sums present") * scale).into_data().into_vec().unwrap()
-    };
-    write_zeta_netcdf(
-        zeta_path,
-        &network_comids,
-        &mean_vec(zeta_sink.abs_sum),
-        &mean_vec(zeta_sink.net_sum),
-        &mean_vec(zeta_sink.depth_sum),
-        &mean_vec(zeta_sink.area_z_sum),
-        &mean_vec(zeta_sink.q_sum),
-        &format!("teacher:{}", checkpoint.display()),
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-    println!("answer key → {} ({} reaches)", zeta_path.display(), network_comids.len());
+    // Answer key: zeta means over the routed window (only when leakance was
+    // planted — a routing-parameter-donor-only teacher run has no zeta term
+    // to report).
+    if let Some(sink) = zeta_sink {
+        let zeta_path = zeta_path.expect("zeta_path is set whenever leakance_active");
+        let scale = 1.0_f32 / sink.steps as f32;
+        assert!(scale.is_finite() && scale > 0.0, "zeta accumulation empty — leakance inactive?");
+        let mean_vec = |t: Option<Tensor<I, 1>>| -> Vec<f32> {
+            (t.expect("zeta sums present") * scale).into_data().into_vec().unwrap()
+        };
+        write_zeta_netcdf(
+            &zeta_path,
+            &network_comids,
+            &mean_vec(sink.abs_sum),
+            &mean_vec(sink.net_sum),
+            &mean_vec(sink.depth_sum),
+            &mean_vec(sink.area_z_sum),
+            &mean_vec(sink.q_sum),
+            &format!("teacher:{}", checkpoint.display()),
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+        println!("answer key → {} ({} reaches)", zeta_path.display(), network_comids.len());
+    } else {
+        println!("no --plant-file given — skipping zeta answer-key write");
+    }
     Ok(())
 }
 
