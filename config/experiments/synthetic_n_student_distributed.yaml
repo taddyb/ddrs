@@ -1,0 +1,96 @@
+# aorc2f_distributed_frozen_chunk1.yaml — full CONUS routing train against the
+# distributed+UH-routing dHBV AORC2F v2 Q' forecast (upstream checkpoint
+# CONUS2717_AORC2F_v2 ep69 — a DDR/PyTorch model that produced this store's
+# Q' data; ddrs only reads the resulting streamflow, it does not load that
+# checkpoint). Same capacity-boosted frozen disagg head as
+# kan_disagg_conus_frozen_chunk1.yaml (hidden 16, 2 KanLayers, grid 20,
+# chunk_days=1, warm-started from capacity_chunk1.mpk, FROZEN).
+#
+# Both the KAN head and the router run on GPU (sparse_solver: cuda).
+# Companion arm: aorc2f_lumped_frozen_chunk1.yaml (same settings, lumped Q').
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+device: 0
+seed: 42
+np_seed: 42
+
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/daily_dhbv_aorc2f_merit_unit_catchments.ic
+  observations: /home/tbindas/projects/ddrs/output/synthetic_n/synthetic_obs_lm
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+
+experiment:
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 5
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    3: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+  # Capacity-boosted disagg head — architecture MUST match capacity_chunk1.mpk
+  # (pretrain_disagg_capacity --chunk-days 1: hidden 16, 2 layers, grid 20, k 3).
+  disaggregation:
+    hidden_size: 16
+    num_hidden_layers: 2
+    grid: 20
+    k: 3
+    boundary_blend: 0.0
+    chunk_days: 1
+    pretrained_checkpoint: /home/tbindas/projects/ddrs/output/disagg_pretrain/capacity_chunk1.mpk
+    freeze: true
+
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  sparse_solver: cuda
+  use_cuda_graphs: false
+  use_leakance: false
+
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15
+  rho: null
