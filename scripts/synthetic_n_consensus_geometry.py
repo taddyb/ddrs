@@ -12,7 +12,6 @@ Run from ddrs-py's venv:
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -46,11 +45,27 @@ CHECKPOINTS = [
 ]
 
 
+def _is_intact(path: Path) -> bool:
+    """A prior run killed mid-write (OOM, disk full, Ctrl-C) can leave a
+    `.nc` file that exists but is truncated or missing variables — silently
+    reusing it would poison the "fixed geometry truth" every downstream
+    synthetic-n student depends on. Require both q_spatial and p_spatial to
+    actually be readable before trusting an existing dump."""
+    try:
+        with xr.open_dataset(path) as ds:
+            return "q_spatial" in ds and "p_spatial" in ds
+    except Exception:
+        return False
+
+
 def dump_one(ckpt: dict) -> Path:
     out = OUT_DIR / f"{ckpt['label']}_kan_parameters.nc"
     if out.exists():
-        print(f"{out} already exists, skipping dump_parameters re-run")
-        return out
+        if _is_intact(out):
+            print(f"{out} already exists, skipping dump_parameters re-run")
+            return out
+        print(f"{out} exists but is truncated/corrupt — removing and re-running dump_parameters")
+        out.unlink()
     cmd = [
         "cargo", "run", "--release", "--bin", "dump_parameters", "--",
         "--backend", "cpu",
