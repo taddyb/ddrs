@@ -1,3 +1,12 @@
+# synthetic_n_student_distributed.yaml — synthetic-n recoverability student:
+# GENERATED from aorc2f_distributed_frozen_chunk1.yaml, observations repointed
+# to the synthetic-n teacher's ground-truth store (output/synthetic_n/
+# synthetic_obs_lm) — everything else (Q' source, disagg head, architecture)
+# stays identical to the real campaign arm below.
+# Spec: docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md
+# Companion synthetic-n students: synthetic_n_student_{lumped,daily_lstm,hourly_lstm}.yaml
+#
+# --- original aorc2f_distributed_frozen_chunk1.yaml header, unmodified below ---
 # aorc2f_distributed_frozen_chunk1.yaml — full CONUS routing train against the
 # distributed+UH-routing dHBV AORC2F v2 Q' forecast (upstream checkpoint
 # CONUS2717_AORC2F_v2 ep69 — a DDR/PyTorch model that produced this store's

@@ -1,3 +1,12 @@
+# synthetic_n_student_hourly_lstm.yaml — synthetic-n recoverability student:
+# GENERATED from lstm_hourly_native.yaml, observations repointed to the
+# synthetic-n teacher's ground-truth store (output/synthetic_n/synthetic_obs_lm)
+# — everything else (Q' source, no-disagg-head architecture) stays identical
+# to the real campaign arm below.
+# Spec: docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md
+# Companion synthetic-n students: synthetic_n_student_{distributed,lumped,daily_lstm}.yaml
+#
+# --- original lstm_hourly_native.yaml header, unmodified below ---
 # lstm_hourly_native.yaml — full CONUS routing train against the hourly-native
 # MTS-LSTM (NH) Q' forecast. No disaggregation block — the store is already
 # hourly-native, and kan_head.disaggregation + an hourly-native source is a

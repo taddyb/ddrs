@@ -1,3 +1,12 @@
+# synthetic_n_student_daily_lstm.yaml — synthetic-n recoverability student:
+# GENERATED from lstm_daily_frozen_chunk1.yaml, observations repointed to the
+# synthetic-n teacher's ground-truth store (output/synthetic_n/synthetic_obs_lm)
+# — everything else (Q' source, disagg head, architecture) stays identical to
+# the real campaign arm below.
+# Spec: docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md
+# Companion synthetic-n students: synthetic_n_student_{distributed,lumped,hourly_lstm}.yaml
+#
+# --- original lstm_daily_frozen_chunk1.yaml header, unmodified below ---
 # lstm_daily_frozen_chunk1.yaml — full CONUS routing train against the daily
 # CudaLSTM (NH) Q' forecast, updated to the capacity-boosted frozen disagg
 # head (hidden 16, 2 KanLayers, grid 20, chunk_days=1, warm-started from
