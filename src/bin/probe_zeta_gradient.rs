@@ -236,6 +236,15 @@ struct Cli {
     #[arg(long)]
     zeta_output: Option<PathBuf>,
 
+    /// teacher mode: continuous-forward chunk length in days. The default
+    /// (365) peaks at ~65 GB RSS over the 64,892-reach eval network — on a
+    /// 93 GB desktop with ambient apps this gets OOM-killed; 180 halves the
+    /// peak at the cost of doubling disagg boundary-artifact density
+    /// (0.55% → 1.1% of days over the 29-year window; artifacts stay rare).
+    /// State continuity across chunks is exact either way.
+    #[arg(long, default_value_t = 365)]
+    chunk_days: usize,
+
     /// Backend: "cpu" (NdArray, deterministic; forces sparse_solver=cpu) or "cuda".
     #[arg(long, default_value = "cpu")]
     backend: String,
@@ -1099,8 +1108,10 @@ fn run_teacher<I: Backend>(
     // Large chunk size reduces disagg boundary-artifact density (left-clamp at chunk
     // day 0 and precip right-clamp at chunk day C-1). With C=365 each artifact appears
     // only ~14 times over 5115 teacher days (0.82%), vs 341 times with C=15 (20%).
-    // 70 GB RAM easily holds a 365-day AORC precip chunk (~2.3 GB).
-    const BATCH_SIZE_DAYS: usize = 365;
+    // Peak RSS scales with chunk length (~65 GB at C=365 on the 64,892-reach eval
+    // network) — --chunk-days trades artifact density for memory headroom.
+    let batch_size_days = cli.chunk_days;
+    assert!(batch_size_days >= 3, "--chunk-days too small: {batch_size_days} (need >= 3)");
 
     let plants = match &cli.plant_file {
         Some(p) => parse_plant_file(p)?,
@@ -1258,12 +1269,12 @@ fn run_teacher<I: Backend>(
     // extracted; gauge aggregation happens here via scatter_add_by_group.
     let mut zeta_sink: Option<ZetaSums<I>> = leakance_active.then(ZetaSums::<I>::new);
     let mut predictions_full = Array2::<f32>::zeros((n_all_gauges, n_hours));
-    let n_chunks_total = n_days.div_ceil(BATCH_SIZE_DAYS);
+    let n_chunks_total = n_days.div_ceil(batch_size_days);
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
     let mut prev_final_state: Option<Vec<f32>> = None;
     while day_offset < n_days {
-        let chunk_n = (n_days - day_offset).min(BATCH_SIZE_DAYS);
+        let chunk_n = (n_days - day_offset).min(batch_size_days);
         let win = TestWindow::new(&axis, day_offset, chunk_n);
         // Disagg lookahead: pass one extra daily Q' row so the disagg "next"
         // for the last day of this chunk uses the NEXT chunk's first day instead
@@ -2556,7 +2567,8 @@ fn run_state_cache<I: Backend>(
     cli: Cli,
     device: I::Device,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Must match run_teacher's BATCH_SIZE_DAYS so state boundaries align.
+    // Must match the teacher run's chunk length (--chunk-days, default 365)
+    // so state boundaries align.
     const BATCH_SIZE_DAYS: usize = 365;
 
     let output = cli.output.as_ref().ok_or("--output is required in state-cache mode")?;
