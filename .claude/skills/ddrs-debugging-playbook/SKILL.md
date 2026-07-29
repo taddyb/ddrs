@@ -67,6 +67,7 @@ Scan this table first. Each row points to a Part 2 entry with the full story and
 | `ddrs plan` hangs or errors on adjacency build | Bad fabric path or multi-layer gpkg needs `geospatial_fabric_layer` | [T8](#t8-adjacency-invariant) |
 | Training NSE well below summed-Q baseline | Routing not earning its keep; loss or gradient issue | [T9](#t9-metric-regression-below-baseline) |
 | KGE lower than baseline in every config | Expected — L1 loss penalizes variance; this is known behavior | [T9](#t9-metric-regression-below-baseline) |
+| Baseline median NSE absurdly LOW; many gauges' baseline predictions exactly 0.0 | Pre-2026-07-28 binary: single-divide gauges summed an empty upstream set | [T9](#t9-metric-regression-below-baseline) |
 | Hourly run produces same predictions as daily run | Stale binary (pre-disagg) or `aorc_precip` source missing | [T1](#t1-stale-binary-trap), [T10](#t10-disaggregation-no-op) |
 | `MeritGagesDataset::open` errors with `use_precip: true` | `aorc_precip` source not configured | [T10](#t10-disaggregation-no-op) |
 | Checkpoint resume trains zero batches | `experiment.epochs` not raised above checkpoint epoch | [T11](#t11-checkpoint-resume-issues) |
@@ -339,6 +340,21 @@ cargo test --test adjacency_parity
 3. Is CUDA graphs masking NaN? (T3 — disable and re-check)
 4. Are gauge batch sizes reasonable? Too few gauges per batch → noisy gradient.
 5. Is the data source correct? `streamflow resolution: Daily|Hourly` is logged at dataset open — verify it.
+
+**The baseline itself can be the bug — phantom-zero single-divide gauges (fixed 2026-07-28).**
+Gauges whose catchment is a single MERIT divide have ZERO edges in the gages
+adjacency store (empty `indices_0`/`indices_1`, length-1 `order`). Before the fix,
+`GageSubgraph::upstream_comids` derived the upstream set from edge endpoints only,
+so these gauges summed an empty COMID set → the baseline predicted exactly 0.0 for
+the whole window and scored it against real observations. On the
+`daily_dhbv2_distributed_aorc2f` 3,211-gauge workspace this was 513 gauges (16%)
+at median NSE −0.305, dragging the baseline median from 0.290 to 0.142. The fix
+falls back to the outlet's own position (`gage_idx`) when a subgraph has no edges
+(matches DDR's `summed_q_prime.py`, which reads the subgroup `order` array), and the
+baseline cache key now includes `baseline-algo-v2` so stale pre-fix caches recompute.
+Diagnostic: load `<workspace>/baselines/<key>/predictions.f32` and count rows that
+are all-zero — any nonzero count on a post-fix binary is a new bug. Training was
+never affected: `dataset.rs` drops zero-edge gauges as headwaters before batching.
 
 **To improve KGE above baseline:** Switch to `experiment.loss.kind: nnse-kge`. The `(α-1)²` term in KGE provides the restoring gradient. This requires explicit config:
 ```yaml
