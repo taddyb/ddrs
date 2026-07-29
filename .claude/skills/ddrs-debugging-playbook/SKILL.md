@@ -73,6 +73,8 @@ Scan this table first. Each row points to a Part 2 entry with the full story and
 | Resumed run drifts from uninterrupted run | Expected: weights stored as f16 (CompactRecorder) | [T11](#t11-checkpoint-resume-issues) |
 | `ddrs run --strict` exits with code 4 | Source fingerprint drift vs `.ddrs/sources.lock` | [T12](#t12-source-lock-drift) |
 | Recoverability / identifiability experiment fails | Hotstart transient noise floor issue (Phase B not yet met) | [T13](#t13-leakance-identifiability-status) |
+| `probe_zeta_gradient --mode teacher` killed with no error in its own log | 365-day chunk peaks ~65 GB RSS on the 64,892-reach eval network; kernel OOM kill | [T14](#t14-teacher-mode-oom) |
+| Workflow fails `icechunk read failed ... object not found` deep into eval; store probes clean | Transient icechunk read failure, not a data hole | [T15](#t15-transient-icechunk-read-failure) |
 
 ---
 
@@ -457,6 +459,39 @@ cat .ddrs/sources.lock   # shows last-locked fingerprints
 | H7: Model-form error (d_gw bounds) | REFUTED | 0.0% of d_gw at bounds in any aridity tercile |
 
 **Do not run K_D widening.** The Phase-3 gate for K_D widening FAILED because H1 was REFUTED. The constraint is the signal, not the box.
+
+---
+
+### T14: Teacher mode OOM
+
+**Story (2026-07-23).** The synthetic-n teacher run (`probe_zeta_gradient --mode teacher`, full 29-year window, 64,892-reach eval network, CPU backend) died 11 minutes after launch with NOTHING in its own log past the setup lines — no panic, no error. The kernel OOM killer had taken it at 54 GB anon RSS (213 GB total-vm) during its FIRST 365-day chunk; desktop apps (Slack/Hyprland/browser) held ~24 GB of the 93 GB machine and the teacher had the highest oom_score.
+
+**Discriminating test.** Log ends abruptly after `teacher: N plants, ...` with no `chunk k/n` lines and the process is gone:
+```bash
+journalctl -k --since <launch date> | grep -iE 'oom|killed process'
+# → "Out of memory: Killed process <pid> (probe_zeta_grad)"
+```
+
+**Memory profile (measured 2026-07-28):** RSS climbs steadily WITHIN a chunk (transient per-timestep allocations) and collapses back to ~4 GB at every chunk boundary. Peak scales with chunk length: ~65 GB at 365 days, ~45 GB at 180 days.
+
+**Fix:** `--chunk-days 180` (added 2026-07-28; default 365 = old behavior). Cost: disagg boundary-artifact density doubles (0.55% → 1.1% of days over 29 years) — still negligible. State continuity across chunks is exact either way. The 180-day teacher completed the full 59-chunk window in ~14 h wall.
+
+**Caveat:** `run_state_cache` still hardcodes 365; if you ever pair a state cache with a teacher run, their chunk lengths must match (state boundaries align).
+
+---
+
+### T15: Transient icechunk read failure
+
+**Story (2026-07-28).** The synthetic-n `distributed` student completed all 5 training epochs, then its eval died at chunk 364/366 with `icechunk read failed at .../daily_dhbv_aorc2f_merit_unit_catchments.ic: object not found` (empty context, no panic). Looked like the store ends before 2010-09-30 — it doesn't.
+
+**Why it can't be a data hole:** these icechunk Q' stores are divide-major — `Qr` chunk shape `(200 divides, ALL 14,976 days)`. Any time-slice read touches every divide-block chunk object, so eval chunks 1–363 had already read the exact objects chunk 364 "couldn't find". A direct Python probe of the same date range read clean immediately after. Verdict: transient.
+
+**Triage:**
+1. Probe the store at the failing range (from `~/projects/ddr` venv): `icechunk.Repository.open(icechunk.local_filesystem_storage(<path>))` → read the failing day-slice. Clean read ⇒ transient.
+2. Check `ddrs import <store> --dry-run` — reports the declared time axis and sample-read health.
+3. Only if BOTH fail is it a real store problem.
+
+**Recovery:** training and eval are separate phases — a post-training eval failure leaves the epoch-5 checkpoint valid. Dump parameters from it (`dump_parameters --checkpoint <ckpt>/head`) and re-run eval-only later (legacy `eval` binary) if the diagnostics matter. Drivers chaining multiple runs should treat "workflow exited nonzero but final checkpoint exists" as continue-with-warning, not abort (see `output/synthetic_n/run_students_sequential.sh`).
 
 ---
 
