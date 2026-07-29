@@ -119,21 +119,27 @@ impl GageSubgraph {
     /// Returns the unique COMIDs in this gauge's upstream subgraph,
     /// sorted by CONUS position (stable across runs).
     ///
+    /// True when the gauge's catchment is a single MERIT divide: the
+    /// subgraph has no edges (only a length-1 `order` array in the store).
+    /// Training drops these as headwaters (`dataset.rs` "dropped N
+    /// headwater"); every consumer must skip them the same way — for a
+    /// zero-edge subgraph `upstream_comids` is empty, and summing an empty
+    /// set silently yields an all-zero prediction.
+    pub fn is_headwater(&self) -> bool {
+        self.indices_0.is_empty()
+    }
+
     /// Mirrors `gages_adjacency[gauge]["order"][:]` from
     /// `~/projects/ddr/scripts/summed_q_prime.py:198`. For subgraphs with at
     /// least one edge, the COO indices (`indices_0` ∪ `indices_1`) cover
     /// exactly the same node set as the gauge's `order` array because every
     /// node appears as an edge endpoint. Single-divide catchments have NO
-    /// edges (their `order` is just the outlet), so the outlet's own position
-    /// (`gage_idx`) is the fallback — an empty set here would make the
-    /// summed-Q' baseline silently predict 0 for the whole window.
+    /// edges, so this returns empty — callers must filter with
+    /// [`GageSubgraph::is_headwater`] first, as training does.
     pub fn upstream_comids(&self, conus: &ConusAdjacencyStore) -> Vec<Comid> {
         let mut positions: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
         positions.extend(self.indices_0.iter().copied());
         positions.extend(self.indices_1.iter().copied());
-        if positions.is_empty() {
-            positions.insert(self.gage_idx as i32);
-        }
         positions
             .into_iter()
             .map(|pos| conus.order[pos as usize])
@@ -276,10 +282,11 @@ mod tests {
     }
 
     #[test]
-    fn upstream_comids_single_divide_falls_back_to_outlet() {
+    fn single_divide_subgraph_is_headwater_and_has_empty_upstream() {
         // Single-divide catchments have NO edges in the gages store — only a
-        // length-1 `order` array and the `gage_idx` attr. The upstream set is
-        // exactly the outlet's own divide, never empty.
+        // length-1 `order` array. `upstream_comids` is empty for them, so
+        // consumers (baseline included) must skip via `is_headwater`, exactly
+        // as training's dataset filter does.
         let conus = fake_conus(vec![100, 200]);
         let sg = GageSubgraph {
             staid: Staid::from("00000002"),
@@ -288,6 +295,19 @@ mod tests {
             indices_0: vec![],
             indices_1: vec![],
         };
-        assert_eq!(sg.upstream_comids(&conus), vec![Comid(200)]);
+        assert!(sg.is_headwater());
+        assert!(sg.upstream_comids(&conus).is_empty());
+    }
+
+    #[test]
+    fn edged_subgraph_is_not_headwater() {
+        let sg = GageSubgraph {
+            staid: Staid::from("00000003"),
+            gage_idx: 1,
+            gage_catchment: String::new(),
+            indices_0: vec![1],
+            indices_1: vec![0],
+        };
+        assert!(!sg.is_headwater());
     }
 }

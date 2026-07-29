@@ -29,8 +29,9 @@ use super::summed_q_prime::{compute, BaselineError, SummedQPrime};
 
 /// Bump when the baseline COMPUTATION changes behavior (not just inputs),
 /// so stale caches from older binaries are recomputed instead of silently
-/// reused. v2: single-divide gauges sum their own divide's Q' instead of an
-/// empty upstream set (2026-07-28).
+/// reused. v2: single-divide (headwater) gauges are skipped, matching
+/// training's dataset filter — previously they summed an empty upstream
+/// set and scored an all-zero prediction (2026-07-29).
 const BASELINE_ALGO_VERSION: &str = "baseline-algo-v2";
 
 /// 16-hex-char (64-bit) prefix of blake3 over the baseline algorithm

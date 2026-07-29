@@ -93,21 +93,7 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
 
     let gages_adj = GagesAdjacencyStore::open(gages_adj_path, &all_staids)?;
     let observations = ObservationsStore::open(&ds.observations)?;
-    // Preserve CSV order; drop gauges without a subgraph or without an
-    // observation series (reads hard-error on missing STAIDs, and global
-    // gage CSVs list a few dozen gauges the obs product lacks).
-    let valid_staids: Vec<Staid> = all_staids
-        .iter()
-        .filter(|s| gages_adj.get(s).is_some())
-        .filter(|s| {
-            let present = observations.contains(s);
-            if !present {
-                eprintln!("warning: gauge {s} has no observation series; skipping");
-            }
-            present
-        })
-        .cloned()
-        .collect();
+    let valid_staids = valid_gauges(&all_staids, &gages_adj, |s| observations.contains(s));
     if valid_staids.is_empty() {
         return Err(BaselineError::NoGauges {
             gages: ds.gages.clone(),
@@ -149,6 +135,47 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
         start,
         n_days,
     ))
+}
+
+/// Gauge filter for the baseline, preserving gages-CSV order. Drops gauges
+/// without a subgraph, single-divide headwater gauges (zero-edge subgraphs
+/// — same skip as training's dataset filter, so baseline and trained eval
+/// score the same population; summing their empty upstream set would
+/// silently produce an all-zero prediction), and gauges without an
+/// observation series (reads hard-error on missing STAIDs, and global gage
+/// CSVs list a few dozen gauges the obs product lacks).
+fn valid_gauges(
+    all_staids: &[Staid],
+    gages_adj: &GagesAdjacencyStore,
+    obs_contains: impl Fn(&Staid) -> bool,
+) -> Vec<Staid> {
+    let mut n_headwater = 0usize;
+    let kept: Vec<Staid> = all_staids
+        .iter()
+        .filter(|s| gages_adj.get(s).is_some())
+        .filter(|s| {
+            let headwater = gages_adj
+                .get(s)
+                .expect("presence filtered above")
+                .is_headwater();
+            if headwater {
+                n_headwater += 1;
+            }
+            !headwater
+        })
+        .filter(|s| {
+            let present = obs_contains(s);
+            if !present {
+                eprintln!("warning: gauge {s} has no observation series; skipping");
+            }
+            present
+        })
+        .cloned()
+        .collect();
+    if n_headwater > 0 {
+        eprintln!("summed Q' gauge filter: dropped {n_headwater} headwater (matches training's dataset filter)");
+    }
+    kept
 }
 
 /// Pure reducer over already-loaded daily arrays. Split from `compute` so
@@ -318,6 +345,45 @@ mod tests {
             2,
         );
         assert_eq!(q.predictions.row(0).to_vec(), vec![5.0, 10.0]);
+    }
+
+    #[test]
+    fn valid_gauges_skips_single_divide_headwaters() {
+        // Training drops zero-edge (single-divide) gauges as headwaters
+        // (`dataset.rs` "dropped N headwater"); the baseline must score the
+        // same gauge population. Before this filter, such gauges summed an
+        // empty upstream set and silently produced all-zero predictions.
+        use crate::data::store::{GageSubgraph, GagesAdjacencyStore};
+        let edged = Staid::from("edged");
+        let headwater = Staid::from("headwater");
+        let mut subgraphs = std::collections::HashMap::new();
+        subgraphs.insert(
+            edged.clone(),
+            GageSubgraph {
+                staid: edged.clone(),
+                gage_idx: 1,
+                gage_catchment: String::new(),
+                indices_0: vec![1],
+                indices_1: vec![0],
+            },
+        );
+        subgraphs.insert(
+            headwater.clone(),
+            GageSubgraph {
+                staid: headwater.clone(),
+                gage_idx: 2,
+                gage_catchment: String::new(),
+                indices_0: vec![],
+                indices_1: vec![],
+            },
+        );
+        let gages_adj = GagesAdjacencyStore {
+            path: std::path::PathBuf::from("/dev/null"),
+            subgraphs,
+        };
+        let all = vec![edged.clone(), headwater];
+        let kept = valid_gauges(&all, &gages_adj, |_| true);
+        assert_eq!(kept, vec![edged]);
     }
 
     #[test]
