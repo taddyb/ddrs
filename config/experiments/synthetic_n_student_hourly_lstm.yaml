@@ -1,0 +1,91 @@
+# synthetic_n_student_hourly_lstm.yaml — synthetic-n recoverability student:
+# GENERATED from lstm_hourly_native.yaml, observations repointed to the
+# synthetic-n teacher's ground-truth store (output/synthetic_n/synthetic_obs_lm)
+# — everything else (Q' source, no-disagg-head architecture) stays identical
+# to the real campaign arm below.
+# Spec: docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md
+# Companion synthetic-n students: synthetic_n_student_{distributed,lumped,daily_lstm}.yaml
+#
+# --- original lstm_hourly_native.yaml header, unmodified below ---
+# lstm_hourly_native.yaml — full CONUS routing train against the hourly-native
+# MTS-LSTM (NH) Q' forecast. No disaggregation block — the store is already
+# hourly-native, and kan_head.disaggregation + an hourly-native source is a
+# hard config-load error (src/data/dataset.rs::validate_disagg_vs_resolution).
+#
+# Both the KAN head and the router run on GPU (sparse_solver: cuda).
+# Companion arm: lstm_daily_frozen_chunk1.yaml (daily Q', frozen disagg head).
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+device: 0
+seed: 42
+np_seed: 42
+
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/hourly_lstm_merit_unit_catchments.ic
+  observations: /home/tbindas/projects/ddrs/output/synthetic_n/synthetic_obs_lm
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+
+experiment:
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 5
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    3: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  sparse_solver: cuda
+  use_cuda_graphs: false
+  use_leakance: false
+
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15
+  rho: null
