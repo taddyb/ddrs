@@ -27,8 +27,16 @@ use crate::training::metrics::Metrics;
 
 use super::summed_q_prime::{compute, BaselineError, SummedQPrime};
 
-/// 16-hex-char (64-bit) prefix of blake3 over the data-source paths +
-/// eval window. Safe for filesystem use; collision-free at our scale.
+/// Bump when the baseline COMPUTATION changes behavior (not just inputs),
+/// so stale caches from older binaries are recomputed instead of silently
+/// reused. v2: single-divide (headwater) gauges are skipped, matching
+/// training's dataset filter — previously they summed an empty upstream
+/// set and scored an all-zero prediction (2026-07-29).
+const BASELINE_ALGO_VERSION: &str = "baseline-algo-v2";
+
+/// 16-hex-char (64-bit) prefix of blake3 over the baseline algorithm
+/// version + data-source paths + eval window. Safe for filesystem use;
+/// collision-free at our scale.
 pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
     let ds = test_cfg
         .data_sources
@@ -57,6 +65,8 @@ pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
              or set conus_adjacency/gages_adjacency explicitly",
         ))?;
     let mut h = blake3::Hasher::new();
+    h.update(BASELINE_ALGO_VERSION.as_bytes());
+    h.update(b"\n");
     for p in [
         &ds.streamflow,
         &ds.observations,
@@ -388,6 +398,33 @@ mod tests {
         let k2 = cache_key(&cfg).unwrap();
         assert_eq!(k1, k2);
         assert_eq!(k1.len(), 16);
+    }
+
+    #[test]
+    fn cache_key_incorporates_algorithm_version() {
+        // Pre-v2 keys hashed ONLY source paths + eval window, so a
+        // behavior-changing fix to the baseline computation (e.g. the
+        // single-divide upstream_comids fallback) was silently masked by
+        // stale caches. The key must differ from that legacy scheme.
+        let cfg = fake_config();
+        let ds = cfg.data_sources.as_ref().unwrap();
+        let exp = cfg.experiment.as_ref().unwrap();
+        let mut h = blake3::Hasher::new();
+        for p in [
+            &ds.streamflow,
+            &ds.observations,
+            &ds.gages,
+            ds.gages_adjacency.as_ref().unwrap(),
+            ds.conus_adjacency.as_ref().unwrap(),
+        ] {
+            h.update(p.display().to_string().as_bytes());
+            h.update(b"\n");
+        }
+        h.update(exp.start_time.as_bytes());
+        h.update(b"\n");
+        h.update(exp.end_time.as_bytes());
+        let legacy_key = h.finalize().to_hex().as_str()[..16].to_string();
+        assert_ne!(cache_key(&cfg).unwrap(), legacy_key);
     }
 
     #[test]
