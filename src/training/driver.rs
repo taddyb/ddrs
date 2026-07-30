@@ -240,7 +240,7 @@ pub fn train<I: Backend>(
     let exp = cfg.experiment.as_ref().expect("experiment");
     let rho = exp.rho.expect("training requires rho");
     let grad_clip = exp.grad_clip_max_norm.unwrap_or(1.0);
-    let accum_steps = exp.grad_accum_steps.unwrap_or(1).max(1);
+    let accum_steps = exp.effective_grad_accum_steps();
 
     let mut sampler = batch_source.unwrap_or_else(|| {
         // Accumulation keeps the partial tail batch (drop_last = false):

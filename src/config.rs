@@ -157,20 +157,40 @@ pub struct Experiment {
     /// without a `loss:` block are byte-for-byte unchanged in behavior.
     #[serde(default)]
     pub loss: LossConfig,
-    /// Optimizer micro-batching (gradient accumulation): number of
-    /// micro-batches (each `batch_size` gauges) whose gradients are summed
-    /// into ONE optimizer step. Absent or `1` ⇒ byte-identical single-batch
-    /// training (one step per mini-batch). `N > 1` ⇒ effective batch
-    /// `N × batch_size` at the peak memory of a single micro-batch; each
-    /// micro-batch loss is weighted by its share of the pooled valid-residual
-    /// denominator, so the accumulated gradient equals the true large-batch
-    /// gradient (see `tests/grad_accum_equivalence.rs`). When accumulating,
-    /// the sampler keeps the partial tail batch (`drop_last = false`) instead
-    /// of silently dropping `n_gauges % batch_size` gauges each epoch.
+    /// Master switch for optimizer micro-batching (gradient accumulation),
+    /// following the `use_leakance`/`use_cuda_graphs` flag convention.
+    /// Default `false` ⇒ byte-identical single-batch training regardless of
+    /// `grad_accum_steps` (the tuning stays in the file, inert). `true`
+    /// requires `grad_accum_steps >= 2` — rejected at load otherwise, so the
+    /// switch can never be a silent no-op.
+    #[serde(default)]
+    pub use_grad_accum: bool,
+    /// Group size for `use_grad_accum: true`: number of micro-batches (each
+    /// `batch_size` gauges) whose gradients are summed into ONE optimizer
+    /// step — effective batch `N × batch_size` at the peak memory of a single
+    /// micro-batch. Each micro-batch loss is weighted by its share of the
+    /// pooled valid-residual denominator, so the accumulated gradient equals
+    /// the true large-batch gradient (see `tests/grad_accum_equivalence.rs`).
+    /// When accumulating, the sampler keeps the partial tail batch
+    /// (`drop_last = false`) instead of silently dropping
+    /// `n_gauges % batch_size` gauges each epoch.
     /// NOTE: iterations-per-epoch shrink by ~N — keep total update count in
-    /// mind when comparing to a single-batch baseline (0 ⇒ rejected at load).
+    /// mind when comparing to a single-batch baseline.
     #[serde(default)]
     pub grad_accum_steps: Option<usize>,
+}
+
+impl Experiment {
+    /// The micro-batch group size the trainer actually runs: `1` (single
+    /// batch) unless `use_grad_accum: true`, in which case the validated
+    /// `grad_accum_steps`. Single source of truth for the driver.
+    pub fn effective_grad_accum_steps(&self) -> usize {
+        if self.use_grad_accum {
+            self.grad_accum_steps.unwrap_or(1).max(1)
+        } else {
+            1
+        }
+    }
 }
 
 /// Selects the training objective and (for the composite objective) its
@@ -786,16 +806,25 @@ fn validate_disagg_pretrained(cfg: &Config) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// `grad_accum_steps: 0` has no meaning (an optimizer step with no
-/// micro-batches) — reject at load time rather than silently treating it
-/// as 1.
+/// `use_grad_accum: true` without a meaningful group size would silently run
+/// single-batch training — reject at load time (mirrors the disaggregation
+/// freeze/pretrained contradiction check). `grad_accum_steps: 0` is likewise
+/// meaningless in any combination.
 fn validate_grad_accum(cfg: &Config) -> std::result::Result<(), String> {
     if let Some(exp) = cfg.experiment.as_ref() {
         if exp.grad_accum_steps == Some(0) {
             return Err(
-                "experiment: `grad_accum_steps: 0` is invalid — use 1 (or omit the key) \
-                 for single-batch training, or N > 1 to accumulate N micro-batches \
-                 per optimizer step."
+                "experiment: `grad_accum_steps: 0` is invalid — set 2 or more \
+                 micro-batches per optimizer step (with `use_grad_accum: true`), \
+                 or omit the key for single-batch training."
+                    .to_string(),
+            );
+        }
+        if exp.use_grad_accum && exp.grad_accum_steps.unwrap_or(1) < 2 {
+            return Err(
+                "experiment: `use_grad_accum: true` requires `grad_accum_steps: N` \
+                 with N >= 2 — accumulating a single micro-batch is identical to \
+                 single-batch training and would be a silent no-op."
                     .to_string(),
             );
         }
@@ -920,36 +949,60 @@ mod tests {
     }
 
     #[test]
-    fn grad_accum_steps_parses_and_defaults_to_none() {
-        // Absent key ⇒ None ⇒ byte-identical single-batch training.
+    fn grad_accum_defaults_off_and_parses() {
+        // Absent keys ⇒ toggle off ⇒ byte-identical single-batch training.
         let exp: Experiment = serde_yaml::from_str(
             "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
              epochs: 1\nrho: 10\nwarmup: 1\n",
         )
         .expect("parse experiment");
+        assert!(!exp.use_grad_accum);
         assert_eq!(exp.grad_accum_steps, None);
+        assert_eq!(exp.effective_grad_accum_steps(), 1);
 
+        // Toggle on with a step count.
         let exp: Experiment = serde_yaml::from_str(
             "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
-             epochs: 1\nrho: 10\nwarmup: 1\ngrad_accum_steps: 4\n",
+             epochs: 1\nrho: 10\nwarmup: 1\nuse_grad_accum: true\ngrad_accum_steps: 4\n",
         )
         .expect("parse experiment");
-        assert_eq!(exp.grad_accum_steps, Some(4));
+        assert!(exp.use_grad_accum);
+        assert_eq!(exp.effective_grad_accum_steps(), 4);
     }
 
     #[test]
-    fn grad_accum_steps_zero_rejected_at_load() {
-        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n\
-                    experiment:\n  batch_size: 4\n  start_time: 2000/01/01\n\
-                    \x20 end_time: 2000/01/02\n  epochs: 1\n  rho: 10\n  warmup: 1\n\
-                    \x20 grad_accum_steps: 0\n";
-        let path = std::env::temp_dir().join("ddrs_config_grad_accum_zero.yaml");
-        std::fs::write(&path, yaml).unwrap();
-        let err = Config::from_yaml_file(&path).unwrap_err();
-        assert!(
-            err.to_string().contains("grad_accum_steps"),
-            "expected grad_accum_steps load error, got: {err}"
-        );
+    fn grad_accum_steps_inert_when_toggle_off() {
+        // Keeping the tuning in the file with the switch off must fall back
+        // to single-batch training — the off switch, not an error.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\nuse_grad_accum: false\ngrad_accum_steps: 4\n",
+        )
+        .expect("parse experiment");
+        assert!(!exp.use_grad_accum);
+        assert_eq!(exp.effective_grad_accum_steps(), 1);
+    }
+
+    #[test]
+    fn grad_accum_enabled_without_steps_rejected_at_load() {
+        // `use_grad_accum: true` with no (or degenerate) step count would be
+        // a silent no-op — reject at load, mirroring the freeze/pretrained
+        // contradiction check.
+        for steps_line in ["", "  grad_accum_steps: 1\n", "  grad_accum_steps: 0\n"] {
+            let yaml = format!(
+                "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n\
+                 experiment:\n  batch_size: 4\n  start_time: 2000/01/01\n\
+                 \x20 end_time: 2000/01/02\n  epochs: 1\n  rho: 10\n  warmup: 1\n\
+                 \x20 use_grad_accum: true\n{steps_line}"
+            );
+            let path = std::env::temp_dir().join("ddrs_config_grad_accum_bad.yaml");
+            std::fs::write(&path, yaml).unwrap();
+            let err = Config::from_yaml_file(&path).unwrap_err();
+            assert!(
+                err.to_string().contains("grad_accum"),
+                "steps_line={steps_line:?}: expected grad_accum load error, got: {err}"
+            );
+        }
     }
 
     #[test]

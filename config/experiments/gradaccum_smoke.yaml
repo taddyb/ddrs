@@ -37,6 +37,7 @@ experiment:
   rho: 30
   shuffle: true
   warmup: 5
+  use_grad_accum: true
   grad_accum_steps: 2
   learning_rate:
     1: 0.001
