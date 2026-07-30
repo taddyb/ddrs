@@ -387,6 +387,7 @@ mod tests {
             checkpoint: None,
             state_cache: None,
             loss: Default::default(),
+            grad_accum_steps: None,
         });
         cfg
     }
@@ -511,6 +512,7 @@ mod tests {
             checkpoint: None,
             state_cache: None,
             loss: Default::default(),
+            grad_accum_steps: None,
         });
         let result = cache_key(&cfg);
         assert!(

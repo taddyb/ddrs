@@ -157,6 +157,20 @@ pub struct Experiment {
     /// without a `loss:` block are byte-for-byte unchanged in behavior.
     #[serde(default)]
     pub loss: LossConfig,
+    /// Optimizer micro-batching (gradient accumulation): number of
+    /// micro-batches (each `batch_size` gauges) whose gradients are summed
+    /// into ONE optimizer step. Absent or `1` ⇒ byte-identical single-batch
+    /// training (one step per mini-batch). `N > 1` ⇒ effective batch
+    /// `N × batch_size` at the peak memory of a single micro-batch; each
+    /// micro-batch loss is weighted by its share of the pooled valid-residual
+    /// denominator, so the accumulated gradient equals the true large-batch
+    /// gradient (see `tests/grad_accum_equivalence.rs`). When accumulating,
+    /// the sampler keeps the partial tail batch (`drop_last = false`) instead
+    /// of silently dropping `n_gauges % batch_size` gauges each epoch.
+    /// NOTE: iterations-per-epoch shrink by ~N — keep total update count in
+    /// mind when comparing to a single-batch baseline (0 ⇒ rejected at load).
+    #[serde(default)]
+    pub grad_accum_steps: Option<usize>,
 }
 
 /// Selects the training objective and (for the composite objective) its
@@ -673,6 +687,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_grad_accum(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
@@ -761,6 +779,23 @@ fn validate_disagg_pretrained(cfg: &Config) -> std::result::Result<(), String> {
             return Err(
                 "kan_head.disaggregation: `freeze: true` requires `pretrained_checkpoint` \
                  — freezing a randomly-initialized disaggregation head would train nothing."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `grad_accum_steps: 0` has no meaning (an optimizer step with no
+/// micro-batches) — reject at load time rather than silently treating it
+/// as 1.
+fn validate_grad_accum(cfg: &Config) -> std::result::Result<(), String> {
+    if let Some(exp) = cfg.experiment.as_ref() {
+        if exp.grad_accum_steps == Some(0) {
+            return Err(
+                "experiment: `grad_accum_steps: 0` is invalid — use 1 (or omit the key) \
+                 for single-batch training, or N > 1 to accumulate N micro-batches \
+                 per optimizer step."
                     .to_string(),
             );
         }
@@ -882,6 +917,39 @@ mod tests {
         assert_eq!(exp.start_time, "1995/10/01");
         assert_eq!(exp.end_time, "2010/09/30");
         assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn grad_accum_steps_parses_and_defaults_to_none() {
+        // Absent key ⇒ None ⇒ byte-identical single-batch training.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.grad_accum_steps, None);
+
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\ngrad_accum_steps: 4\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.grad_accum_steps, Some(4));
+    }
+
+    #[test]
+    fn grad_accum_steps_zero_rejected_at_load() {
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n\
+                    experiment:\n  batch_size: 4\n  start_time: 2000/01/01\n\
+                    \x20 end_time: 2000/01/02\n  epochs: 1\n  rho: 10\n  warmup: 1\n\
+                    \x20 grad_accum_steps: 0\n";
+        let path = std::env::temp_dir().join("ddrs_config_grad_accum_zero.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("grad_accum_steps"),
+            "expected grad_accum_steps load error, got: {err}"
+        );
     }
 
     #[test]
