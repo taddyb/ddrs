@@ -91,6 +91,28 @@ where
     scaler.grads
 }
 
+/// Multiply every gradient in `grads` by `scale` (consume + return, same
+/// pattern as [`clip_grad_norm`]).
+///
+/// Used by the gradient-accumulation path: micro-batch losses are scaled by
+/// their pooled-denominator count `n_i` BEFORE `backward()` (turning each
+/// mean back into a sum), the per-micro gradients are summed in a
+/// `GradientsAccumulator`, and this rescales the total by `1 / Σ n_i` — the
+/// result is exactly the gradient of the pooled large-batch mean loss.
+pub fn scale_grads<M, B>(grads: GradientsParams, module: &M, scale: f32) -> GradientsParams
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    let mut scaler = GradScaler::<M, B> {
+        grads,
+        scale,
+        _phantom: std::marker::PhantomData,
+    };
+    let _ = module.clone().map(&mut scaler);
+    scaler.grads
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -154,6 +176,60 @@ where
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn scale_grads_multiplies_every_gradient() {
+        use burn::backend::{Autodiff, NdArray};
+        use burn::module::Module;
+        use crate::nn::kan_head::{KanHead, KanHeadConfig};
+        type B = Autodiff<NdArray<f32>>;
+        let device = Default::default();
+        let head = KanHeadConfig::new(
+            (0..3).map(|i| format!("attr_{i}")).collect(),
+            vec!["n".into(), "q_spatial".into()],
+            42,
+        )
+        .with_hidden_size(4)
+        .with_num_hidden_layers(1)
+        .init::<B>(&device);
+
+        let x: Tensor<B, 2> =
+            Tensor::random([5, 3], burn::tensor::Distribution::Default, &device);
+        let loss = head
+            .forward(x)
+            .into_values()
+            .map(|t| t.sum())
+            .reduce(|a, b| a + b)
+            .expect("head emits at least one parameter");
+        let grads = GradientsParams::from_grads(loss.backward(), &head);
+        let n_before = grads.len();
+        assert!(n_before > 0, "head must produce gradients");
+
+        // Scaling by 0.25 must scale the global L2 norm by exactly 0.25
+        // and keep every param's gradient registered.
+        let mut c = NormCollector::<KanHead<B>, B> {
+            grads: &grads,
+            sum_sq: 0.0,
+            _phantom: std::marker::PhantomData,
+        };
+        head.visit(&mut c);
+        let norm_before = c.sum_sq.sqrt();
+        assert!(norm_before > 0.0);
+
+        let scaled = scale_grads(grads, &head, 0.25);
+        assert_eq!(scaled.len(), n_before, "scaling must not drop params");
+        let mut c2 = NormCollector::<KanHead<B>, B> {
+            grads: &scaled,
+            sum_sq: 0.0,
+            _phantom: std::marker::PhantomData,
+        };
+        head.visit(&mut c2);
+        let norm_after = c2.sum_sq.sqrt();
+        assert!(
+            (norm_after - 0.25 * norm_before).abs() <= 1e-5 * norm_before,
+            "norm {norm_after} != 0.25 × {norm_before}"
+        );
+    }
 
     #[test]
     fn resolve_lr_picks_largest_key_leq_epoch() {

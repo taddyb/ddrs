@@ -31,11 +31,11 @@ pub use forward::{
     FROZEN_N, FROZEN_Q_SPATIAL, FROZEN_P_SPATIAL,
 };
 pub use loss::{
-    batch_loss, filter_nan_gauges, l1_loss_post_warmup, nnse_kge_loss, tau_trim_and_downsample,
-    FilteredPair,
+    batch_loss, filter_nan_gauges, l1_loss_post_warmup, loss_denominator, nnse_kge_loss,
+    tau_trim_and_downsample, FilteredPair,
 };
 pub use driver::{train, TrainState};
 pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
-pub use optimizer::{resolve_lr, build_adam, clip_grad_norm};
+pub use optimizer::{resolve_lr, build_adam, clip_grad_norm, scale_grads};
 pub use zarr_io::{write_predictions_zarr, ZarrAttrs};

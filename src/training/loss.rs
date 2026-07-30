@@ -139,6 +139,26 @@ pub fn l1_loss_post_warmup(
     diff.iter().map(|v| v.abs()).sum::<f32>() / (diff.len() as f32)
 }
 
+/// The pooled-mean denominator of [`batch_loss`] for a micro-batch of
+/// `g_kept` surviving gauges × `t_post` post-warmup days.
+///
+/// This is the exact-recombination weight for gradient accumulation: a
+/// micro-batch loss `L_i` (a mean over this count) scaled by `n_i` turns
+/// back into a SUM, so `Σ_i (L_i·n_i) / Σ_i n_i` equals the loss of the
+/// pooled batch — and, by linearity of the gradient, the accumulated
+/// scaled gradients equal the true large-batch gradient. A naive 1/N
+/// average is wrong whenever micro-batches differ in surviving-gauge
+/// count (the NaN filter makes that the common case).
+///
+/// L1 averages over ELEMENTS (`(p - o).abs().mean()`); the composite
+/// objectives compute per-gauge scores then average over GAUGES.
+pub fn loss_denominator(cfg: &LossConfig, g_kept: usize, t_post: usize) -> usize {
+    match cfg.kind {
+        LossKind::L1 => g_kept * t_post,
+        LossKind::NnseKge | LossKind::Kge => g_kept,
+    }
+}
+
 /// Dispatch a mini-batch to the configured training objective.
 ///
 /// `p` / `o` are `(G, T_post_warmup)` with autograd alive on `p`. `o` must
@@ -414,6 +434,48 @@ mod tests {
         // indices 1,3 are peaks (pred 2.5 < obs 3); 0,2 are troughs.
         assert!(gv[1] < 0.0 && gv[3] < 0.0, "peak grads not negative: {gv:?}");
         assert!(gv[0] > 0.0 && gv[2] > 0.0, "trough grads not positive: {gv:?}");
+    }
+
+    #[test]
+    fn loss_denominator_matches_each_objective_mean() {
+        use crate::config::LossConfig;
+        // L1 is a mean over (gauge, timestep) ELEMENTS.
+        let l1 = LossConfig::default();
+        assert_eq!(loss_denominator(&l1, 3, 5), 15);
+        // The composite objectives are per-gauge means (mean over GAUGES).
+        let mut nk = LossConfig::default();
+        nk.kind = LossKind::NnseKge;
+        assert_eq!(loss_denominator(&nk, 3, 5), 3);
+        let mut kge = LossConfig::default();
+        kge.kind = LossKind::Kge;
+        assert_eq!(loss_denominator(&kge, 3, 5), 3);
+    }
+
+    #[test]
+    fn scaled_micro_losses_recombine_to_pooled_l1() {
+        // The accumulation identity the driver relies on:
+        //   Σ_i (L_i · n_i) / Σ_i n_i  ==  L over the pooled batch,
+        // with n_i = loss_denominator. Unequal micro-batch sizes on purpose.
+        use crate::config::LossConfig;
+        let cfg = LossConfig::default();
+        let p_all = mk::<Bp>(&[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [0.0, 0.0, 0.0, 0.0]]);
+        let o_all = mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0], [8.0, 8.0, 8.0, 8.0], [1.0, 2.0, 3.0, 4.0]]);
+        let pooled: f32 = batch_loss(p_all.clone(), o_all.clone(), &cfg).into_scalar();
+
+        // Micro 1 = gauges {0, 1}; micro 2 = gauge {2}.
+        let p1 = p_all.clone().slice([0..2, 0..4]);
+        let o1 = o_all.clone().slice([0..2, 0..4]);
+        let p2 = p_all.slice([2..3, 0..4]);
+        let o2 = o_all.slice([2..3, 0..4]);
+        let n1 = loss_denominator(&cfg, 2, 4) as f32;
+        let n2 = loss_denominator(&cfg, 1, 4) as f32;
+        let l1_: f32 = batch_loss(p1, o1, &cfg).into_scalar();
+        let l2_: f32 = batch_loss(p2, o2, &cfg).into_scalar();
+        let recombined = (l1_ * n1 + l2_ * n2) / (n1 + n2);
+        assert!(
+            (recombined - pooled).abs() <= 1e-6 * pooled.abs().max(1.0),
+            "recombined {recombined} != pooled {pooled}"
+        );
     }
 
     #[test]
