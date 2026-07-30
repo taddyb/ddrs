@@ -109,6 +109,7 @@ data_sources:
 | `checkpoint` | path \| absent | absent | absent | Directory path to resume from (e.g. `.ddrs/runs/<id>/checkpoints/epoch_5_mb_9`). |
 | `state_cache` | path \| absent | absent | absent | Path to a continuous-run state zarr store (from `probe_zeta_gradient --mode state-cache`). Injects window-start routing states (hotstarted from a continuous run rather than cold zero-flow start). Reduces the hotstart-transient noise floor. Optional; leave blank for standard cold-start training. |
 | `loss` | block \| absent | L1 (see below) | absent | Training objective. Omit for historical L1. |
+| `grad_accum_steps` | integer ≥ 1 \| absent | absent (=1) | absent | Optimizer micro-batching: N micro-batches (each `batch_size` gauges) summed into ONE optimizer step, at the peak memory of a single micro-batch. Absent/1 = byte-identical single-batch training; 0 rejected at load. Micro losses are weighted by their valid-count denominator so the accumulated gradient exactly equals the pooled large-batch gradient (gate: `tests/grad_accum_equivalence.rs`). When accumulating, the sampler keeps the `n_gauges % batch_size` tail (single-batch mode silently drops it) and `--max-mini-batches` counts optimizer STEPS. Updates/epoch shrink ~N× — match total update count when A/B-ing vs a single-batch baseline (see 2026-07-29 grad-accum handoff). |
 
 ### `experiment.loss:` sub-block
 
