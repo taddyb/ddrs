@@ -3,20 +3,26 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "i just finished training run number 1 (its in output/saved_models_1, latest checkpoint is epoch_5_mb_35). can you plot the predicted hydrograph vs USGS observations for gage 01013500 over calendar year 2000? save it to wherever makes sense.",
-      "expected_output": "A jupyter notebook at output/saved_models_1/plots/hydrograph_01013500_2000.ipynb that loads predictions_latest.zarr, slices gage_ids='01013500' and time='2000-01-01' to '2000-12-31', drops warmup=3, computes per-window NSE, and saves a PNG to the same plots dir.",
+      "prompt": "i just finished a training run — it's the newest thing in .ddrs/runs/. can you plot the predicted hydrograph vs USGS observations for gage 01013500 over calendar year 2000? save it to wherever makes sense.",
+      "expected_output": "Resolves the run with `ls -t .ddrs/runs/ | head` (or `ddrs status`), then writes a notebook at <RUN_DIR>/plots/hydrograph_01013500_2000.ipynb — NOT output/saved_models_*/plots/, which is a dead pre-2026-06 layout. The notebook imports load_predictions_zarr from /home/tbindas/projects/ddrs/.claude/skills/ddrs-eval-plots/scripts, opens <RUN_DIR>/eval/predictions.zarr, slices gage_ids='01013500' and time 2000-01-01..2000-12-31, drops warmup=3, computes per-window NSE, and saves the PNG into <RUN_DIR>/plots/. Reports both the notebook path and the plots dir before offering to execute.",
       "files": []
     },
     {
       "id": 2,
       "prompt": "I want to see manning's roughness over the Pacific Northwest from my latest ddrs training run. Use MERIT basins as polygons with a positron basemap.",
-      "expected_output": "A notebook that loads kan_parameters_latest.nc, joins to the MERIT shapefile under ~/projects/ddr/data/merit/, filters to a PNW bbox (~-125,42,-110,49), plots `n` with plasma_r and CartoDB.Positron basemap, saves PNG to output/saved_models_*/plots/parameter_map_n_pacific_northwest.png. The user is vague about which checkpoint — pick the highest-numbered saved_models_* by mtime.",
+      "expected_output": "A notebook under <RUN_DIR>/plots/ that opens <RUN_DIR>/plot/kan_parameters.nc (dim COMID, vars n/q_spatial/p_spatial/x_storage/slope — NOT the run-root kan_parameters.nc, which on a leakance run is the COMID_eval zeta diagnostic), joins to ~/projects/ddr/data/merit/cat_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp via np.intersect1d, filters to a PNW bbox (~-125,42,-110,49), plots `n` with plasma_r + CartoDB.Positron (alpha 0.6, attribution off), and saves parameter_map_n_pacific_northwest.png into <RUN_DIR>/plots/. If plot/kan_parameters.nc is missing, it offers the dump_parameters command (--checkpoint takes the head BASE, no .mpk) rather than inventing a path.",
       "files": []
     },
     {
       "id": 3,
-      "prompt": "make me the standard evaluation plot bundle for my trained model — boxplots for NSE/KGE/bias/RMSE/FHV/FLV, the NSE CDF, and a gauge map. compare to summed q prime if you can find a baseline zarr.",
-      "expected_output": "A notebook that uses ddr.validation.Metrics + plot_box_fig + plot_cdf + plot_gauge_map + plot_drainage_area_boxplots, against output/predictions_latest.zarr. Loads gauges CSV from training YAML's data_sources.gages. NSE/KGE clipped to [-1,1] for boxplot, [0,inf) for CDF. If no baseline zarr is findable, the notebook should work with just the ddrs run (single label).",
+      "prompt": "make me the standard evaluation plot bundle for my trained model — boxplots for NSE/KGE/bias/RMSE/FHV/FLV, the NSE CDF, and a gauge map. and tell me whether it beat the summed q prime baseline.",
+      "expected_output": "A notebook under <RUN_DIR>/plots/ using ddr.validation Metrics + plot_box_fig + plot_cdf + plot_gauge_map + plot_drainage_area_boxplots. Loads <RUN_DIR>/eval/predictions.zarr with load_predictions_zarr and <RUN_DIR>/baseline/ with load_baseline_f32 (raw f32 planes + manifest.json — NOT a zarr, and NOT load_baseline_zarr, which no longer exists). Intersects gage_ids AND time before scoring so both series cover the same population, and recomputes both from the raw arrays instead of trusting the manifest's precomputed metrics. Gauges CSV comes from <RUN_DIR>/config.yaml data_sources.gages, not config/merit_training.yaml. NSE/KGE clipped to [-1,1] for the boxplot, [0,inf) for the CDF. The verdict quotes MEDIANS and states the gauge count scored; it does not compare against 0.689/0.723 (a global-MERIT number) or against a baseline median from a larger gauge population.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "have the KAN parameters actually converged in my 30-epoch run, or is it still moving? show me.",
+      "expected_output": "Recognizes this as the parameter-convergence family (references/parameter_map.md §Convergence). Needs per-epoch dumps, so it either finds existing kan_parameters_epoch*.nc in the run dir or offers the `dump_parameters` loop over checkpoints/epoch_E_mb_M/head for first/middle/last epoch before running anything. The notebook reads parameter_ranges from <RUN_DIR>/config.yaml (not a hardcoded dict) and reports all four diagnostics: late-half movement as a fraction of total movement, IQR contracting vs expanding across epochs, realized p1-p99 span as a % of the declared range, and the fraction of reaches within 1% of a bound. Saves parameter_convergence_<var>.png + parameter_convergence_stats.json into <RUN_DIR>/plots/. Histogram x-axis is anchored to the declared range, not the data range. Correctly reads 'expanding IQR + a few % realized span' as UNDER-TRAINED, not converged.",
       "files": []
     }
   ]

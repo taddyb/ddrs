@@ -1,0 +1,127 @@
+# Testing: gates, inventory, authoring
+
+70 test files, 233 `#[test]` fns. Full suite runs in 2–5 minutes on the dev machine.
+Each `tests/*.rs` compiles as its own crate; `mod common;` pulls `tests/common.rs`.
+
+**Do not hard-code test counts in docs.** Prior skills claimed "leakance_gradcheck
+8/8" and "zeta_accum 6/6"; the real counts are 16 and 8, and they grow. Assert "all
+pass" instead.
+
+## Tier gates
+
+### Tier A — routing core
+`src/routing/`, `src/geometry.rs`, `src/sparse/`
+
+```bash
+mkdir -p output && cargo run --release --example compare_ddr_sandbox  # must print ABSOLUTE MATCH
+cargo test --lib
+cargo test --test mmc
+cargo test --test sparse_gradcheck
+cargo test --test leakance_gradcheck    # run even if you did not touch leakance —
+cargo test --test leakance_off_parity   # any routing change can disturb OFF-parity
+cargo test --test zeta_accum
+```
+
+### Tier B — KAN head
+`src/nn/`, `Cargo.toml` rskan tag
+
+```bash
+cargo test --features fixtures \
+  --test kan_head_init_repro --test kan_head_init_parity \
+  --test kan_head_fixture_forward --test kan_head_fixture_backward
+```
+Then run Tier A to confirm the head change did not disturb routing.
+
+### Tier C — everything else in `src/`
+```bash
+cargo test --lib && cargo test && \
+  mkdir -p output && cargo run --release --example compare_ddr_sandbox
+```
+If you touched `src/training/forward.rs` (disagg / leakance threading), also run
+`cargo test --test leakance_off_parity`.
+
+### Tier D — config YAML only
+```bash
+ddrs plan --config config/experiments/<x>.yaml \
+          --workspace /home/tbindas/projects/ddrs/.ddrs
+```
+Exit 0, no drift warnings.
+
+## What covers what
+
+| Area | Tests |
+|---|---|
+| Routing | `mmc`, `routing_utils`, `geometry` |
+| Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
+| KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
+| Leakance | `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` |
+| Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
+| CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
+| Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |
+| Eval robustness | `cargo test --lib training::eval::tests` |
+| Disagg freeze | `disagg_freeze` |
+| Grad accumulation | `grad_accum_equivalence`, `adadelta_nse_smoke` (on `exp_train`) |
+
+Two commands that appear in CLAUDE.md and `docs/` and **run zero tests**:
+`cargo test --test mmc mc_routes_linear_chain` (no such test) and
+`cargo test --test sp8_gradcheck -- --ignored` (nothing in that file is `#[ignore]`,
+so it passes vacuously). Do not use either as a gate.
+
+## Acceptance thresholds
+
+| Check | Bar |
+|---|---|
+| DDR sandbox max abs diff | < 1e-3 m³/s |
+| Typical per-reach rel diff | ~1e-7 (the f32 floor). Regression past 1e-6 warrants investigation |
+| `zeta_accum` headwater identity | abs error < 1e-6 · max(\|zeta\|, 1.0) |
+| KAN fixture forward/backward | bit-for-bit |
+| Gradcheck | rel < 5e-3 **or** abs < 1e-4 |
+
+## Authoring patterns
+
+### Gradcheck
+Follow `tests/leakance_gradcheck.rs`. Central difference
+`(f(x+eps) − f(x−eps)) / (2·eps)` on the deterministic `NdArray<f32>` backend.
+
+**ε depends on the parent's nonlinearity — this is the non-obvious part:**
+- Parents the output is **nonlinear** in (`n`, `q_spatial`, `p_spatial`):
+  `eps = max(1e-3·|base|, 1e-3)`. Smaller hits the f32 noise floor.
+- Parents the output is **exactly linear** in (`K_D`, `d_gw`, `leakance_factor`):
+  use a **large** step — `K_D 4e-7` (base 5e-7), `d_gw 1.5` (base 0.0),
+  `factor 0.4` (base 0.5). Central differences have zero truncation error for
+  exactly-linear parents, while a tiny step sinks Δloss into the f32 round-off of
+  `q_next.sum()` (~O(500)).
+
+Tolerances `REL_TOL = 5e-3`, `ABS_TOL = 1e-4`; accept on rel **or** abs. The base
+point must be **interior** to all ranges (no clamp saturation), and for leakance a
+**losing** config (`depth > d_gw`). `x_storage` is a non-differentiated constant of
+`TimestepLeakanceOp` — `.grad()` returns `None`; do not try to sweep it.
+
+### Parity
+Follow `tests/leakance_off_parity.rs`. Capture the `EXPECTED` array **before** the
+feature branch exists, on the deterministic CPU backend, and assert **bit-exact**
+equality — not approximate. Test **both** directions:
+1. feature off ⇒ byte-identical to the committed expectation, and
+2. feature on ⇒ output demonstrably changes.
+
+Only the second catches a silent no-op, which is exactly what the 2026-07-01 stale
+binary produced.
+
+### Fixtures
+Generate under `~/projects/ddr/.venv`, write raw bytes to `tests/fixtures/`
+(**tracked**, unlike the gitignored top-level `/fixtures/`), load behind
+`#[cfg(feature = "fixtures")]`.
+
+## Why the zeta_accum headwater identity works
+
+Reach 0 is a headwater (no upstream), so the triangular solve gives
+`x_sol[0] = b_rhs[0]`. Therefore `q_no_leak[0] − q_leak[0] == zeta[0]` exactly.
+That identity is what proves the eval-time zeta accumulator reports precisely what
+was subtracted from `b_rhs`, rather than a recomputation that might drift.
+
+## Checkpoint f16 drift is expected
+
+`CompactRecorder` = `HalfPrecisionSettings`, so weights and Adam moments are stored
+as f16. A resumed trajectory drifts slowly from an uninterrupted one. This is not a
+bug unless drift exceeds a few thousandths of NSE over many epochs. Resume *state*
+(epoch, mini-batch cursor, rng, sampler permutation) is exact.

@@ -5,17 +5,18 @@ Direct port of DDR's `plot_time_series` (`~/projects/ddr/src/ddr/validation/plot
 
 ## Inputs
 
-### Predictions zarr (from `cargo run --bin eval`)
+### Predictions zarr — `<RUN_DIR>/eval/predictions.zarr`
 
-Required schema (set by `write_predictions_zarr`):
-- group `predictions` — `(G, T)` float, m³/s
-- group `observations` — `(G, T)` float, m³/s, NaN where unobserved
-- group `gage_ids` — `(G,)` string, USGS STAIDs (e.g., `"01013500"`)
-- group `time` — `(T,)` datetime64
+Required schema (set by `write_predictions_zarr`, `src/training/zarr_io.rs`):
+- array `predictions` — `(G, T)` float32, m³/s
+- array `observations` — `(G, T)` float32, m³/s, NaN where unobserved
+- array `gage_ids` — `(G, W)` uint8, NUL-padded fixed-width ASCII STAIDs
+  (`W = max(longest id, 8)`, `_dtype_hint: |S<W>`) — decoded by the bundled loader
+- array `time` — `(T,)` int64 nanoseconds since 1970-01-01
 
 ### User-supplied selection
 
-- **gauge id** — one entry from `gage_ids`. If user passes a name like "Allagash River", join through `data/camels_670.csv` (column `STAID`, `STANAME`).
+- **gauge id** — one entry from `gage_ids`. If the user passes a name like "Allagash River", join through the run's gauges CSV (`data_sources.gages` in `<RUN_DIR>/config.yaml`; currently `/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv`, columns `STAID`, `STANAME`).
 - **year** — water year or calendar year (clarify if ambiguous). Default: full time range in the zarr.
 - **optional comparison series** — e.g., DDR-Python predictions at the same gauge, or summed Q' baseline. Drawn as extra lines.
 
@@ -31,20 +32,20 @@ import pandas as pd
 # Bundled loader handles ddrs's zarr v3 layout (missing dimension_names) and
 # the (G, W) uint8 gage_ids encoding. Without this, `xr.open_zarr` raises
 # KeyError and `.sel(gage_ids="01013500")` silently misses.
-SKILL_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts" if "__file__" in dir() else Path("/home/tbindas/projects/ddrs/.claude/worktrees/plot-predictions-notebook/.claude/skills/ddrs-eval-plots/scripts")
+SKILL_SCRIPTS = Path("/home/tbindas/projects/ddrs/.claude/skills/ddrs-eval-plots/scripts")
 sys.path.insert(0, str(SKILL_SCRIPTS))
 from load_ddrs_predictions import load_predictions_zarr
 
 # --- USER INPUTS ---------------------------------------------------------
-PRED_ZARR = Path("/home/tbindas/projects/ddrs/output/predictions_latest.zarr")
-CKPT_DIR  = Path("/home/tbindas/projects/ddrs/output/saved_models_1")
+RUN_DIR   = Path("/home/tbindas/projects/ddrs/.ddrs/runs/<id>")
+PRED_ZARR = RUN_DIR / "eval" / "predictions.zarr"
+PLOT_DIR  = RUN_DIR / "plots"
 GAGE_ID   = "01013500"          # USGS STAID
 YEAR      = 2000                 # calendar year; for water year, set WATER_YEAR=True below
 WATER_YEAR = False
 WARMUP    = 3                    # drop first N timesteps (DDR default)
 # -------------------------------------------------------------------------
 
-PLOT_DIR = CKPT_DIR / "plots"
 PLOT_DIR.mkdir(exist_ok=True)
 
 ds = load_predictions_zarr(PRED_ZARR)
@@ -92,6 +93,6 @@ print(f"saved {out}")
 - **Why warmup=3?** Matches DDR's default. The first few timesteps of MC routing have not yet propagated through the network, so the predicted hydrograph is artificially flat at hotstart.
 - **NSE inside the slice, not over full zarr.** When the user asks for a single year, recomputing NSE for that window is more informative than reusing the whole-period NSE.
 - **For multiple gauges**: loop over `GAGE_ID` and save one PNG per gauge. Don't put multiple gauges on one axis — discharge magnitudes vary by orders of magnitude across basins.
-- **Adding a comparison line (e.g., summed Q' baseline)**: open the baseline zarr, slice the same time window, plot with `linestyle="--"` and add to the legend.
+- **Adding a comparison line (e.g., summed Q' baseline)**: `from load_ddrs_predictions import load_baseline_f32`, open `RUN_DIR / "baseline"` (raw f32 planes + `manifest.json`, not a zarr), `.sel()` the same gauge and time window, plot with `linestyle="--"` and add to the legend. The baseline gauge set is a superset of the eval set, so `.sel(gage_ids=GAGE_ID)` can still `KeyError` for a gauge dropped from the baseline — guard it.
 - **`gage_ids` dtype gotcha — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, W) uint8` with `_dtype_hint: |S<W>` (W = longest ID, min 8 — stores written before 2026-06-12 hard-truncated to 8 bytes, so global IDs in old stores are lossy), NOT as a 1D bytes/string array. Combined with the missing `dimension_names` metadata in the zarr v3 store, `xr.open_zarr` plus a naïve decode fails in two different places. The bundled `scripts/load_ddrs_predictions.py` handles both: opens with the raw `zarr` library, assembles an `xarray.Dataset`, decodes the 2D uint8 layout into a clean 1D string axis.
 - **`obs <= 0` is a sentinel for "missing".** DDR's convention is to treat non-positive observations as unobserved before computing NSE/bias. If your zarr was produced from a USGS source that uses this convention, mask `obs[obs <= 0] = np.nan` before metrics.

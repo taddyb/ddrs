@@ -4,38 +4,23 @@ Cross-gauge distributions of model performance — NSE, KGE, bias, RMSE, FHV, FL
 
 ## Inputs
 
-### Predictions zarr (from `cargo run --bin eval`)
+### Predictions zarr — `<RUN_DIR>/eval/predictions.zarr`
 
-Same schema as the hydrograph reference: `predictions (G,T)`, `observations (G,T)`, `gage_ids (G,)`, `time (T,)`.
+Same schema as the hydrograph reference: `predictions (G,T)` f32, `observations (G,T)` f32, `gage_ids (G,W)` uint8, `time (T,)` int64 ns.
 
-### Optional baseline (summed Q')
+### Baseline (summed Q') — `<RUN_DIR>/baseline/`
 
-Summed Q' baseline (no routing) — the standard "is routing pulling its weight" comparison. **Two on-disk formats exist; check the run dir first:**
+The standard "is routing pulling its weight" comparison. It is **not** a zarr: `src/baseline/cache.rs` writes `predictions.f32` + `observations.f32` (raw little-endian f32, row-major `(n_gauges, n_days)`) plus `manifest.json` (`n_gauges`, `n_days`, `gage_ids`, `time_range_daily` = ISO date strings, `metrics`, `sources`). Read it with the bundled `load_baseline_f32`, which returns the same `(gage_ids, time)` Dataset shape as `load_predictions_zarr`:
 
-- **Raw f32 + manifest** (what `ddrs run --workflow train-and-test` writes into `<run_dir>/baseline/`): `predictions.f32`, `observations.f32` (both `(n_gauges, n_days)` little-endian f32, row-major) and `manifest.json` (keys `n_gauges`, `n_days`, `gage_ids`, `time_range_daily` = list of `YYYY-MM-DD` strings, `metrics`, `sources`). `load_baseline_zarr` does NOT read this — load it directly:
+```python
+from load_ddrs_predictions import load_predictions_zarr, load_baseline_f32
+```
 
-  ```python
-  def load_baseline_f32(bdir):
-      import json, numpy as np, xarray as xr
-      from pathlib import Path
-      bdir = Path(bdir); man = json.load(open(bdir / "manifest.json"))
-      G, T = man["n_gauges"], man["n_days"]
-      pred = np.fromfile(bdir / "predictions.f32", dtype="<f4").reshape(G, T)
-      obs  = np.fromfile(bdir / "observations.f32", dtype="<f4").reshape(G, T)
-      time = np.array(man["time_range_daily"], dtype="datetime64[D]").astype("datetime64[ns]")
-      return xr.Dataset({"predictions": (("gage_ids","time"), pred),
-                         "observations": (("gage_ids","time"), obs)},
-                        coords={"gage_ids": np.array(man["gage_ids"]), "time": time})
-  ```
-  The manifest's per-gauge `metrics` are precomputed by ddrs's Rust code, but **recompute both series from raw arrays with the same numpy `Metrics`** so the baseline and the run use identical conventions and the comparison is apples-to-apples.
-
-- **Zarr** (DDR's `scripts/summed_q_prime.py` output): same schema as the predictions zarr → use `load_baseline_zarr`.
-
-If provided, plots compare ddrs vs. baseline.
+The manifest's per-gauge `metrics` are precomputed by ddrs's Rust code, but **recompute both series from the raw arrays with the same numpy `Metrics`** so baseline and run use identical conventions and the comparison is apples-to-apples.
 
 ### Optional gauges CSV
 
-Required only for the drainage-area boxplot and the gauge map. Path lives in the training YAML under `data_sources.gages` — e.g. `~/projects/ddr/data/camels_670.csv`. Columns expected: `STAID` (str, zero-padded to 8), `LAT_GAGE`, `LNG_GAGE`, `DRAIN_SQKM`.
+Required only for the drainage-area boxplot and the gauge map. Read the path from `<RUN_DIR>/config.yaml` under `data_sources.gages` rather than hardcoding it — for current CONUS runs that resolves to `/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv`. Columns expected: `STAID` (str, zero-padded to 8), `LAT_GAGE`, `LNG_GAGE`, `DRAIN_SQKM`.
 
 ## Metric helper
 
@@ -63,42 +48,40 @@ import sys
 import yaml
 from ddr.validation import Metrics, plot_box_fig, plot_cdf, plot_drainage_area_boxplots, plot_gauge_map
 
-# Bundled loader handles ddrs's zarr v3 layout + (G, W) uint8 gage_ids.
-SKILL_SCRIPTS = Path("/home/tbindas/projects/ddrs/.claude/worktrees/plot-predictions-notebook/.claude/skills/ddrs-eval-plots/scripts")
+# Bundled loader handles ddrs's zarr v3 layout + (G, W) uint8 gage_ids,
+# and reads the raw-f32 baseline into the same Dataset shape.
+SKILL_SCRIPTS = Path("/home/tbindas/projects/ddrs/.claude/skills/ddrs-eval-plots/scripts")
 sys.path.insert(0, str(SKILL_SCRIPTS))
-from load_ddrs_predictions import load_predictions_zarr, load_baseline_zarr
+from load_ddrs_predictions import load_predictions_zarr, load_baseline_f32
 
 # --- USER INPUTS ---------------------------------------------------------
-PRED_ZARR     = Path("/home/tbindas/projects/ddrs/output/predictions_latest.zarr")
-BASELINE_ZARR = None  # Path("...summed_q_prime.zarr") if comparing; else None
-CKPT_DIR      = Path("/home/tbindas/projects/ddrs/output/saved_models_1")
-TRAINING_YAML = Path("/home/tbindas/projects/ddrs/config/merit_training.yaml")
-RUN_LABEL     = "ddrs latest"
+RUN_DIR   = Path("/home/tbindas/projects/ddrs/.ddrs/runs/<id>")
+PRED_ZARR = RUN_DIR / "eval" / "predictions.zarr"
+BASE_DIR  = RUN_DIR / "baseline"        # set to None to plot the run alone
+PLOT_DIR  = RUN_DIR / "plots"
+RUN_LABEL = "ddrs latest"
 # -------------------------------------------------------------------------
 
-PLOT_DIR = CKPT_DIR / "plots"
 PLOT_DIR.mkdir(exist_ok=True)
 
-# Resolve the gauges CSV from the training config. It lives at
-# `data_sources.gages` and is whatever the model was actually trained on
-# (e.g., gages_3000.csv, camels_670.csv) — don't hardcode the filename.
-GAUGES_CSV = None
-if TRAINING_YAML.exists():
-    cfg = yaml.safe_load(TRAINING_YAML.read_text())
-    gpath = cfg.get("data_sources", {}).get("gages")
-    if gpath:
-        GAUGES_CSV = Path(gpath).expanduser()
+# Resolve the gauges CSV from the run's OWN config snapshot. It lives at
+# `data_sources.gages` and is whatever the model was actually trained on —
+# don't hardcode the filename, and don't read config/merit_training.yaml
+# (that is the template, not what produced this run).
+cfg = yaml.safe_load((RUN_DIR / "config.yaml").read_text())
+gpath = cfg.get("data_sources", {}).get("gages")
+GAUGES_CSV = Path(gpath).expanduser() if gpath else None
 
 ds = load_predictions_zarr(PRED_ZARR)
 
 results = [Metrics(pred=ds.predictions.values, target=ds.observations.values)]
 labels  = [RUN_LABEL]
 
-if BASELINE_ZARR is not None:
-    dsb = load_baseline_zarr(BASELINE_ZARR)
-    # Intersect axes — neither zarr is guaranteed a strict subset of the
-    # other. Past bugs: time axes drifted by 1-2 days; ddrs gauge set is a
-    # subset of baseline but the other direction also happens.
+if BASE_DIR is not None:
+    dsb = load_baseline_f32(BASE_DIR)
+    # Intersect axes — neither series is guaranteed a strict subset of the
+    # other. Observed on the 2026-07-30 CONUS run: baseline 2,698 gauges ×
+    # 5,479 days vs run 2,365 × 5,477, intersecting to 2,365 × 5,477.
     shared_gids = np.intersect1d(ds.gage_ids.values, dsb.gage_ids.values)
     shared_time = np.intersect1d(ds.time.values, dsb.time.values)
     ds  = ds.sel(gage_ids=shared_gids, time=shared_time)
@@ -203,15 +186,26 @@ if GAUGES_CSV is not None and GAUGES_CSV.exists():
 print(f"saved metrics plots to {PLOT_DIR}")
 ```
 
+## Is this a win?
+
+The bar is the **summed-Q' baseline computed on the SAME gauge population** — the intersection you just took, scored with the same `Metrics` code. Nothing else is a valid comparison.
+
+- **CONUS / dHBV2-UH reference bar: median NSE 0.6781, median KGE 0.7172, on 2,365 gauges.**
+- **Never quote `0.689 / 0.723` as the CONUS bar.** That pair is a *global* MERIT number over a different 5,224-gauge network.
+- **Never compare a 2,365-gauge trained median against a 3,211-gauge baseline median.** The raw gage list carries 513 single-divide (headwater) gauges whose upstream set is empty; before the 2026-07-28 fix they summed to an all-zero prediction and scored phantom zeros, dragging the baseline median down. Training's dataset filter drops them, so the trained series never had them. Mixing the two populations manufactures a win out of nothing.
+- **Report medians, not means.** The per-gauge NSE/KGE distribution is strongly left-skewed — a handful of catastrophic gauges (NSE in the hundreds negative) move the mean by tenths while the median barely shifts. Print both if you like, but state the median.
+
+If both series come from the same `<RUN_DIR>` (`eval/predictions.zarr` and `baseline/`) and you intersect both axes before scoring, the populations match by construction. Say so in the notebook's header cell along with the gauge count you actually scored.
+
 ## Notes
 
 - **Why clip NSE to [-1, 1]?** Without clipping, a handful of catastrophic gauges (`NSE < -100`) make the box-plot scale unreadable. DDR's `evaluate.ipynb` does the same (`np.clip(data, -1, 1)` for NSE/KGE only).
 - **Why drop NaN per metric (not per gauge)?** Different metrics fail for different reasons (e.g., zero-variance observations break `nse` but not `bias`). Filtering per metric preserves more data than dropping any gauge with any NaN.
 - **FHV / FLV** (High-Flow Volume / Low-Flow Volume biases) — percent errors in the top/bottom flow regimes; closer to zero is better. From `ddr.validation.Metrics`.
 - **The CDF clips NSE to `[0, ∞)`** to emphasize where useful skill begins. The boxplot uses `[-1, 1]`. This asymmetry is inherited from DDR.
-- **Axis intersection, not subset.** Neither zarr is guaranteed a strict subset of the other — ddrs's predictions zarr and DDR's summed-Q' baseline have been observed to differ by 1-2 days at the time-axis edges, and the gauge sets can be different sizes. Compute the intersection on both axes before metrics, otherwise `.sel(...)` raises `KeyError`. Same rule for the gauges-CSV join — intersect with the predictions zarr `gage_ids` before `.loc[...]`.
-- **`gage_ids` storage gotchas — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, W) uint8` with `_dtype_hint: |S<W>` (W = longest ID, min 8; stores written before 2026-06-12 truncated global Provider__GageId names to 8 bytes — per-gauge joins on such stores are unreliable), NOT as 1D bytes/string. The zarr v3 store also lacks the `dimension_names` metadata `xr.open_zarr` requires. The bundled helper opens with raw `zarr`, decodes the 2D uint8 layout per-row, casts `time` from `int64` nanoseconds to `datetime64[ns]`, and assembles a clean `xarray.Dataset`. Use it for both the ddrs zarr and the DDR summed-Q' baseline (same schema).
-- **`GAUGES_CSV` comes from the training YAML.** The path lives at `data_sources.gages` and tracks whatever the model was actually trained on. Hardcoding `camels_670.csv` or `gages_3000.csv` breaks the moment training switches to a different gauge set.
+- **Axis intersection, not subset.** Neither series is guaranteed a strict subset of the other — the predictions zarr and the summed-Q' baseline have been observed to differ by 1-2 days at the time-axis edges, and the gauge sets are routinely different sizes (baseline keeps gauges training filtered out). Compute the intersection on both axes before metrics, otherwise `.sel(...)` raises `KeyError` — and a population mismatch invalidates the comparison even when it doesn't raise. Same rule for the gauges-CSV join: intersect with the predictions zarr `gage_ids` before `.loc[...]`.
+- **`gage_ids` storage gotchas — handled by `load_predictions_zarr`.** ddrs writes `gage_ids` as `(G, W) uint8` with `_dtype_hint: |S<W>` (W = longest ID, min 8; stores written before 2026-06-12 truncated global Provider__GageId names to 8 bytes — per-gauge joins on such stores are unreliable), NOT as 1D bytes/string. The zarr v3 store also lacks the `dimension_names` metadata `xr.open_zarr` requires. The bundled helper opens with raw `zarr`, decodes the 2D uint8 layout per-row, casts `time` from `int64` nanoseconds to `datetime64[ns]`, and assembles a clean `xarray.Dataset`. The baseline is a *different* format entirely (raw f32 + JSON manifest) — use `load_baseline_f32` for it, never `load_predictions_zarr`.
+- **`GAUGES_CSV` comes from `<RUN_DIR>/config.yaml`, not the repo template.** The path lives at `data_sources.gages` and tracks whatever the model was actually trained on. Hardcoding a filename breaks the moment training switches gauge sets, and reading `config/merit_training.yaml` reads the template rather than the config that produced the run.
 - **Positional reindex when joining metrics to a smaller gauges DataFrame.** `Metrics(...).nse` is shape `(G_ds,)` keyed positionally by `ds.gage_ids`. If you then intersect with a gauges CSV that lacks some of those gauges, you have `G_csv < G_ds`. Writing `g[col] = m.nse` either errors (length mismatch) or — worse, in some pandas versions — silently broadcasts and writes the wrong gauge's NSE to each row. Always reindex with a `gid_to_idx` lookup before the join. This was iter-2's silent bug.
 - **The gauge map uses the last (rightmost) result in `labels`.** If you want to map the baseline instead, swap the index.
 - **Drainage-area panel medians are positioned in data coordinates, not axes coordinates.** DDR's `plot_drainage_area_boxplots` draws all bins on a single Axes with bin centers at `bin_positions[i] + bin_width/2` (data x in `[0, 25]` for the default 5 bins × `bin_width=5`). Iterating `fig.axes[:n_bins]` returns ONE axis and puts every annotation on top of itself — use `ax.text(right_edge_x, y_upper - eps, ...)` in data coords instead. If DDR's defaults change (different bin count or `bin_width`), update both numbers — they're encoded in `plots.py:471` and `plots.py:485-491`.
