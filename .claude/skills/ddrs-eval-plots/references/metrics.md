@@ -2,6 +2,15 @@
 
 Cross-gauge distributions of model performance — NSE, KGE, bias, RMSE, FHV, FLV — rendered as box plots, CDF, and a basemap-backed gauge scatter. Direct port of `~/projects/ddr/examples/eval/evaluate.ipynb`, adapted to ddrs's predictions zarr schema.
 
+## Contents
+
+§Inputs (predictions zarr · raw-f32 baseline · optional gauges CSV) ·
+§Metric helper · §Notebook template (box plot · NSE CDF · drainage-area boxplots ·
+gauge map) · **§Is this a win?** · §Notes
+
+Read **§Is this a win?** before reporting any comparison against the baseline —
+it carries the two population traps that have produced wrong verdicts in this repo.
+
 ## Inputs
 
 ### Predictions zarr — `<RUN_DIR>/eval/predictions.zarr`

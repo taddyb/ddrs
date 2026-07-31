@@ -7,6 +7,17 @@ retired all of them.
 
 **Cite from this file, not from memory, and not from a skill that predates it.**
 
+## Contents
+
+§Gauge-set definitions · §Benchmarks → §The KGE claim · §Closed campaigns
+(leakance · selective equifinality H1–H6 · Q′-store waves · synthetic-n) ·
+**§Do-not-use list** · §Structural constants · §Evidence standard ·
+§Doc conventions · §Open, not closed
+
+If you are about to cite a number, read §Gauge-set definitions and
+§Do-not-use list first — most wrong numbers here are population confusions, not
+arithmetic errors.
+
 ## Gauge-set definitions — memorize these
 
 Most wrong numbers in this repo are population confusions, not arithmetic errors.
