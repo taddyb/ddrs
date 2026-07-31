@@ -1,18 +1,25 @@
 # Reference: parameter map plot
 
-Spatial map of a learned KAN parameter (`n`, `q_spatial`, `p_spatial`, or `slope`) colored over MERIT-Hydro catchment polygons with a basemap. Direct port of DDR's `param_plot` from `~/projects/ddr/examples/merit/plot_parameter_map.ipynb`, adapted to ddrs's `dump_parameters` output schema.
+Spatial map of a learned KAN parameter (`n`, `q_spatial`, `p_spatial`, `x_storage`, or `slope`) colored over MERIT-Hydro catchment polygons with a basemap. Direct port of DDR's `param_plot` from `~/projects/ddr/examples/merit/plot_parameter_map.ipynb`, adapted to ddrs's `dump_parameters` output schema.
 
 ## Inputs
 
-### Parameter NetCDF (from `cargo run --bin dump_parameters`)
+### Parameter NetCDF — `<RUN_DIR>/plot/kan_parameters.nc`
 
-Schema is intentionally identical to the KAN subset of DDR's `merit_geometry_predictions.nc` (see `src/bin/dump_parameters.rs:1-32`):
+Written by `dump_parameters` (`src/dump_parameters.rs::write_netcdf`), either via `ddrs run --plot` or the standalone binary. `dump_parameters` **always** writes these five variables, whatever `kan_head.learnable_parameters` contains — a non-learnable entry falls back to its `params.defaults` / sigmoid-init value rather than being omitted:
 
-- dim `COMID` — int64 reach identifier (MERIT-Hydro)
-- var `n` — Manning's n (m⁻¹/³ s, range [0.015, 0.25])
+- dim `COMID` — int64 reach identifier (MERIT-Hydro), 346,321 for CONUS
+- var `n` — Manning's n (s/m^(1/3), range [0.015, 0.25])
 - var `q_spatial` — Leopold & Maddock exponent (range [0, 1])
 - var `p_spatial` — Leopold & Maddock coefficient (range [1, 200])
-- var `slope` — channel bed slope (m/m, clamped ≥0.001)
+- var `x_storage` — Muskingum X storage weight (range [0, 0.5]; 0 = attenuation, 0.5 = pure lag; sigmoid init ≈ 0.25)
+- var `slope` — channel bed slope (m/m, clamped to `attribute_minimums.slope`, ≥0.001)
+
+Plus `K_D` (1/s), `d_gw` (m), and `leakance_factor` (dimensionless) **only** when the run has `params.use_leakance: true`.
+
+Root attrs: `checkpoint` (the exact head base that was dumped), `ddrs_version`, `n_reaches`, `note`.
+
+> **The zeta variables are in a different file on a different dimension.** `zeta`, `zeta_net`, `depth_mean`, `area_z_mean`, `q_mean` live in `<RUN_DIR>/kan_parameters.nc` (no `plot/`) on dim `COMID_eval` — 64,892 reaches, the gauge-subgraph union, **not** the 346,321-reach CONUS network. They are written by `eval --zeta-output` (or `train-and-test` Phase 2), never by `dump_parameters`: zeta needs the routed per-timestep depth, which only exists during eval. Do not `xr.open_dataset` one expecting the other's variables, and never plot the two on a shared COMID axis.
 
 ### MERIT-Hydro fabric (external)
 
@@ -26,14 +33,14 @@ Schema is intentionally identical to the KAN subset of DDR's `merit_geometry_pre
 - Load with `gpd.read_file(...)`, join with `np.intersect1d` (template below).
 
 **Global GeoPackage** (runs whose `config.yaml` sets `geospatial_fabric: .../global_merit_riv.gpkg`) — use the **global template** in §"Global-fabric runs", NOT the CONUS template:
-- Path: `/projects/mhpi/data/MERIT/raw/global_merit_riv.gpkg`, layer `flowlines` (LINESTRING, EPSG:4326), 2,939,408 reaches.
+- Path: `/projects/mhpi/data/MERIT/raw/global_merit_riv.gpkg`, layer `flowlines` (LINESTRING, EPSG:4326), 2,939,408 reaches. **HPC-only — this file is not present on this workstation.** Global-fabric plots have to run where the gpkg lives; don't offer them locally.
 - It's ~6.4 GB, so **read with `pyogrio.read_dataframe(GPKG, layer="flowlines", columns=["COMID", "uparea"])`** — column pushdown loads only what you join + filter on (a few minutes, once). `gpd.read_file` on the whole file is far slower.
 - These are flowlines (lines), not catchment polygons — plot with thin `linewidth`, not filled polygons.
 - `dump_parameters` on a global run writes ~2.94M COMIDs; the join covers the whole planet, so always produce a CONUS-bbox map **and** a `uparea`-filtered global map (headwater reaches are sub-pixel at world scale).
 
 ### User-supplied selection
 
-- **variable** — one of `n`, `q_spatial`, `p_spatial`, `slope`. Default: `n` (Manning's, the most physically interpretable).
+- **variable** — one of `n`, `q_spatial`, `p_spatial`, `x_storage`, `slope`. Default: `n` (Manning's, the most physically interpretable).
 - **region**: one of
   - Bounding box `(min_lon, min_lat, max_lon, max_lat)`
   - Named region (CONUS, Northeast, Pacific Northwest, etc.) — translate to bounding box
@@ -53,15 +60,15 @@ import xarray as xr
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- USER INPUTS ---------------------------------------------------------
-PARAMS_NC = Path("/home/tbindas/projects/ddrs/output/kan_parameters_latest.nc")
-CKPT_DIR  = Path("/home/tbindas/projects/ddrs/output/saved_models_1")
+RUN_DIR   = Path("/home/tbindas/projects/ddrs/.ddrs/runs/<id>")
+PARAMS_NC = RUN_DIR / "plot" / "kan_parameters.nc"
+PLOT_DIR  = RUN_DIR / "plots"
 SHAPEFILE = Path("/home/tbindas/projects/ddr/data/merit/cat_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp")
 VARIABLE  = "n"
 BBOX      = (-125, 24, -66, 53)   # CONUS; set tighter for a region
 REGION_LABEL = "CONUS"
 # -------------------------------------------------------------------------
 
-PLOT_DIR = CKPT_DIR / "plots"
 PLOT_DIR.mkdir(exist_ok=True)
 
 # Load and join
@@ -84,6 +91,7 @@ PLOT_CONFIGS = {
     "n":         {"title": "Manning's Roughness", "unit": "m⁻¹/³ s", "cmap": "plasma_r", "vmax": 0.2},
     "q_spatial": {"title": "Width-Depth Exponent (q)", "unit": "–", "cmap": "viridis"},
     "p_spatial": {"title": "Width Coefficient (p)",   "unit": "–", "cmap": "viridis"},
+    "x_storage": {"title": "Muskingum X Storage Weight", "unit": "–", "cmap": "coolwarm", "vmax": 0.5},
     "slope":     {"title": "Channel Bed Slope",       "unit": "m/m", "cmap": "magma"},
 }
 cfg = PLOT_CONFIGS[VARIABLE]
@@ -163,14 +171,14 @@ cp "$RUN/config.yaml" /tmp/dump_cfg.yaml   # then edit in the two lines
 cargo run --release --bin dump_parameters -- \
   --config /tmp/dump_cfg.yaml \
   --checkpoint "$RUN/checkpoints/<epoch_E_mb_M>/head" \
-  --output "$RUN/kan_parameters.nc"
+  --output "$RUN/plot/kan_parameters.nc"
 ```
 
 The checkpoint base is the predictions zarr's `model` attr without `.mpk`
 (`<run-id>/checkpoints/epoch_E_mb_M/head`). The dump streams the fabric in
 50k-reach batches (~2.94M reaches for the global fabric, ~1 min on GPU once the
-binary is built) and writes `n`, `q_spatial`, `p_spatial`, `slope`
-(plus `x_storage` once that learnable parameter lands). The patched config is
+binary is built) and writes `n`, `q_spatial`, `p_spatial`, `x_storage`, `slope`
+(plus `K_D`, `d_gw`, `leakance_factor` for a leakance run). The patched config is
 disposable — never commit explicit adjacency paths back into the run's
 `config.yaml`.
 
@@ -186,9 +194,9 @@ import pyogrio
 import xarray as xr
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-RUN_DIR   = Path("/projects/mhpi/tbindas/ddrs/.ddrs/runs/<run-id>")
-PARAMS_NC = RUN_DIR / "kan_parameters.nc"
-GPKG      = Path("/projects/mhpi/data/MERIT/raw/global_merit_riv.gpkg")
+RUN_DIR   = Path("/projects/mhpi/tbindas/ddrs/.ddrs/runs/<run-id>")   # HPC path
+PARAMS_NC = RUN_DIR / "plot" / "kan_parameters.nc"
+GPKG      = Path("/projects/mhpi/data/MERIT/raw/global_merit_riv.gpkg")  # HPC-only
 PLOT_DIR  = RUN_DIR / "plots"; PLOT_DIR.mkdir(exist_ok=True)
 
 CONUS_BBOX, GLOBAL_BBOX = (-125, 24, -66, 53), (-180, -60, 180, 85)
@@ -316,6 +324,124 @@ fig.savefig(out_sc, dpi=300, bbox_inches="tight", facecolor="white")
 print(f"saved {out_sc}")
 ```
 
+## Convergence: has training actually moved the parameters?
+
+A single-epoch map answers "what did it learn". This family answers "was it done learning". It is the standard follow-up to any parameter map, and the honest answer for ddrs runs so far has been *no*.
+
+### Step 1 — produce per-epoch dumps
+
+`dump_parameters` reads one checkpoint at a time, so pick three or more epochs spanning the run (first, middle, last) and dump each into its own NetCDF. `--checkpoint` takes the **head base** (`.../head`, no `.mpk`), and the dumped file records it in the `checkpoint` root attr, so the provenance is self-describing.
+
+```bash
+RUN=/home/tbindas/projects/ddrs/.ddrs/runs/<id>
+mkdir -p "$RUN/plot"
+for E in 1 15 30; do
+  cargo run --release --bin dump_parameters -- \
+    --config "$RUN/config.yaml" \
+    --checkpoint "$RUN/checkpoints/epoch_${E}_mb_0/head" \
+    --output "$RUN/plot/kan_parameters_epoch${E}.nc"
+done
+```
+
+The mini-batch suffix is whatever the run wrote — `ls "$RUN/checkpoints"` first; all-basin accumulated runs end each epoch at `mb_0`. If the config uses managed adjacency, apply the throwaway-config patch from §"Producing `kan_parameters.nc` for a managed-adjacency run" to every dump. Each dump is a GPU job over the full fabric (~1 min, ~10 MB out for CONUS).
+
+> The 2026-07-30 CONUS run (`2026-07-30T01-58-07Z-train-and-test`) wrote its per-epoch dumps at the **run root** — `kan_parameters_epoch1.nc`, `kan_parameters_epoch15.nc`, and epoch 30 as `kan_parameters.nc`. That collides with the eval zeta diagnostic's filename. Write new dumps under `plot/` and read the older run's from the root.
+
+### Step 2 — the four diagnostics
+
+Reported by the template below, and executed for real in `.ddrs/runs/2026-07-30T01-58-07Z-train-and-test/plots/parameter_maps.ipynb` (final cell) → `parameter_convergence_{n,q_spatial,p_spatial}.png` + `parameter_convergence_stats.json`.
+
+1. **Late-half movement as a fraction of total movement** — `median|e_last − e_mid| / median|e_last − e_first|`. A converged run spends its late half barely moving, so this should be well under 0.5. Near or above 0.5 means the trajectory is still going.
+2. **IQR across epochs** — contracting means reaches are agreeing on a value; **expanding** means the head is still spreading reaches apart, i.e. still differentiating them.
+3. **Realized span as a % of the declared `parameter_ranges` span** — take p1–p99 of the last epoch over `hi − lo` from the run's own `config.yaml`. A few percent means the sigmoid output has barely left its initialization plateau.
+4. **Fraction of reaches pinned at a bound** — within 1% of `lo` or `hi`. This is the *opposite* failure: saturation. Diagnostics 3 and 4 are both bad, and they are mutually exclusive, so always report both.
+
+**Interpretation.** Expanding IQR *plus* a realized span of a few percent of the declared range means the parameters sit **near initialization** — the model is **UNDER-TRAINED, not converged**. Do not read "the distribution barely moved" as "the optimizer found its optimum". Measured on the 2026-07-30 30-epoch CONUS run: `n` late-half fraction 0.59, IQR 0.0011 → 0.0027 (expanding 2.4×), realized span 4.5% of [0.015, 0.25], 0.0% at a bound. `q_spatial` 3.1% span, `p_spatial` 1.7%. That run had not converged.
+
+### Template
+
+Add this as a final cell to the parameter-map notebook so all views travel together. It reuses `RUN_DIR`, `VARIABLES`, and `PLOT_DIR`.
+
+```python
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+import xarray as xr
+import yaml
+
+# Per-epoch dumps: first, middle, last. Point at wherever Step 1 wrote them.
+EPOCH_NCS = {
+    1:  RUN_DIR / "plot" / "kan_parameters_epoch1.nc",
+    15: RUN_DIR / "plot" / "kan_parameters_epoch15.nc",
+    30: RUN_DIR / "plot" / "kan_parameters.nc",
+}
+BOUND_TOL = 0.01   # "at a bound" = within 1% of the declared range
+
+# Declared ranges come from the run's OWN config, not a hardcoded dict.
+ranges = yaml.safe_load((RUN_DIR / "config.yaml").read_text())["params"]["parameter_ranges"]
+
+eds    = {ep: xr.open_dataset(p) for ep, p in EPOCH_NCS.items()}
+epochs = sorted(eds)
+e_first, e_mid, e_last = epochs[0], epochs[len(epochs) // 2], epochs[-1]
+
+stats = {}
+for var in VARIABLES:
+    lo, hi = ranges[var]
+    span   = hi - lo
+    vals   = {ep: eds[ep][var].values for ep in epochs}
+
+    d_total = np.abs(vals[e_last] - vals[e_first])
+    d_late  = np.abs(vals[e_last] - vals[e_mid])
+    iqr = {ep: float(np.nanpercentile(vals[ep], 75) - np.nanpercentile(vals[ep], 25))
+           for ep in epochs}
+
+    v        = vals[e_last][np.isfinite(vals[e_last])]
+    realized = float(np.nanpercentile(v, 99) - np.nanpercentile(v, 1))
+    at_bound = float(np.mean((v <= lo + BOUND_TOL * span) | (v >= hi - BOUND_TOL * span)))
+
+    stats[var] = {
+        # 1. late-half movement / total movement
+        "late-half movement fraction": float(np.nanmedian(d_late) / np.nanmedian(d_total)),
+        f"median |e{e_last}-e{e_first}| (% of range)": float(np.nanmedian(d_total)) / span * 100,
+        f"median |e{e_last}-e{e_mid}| (% of range)":   float(np.nanmedian(d_late))  / span * 100,
+        f"p95 |e{e_last}-e{e_mid}| (% of range)":      float(np.nanpercentile(d_late, 95)) / span * 100,
+        # 2. IQR contracting or expanding
+        "IQR by epoch": iqr,
+        "IQR trend": "expanding" if iqr[e_last] > iqr[e_first] else "contracting",
+        # 3. realized span vs declared range
+        "realized span (p1-p99, % of declared)": realized / span * 100,
+        # 4. pinned at a bound
+        "fraction at a bound": at_bound,
+    }
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 5), dpi=150)
+    shades = plt.cm.viridis(np.linspace(0.15, 0.85, len(epochs)))
+    for c, ep in zip(shades, epochs):
+        vv = vals[ep][np.isfinite(vals[ep])]
+        ax1.hist(vv, bins=80, range=(lo, hi), histtype="step", linewidth=1.8, color=c,
+                 label=f"epoch {ep} (median {np.nanmedian(vv):.4f}, IQR {iqr[ep]:.4f})")
+    ax1.set_xlim(lo, hi)                      # anchored to the DECLARED range
+    ax1.set_xlabel(var); ax1.set_ylabel("reach count")
+    ax1.set_title(f"{var}: distribution by epoch")
+    ax1.legend(frameon=True); ax1.grid(axis="y", alpha=0.3)
+
+    ax2.hist(d_late[np.isfinite(d_late)] / span * 100, bins=80,
+             color="#aa3333", edgecolor="white", linewidth=0.3)
+    ax2.set_xlabel(f"|epoch {e_last} - epoch {e_mid}| as % of declared {var} range")
+    ax2.set_ylabel("reach count")
+    ax2.set_title(f"{var}: late-training per-reach movement")
+    ax2.grid(axis="y", alpha=0.3)
+
+    fig.savefig(PLOT_DIR / f"parameter_convergence_{var}.png",
+                dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+print(json.dumps(stats, indent=2))
+(PLOT_DIR / "parameter_convergence_stats.json").write_text(json.dumps(stats, indent=2))
+```
+
+**Why the left panel's x-axis is the declared range, not the data range.** Auto-scaling to the data zooms into a 4%-wide sliver and makes three near-identical epoch curves look like meaningful separation. Anchoring to `parameter_ranges` shows the collapse at a glance — that is the whole point of the plot.
+
 ## Notes
 
 - **Shapefile is large.** A full Pfafstetter-7 shapefile is several GB. For small-region plots, filter before plotting (`.cx[xmin:xmax, ymin:ymax]` is fast — uses the spatial index).
@@ -325,5 +451,5 @@ print(f"saved {out_sc}")
 - **CRS**: MERIT shapefiles are EPSG:4326 (lat/lon). Don't reproject before plotting — `contextily` will fetch tiles matching the geo coords.
 - **Joining to a gauge**: use `~/projects/ddr/data/merit_gages_conus_adjacency.zarr/<STAID>/comids` to get the contributing COMIDs for a specific gauge, then filter `ds.sel(COMID=...)` before plotting. Compute the bbox from the polygons' total extent.
 - **Histogram x-axis uses the YAML-declared parameter range, not data min/max.** If an under-trained model collapses every reach near the lower bound (n ≈ 0.015), a data-driven x-axis would zoom in and hide the pathology. Anchoring the x-axis to `parameter_ranges` makes "the model hasn't learned much yet" immediately legible.
-- **Scatter pulls drainage area from the global attributes NetCDF**, not from the predictions NetCDF. `dump_parameters` writes `n / q_spatial / p_spatial / slope` only — `log10_uparea` is a model INPUT and lives in `merit_global_attributes_v2.nc`. Join on COMID; ddrs is a subset (CONUS only), the attributes file is global, so use `np.intersect1d`.
+- **Scatter pulls drainage area from the global attributes NetCDF**, not from the parameter NetCDF. `dump_parameters` writes `n / q_spatial / p_spatial / x_storage / slope` only — `log10_uparea` is a model INPUT and lives in `merit_global_attributes_v2.nc`. Join on COMID; ddrs is a subset (CONUS only), the attributes file is global, so use `np.intersect1d`.
 - **Hexbin not scatter** for the parameter-vs-area plot. 300k points as a raw `ax.scatter` is solid black even at `alpha=0.01`; hexbin with `mincnt=1` reveals the density structure and an overlaid `median-per-bin` line shows the trend. If a user has a small region (<5k reaches) and asks for a scatter explicitly, falling back to `ax.scatter(..., s=4, alpha=0.3)` is fine.
