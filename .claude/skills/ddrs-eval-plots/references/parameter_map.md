@@ -2,6 +2,19 @@
 
 Spatial map of a learned KAN parameter (`n`, `q_spatial`, `p_spatial`, `x_storage`, or `slope`) colored over MERIT-Hydro catchment polygons with a basemap. Direct port of DDR's `param_plot` from `~/projects/ddr/examples/merit/plot_parameter_map.ipynb`, adapted to ddrs's `dump_parameters` output schema.
 
+## Contents
+
+| Section | Use it when |
+|---|---|
+| §Inputs | Always — parameter NetCDF schema, MERIT fabric, what you must choose |
+| §Notebook template | CONUS run, standard case |
+| §Global-fabric runs | The run used `geospatial_fabric` / managed adjacency, or a non-CONUS domain |
+| §Global-fabric runs → Producing `kan_parameters.nc` | `dump_parameters` failed with `conus_adjacency not resolved` |
+| §Companion cells → Distribution histogram | "Is the parameter pinned at a bound?" |
+| §Companion cells → Parameter vs log10(drainage area) | "Did the model learn a scale relationship?" |
+| **§Convergence** | **"Have the parameters converged?" / "Is this run under-trained?"** |
+| §Notes | Colormaps, projection, joins, performance |
+
 ## Inputs
 
 ### Parameter NetCDF — `<RUN_DIR>/plot/kan_parameters.nc`

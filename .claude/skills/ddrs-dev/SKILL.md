@@ -22,11 +22,50 @@ config reference, test-authoring patterns, and the current research status.
 |---|---|
 | Fix a build failure (cmake, netcdf, fork resolution, fixtures) | `references/build-and-env.md` |
 | Look up a config key, its default, or a load-time guard | `references/config.md` |
-| Know which tests gate the change I just made | `references/testing.md` (tier matrix) |
-| Write a new gradcheck / parity / fixture test | `references/testing.md` (authoring) |
-| Diagnose a failed, hung, or wrong-result run | `references/traps.md` |
+| Know which tests gate the change I just made | `references/testing.md` §Tier gates |
+| Write a new gradcheck / parity / fixture test | `references/testing.md` §Authoring patterns |
+| Diagnose a failed, hung, or wrong-result run | `references/traps.md` §Symptom → trap |
 | Check whether a question is already settled | `references/research-status.md` |
 | Plot or interpret eval output | skill `ddrs-eval-plots` |
+
+## Contents
+
+**This file** — Five costly facts · Change→gate table · Commands · Verifying a run ·
+Maintenance
+
+**`references/build-and-env.md`** (80 lines)
+Hard prerequisites (cmake; CUDA toolkit is required even for CPU-only builds) ·
+Fork pins (13 burn, 11 cubecl, rskan tag) + resolution failure modes · Fixtures
+(V1 sandbox, KAN parity, the wrong-reference caveat) · Gitignored artifacts ·
+Cargo features · Worktree gotchas
+
+**`references/config.md`** (194 lines)
+Top level · `data_sources:` (8 fields, adjacency rule) · `experiment:` (incl.
+`optimizer`, grad-accum) → `experiment.loss:` (l1 / nnse-kge / kge / nse-batch) ·
+`testing:` overlay (batch_size shifts meaning) · `kan_head:` →
+`kan_head.disaggregation:` (**the real fields — `use_precip` does not exist**) ·
+`params:` (incl. what `tau` actually is) → `parameter_ranges` → `attribute_minimums` ·
+Load-time guards + their error substrings · Adding a routing parameter · Adding a
+boolean flag · Enabling leakance
+
+**`references/testing.md`** (127 lines)
+Tier gates A/B/C/D with exact commands · What covers what (test → area map) ·
+Acceptance thresholds · Authoring patterns: gradcheck (**ε depends on the parent's
+nonlinearity**), parity (must be bidirectional), fixtures · Why the zeta_accum
+headwater identity works · Checkpoint f16 drift
+
+**`references/traps.md`** (212 lines)
+Symptom → trap table · T1 stale binary · T2 DDR sandbox mismatch · T3 CUDA graphs
+mask NaN · T4 phantom-zero baseline · T5 flat training loss · T6 GPU eval OOM that
+never propagates · T7 silent kernel OOM on long CPU forwards · T8 transient icechunk
+read · T9 `.ddrs/` beside the config · T10 `--checkpoint` differs per binary ·
+Exit codes · Pre-flight checklist
+
+**`references/research-status.md`** (213 lines)
+Gauge-set definitions (2,365 vs 2,698 vs 3,211 vs 5,224) · Benchmarks + the KGE
+claim restated · Closed campaigns: leakance NO-GO, selective equifinality H1–H6,
+Q′-store waves, synthetic-n interim · **Do-not-use list** · Structural constants ·
+Evidence standard · Doc conventions · Open questions
 
 ## The five facts that cause the most wasted time
 

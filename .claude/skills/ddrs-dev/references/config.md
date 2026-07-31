@@ -8,6 +8,17 @@ Six top-level sections. Verified against source 2026-07-30.
 instead of erroring. This is the single most common cause of "my config change did
 nothing".
 
+## Contents
+
+§Top level · §`data_sources:` · §`experiment:` → §`experiment.loss:` ·
+§`testing:` overlay · §`kan_head:` → §`kan_head.disaggregation:` ·
+§`params:` → §`parameter_ranges` → §`attribute_minimums` · §Load-time guards ·
+§Adding a new routing parameter · §Adding a new boolean flag · §Leakance: enabling it
+
+Jump straight to §Load-time guards if a config was **rejected**; to
+§`kan_head.disaggregation:` if anything mentions `use_precip` (it does not exist);
+to §`params:` if you are looking for `tau` (it is not a routing sub-step count).
+
 ## Top level
 
 | Key | Default | Notes |
