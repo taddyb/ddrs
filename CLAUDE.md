@@ -353,6 +353,10 @@ which preserves prior behavior exactly — omit the block and nothing changes):
   `(sim - obs)² / (σ_gauge + eps)²`, with σ fixed over the training period.
   Pairs with `experiment.optimizer: adadelta`, which is scale-free and ignores
   the `learning_rate` schedule by design.
+  **Not on `master` yet** — `nse-batch`, `optimizer`, `use_grad_accum`, and
+  `grad_accum_steps` land with the gradient-accumulation work (PR #31, branch
+  `exp_train`). On a commit without them, `nse-batch` fails config load with
+  `unknown variant 'nse-batch'`.
 
 The `nnse-kge` option exists because L1 and NSE are both maximized at a
 simulated variance *below* observed (NSE's optimum is at `α = r < 1`), so they

@@ -2,8 +2,9 @@
 
 This chapter is the BURN 0.21 recipe for registering a custom
 `Backward` op from a downstream crate like ddrs. It is the load-bearing
-plumbing that lets `CsrSolveOp` (in `src/sparse/mod.rs`) and
-`TimestepOp` (in `src/routing/mmc_op.rs`) collapse what would otherwise
+plumbing that lets ddrs's three custom ops — `CsrSolveOp` (in
+`src/sparse/mod.rs:417`), `TimestepOp` and `TimestepLeakanceOp` (both in
+`src/routing/mmc_op.rs:560` and `:617`) — collapse what would otherwise
 be O(n²) or ~33-ops-per-timestep autograd tape entries into a single
 `Backward<I, N>` node each. Without this recipe, the differentiable side
 of ddrs would be untrainable at CONUS scale.
@@ -34,8 +35,9 @@ burn::backend::Autodiff<B>                              ✓ public
     = AutodiffTensor<B> (pub fields: .primitive, .node) ✓ values reachable
 ```
 
-The imports both ddrs ops actually use are visible at the top of
-`src/sparse/mod.rs` and `src/routing/mmc_op.rs`:
+The autodiff imports the ddrs ops actually use are at the top of
+`src/sparse/mod.rs` (lines 21-27, reproduced verbatim; `src/routing/
+mmc_op.rs` carries the same autodiff set with its own tensor imports):
 
 ```rust
 use burn::backend::Autodiff;
@@ -44,8 +46,14 @@ use burn::backend::autodiff::checkpoint::strategy::NoCheckpointing;
 use burn::backend::autodiff::grads::Gradients;
 use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
 use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorPrimitive};
+use burn::tensor::{IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive};
 ```
+
+The last line's `IndexingUpdateOp`, `Int`, and `TensorData` are not part
+of the custom-backward recipe — they belong to the CPU scatter fallback
+and the host round-trips in the same module. The recipe itself needs only
+`Tensor` and `TensorPrimitive` from `burn::tensor`, as in the minimal
+example below.
 
 ## How to use it
 
@@ -114,24 +122,39 @@ will be detached, so the bookkeeping is skipped).
 
 `Backward<B, N>` widens the parent array to `[Option<NodeRef>; N]` and
 the `prepare` call to an N-element node array. Each `Option` is `Some`
-iff that input was being tracked. ddrs uses two widths:
+iff that input was being tracked. ddrs uses three widths — 2, 5, and 8:
 
-- **`CsrSolveOp` is `Backward<B, 2>`** — the two inputs are the
-  assembled matrix values `a_values` and the right-hand side `b`. Its
-  forward (`triangular_csr_solve` in `src/sparse/mod.rs`) destructures
+- **`CsrSolveOp` is `Backward<B, 2>`** (`src/sparse/mod.rs:417`) — the
+  two inputs are the assembled matrix values `a_values` and the
+  right-hand side `b`. Its forward (`triangular_csr_solve` in
+  `src/sparse/mod.rs`) destructures
   `[a_at.node.clone(), b_at.node.clone()]` into the prepare call, and
   its backward destructures `let [parent_a, parent_b] = ops.parents;`.
-- **`TimestepOp` is `Backward<I, 5>`** — the five tracked parents are,
-  in fixed order, `[n, q_spatial, p_spatial, q_t, q_prime_t]`. The three
+- **`TimestepOp` is `Backward<I, 5>`** (`src/routing/mmc_op.rs:560`) —
+  the five tracked parents are, in fixed order,
+  `[n, q_spatial, p_spatial, q_t, q_prime_t]`. The three
   remaining forward inputs (`length`, `slope`, `x_storage`) are network
   constants, not differentiated through, so they are saved in state but
   never registered.
+- **`TimestepLeakanceOp` is `Backward<I, 8>`**
+  (`src/routing/mmc_op.rs:617`) — the leakance (GW–SW water-loss)
+  variant of the fused timestep. It widens `TimestepOp`'s five parents
+  with the three leakance parameters:
+  `let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac] =
+  ops.parents;` (`:630`). Its `State` is `TimestepLeakanceState`, which
+  *composes* rather than duplicates — a `base: TimestepState<I>` plus a
+  `leak: LeakanceSaved<I>` holding `area_z`, `k_d`, `d_gw`,
+  `leakance_factor`, the `losing_only` flag, and the optional impervious
+  mask. Exactly one of the two timestep ops is registered per step:
+  `route_timestep` (`src/routing/mmc.rs:377-383`) takes the leakance
+  branch when all three of `k_d`, `d_gw`, `leakance_factor` are present,
+  and `timestep_forward` otherwise.
 
 ### Saved state holds primitives, not autodiff tensors
 
 `State` must be `Clone + Send + Debug + 'static`, and — critically —
 must not itself participate in autograd, or the op would defeat its own
-purpose. Both ddrs ops therefore store inner-backend
+purpose. All three ddrs ops therefore store inner-backend
 `B::FloatTensorPrimitive` values plus plain Rust scalars. `CsrSolveState`
 is small:
 
@@ -277,6 +300,22 @@ It builds a small synthetic `NdArray` network, runs one
 differences for each of `n`, `q_spatial`, `p_spatial`, `q_t`,
 `q_prime_t` (1e-3 relative tolerance, with an absolute-tolerance
 allowance for clamp-saturated slots whose analytical gradient is zero).
+
+The 8-wide leakance op has its own finite-difference gradcheck:
+
+```bash
+cargo test --test leakance_gradcheck
+```
+
+It mirrors `sp8_gradcheck` but drives `timestep_forward_leakance`
+end-to-end and adds the three leakance parents to the swept set
+(`{n, q_spatial, p_spatial, x_storage, K_D, d_gw, leakance_factor}`),
+with the leakance parameters placed in the interior of their ranges
+(`K_D = 5e-7`, `d_gw = 0.0`, `leakance_factor = 0.5`) on a losing
+configuration so no clamp saturates. Any change to
+`src/routing/leakance.rs` or to `TimestepLeakanceOp` must keep this
+green — alongside `cargo test --test leakance_off_parity`, which asserts
+the no-leakance path stays byte-identical when the term is off.
 
 ## See also
 

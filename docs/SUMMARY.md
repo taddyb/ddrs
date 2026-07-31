@@ -23,5 +23,6 @@
 
 - [Comparing to DDR](reference/ddr-comparison.md)
 - [The summed Q' baseline](reference/baseline.md)
+- [DDR Q' store contract](nh-qprime-store-contract.md)
 - [Performance & CUDA Graphs](reference/perf.md)
 - [BURN autograd recipe](reference/burn-autograd.md)

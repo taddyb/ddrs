@@ -62,17 +62,28 @@ plain `git clone && cargo build` works — no sibling clones to wire up.
    [The `[patch.crates-io]` block in detail](#the-patchcrates-io-block-in-detail)
    below.
 
-3. **CUDA Toolkit 12+ with a CUDA-12-capable driver** for the GPU
-   path; validated on driver 575.57.08 (8× A100, sm_80) and a desktop
-   RTX 4080. ddrs's current `config/merit_training.yaml` defaults to
-   `sparse_solver: cuda` and `use_cuda_graphs: true`, so the GPU path
-   is exercised on every default training run. The CPU path needs none
-   of this — it uses `burn-ndarray` and runs end-to-end without a
-   single CUDA call. The unit tests under `cargo test` exercise the
-   CPU path and pass on a CUDA-less machine. The CUDA device ordinal is
-   selectable via the top-level `device:` key in the config (default
-   `0`); on a multi-GPU host, set e.g. `device: 1` to keep training off
-   the display/shared GPU.
+3. **CUDA Toolkit 12+ with a CUDA-12-capable driver.** Validated on
+   driver 575.57.08 (8× A100, sm_80) and a desktop RTX 4080. ddrs's
+   current `config/merit_training.yaml` defaults to `sparse_solver:
+   cuda` and `use_cuda_graphs: true`, so the GPU path is exercised on
+   every default training run. The CUDA device ordinal is selectable
+   via the top-level `device:` key in the config (default `0`); on a
+   multi-GPU host, set e.g. `device: 1` to keep training off the
+   display/shared GPU.
+
+   > **A CUDA toolkit is required to *compile*, even for CPU-only use.**
+   > `burn-cuda` and `cudarc` (the latter with the
+   > `cuda-version-from-build-system` feature) are **non-optional**
+   > dependencies in `Cargo.toml`, and `burn_cuda::Cuda` is imported
+   > unconditionally by `src/sparse/dispatch.rs`, `src/sparse/cusparse.rs`,
+   > `src/cli/run.rs`, and `src/cli/system.rs` (which also calls
+   > `cudarc::driver` directly). There is no `cfg(feature = "cuda")`
+   > gate around them. A machine with no CUDA toolkit therefore fails at
+   > `cargo build`, *not* at runtime.
+   >
+   > CPU **execution** is fully supported once built: pass
+   > `ddrs run --backend cpu` (NdArray, deterministic; `sparse_solver`
+   > is forced to `cpu`), and the `cargo test` suite runs CPU-only.
 
 4. **DDR reference repository** at `~/projects/ddr` for V1 fixture
    regeneration. `scripts/export_ddr_sandbox.py` runs under DDR's `uv`
@@ -127,9 +138,14 @@ participates in the adjacency cache key). To skip the managed build
 entirely, drop `geospatial_fabric` and set both `conus_adjacency` and
 `gages_adjacency` to pre-built zarr stores instead.
 
-If any of these live elsewhere on your machine, edit the YAML rather
+If any of these live elsewhere on your machine, change the paths rather
 than symlinking — symlinks under `~/projects/ddr/data/` have historically
-masked stale fixtures. See [Reading inputs](usage/inputs-reading.md) and
+masked stale fixtures. For a one-off path, edit the `data_sources:` block
+in your `ddrs.yaml`; for a whole dataset you switch between, prefer the
+saved groups: `ddrs sources list` / `ddrs sources save <name>` /
+`ddrs sources use <name>` splice the block in for you and refresh
+`.ddrs/sources.lock`, so no hand-editing is needed. See
+[Reading inputs](usage/inputs-reading.md) and
 [Graph objects](usage/graph-objects.md) for what each source contributes.
 
 ## Setup steps
@@ -166,16 +182,65 @@ setup is wrong — see Gotchas below before reaching for the routing
 code.
 
 For day-to-day use, install the `ddrs` CLI and drive the
-`init → plan → run` lifecycle instead of the raw examples:
+`plan → run` lifecycle instead of the raw examples:
 
 ```bash
 cargo install --path .   # puts `ddrs` in ~/.cargo/bin/
-ddrs init                # GPU probe + smoke test, bootstraps ./ddrs.yaml
-ddrs plan                # validate config, build managed adjacency, baseline
+ddrs plan                # GPU probe + cached smoke test, bootstraps ./ddrs.yaml,
+                         # locks data sources, builds managed adjacency + baseline
 ddrs run                 # execute the workflow, write manifest + outputs
 ```
 
-See [Running the code](usage/running.md) for the full lifecycle.
+`ddrs plan` is the first command — there is **no `ddrs init`**. The old
+`init` subcommand was merged into `plan`; the remaining stub is hidden
+from `--help`, prints `ddrs init has been merged into ddrs plan` and
+exits **2** (`src/bin/ddrs.rs`, asserted by `tests/cli_init_stub.rs`),
+so old muscle-memory scripts fail loudly rather than silently skipping
+setup.
+
+> **⚠️ STALE-BINARY TRAP — re-install after every `src/` change.**
+> `ddrs` on your PATH is `~/.cargo/bin/ddrs`, **not** your working tree.
+> `cargo build` and `cargo run` do **not** update it, so editing `src/`
+> and then typing `ddrs run …` silently runs the *old* binary. The run
+> manifest stamps `git.sha` from `.git` at runtime, not from the binary,
+> so a stale run still *looks* current. After touching `src/`, do one of:
+>
+> ```bash
+> cargo install --path .                              # canonical refresh
+> cargo build --release --bin ddrs && cp target/release/ddrs ~/.cargo/bin/ddrs
+> cargo run --release --bin ddrs -- run --workflow …  # bypass the installed copy
+> ```
+>
+> **Self-check:** current checkpoints are **directories**
+> (`.ddrs/runs/<id>/checkpoints/epoch_E_mb_M/` containing `head.mpk`,
+> `optim.mpk`, `state.json`). Flat `epoch_E_mb_M.mpk` files mean a
+> pre-checkpoint-resume binary ran — you are on a stale `ddrs`.
+
+Two flags are global (`src/bin/ddrs.rs`), so they work on every
+subcommand:
+
+- `--config <path>` — the experiment config to use. Default: discover
+  `ddrs.yaml` upward from the current directory, stopping at the first
+  `.git` ancestor.
+- `--workspace <dir>` — the workspace directory. **Default: `.ddrs/`
+  *beside the config*.** This is a trap: `--config
+  config/experiments/x.yaml` silently creates and uses
+  `config/experiments/.ddrs/`, not the repo-root workspace, so cached
+  adjacency/baselines are rebuilt and runs land somewhere unexpected.
+  Always pass `--workspace` explicitly alongside `--config`:
+
+  ```bash
+  ddrs --config config/experiments/x.yaml \
+       --workspace ~/projects/ddrs/.ddrs run --workflow train
+  ```
+
+Beyond `plan` and `run`, the CLI also has `ddrs sources`
+(named data-source groups under `config/sources/`), `ddrs import`
+(register an external Q' store — see
+[the Q' store contract](nh-qprime-store-contract.md)), `ddrs show`
+(inspect a past run's manifest), `ddrs status`, and `ddrs gc`. See
+`README.md` and [Running the code](usage/running.md) for the full
+lifecycle.
 
 ## The `[patch.crates-io]` block in detail
 
@@ -244,8 +309,20 @@ changed) to pull the new commits.
   [Comparing to DDR](reference/ddr-comparison.md) for the fixture
   caveat about the desktop DDR working tree.
 - **CUDA defaults are on.** `config/merit_training.yaml` ships with
-  `sparse_solver: cuda` and `use_cuda_graphs: true`. On a CPU-only
-  machine, either edit the YAML or pass a temp YAML that overrides:
+  `sparse_solver: cuda` and `use_cuda_graphs: true`. To run on the CPU,
+  do **not** hand-edit the YAML — `ddrs run` takes a `--backend` flag
+  (`src/bin/ddrs.rs`, `default_value = "cuda"`):
+
+  ```bash
+  ddrs run --workflow train --backend cpu
+  ```
+
+  This binds the `NdArray<f32>` backend (deterministic) and forces
+  `sparse_solver` to `cpu`; the run logs
+  `backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)`.
+  Only `cpu` and `cuda` are accepted — anything else is rejected before
+  the workspace is touched. If you do need it pinned in config instead,
+  the equivalent override is:
 
   ```yaml
   params:
@@ -254,7 +331,8 @@ changed) to pull the new commits.
   ```
 
   The `cargo test` suite already runs CPU-only, so `cargo test` is a
-  fine first check that the build is sound even without CUDA.
+  fine first check that the build is sound. (It still needs the CUDA
+  toolkit to *compile* — see item 3 above.)
 - **`output/` must exist** for the examples. Both `compare_ddr_sandbox`
   and `benchmark_hydrograph` write CSV+PNG directly to `output/` and
   panic on `BufWriter::new(File::create(...))` if the directory is
@@ -296,9 +374,9 @@ If that fails, check the troubleshooting order:
 For broader confidence:
 
 ```bash
-cargo test                                     # all tests (each tests/ file is its own crate)
-cargo test --test sparse_gradcheck             # one integration test file
-cargo test --test mmc mc_routes_linear_chain   # one specific test
+cargo test                                # all tests (each tests/ file is its own crate)
+cargo test --test sparse_gradcheck        # one integration test file
+cargo test --test mmc forward_reproducible  # one specific test
 ```
 
 The CPU-side `cargo test` suite passes without CUDA. If you have a
@@ -312,8 +390,23 @@ This routes the example through the `Cuda<f32, i32>` inner backend
 with `use_cuda_graphs=true` regardless of the YAML. Both runs must
 report `ABSOLUTE MATCH` for a clean setup.
 
+### Cargo features
+
+`Cargo.toml` defines exactly two features, both off by default:
+
+- **`fixtures`** — enables the optional `ndarray-npy` dependency and
+  un-gates the fixture-backed tests, which are compiled out via
+  `#![cfg(feature = "fixtures")]` otherwise. These read the tracked
+  `tests/fixtures/` directory (e.g. `kan_head_init_seed42.npz`,
+  `kan_init_stats_ddr.csv`), so nothing needs regenerating — unlike the
+  root-level `fixtures/` used by `compare_ddr_sandbox`, `tests/fixtures/`
+  is checked into git.
+- **`cuda`** — enables the GPU branch of those fixture tests. (It does
+  *not* control whether CUDA is linked; that is unconditional — see
+  item 3 under [What you need](#what-you-need).)
+
 If you touched `src/nn/`, the rskan pin in `Cargo.toml`, or DDR's
-`nn/kan.py`, also run the KAN parity sweep (CLAUDE.md invariant 7):
+`nn/kan.py`, run the KAN parity sweep (CLAUDE.md invariant 7):
 
 ```bash
 cargo test --features fixtures \
@@ -323,7 +416,7 @@ cargo test --features fixtures \
 
 ## See also
 
-- [Running the code](usage/running.md) — the `init → plan → run`
+- [Running the code](usage/running.md) — the `plan → run`
   lifecycle, training, evaluation, and the examples once setup is green.
 - [Comparing to DDR](reference/ddr-comparison.md) — what the V1
   regression measures and how to regenerate its fixtures.
