@@ -105,6 +105,7 @@ fn run_micro_batch<I: Backend>(
     let exp = cfg.experiment.as_ref().expect("experiment");
     let batch = dataset.collate(staids, window)?;
     let num_gauges = batch.gauge_staids.len();
+    let batch_gauge_std = batch.gauge_obs_std.clone();
 
     // Save observations before consuming `batch` in to_tensors.
     // SP-3 layout: observations shape is (rho_days, G) — rows are daily
@@ -171,13 +172,25 @@ fn run_micro_batch<I: Backend>(
         return Ok(None);
     }
 
+    // Per-gauge training-period std for the SURVIVING gauges, in the same
+    // row order as `p_filt` (empty unless `loss.kind: nse-batch`).
+    let sigma = if batch_gauge_std.is_empty() {
+        None
+    } else {
+        let vals: Vec<f32> = keep_indices.iter().map(|&gi| batch_gauge_std[gi as usize]).collect();
+        Some(Tensor::<Autodiff<I>, 1>::from_data(
+            TensorData::new(vals, [surviving_g]),
+            device,
+        ))
+    };
+
     let keep_t: Tensor<Autodiff<I>, 1, burn::tensor::Int> =
         Tensor::from_data(TensorData::new(keep_indices, [surviving_g]), device);
     let p_filt = p_post.select(0, keep_t.clone());
     let o_filt = o_post.select(0, keep_t);
 
     // Config-selected objective (default L1); autograd alive on `p_filt`.
-    let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss);
+    let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss, sigma);
     let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
     Ok(Some(MicroBatchOutcome {

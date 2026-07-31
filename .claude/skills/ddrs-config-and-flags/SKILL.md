@@ -109,10 +109,23 @@ data_sources:
 | `checkpoint` | path \| absent | absent | absent | Directory path to resume from (e.g. `.ddrs/runs/<id>/checkpoints/epoch_5_mb_9`). |
 | `state_cache` | path \| absent | absent | absent | Path to a continuous-run state zarr store (from `probe_zeta_gradient --mode state-cache`). Injects window-start routing states (hotstarted from a continuous run rather than cold zero-flow start). Reduces the hotstart-transient noise floor. Optional; leave blank for standard cold-start training. |
 | `loss` | block \| absent | L1 (see below) | absent | Training objective. Omit for historical L1. |
+| `optimizer` | `adam` \| `adadelta` | `adam` | absent | Which optimizer the training loop builds. `adam` = historical (`torch.optim.Adam` defaults + the `learning_rate` schedule). `adadelta` = dHBV's choice (`torch.optim.Adadelta` defaults ρ=0.9, ε=1e-6, lr=1.0): a **scale-free** update whose step size is `RMS[Δx]/RMS[g]`, so it IGNORES the `learning_rate` schedule by design. Use it whenever gradient accumulation drops the run to a few dozen optimizer steps — Adam's per-step movement is capped at `lr`, so a 30-update run at 5e-4 can move a weight at most ~0.017 total (measured 2026-07-30: AdaDelta moved the emitted `n` field **36.5×** further than Adam over the same 30 updates, `tests/adadelta_nse_smoke.rs`). A typo'd value fails config load; an optimizer checkpoint refuses to load into the other kind rather than reinterpreting moment tensors. |
 | `use_grad_accum` | bool | `false` | absent | Master switch for optimizer micro-batching (matches the `use_*` flag convention). `false` = byte-identical single-batch training, even if `grad_accum_steps` is present (the tuning stays inert). `true` requires `grad_accum_steps >= 2` — rejected at load otherwise (no silent no-op). |
 | `grad_accum_steps` | integer ≥ 2 \| absent | absent | absent | Group size when `use_grad_accum: true`: N micro-batches (each `batch_size` gauges) summed into ONE optimizer step, at the peak memory of a single micro-batch. 0 rejected at load. Micro losses are weighted by their valid-count denominator so the accumulated gradient exactly equals the pooled large-batch gradient (gate: `tests/grad_accum_equivalence.rs`). When accumulating, the sampler keeps the `n_gauges % batch_size` tail (single-batch mode silently drops it) and `--max-mini-batches` counts optimizer STEPS. Updates/epoch shrink ~N× — match total update count when A/B-ing vs a single-batch baseline (see 2026-07-29 grad-accum handoff). |
 
 ### `experiment.loss:` sub-block
+
+`kind: nse-batch` is dHBV's batch-NSE (hydroDL `crit.py::NSELossBatch`):
+`mean over valid (day, gauge) of (sim − obs)² / (σ_gauge + eps)²`, where
+`σ_gauge` is that gauge's observed-discharge std over the **whole training
+period** (fixed, never per-window — a per-window σ would drift between
+micro-batches and break gradient-accumulation exactness). Normalizing by σ
+stops high-variance basins from dominating the batch gradient the way raw L1
+does; it pairs with `optimizer: adadelta` as the dHBV recipe. `eps` defaults
+to 0.1 (dHBV's value). The σ vector is computed lazily by
+`MeritGagesDataset::gauge_obs_std` on first collate and logged
+(`gauge obs std (training period, N days): ... median X m3/s`) — its absence
+in the log means the loss is NOT nse-batch.
 
 Omit the entire `loss:` block to use the historical L1 objective. Including the block does NOT change behavior if `kind: l1`.
 

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use burn::module::{AutodiffModule, ModuleMapper, ModuleVisitor, Param, ParamId};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
+use burn::optim::{AdamConfig, GradientsParams, LearningRate, Optimizer};
 use burn::prelude::ElementConversion;
 use burn::tensor::{Tensor, backend::AutodiffBackend};
 
@@ -43,6 +43,107 @@ where
         .with_beta_2(0.999)
         .with_epsilon(1e-8)
         .init::<B, M>()
+}
+
+/// Optimizer selected by `experiment.optimizer`.
+///
+/// Exists because `bootstrap_head_and_state` returns ONE type: Adam and
+/// AdaDelta are different `OptimizerAdaptor`s, so a runtime choice needs a
+/// wrapper. The `Record` is an enum too, so a checkpoint written by one
+/// optimizer refuses to load into the other instead of silently
+/// reinterpreting moment tensors.
+#[derive(Clone)]
+pub enum HeadOptimizer<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    Adam(burn::optim::adaptor::OptimizerAdaptor<burn::optim::Adam, M, B>),
+    AdaDelta(burn::optim::adaptor::OptimizerAdaptor<crate::training::adadelta::AdaDelta, M, B>),
+}
+
+/// Record for [`HeadOptimizer`]. Only the active variant is populated.
+#[derive(burn::record::Record)]
+pub enum HeadOptimizerRecord<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    Adam(
+        <burn::optim::adaptor::OptimizerAdaptor<burn::optim::Adam, M, B> as Optimizer<M, B>>::Record,
+    ),
+    AdaDelta(
+        <burn::optim::adaptor::OptimizerAdaptor<crate::training::adadelta::AdaDelta, M, B> as Optimizer<M, B>>::Record,
+    ),
+}
+
+impl<M, B> Optimizer<M, B> for HeadOptimizer<M, B>
+where
+    M: AutodiffModule<B> + core::fmt::Debug + Send,
+    B: AutodiffBackend,
+{
+    type Record = HeadOptimizerRecord<M, B>;
+
+    fn step(&mut self, lr: LearningRate, module: M, grads: GradientsParams) -> M {
+        match self {
+            Self::Adam(o) => o.step(lr, module, grads),
+            Self::AdaDelta(o) => o.step(lr, module, grads),
+        }
+    }
+
+    fn step_multi(
+        &mut self,
+        lr: LearningRate,
+        module: M,
+        grads: burn::optim::MultiGradientsParams,
+    ) -> M {
+        match self {
+            Self::Adam(o) => o.step_multi(lr, module, grads),
+            Self::AdaDelta(o) => o.step_multi(lr, module, grads),
+        }
+    }
+
+    fn to_record(&self) -> Self::Record {
+        match self {
+            Self::Adam(o) => HeadOptimizerRecord::Adam(o.to_record()),
+            Self::AdaDelta(o) => HeadOptimizerRecord::AdaDelta(o.to_record()),
+        }
+    }
+
+    fn load_record(self, record: Self::Record) -> Self {
+        match (self, record) {
+            (Self::Adam(o), HeadOptimizerRecord::Adam(r)) => Self::Adam(o.load_record(r)),
+            (Self::AdaDelta(o), HeadOptimizerRecord::AdaDelta(r)) => {
+                Self::AdaDelta(o.load_record(r))
+            }
+            _ => panic!(
+                "optimizer checkpoint kind does not match `experiment.optimizer` — \
+                 resuming an Adam run as AdaDelta (or vice versa) would reinterpret \
+                 the saved moment tensors"
+            ),
+        }
+    }
+}
+
+/// Build the optimizer selected by `experiment.optimizer` (default Adam).
+pub fn build_head_optimizer<M, B>(kind: crate::config::OptimizerKind) -> HeadOptimizer<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    use crate::config::OptimizerKind;
+    match kind {
+        OptimizerKind::Adam => HeadOptimizer::Adam(
+            AdamConfig::new()
+                .with_beta_1(0.9)
+                .with_beta_2(0.999)
+                .with_epsilon(1e-8)
+                .init::<B, M>(),
+        ),
+        OptimizerKind::Adadelta => HeadOptimizer::AdaDelta(
+            crate::training::adadelta::AdaDeltaConfig::default().init::<B, M>(),
+        ),
+    }
 }
 
 // ── gradient clipping ──────────────────────────────────────────────────────

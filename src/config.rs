@@ -163,6 +163,13 @@ pub struct Experiment {
     /// `grad_accum_steps` (the tuning stays in the file, inert). `true`
     /// requires `grad_accum_steps >= 2` — rejected at load otherwise, so the
     /// switch can never be a silent no-op.
+    /// Which optimizer to use. `adam` (default) preserves every historical
+    /// run; `adadelta` matches dHBV's `torch.optim.Adadelta(params)` — a
+    /// scale-free update that needs no lr schedule (`lr` is ignored) and can
+    /// take meaningful steps when gradient accumulation reduces the run to a
+    /// few dozen updates, where Adam's per-step movement is capped at `lr`.
+    #[serde(default)]
+    pub optimizer: OptimizerKind,
     #[serde(default)]
     pub use_grad_accum: bool,
     /// Group size for `use_grad_accum: true`: number of micro-batches (each
@@ -191,6 +198,20 @@ impl Experiment {
             1
         }
     }
+}
+
+/// Which optimizer the training loop constructs. See `experiment.optimizer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OptimizerKind {
+    /// `torch.optim.Adam` defaults (β=0.9/0.999, ε=1e-8) with the YAML
+    /// `learning_rate` schedule. The historical choice.
+    #[default]
+    Adam,
+    /// `torch.optim.Adadelta` defaults (ρ=0.9, ε=1e-6, lr=1.0). Ignores the
+    /// `learning_rate` schedule by design — AdaDelta derives its own step
+    /// size from the ratio of accumulated updates to accumulated gradients.
+    Adadelta,
 }
 
 /// Selects the training objective and (for the composite objective) its
@@ -257,6 +278,14 @@ pub enum LossKind {
     /// so no gradient singularity at perfect KGE), letting `α_w` up-weight the
     /// anti-attenuation restoring force. See `src/training/loss.rs`.
     Kge,
+    /// dHBV's batch-NSE (hydroDL `NSELossBatch`, Frederick 2019):
+    /// `mean over valid (day, gauge) of (sim − obs)² / (σ_gauge + eps)²`,
+    /// where `σ_gauge` is the gauge's observed-discharge standard deviation
+    /// over the **training period** (fixed, not per window). Normalizing by
+    /// σ stops high-variance basins from dominating the batch gradient the
+    /// way raw L1 does — the conditioning half of the dHBV recipe that
+    /// pairs with the AdaDelta optimizer.
+    NseBatch,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -946,6 +975,41 @@ mod tests {
         assert_eq!(exp.start_time, "1995/10/01");
         assert_eq!(exp.end_time, "2010/09/30");
         assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn optimizer_defaults_to_adam_and_parses_adadelta() {
+        // Absent key ⇒ Adam ⇒ every historical run unchanged.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.optimizer, OptimizerKind::Adam);
+
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\noptimizer: adadelta\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.optimizer, OptimizerKind::Adadelta);
+
+        // A typo must fail loudly, not silently fall back to Adam.
+        assert!(serde_yaml::from_str::<Experiment>(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\noptimizer: adadelta_typo\n",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn nse_batch_loss_kind_parses() {
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\nloss:\n  kind: nse-batch\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.loss.kind, LossKind::NseBatch);
     }
 
     #[test]

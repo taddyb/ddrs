@@ -48,6 +48,10 @@ pub struct RoutingBatch {
     pub temp_hourly: Array2<f32>,
     /// USGS observations, shape `(T_days, G)`. NaN-tolerant.
     pub observations: Array2<f32>,
+    /// Per-gauge observed std over the training period, aligned to
+    /// `gauge_staids`. Empty unless `loss.kind: nse-batch`. See
+    /// `MeritGagesDataset::gauge_obs_std`.
+    pub gauge_obs_std: Vec<f32>,
     /// For each gauge in `gauge_staids`, list of compressed-cols whose row
     /// equals the gauge's outlet position. SP-4 reads gauge predictions
     /// out of the engine's `(N, T)` output via these indices.
@@ -279,6 +283,15 @@ pub struct MeritGagesDataset {
     /// `collate_window`. Interior mutability via `OnceCell` (single-threaded
     /// dataset access — the training loop drives it from one thread).
     static_network: OnceCell<StaticNetworkCache>,
+    /// Per-gauge observed-discharge std over the FULL training period, keyed
+    /// by STAID. Built once on first use; only populated when the configured
+    /// objective needs it (`want_gauge_std`), since it costs a full-window
+    /// observation read. Fixed across windows on purpose — a per-window std
+    /// would make the objective drift between micro-batches and break
+    /// gradient-accumulation exactness. Mirrors dHBV's `stdarray`.
+    gauge_std: OnceCell<std::collections::HashMap<Staid, f32>>,
+    /// Whether the configured loss needs `gauge_std` (`loss.kind: nse-batch`).
+    want_gauge_std: bool,
     /// Optional day-boundary discharge state cache. `None` ⇒ every code path
     /// byte-identical to no-cache behavior (`RoutingBatch::initial_state = None`).
     state_cache: Option<crate::data::store::StateCache>,
@@ -500,6 +513,12 @@ impl MeritGagesDataset {
             stds,
             gauges,
             static_network: OnceCell::new(),
+            gauge_std: OnceCell::new(),
+            want_gauge_std: cfg
+                .experiment
+                .as_ref()
+                .map(|e| e.loss.kind == crate::config::LossKind::NseBatch)
+                .unwrap_or(false),
             state_cache,
             leakance_impervious_threshold,
         })
@@ -515,6 +534,52 @@ impl MeritGagesDataset {
 
     pub fn staids(&self) -> &[Staid] {
         &self.gauges
+    }
+
+    /// Per-gauge observed-discharge standard deviation over the full training
+    /// period, in the order of `staids`. Empty vec when the configured loss
+    /// doesn't need it. Gauges with <2 finite observations get 0.0 (the loss
+    /// adds `eps` to the denominator, so they stay finite).
+    ///
+    /// Fixed across windows on purpose — a per-window std would make the
+    /// objective drift between micro-batches and break gradient-accumulation
+    /// exactness. Mirrors dHBV's `stdarray` (hydroDL `crit.py::NSELossBatch`).
+    pub fn gauge_obs_std(&self, staids: &[Staid]) -> Result<Vec<f32>> {
+        if !self.want_gauge_std {
+            return Ok(Vec::new());
+        }
+        if self.gauge_std.get().is_none() {
+            let full = crate::data::dates::RhoWindow {
+                start_day_idx: 0,
+                rho_days: self.time_axis.num_days,
+                window_start: self.time_axis.start,
+            };
+            let obs = self.observations.read_window(&full, &self.gauges)?;
+            let mut m = std::collections::HashMap::with_capacity(self.gauges.len());
+            for (j, s) in self.gauges.iter().enumerate() {
+                let vals: Vec<f32> =
+                    obs.column(j).iter().copied().filter(|v| v.is_finite()).collect();
+                let std = if vals.len() < 2 {
+                    0.0
+                } else {
+                    let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+                    (vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / vals.len() as f32)
+                        .sqrt()
+                };
+                m.insert(s.clone(), std);
+            }
+            let mut sorted: Vec<f32> = m.values().copied().collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "gauge obs std (training period, {} days): {} gauges, median {:.3} m3/s",
+                self.time_axis.num_days,
+                m.len(),
+                sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
+            );
+            let _ = self.gauge_std.set(m);
+        }
+        let map = self.gauge_std.get().expect("populated above");
+        Ok(staids.iter().map(|s| map.get(s).copied().unwrap_or(0.0)).collect())
     }
 
     pub fn time_axis(&self) -> &TimeAxis {
@@ -644,6 +709,7 @@ impl MeritGagesDataset {
             q_prime_daily,
             precip_hourly,
             temp_hourly,
+            gauge_obs_std: self.gauge_obs_std(&gauge_staids)?,
             observations,
             outflow_idx: compressed.outflow_idx,
             gauge_staids,
@@ -896,6 +962,7 @@ impl MeritGagesDataset {
             precip_hourly,
             temp_hourly,
             observations: obs,
+            gauge_obs_std: Vec::new(),
             outflow_idx: cache.outflow_idx.clone(),
             gauge_staids: cache.gauge_staids.clone(),
             divide_comids: cache.divide_comids.clone(),

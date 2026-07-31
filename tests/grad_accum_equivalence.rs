@@ -113,7 +113,7 @@ fn check_equivalence(loss_cfg: &LossConfig) -> (f32, f32, f32) {
 
     // ── reference: one pooled batch ────────────────────────────────────────
     let p_all = predictions(&head, x.clone());
-    let pooled_loss = batch_loss(p_all, o.clone(), loss_cfg);
+    let pooled_loss = batch_loss(p_all, o.clone(), loss_cfg, None);
     let pooled_f32: f32 = pooled_loss.clone().into_scalar();
     let grads_ref = GradientsParams::from_grads(pooled_loss.backward(), &head);
     let ref_tensors = collect(&head, &grads_ref);
@@ -128,7 +128,7 @@ fn check_equivalence(loss_cfg: &LossConfig) -> (f32, f32, f32) {
         let x_micro = x.clone().slice([lo..hi, 0..F]);
         let o_micro = o.clone().slice([lo..hi, 0..T]);
         let p_micro = predictions(&head, x_micro);
-        let micro_loss = batch_loss(p_micro, o_micro, loss_cfg);
+        let micro_loss = batch_loss(p_micro, o_micro, loss_cfg, None);
         let micro_f32: f32 = micro_loss.clone().into_scalar();
         let n_i = loss_denominator(loss_cfg, g_micro, T);
         let grads =
@@ -204,11 +204,11 @@ fn naive_equal_weighting_is_not_equivalent() {
     let head = head();
     let x = attributes();
     let o = observations();
-    let pooled: f32 = batch_loss(predictions(&head, x.clone()), o.clone(), &cfg).into_scalar();
+    let pooled: f32 = batch_loss(predictions(&head, x.clone()), o.clone(), &cfg, None).into_scalar();
     let mut naive = 0.0f32;
     for (lo, hi) in [(0, SPLIT), (SPLIT, G)] {
         let p = predictions(&head, x.clone().slice([lo..hi, 0..F]));
-        let l: f32 = batch_loss(p, o.clone().slice([lo..hi, 0..T]), &cfg).into_scalar();
+        let l: f32 = batch_loss(p, o.clone().slice([lo..hi, 0..T]), &cfg, None).into_scalar();
         naive += 0.5 * l;
     }
     let rel = (naive - pooled).abs() / pooled.abs().max(1e-12);

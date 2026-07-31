@@ -387,6 +387,7 @@ mod tests {
             checkpoint: None,
             state_cache: None,
             loss: Default::default(),
+            optimizer: Default::default(),
             use_grad_accum: false,
             grad_accum_steps: None,
         });
@@ -513,6 +514,7 @@ mod tests {
             checkpoint: None,
             state_cache: None,
             loss: Default::default(),
+            optimizer: Default::default(),
             use_grad_accum: false,
             grad_accum_steps: None,
         });

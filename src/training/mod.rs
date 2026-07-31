@@ -9,6 +9,7 @@
 //!   V2 — all filtered gauges in one batch, same frozen params.
 //!   V3 — full training loop runs end-to-end without divergence.
 
+pub mod adadelta;
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod driver;
@@ -32,10 +33,14 @@ pub use forward::{
 };
 pub use loss::{
     batch_loss, filter_nan_gauges, l1_loss_post_warmup, loss_denominator, nnse_kge_loss,
+    nse_batch_loss,
     tau_trim_and_downsample, FilteredPair,
 };
 pub use driver::{train, TrainState};
 pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
-pub use optimizer::{resolve_lr, build_adam, clip_grad_norm, scale_grads};
+pub use adadelta::{AdaDelta, AdaDeltaConfig};
+pub use optimizer::{
+    build_adam, build_head_optimizer, clip_grad_norm, resolve_lr, scale_grads, HeadOptimizer,
+};
 pub use zarr_io::{write_predictions_zarr, ZarrAttrs};

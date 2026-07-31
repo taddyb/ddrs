@@ -39,6 +39,10 @@ experiment:
   warmup: 5
   use_grad_accum: true
   grad_accum_steps: 2
+  # dHBV recipe: scale-free AdaDelta (no lr schedule) + batch-NSE loss.
+  optimizer: adadelta
+  loss:
+    kind: nse-batch
   learning_rate:
     1: 0.001
   grad_clip_max_norm: 1.0
