@@ -16,10 +16,15 @@ differentiable solver and the rest of the training stack. The spatial
 parameters and lateral inflow are bound up front through
 `setup_inputs`; `forward` then walks the time window. Inside that call:
 
-- The **inputs** are spatial parameters `(n, q_spatial, p_spatial)`
-  emitted by the routing head from catchment attributes, plus the
-  per-timestep lateral inflow `q_prime` (the `streamflow` tensor passed
-  to `setup_inputs`).
+- The **inputs** (`SpatialParameters`, `src/routing/mmc.rs:48-63`) are
+  the spatial parameters `(n, q_spatial, p_spatial)` emitted by the
+  routing head from catchment attributes, plus the per-timestep lateral
+  inflow `q_prime` (the `streamflow` tensor passed to `setup_inputs`).
+  Four optional fields ride along for the leakance path: `k_d`, `d_gw`,
+  and `leakance_factor` (all-or-nothing — all three `Some` selects the
+  leakance branch), and `impervious_mask`, a per-reach 0/1 constant on
+  the *inner* backend `I` (no gradient) that hard-zeros `zeta` on
+  impervious reaches.
 - The **output** is a 2-D discharge tensor on the autodiff backend
   `Autodiff<I>`. `forward` returns shape `[n, T]` (segment × time),
   assembled by `Tensor::cat` over the per-timestep columns.
@@ -41,9 +46,9 @@ and `SparseAdjacency`:
 - Timestep `dt = 3600 s` (`DT_SECONDS` in `src/routing/mmc.rs`,
   hardcoded to match `self.t` in DDR's `mmc.py`).
 
-What is **learned**, all denormalized inside `setup_inputs` from `[0, 1]`
-via the configured `parameter_ranges` / `log_space_parameters` in
-`config.rs`:
+What is **learned**, all denormalized inside `setup_inputs`
+(`src/routing/mmc.rs:238-245`) from `[0, 1]` via the configured
+`parameter_ranges` / `log_space_parameters` in `config.rs`:
 
 - `n` — Manning's roughness.
 - `q_spatial` — Leopold-Maddock width exponent.
@@ -51,45 +56,137 @@ via the configured `parameter_ranges` / `log_space_parameters` in
   routing head doesn't emit it, `MuskingumCunge::new` falls back to the
   scalar `p_spatial` default from `cfg.params.defaults` and broadcasts
   it across reaches (`p_spatial_broadcast`).
+- `k_d` (range key `K_D`), `d_gw`, `leakance_factor` — the three optional
+  leakance parameters, denormalized the same way when present and
+  cleared otherwise.
 
-The Muskingum storage weight `x_storage` is supplied per-batch (as a
-tensor on `RoutingInputs`) and typically held constant in practice.
+`impervious_mask` is *not* denormalized — it is a constant 0/1 mask
+stored as-is. The Muskingum storage weight `x_storage` is supplied
+per-batch (as a tensor on `RoutingInputs`) and typically held constant in
+practice.
 
 ## Module map
+
+`src/lib.rs` declares fifteen top-level modules; all fifteen appear
+below, plus `src/bin/` (binary targets, not a library module). Note that
+`src/routing` and `src/sparse` are **directories**, not `routing.rs` /
+`sparse.rs`, so their members are listed individually. `mod.rs` files
+that only re-export are omitted throughout.
 
 | Path | Responsibility | Mirrors (in DDR) |
 |---|---|---|
 | `src/routing/mmc.rs` | `MuskingumCunge<I>` engine: `setup_inputs`, `forward`, `route_timestep`, `calculate_muskingum_coefficients`. Holds NN params + cached attributes + the `Arc<CsrPattern>`. | `ddr/routing/mmc.py` |
-| `src/routing/mmc_op.rs` | `TimestepOp` — single custom `Backward<I, 5>` per timestep. `forward_chain_inner` runs S1..S28 at the backend-primitive level. `TimestepState` saves 23 intermediates. | (no direct analog — SP-8 fusion is ddrs-specific) |
+| `src/routing/mmc_op.rs` | `TimestepOp` — one custom `Backward<I, 5>` per timestep — and `TimestepLeakanceOp`, the `Backward<I, 8>` used on the leakance branch. `forward_chain_inner` runs S1..S28 at the backend-primitive level. `TimestepState` saves 23 intermediates. | (no direct analog — SP-8 fusion is ddrs-specific) |
+| `src/routing/leakance.rs` | Pure `zeta` math only: `zeta_forward`, `ZetaGrads`, `zeta_backward`. Inner-backend tensors, no autograd tape, no op struct. | `ddr/routing/mmc.py::_compute_zeta` (commit c2bd0f9, since reverted) |
 | `src/routing/utils.rs` | `denormalize`, `compute_hotstart_discharge`, dense helpers. | `ddr/routing/utils.py` |
 | `src/sparse/mod.rs` | `CsrPattern` (Arc-shared per network), `SparseAdjacency`, `AValuesAssembler`, `spmv_primitive`, `assemble_primitive`, `triangular_csr_solve`, hand-written `CsrSolveOp impl Backward`. | (DDR uses SciPy/CuPy `spsolve_triangular` with a custom `torch.autograd.Function`) |
 | `src/sparse/cusparse.rs` | Raw CUDA device-pointer extraction from BURN tensors, cuSPARSE `SpMV` + `SpSV` wrappers, descriptor cache, CUDA-graph capture entry. | (DDR uses CuPy directly) |
 | `src/sparse/dispatch.rs` | Routes between CPU forward-sub and cuSPARSE SpSV per `cfg.params.sparse_solver`; one-shot WARN + CPU fallback when the backend isn't `Cuda<f32, i32>`. | — |
 | `src/cuda_graph/` | SP-10 CUDA Graph capture/replay. `capture.rs`, fused `#[cube]` kernels in `geometry_kernel.rs`, persistent handle scratch in `scratch.rs`. | (ddrs-specific perf layer) |
 | `src/geometry.rs` | Trapezoidal channel geometry (Leopold & Maddock), pure math mirrored by `forward_chain_inner`. | `ddr/geometry/trapezoidal.py` |
-| `src/config.rs` | YAML config, parameter ranges, attribute minimums, log-space flags, `SparseSolver` enum. | `ddr/validation/configs.py` (Params subset) |
+| `src/config.rs` | YAML config, parameter ranges, attribute minimums, log-space flags, `SparseSolver` enum, leakance switches. | `ddr/validation/configs.py` (Params subset) |
 | `src/nn/kan_head.rs` | KAN routing head (`rskan::KanLayer`) producing `[0, 1]` parameters, matching DDR's `kan.py` layer stack. | `ddr/nn/kan.py` |
-| `src/data/` | Live readers for DDR's training data — zarr/netcdf/icechunk. `ids.rs` (`Comid`/`Staid`), `dates.rs` (rho-window sampler), `store/zarr.rs` (`ConusAdjacencyStore`, `GagesAdjacencyStore`). | `ddr/data/` (`Dates`, gauge selection, etc.) |
-| `src/training/` | Training driver: forward loop, loss, metrics, optimizer, checkpoint, zarr output. | `ddr/training/` |
-| `src/bin/`, `src/cli/` | CLI entry points and the `ddrs` lifecycle (init/plan/run). | `ddr/scripts/` |
+| `src/nn/disagg_head.rs` | Learnable mass-preserving daily→hourly forcing disaggregation sub-head (KAN-based), replacing flat `repeat-24` upsampling. | (ddrs-specific) |
+| `src/nn/init.rs` | Project-controlled seeded `Linear` init, so head init is reproducible at a fixed seed and shares `rskan`'s RNG family. | (ddrs-specific) |
+| `src/adjacency/` | Managed adjacency builds — CONUS + per-gauge subgraph zarr stores constructed from a raw `.shp`/`.dbf` or `.gpkg` fabric. See table below. | (DDR consumes pre-built exports) |
+| `src/data/` | Live readers for the training data sources — no export step. See table below. | `ddr/data/`, `ddr/io/readers.py` |
+| `src/training/` | Training driver, eval loop, loss, metrics, optimizer, checkpointing, zarr output. See table below. | `ddr/training/`, `ddr/scripts/train.py` |
+| `src/baseline/` | The non-routing summed-Q' sanity baseline: `summed_q_prime.rs`, content-addressed `cache.rs`, `print.rs` reporting. | `ddr/scripts/summed_q_prime.py` |
+| `src/pretrain/` | Standalone pretraining pipeline for the disaggregation head against real USGS hourly flow + NLDAS precip. | (ddrs-specific) |
+| `src/dump_parameters.rs` | Per-COMID denormalised KAN-parameter NetCDF dump, shared by `cli::run --plot` and the `dump_parameters` binary. | (ddrs-specific) |
+| `src/sandbox.rs` | 5-reach RAPID sandbox fixture loader + smoke test, used by `compare_ddr_sandbox` and the `ddrs plan` GPU probe. | (the DDR sandbox fixture) |
+| `src/error.rs` | CLI error type mapping onto process `ExitCode`. | — |
+| `src/cli/` | The `ddrs` lifecycle: `plan`, `run`, `show`, `status`, `gc`, `sources`, `import`, plus manifests, lockfiles, workspace layout, and the run-log `tee`. | `ddr/scripts/` |
+| `src/bin/` | Binary entry points: `ddrs.rs` (canonical), the deprecated `train`/`eval`/`train_and_test`, `dump_parameters`, `probe_zeta_gradient`, and the `pretrain_disagg_*` family. | `ddr/scripts/` |
+
+### `src/data/`
+
+| File | Purpose |
+|---|---|
+| `dataset.rs` | `MeritGagesDataset` + `RoutingBatch` — the batch-producing front door. |
+| `collate.rs` | Per-batch subgraph union + index compression. |
+| `dates.rs` | Time-axis bookkeeping and the rho-window sampler (mirrors DDR's `Dates`). |
+| `sampler.rs` | Batch index samplers (gauge permutation, resumable cursor). |
+| `statistics.rs` | Pre-computed attribute statistics + NaN handling. |
+| `ids.rs` | `Comid` / `Staid` newtypes and the shared `IdIndex<T>` position map. |
+| `test_window.rs` | Contiguous-hourly time windows for test-mode chunking. |
+| `error.rs` | `DataError` — every variant carries the source `PathBuf`. |
+
+`src/data/store/` — one focused reader per source, returning `ndarray`
+buffers plus domain-typed metadata (no `trait Store`, no `Box<dyn>`):
+
+| File | Reads |
+|---|---|
+| `zarr.rs` | MERIT binsparse-COO zarr v3: `ConusAdjacencyStore`, `GagesAdjacencyStore`. |
+| `icechunk.rs` | Icechunk time-series (CONUS Q' + USGS observations). |
+| `netcdf.rs` | Catchment attribute NetCDF. |
+| `zarr_qprime.rs` | Global multi-zone `merit_global_v2.x` Q' zarr v2 stores. |
+| `zarr_obs.rs` | Global `dMC_global_v3.1`-style observation zarr v2 groups. |
+| `zarr_aorc.rs` | Hourly AORC precip (`merit_unit_catchments.zarr`, zarr v3). |
+| `camels_hourly.rs` | Real hourly USGS streamflow + NLDAS precip (Gauch et al. dataset). |
+| `gage_csv.rs` | Gage metadata CSVs. |
+| `state_cache.rs` | Day-boundary discharge state cache written by `probe_zeta_gradient`. |
+| `param_dump.rs` | Per-reach routing-parameter NetCDF dumps written by `dump_parameters`. |
+| `obs_writer.rs` | Writer for a minimal zarr-v2 observations store (fixtures/tests). |
+
+### `src/training/`
+
+| File | Purpose |
+|---|---|
+| `driver.rs` | Top-level training loop (mirrors `ddr/scripts/train.py:23-128`). |
+| `forward.rs` | One forward pass — direct-param and head-driven paths, plus the scatter-add-by-group gauge reduction. |
+| `loss.rs` | Daily downsample + the config-selectable objective with NaN masking. |
+| `metrics.rs` | Per-gauge NSE / RMSE / KGE. |
+| `optimizer.rs` | Adam, learning-rate schedule, gradient clipping. |
+| `bootstrap.rs` | Shared head + optimizer + resume-state constructor for the binaries and the CLI. |
+| `checkpoint.rs` | Save/load via BURN's `CompactRecorder` (`head.mpk`, `optim.mpk`, `state.json`). |
+| `eval.rs` | Test-phase evaluation loop (mirrors `train_and_test.py::_test`). |
+| `zarr_io.rs` | Per-gauge daily predictions + observations, in DDR's `_test` output layout. |
+| `probe.rs` | Stage-1 adjoint reachability probe (zeta-gradient campaign). |
+
+### `src/adjacency/`
+
+`fabric.rs` dispatches on the fabric format (`dbf.rs` for `.shp`/`.dbf`,
+`gpkg.rs` for GeoPackage); `build.rs` runs the topological sort and
+builds the CONUS network; `gauges.rs` extracts per-gauge subgraphs;
+`zarr_write.rs` writes the results as zarr-v3 stores byte-compatible with
+`ddr_engine/core/zarr_io.py`; `cache.rs` content-addresses them into
+`<workspace_root>/adjacency/<key>/`. `validate.rs` is separate — it
+runs up-front existence checks on *explicitly configured* adjacency zarr
+paths, so a typo fails before the run starts.
 
 The crate splits along four orthogonal axes: routing (`routing/`,
-`sparse/`, `geometry.rs`), data (`data/`), neural network (`nn/`), and
-training driver (`training/`, `cli/`, `bin/`). The CUDA-Graphs perf
-layer under `src/cuda_graph/` is a sibling of `routing/` rather than
-living inside it, because it hooks the per-timestep dispatch from the
-outside: `setup_inputs` eagerly captures the forward graph once
-(`try_capture_forward_graph`), and `route_timestep` replays it.
+`sparse/`, `geometry.rs`), data (`data/`, `adjacency/`), neural network
+(`nn/`), and training driver (`training/`, `baseline/`, `pretrain/`,
+`cli/`, `bin/`). The CUDA-Graphs perf layer under `src/cuda_graph/` is a
+sibling of `routing/` rather than living inside it, because it hooks the
+per-timestep dispatch from the outside: `setup_inputs` eagerly captures
+the forward graph once (`try_capture_forward_graph`), and
+`route_timestep` replays it.
 
 ## Per-timestep dataflow
 
-`MuskingumCunge::route_timestep` is a thin wrapper. By default it calls
-`mmc_op::timestep_forward`, which registers a single `TimestepOp` node;
-when CUDA graphs are active it calls `timestep_forward_via_graph`
-instead. Either way the math runs through `forward_chain_inner`
+`MuskingumCunge::route_timestep` (`src/routing/mmc.rs:375-383`) is a thin
+wrapper with a **three-way** dispatch, checked in this order:
+
+1. **Leakance** — if `k_d`, `d_gw`, and `leakance_factor` are all bound,
+   it calls `mmc_op::timestep_forward_leakance`
+   (`src/routing/mmc_op.rs:1470`) and returns immediately. This branch is
+   tested *first*, before the graph branch, because leakance forces
+   `use_cuda_graphs: false` and can never be captured.
+2. **CUDA graph** — else, if `use_cuda_graphs` is on, the sparse solver
+   is `Cuda`, and the inner backend type-checks as `Cuda<f32, i32>`, it
+   calls `timestep_forward_via_graph`.
+3. **Default** — else `mmc_op::timestep_forward`, which registers a
+   single `TimestepOp` node.
+
+All three run the math through `forward_chain_inner`
 (`src/routing/mmc_op.rs`) at the inner-backend primitive level — no
 autograd nodes inside — emitting the next discharge `q_next` plus 23
-saved intermediates that the analytical backward needs.
+saved intermediates that the analytical backward needs. The diagram and
+S1..S28 listing below describe branches 2 and 3; branch 1 differs only in
+subtracting `zeta` at S25 (see
+[Algorithm §Leakance](algorithm.md#leakance-the-optional-water-loss-term)).
 
 ```mermaid
 flowchart TD
@@ -186,9 +283,10 @@ $Q_0[i] = \sum_{j \le i} q'_0[j]$. See
 
 ## Autograd model
 
-`TimestepOp` registers **one** `Backward<I, 5>` node per timestep
-instead of the ~33 individual op nodes the naive BURN-tensor-op chain
-would push. Parents are fixed in this order (the array
+`TimestepOp` (`src/routing/mmc_op.rs:113`, `impl Backward` at `:560`)
+registers **one** `Backward<I, 5>` node per timestep instead of the ~33
+individual op nodes the naive BURN-tensor-op chain would push. Parents
+are fixed in this order (the array
 `[n, q_spatial, p_spatial, q_t, q_prime_t]` in `TimestepOp::backward`):
 
 1. `n` — Manning's roughness.
@@ -197,9 +295,25 @@ would push. Parents are fixed in this order (the array
 4. `q_t` — previous-step discharge (tape link to the prior `TimestepOp`).
 5. `q_prime_t` — lateral inflow forcing.
 
-The three constants `length`, `slope`, and `x_storage` are saved in
-`TimestepState` but are **not** parents — they are not differentiated
-through.
+On the leakance branch the node is instead a `Backward<I, 8>`,
+`TimestepLeakanceOp` — declared at `src/routing/mmc_op.rs:615` with its
+`impl Backward<I, 8>` at `:617`. (Note the op lives in `mmc_op.rs`, *not*
+in `src/routing/leakance.rs`; that module exports only the pure math —
+`zeta_forward`, `ZetaGrads`, and `zeta_backward` — which the op calls.)
+Its eight parents extend the five above:
+
+6. `k_d` — hydraulic exchange rate `K_D`.
+7. `d_gw` — groundwater depth offset.
+8. `leakance_factor` — dimensionless scale.
+
+Its state is `TimestepLeakanceState`: the same `TimestepState` plus the
+extra `LeakanceSaved` intermediates (`area_z`, the three params, the
+`losing_only` flag, and the optional mask).
+
+For **both** ops the three constants `length`, `slope`, and `x_storage`
+are saved in `TimestepState` but are **not** parents — they are not
+differentiated through. The `impervious_mask` is likewise a saved
+constant, not a parent.
 
 `TimestepState` saves the 23 forward intermediates the analytical
 chain rule needs: `depth`, `top_width`, `side_slope`, `bottom_width`,
@@ -298,21 +412,28 @@ the CPU path — so capture is never attempted on a backend that would
 
 ## Reference
 
-Key public symbols, all in `src/routing/mmc.rs` and `src/sparse/mod.rs`:
+Key routing-core symbols. Visibility is stated per row: several of the
+load-bearing types are `pub(crate)` or module-private and are **not**
+part of the crate's public API — they are listed because you will meet
+them while reading `src/routing/` and `src/sparse/`, not because you can
+call them from downstream.
 
-| Symbol | Location | Role |
-|---|---|---|
-| `MuskingumCunge::<I>::new` | `src/routing/mmc.rs` | Construct the engine from `Config` + device; seeds the scalar `p_spatial` default. |
-| `setup_inputs` | `src/routing/mmc.rs` | Bind attributes + `[0,1]` params, build `CsrPattern`, denormalize, cold-start `Q_0`, optionally capture the CUDA graph. |
-| `forward` | `src/routing/mmc.rs` | Walk the time window, return `[n, T]` discharge. |
-| `route_timestep` | `src/routing/mmc.rs` | Advance one step; dispatches `timestep_forward` vs `timestep_forward_via_graph`. |
-| `calculate_muskingum_coefficients` | `src/routing/mmc.rs` | `(c1, c2, c3, c4)` from length, velocity, `x_storage`. |
-| `DT_SECONDS` | `src/routing/mmc.rs` | `3600.0` — the hardcoded routing timestep. |
-| `TimestepOp`, `TimestepState` | `src/routing/mmc_op.rs` | Fused per-timestep `Backward<I, 5>` and its saved state. |
-| `forward_chain_inner` | `src/routing/mmc_op.rs` | S1..S28 at the inner-backend level; shared by the regular and capture paths. |
-| `CsrPattern`, `SparseAdjacency` | `src/sparse/mod.rs` | CSR structure (+ transposed view) and the COO source. |
-| `AValuesAssembler` | `src/sparse/mod.rs` | Cached constants for per-timestep $A = I - c N$ assembly. |
-| `triangular_csr_solve`, `CsrSolveOp` | `src/sparse/mod.rs` | The differentiable lower-triangular solve and its adjoint. |
+| Symbol | Visibility | Location | Role |
+|---|---|---|---|
+| `MuskingumCunge::<I>::new` | `pub` | `src/routing/mmc.rs` | Construct the engine from `Config` + device; seeds the scalar `p_spatial` default. |
+| `setup_inputs` | `pub` | `src/routing/mmc.rs` | Bind attributes + `[0,1]` params, build `CsrPattern`, denormalize, cold-start `Q_0`, optionally capture the CUDA graph. |
+| `forward` | `pub` | `src/routing/mmc.rs` | Walk the time window, return `[n, T]` discharge. |
+| `route_timestep` | `pub` | `src/routing/mmc.rs` | Advance one step; three-way dispatch across `timestep_forward_leakance` / `timestep_forward_via_graph` / `timestep_forward`. |
+| `calculate_muskingum_coefficients` | `pub` | `src/routing/mmc.rs` | `(c1, c2, c3, c4)` from length, velocity, `x_storage`. |
+| `DT_SECONDS` | `pub` | `src/routing/mmc.rs` | `3600.0` — the hardcoded routing timestep. |
+| `TimestepOp`, `TimestepState` | `pub(crate)` | `src/routing/mmc_op.rs` | Fused per-timestep `Backward<I, 5>` and its saved state. |
+| `TimestepLeakanceOp`, `TimestepLeakanceState` | `pub(crate)` | `src/routing/mmc_op.rs` | The `Backward<I, 8>` leakance variant and its state. |
+| `forward_chain_inner` | `pub(crate)` | `src/routing/mmc_op.rs` | S1..S28 at the inner-backend level; shared by the regular and capture paths. |
+| `zeta_forward`, `zeta_backward`, `ZetaGrads` | `pub` | `src/routing/leakance.rs` | The `zeta` flux and its analytical partials — pure math, no op struct. |
+| `CsrPattern`, `SparseAdjacency` | `pub` | `src/sparse/mod.rs` | CSR structure (+ transposed view) and the COO source. |
+| `AValuesAssembler` | `pub` | `src/sparse/mod.rs` | Cached constants for per-timestep $A = I - c N$ assembly. |
+| `triangular_csr_solve` | `pub` | `src/sparse/mod.rs` | The differentiable lower-triangular solve. |
+| `CsrSolveOp` | **private** | `src/sparse/mod.rs:415` | Its analytical adjoint — a module-private op reached only through `triangular_csr_solve`. |
 
 ## Verification
 

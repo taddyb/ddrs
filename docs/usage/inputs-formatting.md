@@ -50,10 +50,10 @@ testing:     { ... }         # optional overlay; applied when mode == testing
 | `device` | usize | CUDA device ordinal, mirrors DDR's `device:` key (`device: 2` → `cuda:2`). Defaults to `0`. |
 | `seed`, `np_seed` | u64 | Two seeds — DDR draws both because numpy and torch RNGs are seeded independently. Both default to `42`. |
 | `data_sources` | section | Paths read in place; see [Reading inputs](inputs-reading.md) for what each feeds. Optional section, but validated when present. |
-| `experiment` | section | Training schedule (`batch_size`, `start_time`, `end_time`, `epochs`, `rho`, `shuffle`, `warmup`, `learning_rate`, `grad_clip_max_norm`, `checkpoint`). |
-| `kan_head` | section | KAN head shape. Accepts the legacy key `mlp` as a serde alias. |
+| `experiment` | section | Training schedule (`batch_size`, `start_time`, `end_time`, `epochs`, `rho`, `shuffle`, `warmup`, `learning_rate`, `grad_clip_max_norm`, `checkpoint`, `state_cache`, `loss`). |
+| `kan_head` | section | KAN head shape, plus the optional `disaggregation` sub-section. Accepts the legacy key `mlp` as a serde alias. |
 | `params` | section | Routing engine knobs (see [`params` section](#params-section)). |
-| `testing` | section | Overlay applied to `experiment` when `mode == testing`. |
+| `testing` | section | Overlay applied to `experiment` when `mode == testing`; eight overridable keys. |
 
 The defining types are in `src/config.rs`: `Config` /
 `ConfigRaw` / `From<ConfigRaw>` for the root, and the section structs
@@ -94,6 +94,18 @@ experiment:
     1: 0.001
     3: 0.0005
   grad_clip_max_norm: 1.0
+  # Training objective. Omit this block for the historical L1 loss.
+  #   kind: l1        → mean(|p - o|)  (default; rewards peak attenuation)
+  #   kind: nnse-kge  → nnse-weight·(1 - NNSE) + kge-weight·(1 - KGE), per gauge.
+  #                     The KGE term's (alpha-1)^2 restores the hydrograph
+  #                     variance that L1/NSE shrink away (fixes the KGE
+  #                     regression vs the summed-Q' baseline). See
+  #                     src/training/loss.rs.
+  # loss:
+  #   kind: nnse-kge
+  #   nnse-weight: 1.0
+  #   kge-weight: 1.0
+  #   eps: 0.1          # stabilizes variance/mean denominators
 
 kan_head:
   hidden_size: 21
@@ -141,12 +153,58 @@ testing:
   rho: null           # disabled in test mode
 ```
 
-### `data_sources` — adjacency strategy
+The shipped file carries the `loss:` block **commented out** — that is
+deliberate (an absent block means `LossKind::L1`, the historical
+behavior), and it doubles as the in-file reference for the option. Note
+also what the shipped config does *not* contain: neither adjacency key,
+no `aorc_precip`, no `kan_head.disaggregation`, and no leakance keys.
 
-`DataSources` has six path fields plus a layer selector. `attributes`,
-`streamflow`, `observations`, and `gages` are always required when the
-section is present; the adjacency inputs follow one of two strategies
-(validated by `validate_data_sources` at load time):
+### `data_sources` — paths and the adjacency strategy
+
+`DataSources` has **eight** path fields plus a layer selector:
+
+| Field | Rust type | Required? |
+|---|---|---|
+| `attributes` | `Vec<PathBuf>` | yes |
+| `streamflow` | `PathBuf` | yes |
+| `observations` | `PathBuf` | yes |
+| `gages` | `PathBuf` | yes |
+| `conus_adjacency` | `Option<PathBuf>` | adjacency Strategy B |
+| `gages_adjacency` | `Option<PathBuf>` | adjacency Strategy B |
+| `geospatial_fabric` | `Option<PathBuf>` | adjacency Strategy A |
+| `aorc_precip` | `Option<PathBuf>` | only with `kan_head.disaggregation` |
+| `geospatial_fabric_layer` | `Option<String>` | multi-layer `.gpkg` only |
+
+#### `attributes` accepts one path or many
+
+`attributes` is a `Vec<PathBuf>` behind a custom
+`deserialize_one_or_many_paths` shim, so both spellings parse:
+
+```yaml
+# scalar — becomes a one-element Vec, byte-identical to the old behavior
+attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+
+# list — routes to AttributesStore::open_multi
+attributes:
+  - /path/to/merit_global_attributes_v2.nc
+  - /path/to/streamcat_corridor.nc
+```
+
+With two or more paths the files are **feature-concatenated on COMID**,
+not row-concatenated: each requested variable in
+`kan_head.input_var_names` must live in exactly one file (present in two
+⇒ load error; present in none ⇒ load error), and a COMID missing from
+one file gets `NaN` for that file's variables. An **empty list** is a
+hard deserialize error (`data_sources.attributes: list must not be
+empty`). Tests: `attributes_bare_path_parses_as_single_element_vec`,
+`attributes_yaml_list_parses_as_multi_element_vec`,
+`attributes_empty_list_rejected`.
+
+#### Adjacency: two strategies
+
+`attributes`, `streamflow`, `observations`, and `gages` are always
+required when the section is present; the adjacency inputs follow one of
+two strategies (validated by `validate_data_sources` at load time):
 
 ```yaml
 # Strategy A — managed build (the shipped default):
@@ -182,6 +240,31 @@ or `.gpkg`; geometry is never opened in any format. Set
 `geospatial_fabric_layer` only for multi-layer `.gpkg` fabrics. See
 [Reading inputs](inputs-reading.md) for what each path actually feeds.
 
+#### `aorc_precip`
+
+Optional path to the hourly AORC precipitation store
+(`merit_unit_catchments.zarr`, zarr v3, CONUS-only). It is only read when
+a `kan_head.disaggregation:` block is present, and in that case it is
+**mandatory**: `MeritGagesDataset::open` errors if the head wants precip
+and no `aorc_precip` source is configured, so a missing precip store can
+never silently degrade to flat daily forcing. Note this is a *runtime*
+check in the dataset, not one of the four config-load validators.
+
+### Load-time validation
+
+`Config::from_yaml_file_with_mode` runs **four** validators in order,
+each wrapping its message in a `DataError::Yaml`:
+
+| Validator | Rejects | Error substring |
+|---|---|---|
+| `validate_mode_workflow` | `mode`/`workflow` disagreement | `conflicting top-level keys` |
+| `validate_data_sources` | the adjacency matrix below; `geospatial_fabric_layer` on a non-`.gpkg` fabric | `data_sources:` |
+| `validate_leakance` | `use_leakance: true` together with `use_cuda_graphs: true` | `` `use_leakance: true` requires `use_cuda_graphs: false` `` |
+| `validate_disagg_pretrained` | `disaggregation.freeze: true` without `pretrained_checkpoint` | `` `freeze: true` requires `pretrained_checkpoint` `` |
+
+The `testing:` overlay is applied *after* all four run, so validation
+always sees the training-mode view of the config.
+
 ### `kan_head` — the routing head
 
 `KanHeadConfigSection` configures the KAN head shape. The section may be
@@ -196,9 +279,34 @@ retained for older configs).
 | `k` | usize | `3` | B-spline order; merit YAML sets `2` (DDR's production override) |
 | `input_var_names` | `Vec<String>` | required | Attribute columns fed to the head |
 | `learnable_parameters` | `Vec<String>` | required | Which routing parameters the head produces |
+| `disaggregation` | section (optional) | absent | Enables the learnable daily→hourly forcing disaggregation head; absent ⇒ flat `repeat-24` |
 
 `grid` and `k` default to `5` and `3` (pykan defaults) when absent; the
 merit config overrides them to `50` and `2` to match DDR production.
+
+#### `kan_head.disaggregation` — the daily→hourly head
+
+The **presence of the block** turns the head on; there is no `enabled`
+flag and — important — **no `use_precip` key**. The head always consumes
+`(daily Q′, that day's 24 h precip)`, which is why the block's presence
+makes `data_sources.aorc_precip` mandatory. Eight keys, all optional:
+
+| Key | Type | Default | Role |
+|---|---|---|---|
+| `hidden_size` | usize | `16` | Hidden width of the disagg KAN |
+| `num_hidden_layers` | usize | `1` | Inner `KanLayer` count |
+| `grid` | usize | `3` | B-spline grid intervals |
+| `k` | usize | `3` | B-spline order |
+| `boundary_blend` | f32 | `0.0` | Day-boundary shape-continuity blend λ ∈ [0,1]; `0.0` ⇒ fully independent per-day shapes. Only used when `chunk_days <= 1` |
+| `chunk_days` | usize | `1` | Mass-balance chunk size in days. `1` keeps the per-calendar-day-exact contract (byte-identical to pre-field checkpoints); `> 1` relaxes conservation to the chunk aggregate so storms spanning midnight stay one event |
+| `pretrained_checkpoint` | path (optional) | `None` | Warm-start from a standalone-pretrained `DisaggHead` (`CompactRecorder` `.mpk`). The five architecture fields above MUST match what the checkpoint was trained with — `load_record` fails loudly otherwise |
+| `freeze` | bool | `false` | `Module::no_grad()` after loading. **Requires** `pretrained_checkpoint` — rejected at load time otherwise |
+
+`pretrained_checkpoint` and `freeze` are operational, not architectural:
+deliberately not threaded through `kan_config`, mirroring how
+`experiment.checkpoint` bypasses it. Tests:
+`disagg_freeze_without_pretrained_checkpoint_fails_to_load`,
+`disagg_pretrained_fields_default_to_none_and_false`.
 
 ### `experiment` — training schedule
 
@@ -213,6 +321,80 @@ merit config overrides them to `50` and `2` to match DDR production.
 | `learning_rate` | `BTreeMap<usize, f32>` | Epoch → LR schedule. Defaults to empty. |
 | `grad_clip_max_norm` | f32 (optional) | Gradient clip norm. |
 | `checkpoint` | path (optional) | Resume directory. |
+| `state_cache` | path (optional) | Day-boundary discharge cache; see below. |
+| `loss` | section | Training objective; defaults to L1. See below. |
+
+### `experiment.state_cache`
+
+Path to a day-boundary discharge state cache — a **netCDF** file (dims
+`(day, COMID)`, var `q_state` f32, var `COMID` i64, global attr `day0` as
+an ISO date string), produced by `--mode state-cache` in
+`probe_zeta_gradient`. Not zarr.
+
+When set, `collate` attaches the window-start per-reach Q vector as
+`RoutingBatch::initial_state`, and `setup_inputs` uses it instead of the
+cold-start hotstart solve. Absent ⇒ `None` ⇒ every code path is
+byte-identical to the no-cache behavior. Reads are lazy (one row, ~256 KB,
+per `row_for_day` call) because the full array is ~1.3 GB at CONUS scale.
+Tests: `state_cache_absent_yields_none`, `state_cache_path_parses`.
+
+### `experiment.loss` — the training objective
+
+Omit the block and you get `kind: l1`, the historical objective, exactly.
+The section deserializes with `#[serde(default, rename_all =
+"kebab-case")]`, so every sub-key is **kebab-case in YAML** and every one
+has a default:
+
+| YAML key | Rust field | Default | Used by |
+|---|---|---|---|
+| `kind` | `kind` | `l1` | — |
+| `nnse-weight` | `nnse_weight` | `1.0` | `nnse-kge`, and the optional NNSE guard of `kge` |
+| `kge-weight` | `kge_weight` | `1.0` | `nnse-kge` only |
+| `r-weight` | `r_weight` | `1.0` | `kge` only — the `(r-1)²` correlation term |
+| `alpha-weight` | `alpha_weight` | `1.0` | `kge` only — the `(α-1)²` variance-ratio term; the anti-attenuation restoring force |
+| `beta-weight` | `beta_weight` | `1.0` | `kge` only — the `(β-1)²` mean-ratio term |
+| `kge-clamp` | `kge_clamp` | `10.0` | `kge` only — per-gauge upper bound on the weighted component sum before averaging |
+| `eps` | `eps` | `0.1` | all non-L1 kinds — stabilizes variance/mean denominators (matches DDR `hydrograph_loss`) |
+
+`kind` accepts **three** values on this commit (`LossKind`, also
+kebab-case):
+
+- `l1` — `mean(|p - o|)`. The default; rewards peak attenuation.
+- `nnse-kge` — per gauge `nnse_weight·(1 - NNSE) + kge_weight·(1 - KGE)`.
+  The KGE term's `(α-1)²` restores the hydrograph variance L1/NSE shrink
+  away.
+- `kge` — per gauge `r_w·(r-1)² + α_w·(α-1)² + β_w·(β-1)² +
+  nnse_w·(1-NNSE)`. The KGE components are weighted individually (no
+  sqrt Euclidean term, hence no gradient singularity at perfect KGE), so
+  `alpha-weight` can up-weight the anti-attenuation force.
+
+`kge-clamp` exists because gauges with near-constant observed flow have a
+collapsing `std_o`/`mean_o` denominator, so `(α-1)²`/`(β-1)²` can explode
+and hijack the batch gradient (a single gauge drove batch loss to ~1e4 in
+testing). Tests: `loss_config_defaults_to_l1`,
+`loss_config_parses_nnse_kge_kebab_case`.
+
+### `testing` — the eval overlay
+
+`TestingOverridesRaw` overlays **eight** `experiment` keys when the
+config is loaded with `ConfigMode::Testing`. Every field is optional, so
+an absent key inherits the training value:
+
+| `testing` key | Overrides | Note |
+|---|---|---|
+| `start_time` | `experiment.start_time` | |
+| `end_time` | `experiment.end_time` | |
+| `batch_size` | `experiment.batch_size` | **semantics shift**: DAYS per eval chunk, not gauges |
+| `rho` | `experiment.rho` | double-`Option`: `rho: null` explicitly clears it; an absent key inherits |
+| `warmup` | `experiment.warmup` | |
+| `epochs` | `experiment.epochs` | |
+| `grad_clip_max_norm` | `experiment.grad_clip_max_norm` | |
+| `checkpoint` | `experiment.checkpoint` | parsed as a string, converted to `PathBuf` |
+
+Anything *not* in that list — `shuffle`, `learning_rate`, `state_cache`,
+`loss` — cannot be overridden per-mode; the training value always
+applies. Tests: `testing_mode_overlays_apply_to_experiment`,
+`training_mode_does_not_apply_overlays`.
 
 ## `params` section
 
@@ -224,14 +406,35 @@ and is folded into the typed `Params` by `From<ParamsRaw>`.
 Physical `[min, max]` ranges used to denormalize the NN's `[0,1]`
 outputs into real channel-routing parameters.
 
-| Key | YAML shape | Default | Used by |
+| YAML key | Rust field | Default | Used by |
 |---|---|---|---|
-| `n` | `[min, max]` f32 pair | `[0.015, 0.25]` | Manning's roughness |
-| `q_spatial` | `[min, max]` f32 pair | `[0.0, 1.0]` | Discharge spatial term |
-| `p_spatial` | `[min, max]` f32 pair | `[1.0, 200.0]` | Pressure spatial term |
+| `n` | `n` | `[0.015, 0.25]` | Manning's roughness |
+| `q_spatial` | `q_spatial` | `[0.0, 1.0]` | Leopold & Maddock width–depth exponent |
+| `p_spatial` | `p_spatial` | `[1.0, 200.0]` | Leopold & Maddock width coefficient |
+| `x_storage` | `x_storage` | `[0.0, 0.5]` | Muskingum storage weight X |
+| `K_D` | `k_d` | `[1e-8, 1e-6]` | Leakance hydraulic exchange rate (1/s) |
+| `d_gw` | `d_gw` | `[-2.0, 2.0]` | Leakance groundwater depth offset (m) |
+| `leakance_factor` | `leakance_factor` | `[0.0, 1.0]` | Leakance dimensionless scale |
 
-YAML is a dict-of-2-tuples (`HashMap<String, [f32; 2]>`); the parse
-block reads only these three known keys.
+YAML is a dict-of-2-tuples (`HashMap<String, [f32; 2]>`); the
+`From<ParamsRaw>` block reads **seven** known keys, and silently ignores
+anything else.
+
+Two traps in that table:
+
+- **`K_D` is uppercase in YAML, `k_d` in Rust.** The lookup is a literal
+  string match on `"K_D"` (`src/config.rs`), spelled that way because DDR
+  spells it uppercase while every sibling key is lowercase. Writing
+  `k_d:` in YAML parses fine and silently leaves the default range in
+  place. The same uppercase spelling is what `log_space_parameters` and
+  `kan_head.learnable_parameters` must use.
+- **A range is only consumed if the head emits the parameter.**
+  `x_storage`'s range is used only when `x_storage` is listed in
+  `kan_head.learnable_parameters`; otherwise routing uses a constant
+  `0.3`. Likewise `K_D` / `d_gw` / `leakance_factor` are consumed only
+  when `params.use_leakance: true` **and** all three are in
+  `learnable_parameters` (the leakance params are all-or-nothing: any one
+  missing routes the non-leakance path).
 
 ### `attribute_minimums`
 
@@ -266,17 +469,78 @@ value overrides the default; an empty/absent one keeps it.
 
 ### Solver toggles
 
-| Key | Type | YAML value | Rust default | Effect |
+| Key | Type | Merit YAML | Rust default | Effect |
 |---|---|---|---|---|
-| `tau` | u32 | unset → 3 | 3 | Hours-per-substep when subdividing the daily forcing |
+| `tau` | u32 | unset → 3 | 3 | UTC→local phase offset of the daily-aggregation trim window (see below) |
 | `sparse_solver` | `"cpu"` \| `"cuda"` | `cuda` | `Cpu` | Picks the CSR triangular solve backend |
 | `use_cuda_graphs` | bool | `true` | `false` | Enables per-timestep CUDA-graph capture+replay |
+| `use_leakance` | bool | unset → `false` | `false` | Enables the GW–SW water-loss term in routing |
+| `leakance_losing_only` | bool | unset → `true` | **`true`** | Clamps the leakance head term to `max(0, depth − d_gw)` so gaining reaches produce `zeta ≡ 0` |
+| `leakance_impervious_threshold` | f32 | unset → `0.7` | `0.7` | Reaches with `corridor_impervious` **strictly greater than** this get `zeta ≡ 0` and zero gradient to their leakance params |
 
 Parsing of `sparse_solver` accepts both lower and upper case (`cpu`,
 `CPU`, `cuda`, `CUDA`); anything else panics with
 `unknown sparse_solver: "..."`. `use_cuda_graphs` silently has no effect
 on the CPU path. On a non-CUDA backend, `sparse_solver: cuda` falls back
 to `Cpu` (logged once at WARN).
+
+#### `tau` is not a substep count
+
+`tau` does **not** subdivide the forcing. The routing core never reads it
+— `grep -rn '\btau\b' src/routing/` returns nothing. It is consumed only
+by `tau_trim_and_downsample` (`src/training/loss.rs`), which trims the
+hourly prediction window before daily area-pooling:
+
+```rust
+let start = 13 + tau as usize;
+let end   = t_hours - 11 + tau as usize;
+```
+
+Those constants come straight from DDR's `compute_daily_runoff` slice
+`[13 + tau : -11 + tau]`. In other words `tau` is the **UTC→local phase
+offset** that aligns the model's hourly axis with the observation
+product's local-day boundaries. Raising it shifts *which* hours land in
+each daily bin; it changes nothing about the routing timestep, which is
+fixed at `DT_SECONDS = 3600.0` in `src/routing/mmc.rs`.
+
+#### Leakance toggles
+
+`leakance_losing_only` and `leakance_impervious_threshold` are Phase-C
+physical guards; both are inert unless `use_leakance: true`. Note the two
+defaults that are easy to get backwards:
+
+- `leakance_losing_only` defaults to **`true`** (guard ON). Set it to
+  `false` to recover the prior unclamped behavior byte-identically.
+- The impervious comparison is strict: `corridor_impervious > threshold`
+  zeroes the reach, so a reach exactly at `0.7` is **not** masked. NaN
+  (no StreamCat coverage) is treated as not-impervious — absence of data
+  is not concrete. The mask is only built when leakance is on *and*
+  `corridor_impervious` is among `kan_head.input_var_names`.
+
+Turning leakance on takes three coordinated edits, not one:
+
+```yaml
+kan_head:
+  learnable_parameters: [n, q_spatial, p_spatial, K_D, d_gw, leakance_factor]
+params:
+  use_leakance: true
+  use_cuda_graphs: false        # REQUIRED — see below
+  parameter_ranges:
+    K_D: [1.0e-8, 1.0e-6]
+    d_gw: [-2, 2]
+    leakance_factor: [0, 1]
+```
+
+Two combinations are rejected at load time rather than silently
+misbehaving:
+
+1. `use_leakance: true` with `use_cuda_graphs: true` → error (the
+   CUDA-graph capture path bakes the non-leakance `b_rhs` into the
+   graph). Test: `leakance_with_cuda_graphs_rejected`.
+2. `kan_head.disaggregation.freeze: true` without
+   `pretrained_checkpoint` → error (freezing a randomly-initialized head
+   would train nothing). Test:
+   `disagg_freeze_without_pretrained_checkpoint_fails_to_load`.
 
 ## Defaults
 
@@ -392,6 +656,24 @@ same but in `Config`, `ConfigRaw`, and the `From<ConfigRaw>` block.
   Typos like `sparse_solver: gpu` crash with
   `unknown sparse_solver: "gpu"` — not a clean `DataError::Yaml`. Don't
   hand this YAML to an end user uninspected.
+- **`K_D` is the only uppercase parameter name.** `parameter_ranges`,
+  `log_space_parameters`, and `kan_head.learnable_parameters` all match
+  it literally. `k_d:` in YAML is silently ignored (see the
+  unknown-keys gotcha above) and you get the default `[1e-8, 1e-6]`.
+- **There is no `use_precip` key.** The disaggregation head is always
+  precip-driven; what switches it on is the *presence* of the
+  `kan_head.disaggregation:` block, and that in turn makes
+  `data_sources.aorc_precip` mandatory at dataset-open time. Any doc or
+  config snippet with `use_precip:` is stale — serde drops it silently.
+- **`leakance_losing_only` defaults to `true`.** Unlike every other
+  leakance key it is a guard that is ON by default. Omitting it does not
+  reproduce pre-Phase-C behavior; you must write
+  `leakance_losing_only: false` for that.
+- **A `parameter_ranges` entry for a parameter the head doesn't emit is
+  dead config.** `x_storage` falls back to a constant `0.3` and the
+  leakance trio falls back to the non-leakance routing path. Setting the
+  range without adding the name to `kan_head.learnable_parameters`
+  changes nothing.
 
 ### Verification
 
@@ -403,11 +685,19 @@ Covers the critical assertions:
 
 | Test | Locks |
 |---|---|
-| `loads_merit_training_yaml` | YAML round-trip, every default in `params`, the `kan_head` section, top-level `seed`/`mode`/`workflow`/`device` |
+| `loads_merit_training_yaml` | YAML round-trip, every default in `params`, the `kan_head` section, top-level `seed`/`mode`/`workflow`/`device`; also asserts the shipped config has **no** adjacency keys |
 | `default_config_still_constructs` | `Config::default()` keeps working for the routing-only path |
 | `testing_mode_overlays_apply_to_experiment` | Testing overlay copies fields and clears `rho` |
 | `training_mode_does_not_apply_overlays` | Training mode leaves `experiment` untouched |
-| `mode_workflow_conflict_rejected` / `*_data_sources*` | mode/workflow and adjacency validation matrix |
+| `mode_workflow_conflict_rejected`, `mode_testing_with_train_workflow_rejected` | mode/workflow cross-validation |
+| `both_adjacency_paths_valid`, `fabric_only_valid`, `both_adjacency_and_fabric_valid`, `neither_adjacency_nor_fabric_rejected`, `partial_adjacency_conus_only_rejected`, `partial_adjacency_gages_only_rejected`, `gpkg_fabric_with_layer_valid`, `layer_without_gpkg_fabric_rejected`, `no_data_sources_section_valid` | the adjacency / fabric validation matrix |
+| `attributes_bare_path_parses_as_single_element_vec`, `attributes_yaml_list_parses_as_multi_element_vec`, `attributes_empty_list_rejected` | `attributes` one-or-many deserializer |
+| `loss_config_defaults_to_l1`, `loss_config_parses_nnse_kge_kebab_case` | `experiment.loss` defaults and kebab-case sub-keys |
+| `state_cache_absent_yields_none`, `state_cache_path_parses` | `experiment.state_cache` |
+| `use_leakance_defaults_false`, `leakance_flag_and_ranges_parse`, `leakance_losing_only_defaults_true`, `leakance_losing_only_parses_false`, `leakance_losing_only_absent_defaults_true`, `leakance_impervious_threshold_defaults_to_0_7`, `leakance_impervious_threshold_parses`, `leakance_with_cuda_graphs_rejected` | the leakance toggles and their load-time rejection |
+| `disagg_freeze_without_pretrained_checkpoint_fails_to_load`, `disagg_pretrained_fields_default_to_none_and_false` | `kan_head.disaggregation` pretrain/freeze rules |
+
+`cargo test --lib config::` runs 35 tests on this commit.
 
 If a new YAML key is added, extend `loads_merit_training_yaml` with an
 explicit assertion — silent serde defaults are the gotcha above.
@@ -416,7 +706,7 @@ explicit assertion — silent serde defaults are the gotcha above.
 
 - [Reading inputs](inputs-reading.md) — what the `data_sources:` paths
   point at and how each is read.
-- [Running the code](running.md) — how `--config` and `ddrs init/plan/run`
+- [Running the code](running.md) — how `--config` and `ddrs plan/run`
   wire the YAML through the CLI.
 - [Setup](../setup.md) — the canonical data-source paths and how to flip
   the CUDA defaults to CPU.

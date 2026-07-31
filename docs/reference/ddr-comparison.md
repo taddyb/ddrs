@@ -84,22 +84,41 @@ mkdir -p output
 cargo run --release --example compare_ddr_sandbox
 ```
 
-`--release` is mandatory. Debug builds are far slower and exercise
-different fused kernels in some BURN ops; the regression target assumes
-release.
+`--release` is mandatory: debug builds are far slower, and the regression
+target is only ever measured against release. (Release builds also enable
+`LTO=thin` and BURN's optimized op paths, so the two profiles are not
+guaranteed to agree bit-for-bit — but no measurement of a debug-vs-release
+divergence on this sandbox has been recorded, so treat "debug may differ
+numerically" as an untested caution, not an established fact.)
 
-By default the example runs on the CPU NdArray inner backend. To verify
-the CUDA graph-capture path — the path production training actually uses
-— set `DDRS_FORCE_GRAPHS=1`. The example then dispatches the same
-forward solve through the `Cuda<f32, i32>` inner backend instead of
-NdArray:
+By default the example runs on the CPU NdArray inner backend. Setting
+`DDRS_FORCE_GRAPHS=1` dispatches the same forward solve through the
+`Cuda<f32, i32>` inner backend instead of NdArray:
 
 ```bash
 DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox
-# expect: same ABSOLUTE MATCH verdict on the CUDA path
+# expect: same ABSOLUTE MATCH verdict on the CUDA backend
 ```
 
 Both runs must report `ABSOLUTE MATCH` for a clean V1.
+
+> **The env var's name overpromises: it does NOT enable CUDA graph
+> capture.** `examples/compare_ddr_sandbox.rs:113-117` uses it for exactly
+> one thing — `std::env::var("DDRS_FORCE_GRAPHS").is_ok()` picks
+> `InnerGpu = Cuda<f32, i32>` over `InnerCpu = NdArray<f32>`. Graph
+> capture is gated separately in `src/routing/mmc.rs:289-294` on
+> `use_cuda_graphs && sparse_solver == SparseSolver::Cuda &&
+> backend_is_cuda::<I>()`. The sandbox `Config` comes from
+> `Config::default()` (`src/sandbox.rs:88-89`), which is
+> `use_cuda_graphs: false` (`src/config.rs:454`) and
+> `SparseSolver::Cpu` (`src/config.rs:407-410`), and
+> `fixtures/sandbox/config.csv` sets neither key — `parse_config_csv`
+> only honours `range_n`, `range_q_spatial`, `log_space_parameters`, and
+> `p_spatial_default`. So the `DDRS_FORCE_GRAPHS=1` run is the **CUDA
+> backend with the CPU sparse solver and no capture**. It is a valuable
+> backend-portability check; it is not coverage of the graph-capture path.
+> Note also that `.is_ok()` tests *presence*, so `DDRS_FORCE_GRAPHS=0`
+> switches to CUDA just as `=1` does.
 
 ### Regenerating fixtures
 
@@ -195,11 +214,12 @@ cargo run --release --example compare_ddr_sandbox
 # expect: verdict: ABSOLUTE MATCH (max abs < 1e-3 m³/s)
 ```
 
-**Run V1 (CUDA graph-capture path):**
+**Run V1 (CUDA backend — *not* the graph-capture path):**
 
 ```bash
 DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox
 # expect: same verdict on the Cuda<f32, i32> inner backend
+# (CPU sparse solver, no graph capture — see the note above)
 ```
 
 **Regenerate fixtures (DDR `uv` venv only):**
@@ -216,7 +236,7 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 | Geometry | length 5000 m, slope 0.001, x_storage 0.25 | `examples/compare_ddr_sandbox.rs` |
 | Spatial params | n 0.5, q_spatial 0.5, p_spatial default 21.0 | `examples/compare_ddr_sandbox.rs` |
 | Default backend | NdArray (CPU) under `Autodiff` | `examples/compare_ddr_sandbox.rs` |
-| GPU override | `DDRS_FORCE_GRAPHS=1` → `Cuda<f32, i32>` | `examples/compare_ddr_sandbox.rs` |
+| GPU override | any value of `DDRS_FORCE_GRAPHS` → `Cuda<f32, i32>` inner backend (backend only; no graph capture) | `examples/compare_ddr_sandbox.rs:113-117` |
 | CSV header | `reach_id,max_abs_diff,mean_abs_diff,max_rel_diff,ddr_mean,ddrs_mean,corr` | `examples/compare_ddr_sandbox.rs` |
 | Fixture dir | `fixtures/sandbox/` (gitignored, 6 files) | `scripts/export_ddr_sandbox.py` |
 
@@ -229,13 +249,16 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
   `output/ddrs_vs_ddr.{csv,png}` via `File::create`, which does not
   `mkdir -p`. A fresh worktree panics on the file create if `output/` is
   missing — run `mkdir -p output` first.
-- **`DDRS_FORCE_GRAPHS=1`** switches the inner backend to
-  `Cuda<f32, i32>` so V1 exercises the CUDA graph-capture path. The CPU
-  NdArray run is the default, but the graph path is what production
-  training uses, so both must pass for a clean V1.
-- **`--release` is mandatory.** Debug builds are slower and exercise
-  different fused kernels in some BURN ops; the regression target
-  assumes release.
+- **`DDRS_FORCE_GRAPHS` switches the inner backend to `Cuda<f32, i32>`
+  and nothing else.** Despite the name it does **not** enable CUDA graph
+  capture — that needs `use_cuda_graphs` + `sparse_solver: cuda`, and the
+  sandbox config sets neither. The check is `.is_ok()`, so *any* value
+  (including `0`) triggers it. Both the default CPU run and the CUDA-
+  backend run must pass for a clean V1; neither covers graph capture.
+- **`--release` is mandatory.** Debug builds are far slower and the
+  regression target is only measured against release. A numerical
+  debug-vs-release divergence has never been observed here — don't cite
+  one as a reason.
 - **V1 is the load-bearing port invariant.** Never bypass it, never
   relax the `1e-3 m³/s` threshold, never declare a "good enough" pass.
   If a change cannot keep V1 green, it cannot land.
@@ -253,8 +276,8 @@ floor are noise; drifts above the `1e-3 m³/s` threshold are bugs.
   V1.
 - [Algorithm](../algorithm.md) — the Muskingum-Cunge math V1 is
   verifying.
-- [Performance & CUDA Graphs](perf.md) — the graph-capture path that
-  `DDRS_FORCE_GRAPHS=1` exercises.
+- [Performance & CUDA Graphs](perf.md) — the graph-capture path, and why
+  `DDRS_FORCE_GRAPHS=1` does not reach it.
 - [Reading outputs](../usage/outputs.md) — the format of
   `output/ddrs_vs_ddr.{csv,png}`.
 - [Running the code](../usage/running.md) — how the example is invoked
