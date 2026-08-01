@@ -248,10 +248,18 @@ sequence failed at every layer:
 allows step 1 above to work.
 
 **Outcome:**
-- V9 (graph vs no-graph bit-match): **GREEN.** `DDRS_FORCE_GRAPHS=1`
-  forces the capture path on `compare_ddr_sandbox`; result is ABSOLUTE
-  MATCH at the f32 precision floor (max abs 1.5e-5 m³/s, identical to
-  the no-graph default).
+- V9 (graph vs no-graph bit-match): **UNVERIFIED — the recorded evidence
+  does not test what it claims.** `DDRS_FORCE_GRAPHS=1` only selects the
+  CUDA *backend* (`examples/compare_ddr_sandbox.rs`, `.is_ok()` — so `=0`
+  triggers it too). Capture additionally requires
+  `use_cuda_graphs && sparse_solver == Cuda` (`src/routing/mmc.rs:289-294`),
+  and the sandbox builds from `Config::default()` (`src/sandbox.rs:88-89`)
+  = `use_cuda_graphs: false` + `SparseSolver::Cpu`, with
+  `fixtures/sandbox/config.csv` setting neither key. So the recorded run
+  exercised the CUDA backend with the **CPU** sparse solver and **no
+  capture**. The ABSOLUTE MATCH it reports (max abs 1.5e-5 m³/s) is real
+  but certifies the backend, not the graph path. A genuine V9 needs a
+  sandbox config that sets both toggles.
 - V10 (cuLaunchKernel drop ≥ 40%): **PARTIAL — 29.2%** (5,442,735 vs
   SP-9's 7,684,365). Below target because the backward path still uses
   SP-9's direct-launch kernels — roughly half the per-step launches
