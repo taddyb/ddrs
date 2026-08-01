@@ -1,0 +1,135 @@
+# ddrs MERIT training config.
+#
+# Hyperparameters are pulled verbatim from
+# ~/projects/ddr/config/merit_training_config.yaml.
+# Forcing is daily; the loader interpolates to hourly (repeat × 24, trim to
+# n_hourly) before feeding the Muskingum-Cunge engine — same pattern as
+# DDR's StreamflowReader.
+
+mode: training
+workflow: train-and-test    # ddrs plan/run picks this up; override with --workflow X
+geodataset: merit
+seed: 42
+np_seed: 42
+
+# Source paths — read in place by ddrs's Rust loaders (zarrs + icechunk + netcdf).
+# No export/materialization step; the harness reads DDR's live data sources
+# straight from disk.
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/daily_dhbv2_distributed_aorc2f_merit_unit_catchments.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv
+  # Hourly AORC precip (zarr v3, CONUS) — drives the precip-conditioned
+  # mass-preserving disaggregation head below.
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+
+experiment:
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 30
+  rho: 90
+  shuffle: true
+  warmup: 5
+  # Optimizer micro-batching: 2,365 training gauges / 64 per micro-batch =
+  # 37 micro-batches accumulated into ONE optimizer step — every basin
+  # contributes to every update (exact valid-count weighting; the 61-gauge
+  # tail is kept, not dropped). 30 epochs -> 30 optimizer steps total.
+  use_grad_accum: true
+  grad_accum_steps: 37
+  # Adam, reverting the 2026-07-31 AdaDelta run. That run's head moved
+  # L2(dw) = 1.9e-4 (0.0004% of ||w||) across all 30 epochs — it never left
+  # initialization. Cause: `experiment.learning_rate` IS applied to AdaDelta
+  # (driver.rs:404 passes lr to optimizer.step; adadelta.rs:123 multiplies
+  # delta by it) despite config.rs:211-213 documenting the key as inert, so
+  # every update ran 1000x scaled down. dHBV intends AdaDelta at lr=1.0.
+  optimizer: adam
+  loss:
+    kind: nse-batch
+  # Step schedule. Keys are the FIRST epoch at which the lr applies
+  # (`resolve_lr` takes the largest key <= epoch, 1-indexed), so this reads:
+  # epochs 1-10 @ 0.01, 11-15 @ 0.005, 16-20 @ 0.001, 21+ @ 0.0005.
+  # Deliberately steep early: with grad_accum_steps 37 the epoch collapses to
+  # ONE optimizer step, so this run gets 30 updates total and needs each to
+  # count. Watch for sigmoid saturation (params pinned at range endpoints)
+  # rather than the collapsed-at-center failure the AdaDelta run showed.
+  learning_rate:
+    1: 0.01
+    11: 0.005
+    16: 0.001
+    21: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  # B-spline grid intervals (`num` in pykan). Matches DDR's
+  # ~/projects/ddr/config/merit_training_config.yaml::kan.grid.
+  grid: 50
+  # B-spline order. Matches DDR's ::kan.k. (pykan's KANLayer default is 3,
+  # but DDR overrides to 2 for production.)
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+  # Precip-conditioned mass-preserving daily->hourly disaggregation head.
+  # The within-day shape is driven by the hourly AORC precip window
+  # [d-1,d,d+1] (+ daily-Q taps + static attrs); the daily mean is conserved
+  # exactly. Loss stays the historical L1 (no experiment.loss block).
+  # Warm-started FROZEN from the standalone capacity pretrain (chunk_days=1);
+  # architecture fields must match that checkpoint or load_record fails.
+  disaggregation:
+    hidden_size: 16
+    num_hidden_layers: 2
+    grid: 20
+    k: 3
+    boundary_blend: 0.0
+    chunk_days: 1
+    pretrained_checkpoint: /home/tbindas/projects/ddrs/output/disagg_pretrain/capacity_chunk1.mpk
+    freeze: true
+
+# Routing-engine knobs — DDR's MERIT defaults (matches mock_config in tests).
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  sparse_solver: cpu     # CPU triangular solve (pair with `ddrs run --backend cpu`)
+  use_cuda_graphs: false  # SP-10: forward CUDA Graph capture+replay (CUDA backend only; V7a=0.385)
+
+# Test-mode overlay. When the binary is run with --mode testing, these keys
+# replace the corresponding ones in `experiment:`. Absent keys inherit.
+#
+# IMPORTANT: batch_size SEMANTIC SHIFTS between modes:
+#   - experiment.batch_size (training) = number of GAUGES per mini-batch
+#   - testing.batch_size              = number of DAYS per chunk
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15      # DAYS, not gauges
+  rho: null           # disabled in test mode
