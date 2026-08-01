@@ -1,10 +1,15 @@
 //! SP-10: persistent per-MC-instance scratch buffers.
 //!
 //! Allocated once during `setup_inputs`, dropped when `CudaPatternCache`
-//! drops. All buffers are `[n × f32]`. 32 Handles total: 3 forward I/O,
-//! 23 saved-state intermediates (mirroring `TimestepState`), 1 backward
-//! input, 5 backward outputs. Total: ~32n × 4 bytes (~525 KB for n=5K
-//! gauge subgraph; ~44 MB for full CONUS n=346,321).
+//! drops. **39 Handles total**: 3 forward I/O, 6 static-input mirrors,
+//! 1 pattern `diag_mask`, 23 saved-state intermediates (mirroring
+//! `TimestepState`, so this count tracks `mmc_op::NUM_SAVED_STATE`),
+//! 1 backward input, 5 backward outputs.
+//!
+//! 37 are sized `[n_segments × f32]`; 2 are sized `[nnz × f32]`
+//! (`state_a_values` and `pattern_diag_mask`). The n-sized set totals
+//! ~37n × 4 bytes — ~740 KB for an n=5K gauge subgraph, ~51 MB for full
+//! CONUS at n=346,321 — plus `2 × nnz × 4` bytes.
 
 use burn::tensor::backend::Backend;
 use burn_cubecl::cubecl::server::Handle;
@@ -36,7 +41,8 @@ pub struct PersistentScratch {
     // CsrPattern; populated once at scratch allocation.
     pub pattern_diag_mask: Handle,
 
-    // 24 saved-state outputs (forward) / inputs (backward).
+    // 23 saved-state outputs (forward) / inputs (backward).
+    // Must stay in lockstep with `mmc_op::NUM_SAVED_STATE`.
     pub state_depth: Handle,
     pub state_top_width: Handle,
     pub state_side_slope: Handle,

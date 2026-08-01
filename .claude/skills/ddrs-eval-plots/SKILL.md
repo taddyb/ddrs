@@ -1,223 +1,255 @@
 ---
 name: ddrs-eval-plots
-description: Generate plotting notebooks for the output of a ddrs-trained KAN routing model. Use this whenever the user wants to visualize a ddrs training run — hydrographs of predicted vs. observed streamflow, spatial maps of learned Manning's n / Leopold-Maddock p / q parameters over MERIT-Hydro basins, metrics distributions (NSE, KGE, bias, RMSE, FHV, FLV) across evaluation gauges, or the selective-equifinality H5/H6 parameter-swap and loss-landscape results. Trigger on phrases like "plot my trained model", "visualize the trained KAN", "make a hydrograph for gauge X", "plot Manning's n over basin Y", "show NSE distribution", "evaluation plots", "plot the H5 swap results", "visualize the loss landscape", or any request to inspect a checkpoint under `output/saved_models*/`. Also trigger when the user gestures vaguely at "the latest model" or "my training run" — the skill knows how to find inputs.
+description: Generate and run plotting notebooks for the output of a ddrs training run, and interpret the results. Use whenever the user wants to visualize or evaluate a run — hydrographs of predicted vs observed streamflow, spatial maps of learned Manning's n / Leopold-Maddock p / q over MERIT basins, parameter-convergence drift across epochs, metric distributions (NSE, KGE, bias, RMSE, FHV, FLV) compared against the summed-Q' baseline, or DDR-vs-ddrs parameter parity. Trigger on "plot my trained model", "eval plots", "make a hydrograph", "plot Manning's n", "NSE distribution", "CDF", "box plot", "did it beat the baseline", "have the parameters converged", or a vague gesture at "the latest run". For building, configuring, testing, or debugging ddrs itself, use ddrs-dev instead.
 ---
 
-# ddrs trained-model plotting
+# ddrs eval plots
 
-This skill generates Jupyter notebooks that visualize the output of a trained ddrs KAN routing model. It mirrors the plot families from DDR's reference notebooks (`~/projects/ddr/examples/eval/evaluate.ipynb`, `~/projects/ddr/examples/merit/plot_parameter_map.ipynb`) and DDR's `ddr.validation.plots` library, but adapted to ddrs's output schemas.
+Visualize and interpret what a trained ddrs KAN routing model produced. Mirrors the
+plot families from DDR's reference notebooks (`~/projects/ddr/examples/eval/`) and
+`ddr.validation.plots`, adapted to ddrs's output schemas.
 
-## Why this exists
+## Contents
 
-ddrs writes two artifacts after training, plus one more from the
-selective-equifinality campaign's H5 parameter-swap probe:
+**This file** — Where everything lives (run layout; the two NetCDF files) · Python
+environment · Workflow (pick family → read reference → generate/report/run) ·
+Missing inputs · Interpreting what you plotted (baseline bar, convergence, zeta) ·
+Conventions · When NOT to use · Files
 
-| Artifact | Producer | Schema |
-|---|---|---|
-| Predictions zarr | `cargo run --bin eval` | groups `gage_ids`, `time`, `predictions (G,T)`, `observations (G,T)` |
-| KAN parameter NetCDF | `cargo run --bin dump_parameters` | dim `COMID`, vars `n`, `q_spatial`, `p_spatial`, `slope` |
-| H5 eval-loss CSV | `probe_zeta_gradient --mode eval-loss` | tidy `composition,window,mean_loss` |
+**`references/hydrograph.md`** (98 lines)
+Inputs (predictions zarr schema; user selection) · Notebook template · Notes
+(warmup, `obs<=0` sentinel, per-slice metrics)
 
-Visualizing them well requires several families of plots, each with its own data dependencies and conventions. Instead of asking the user to assemble matplotlib calls from scratch every time, this skill picks the right recipe, generates a notebook, and saves output PNGs next to the checkpoint (or next to the eval-loss CSVs, for H5/H6) so the artifacts travel with the run.
+**`references/metrics.md`** (211 lines)
+Inputs (predictions zarr; **raw-f32 baseline**; optional gauges CSV) · Metric helper
+(`ddr.validation.Metrics` field list) · Notebook template: box plot of 6 metrics,
+NSE CDF, drainage-area boxplots, gauge map · **§Is this a win?** — the baseline bar
+and the two population traps · Notes
 
-## How it works
+**`references/parameter_map.md`** (455 lines)
+Inputs (`plot/kan_parameters.nc` variables; MERIT fabric) · Notebook template ·
+Global-fabric runs (incl. producing the NetCDF for a managed-adjacency run) ·
+Companion cells: distribution histogram, parameter vs log10(drainage area) hexbin ·
+**§Convergence: has training actually moved the parameters?** — per-epoch dumps,
+the four diagnostics, template · Notes
 
-The skill produces a Jupyter notebook (and runs it if asked) that:
-1. Loads the appropriate ddrs output artifact(s)
-2. Uses `ddr.validation` helpers (`Metrics`, `plot_*`) — DDR is installed as a
-   dependency in `ddrs-py`'s `plots` extra; the skill does not reimplement these
-3. Saves PNGs into `<RUN_DIR>/plots/` (or `<CKPT_DIR>/plots/` for legacy `output/saved_models*/` layouts) so plots travel with the run
+**`references/parity.md`** (235 lines)
+Init-time parity (when to use, inputs, load → histograms → pass/fail, KS criterion) ·
+Trained parity (inputs, load → per-distribution stats → histograms → per-reach
+scatter → verdict, KS + Spearman criteria)
 
-**All execution happens from `./ddrs-py`** — the Python venv lives there, not under `~/projects/ddr`. First-time setup (idempotent):
+**`scripts/load_ddrs_predictions.py`** — `load_predictions_zarr` and
+`load_baseline_f32`. Always use these; they handle the zarr-v3 `dimension_names`
+gap and the `(G, W) uint8` gage_ids encoding.
+
+## Where everything lives
+
+**One run directory holds every input you need.** There is no `output/saved_models*/`
+layout anymore — those directories are flat pre-2026-06 `.mpk` files and are dead.
+
+```
+.ddrs/runs/<id>/                        # <id> = <UTC ts>-[<group>-]<workflow>
+├── config.yaml                         # the config that produced this run
+├── manifest.json                       # metrics, git sha, outputs, sources
+├── run.log
+├── checkpoints/epoch_E_mb_M/           # head.mpk, optim.mpk, state.json
+├── eval/predictions.zarr               # predictions + observations (G,T)
+├── baseline/                           # predictions.f32, observations.f32, manifest.json
+├── kan_parameters.nc                   # eval-network zeta diagnostic (leakance runs only)
+├── plot/kan_parameters.nc              # full-CONUS learned parameters (`ddrs run --plot`)
+└── plots/                              # ← WRITE NOTEBOOKS AND PNGs HERE
+```
+
+**Always save into `<RUN_DIR>/plots/`** so artifacts travel with the run. Never
+`<CKPT_DIR>/plots/` — that would bury them inside `checkpoints/epoch_30_mb_0/`.
+
+Find the right run: `ls -t .ddrs/runs/ | head`, or `ddrs status`, or — most
+authoritative — read the predictions zarr's root `model` attribute, which records the
+checkpoint that produced it.
+
+### Two different NetCDF files, often confused
+
+| File | Dimension | Variables | Writer |
+|---|---|---|---|
+| `plot/kan_parameters.nc` | `COMID` (346,321 full CONUS) | `n`, `q_spatial`, `p_spatial`, `x_storage`, `slope` (+ `K_D`, `d_gw`, `leakance_factor` when `use_leakance`) | `dump_parameters` / `ddrs run --plot` |
+| `kan_parameters.nc` | `COMID_eval` (64,892 gauge-subgraph union) | `zeta` (mean \|ζ\|, m³/s), `zeta_net` (signed; + = losing), `depth_mean`, `area_z_mean`, `q_mean` | `eval --zeta-output`, or `train-and-test` Phase 2 |
+
+`dump_parameters` can never write `zeta` — it needs routed per-timestep depth, which
+only exists during eval.
+
+## Python environment
+
+Everything runs from `./ddrs-py`. First-time setup (idempotent):
 
 ```bash
 cd ./ddrs-py && uv sync --extra plots
 ```
 
-Run the resulting notebook in place:
+Execute a notebook in place:
 
 ```bash
 cd ./ddrs-py && uv run jupyter nbconvert --to notebook --execute \
-    <absolute_notebook_path> --output <basename> --output-dir <PLOT_DIR>
+    <absolute_notebook_path> --output <basename> --output-dir <RUN_DIR>/plots
 ```
 
-Or open interactively: `cd ./ddrs-py && uv run jupyter notebook <absolute_notebook_path>`.
+Verified working on this host (2026-07-30): `ddr` 0.5.3.dev3, `torch` 2.12.0+cu130,
+`xarray` 2026.4.0, `zarr` 3.2.1, `geopandas` 1.1.3, `contextily`, `matplotlib`,
+`pyogrio`, `netCDF4`, `scipy`. `cartopy` is **absent and not needed** —
+`plot_gauge_map` uses geopandas + contextily.
 
-If `uv sync --extra plots` fails because `ddr` isn't at `file:///home/tbindas/projects/ddr` on this machine, update the `ddr @ file://...` line in `ddrs-py/pyproject.toml` to point at the local DDR checkout. Do NOT shell into `~/projects/ddr` and run from there — that's the old workflow and pollutes the ddrs project boundary.
+`from ddr.validation import Metrics, plot_box_fig, plot_cdf, plot_drainage_area_boxplots, plot_gauge_map`
+all resolve; do not reimplement them.
 
-**Host where `uv` can't build `ddrs-py` (e.g. wukong).** On nodes where the
-Rust `burn-*` path deps are absent, `uv sync`/`uv run` abort trying to rebuild
-the maturin package, so `ddr` + `torch` never install. If the venv was synced
-once before the breakage it still has the plotting stack (xarray, zarr,
-geopandas, contextily, matplotlib, pyogrio, netCDF4 — but NOT `cartopy`,
-`torch`, or `ddr`). Two adjustments:
-1. **Skip `uv` and call the interpreter directly**: `.venv/bin/python`,
-   `.venv/bin/jupyter nbconvert --to notebook --execute ...`. This bypasses the
-   rebuild and runs against the already-installed packages.
-2. **The metrics family can't `from ddr.validation import Metrics, plot_*`** —
-   reimplement them inline (NSE/KGE/bias/RMSE in numpy; FHV top-2% / FLV
-   bottom-30% log-space per Yilmaz 2008; boxplot/CDF/gauge-map in
-   matplotlib+geopandas). Compute BOTH the run and the baseline from raw arrays
-   with the same numpy code so the two series stay apples-to-apples. Confirm
-   what's importable first: `for m in ("torch","ddr","cartopy","geopandas","pyogrio"): ...`.
+**If `uv` can't build `ddrs-py`** (hosts without the Rust `burn-*` path deps, e.g.
+wukong): skip `uv` and call the interpreter directly —
+`ddrs-py/.venv/bin/python`, `ddrs-py/.venv/bin/jupyter nbconvert …`. This bypasses
+the maturin rebuild and runs against what is already installed. Confirm importability
+first before assuming `ddr` is available.
+
+Do **not** shell into `~/projects/ddr` and run from there — that pollutes the project
+boundary.
 
 ## Workflow
 
-### Step 1 — Identify the plot family
+### 1. Pick the family
 
-Pick one (or more — emit one notebook per family):
+| User asks about | Family | Reference |
+|---|---|---|
+| hydrograph, time series, predicted vs observed, gauge X in year Y | **hydrograph** | `references/hydrograph.md` |
+| NSE, KGE, bias, RMSE, FHV, FLV, CDF, box plot, "did it beat the baseline" | **metrics** | `references/metrics.md` |
+| Manning's n, p_spatial, q_spatial, slope, map, basin, spatial pattern | **parameter_map** | `references/parameter_map.md` |
+| "have the parameters converged", epoch drift, movement across epochs | **parameter convergence** | `references/parameter_map.md` §Convergence |
+| DDR-vs-ddrs parameter distributions, at init or trained | **parity** | `references/parity.md` |
 
-| If user asks about… | Use family |
-|---|---|
-| hydrograph, time series, predicted vs observed, gauge X over year Y | **hydrograph** → `references/hydrograph.md` |
-| Manning's n, p_spatial, q_spatial, slope, map, basin, MERIT, area | **parameter_map** → `references/parameter_map.md` |
-| NSE, KGE, bias, RMSE, FHV, FLV, distribution, CDF, boxplot, metrics | **metrics** → `references/metrics.md` |
-| H5, parameter swap, n-swap/geo-swap, transfer penalty, f_n, compensator vs sloppy | **parameter_swap** → `references/parameter_swap.md` |
-| H6, loss landscape, (n,p) grid, valley, minima shift, barrier | **loss_landscape_h6** → `references/loss_landscape_h6.md` |
-| KAN interpretability, sensitivity sweep, how does the model understand inputs, disagg head response to precip, per-edge spline, pykan-style | **kan_interpretability** → `references/kan_interpretability.md` |
+Vague request ("plot my trained model")? Offer the default bundle:
+hydrograph + metrics + parameter_map.
 
-If the user is vague ("plot my trained model"), ask which family — but offer to emit all three (hydrograph/parameter_map/metrics) as a default plot bundle if they don't have a preference. H5/H6 are a separate research campaign (selective equifinality) and only apply when the user is working with `probe_zeta_gradient --mode eval-loss` output, not a routine training run.
+### 2. Read the reference before writing the notebook
 
-### Step 2 — Locate inputs
+Each reference carries the exact schema, a runnable template, and the DDR-inherited
+conventions. **Do not invent column names** — the schemas are documented there and
+the writers are cited.
 
-Detect the checkpoint and infer where its outputs should live. ddrs convention:
+### 3. Generate, report, offer to run
 
-```
-output/
-├── saved_models_1/                       ← checkpoint directory ($CKPT_DIR)
-│   ├── epoch_5_mb_35.mpk
-│   └── plots/                            ← write notebooks + PNGs here
-├── predictions_latest.zarr               ← from `cargo run --bin eval`
-└── kan_parameters_latest.nc              ← from `cargo run --bin dump_parameters`
-```
+Write `<RUN_DIR>/plots/<name>.ipynb` with a top markdown cell recording: run id,
+checkpoint, inputs, region/gauge/year selected, date generated.
 
-**Finding the right checkpoint dir** — multiple `saved_models_*` directories may coexist on disk. Use this priority order:
-
-1. **Predictions zarr's `model` attribute** (highest authority). `eval` records the source checkpoint path in the zarr's metadata — read it with `xr.open_zarr(path).attrs["model"]` and parse out the parent dir. This guarantees plots land next to the checkpoint that actually produced the predictions.
-2. **User-specified checkpoint** in the prompt.
-3. **Newest `saved_models_*` by mtime** as a last resort.
-
-Tie-breaker hint when comparing two checkpoint dirs: KAN-head checkpoints (`rskan`) are typically ~20 KB; older MLP-placeholder checkpoints are ~3 KB. If the user's working with the current architecture, prefer the larger.
-
-**Missing input artifacts — generate them, don't dead-end.** The plot families
-depend on two producible artifacts:
-
-- **Parameter NetCDF (`kan_parameters.nc`) for the parameter-map family.** This
-  is a single deterministic command whose output path you control, so when it's
-  absent **offer to run it and, on consent, run it for the user** — don't just
-  quote the command and stop. It IS a `cargo build` + CUDA GPU job (minutes, GPU
-  memory, writes ~70 MB), so confirm first unless the user already told you to
-  proceed; then launch it in the background and monitor. Command (resolve
-  `--config`/`--checkpoint` from the run dir; checkpoint base is the predictions
-  zarr's `model` attr without the `.mpk`):
-
-  ```bash
-  cargo run --release --bin dump_parameters -- \
-    --config <run_dir>/config.yaml \
-    --checkpoint <run_dir>/checkpoints/<epoch_E_mb_M>/head \
-    --output <run_dir>/kan_parameters.nc
-  ```
-  After it writes, execute the parameter-map notebook as usual. (If `cargo`
-  itself won't build on the host, fall back to quoting the command.)
-
-- **Predictions zarr for hydrograph/metrics.** Produced by the eval phase of
-  `ddrs run`. This is a much longer routing run (not a single forward pass), so
-  here it's correct to quote the command (`ddrs run --workflow eval`, or
-  `src/bin/eval.rs`) and let the user run it rather than launching it yourself.
-
-**Always save plots into `<CKPT_DIR>/plots/`** so artifacts travel with the run. Create the directory if it doesn't exist.
-
-**H5/H6 artifacts don't live under a `saved_models*`/run-dir checkpoint** —
-they're produced by `probe_zeta_gradient --mode eval-loss` (see
-`references/parameter_swap.md`) against a research campaign's own output
-directory (e.g. `output/equif/h5/*.csv`), not the routine training-run
-layout above. If the CSVs the user references don't exist yet, this IS a
-CPU job you can offer to run (minutes, no GPU) — see the reference for the
-exact CLI invocation and required flags (`--donor-params-nc`,
-`--compositions`, `--windows`, `--seed`, `--loss-output`). H6 (`--mode
-landscape`, see `references/loss_landscape_h6.md`) is the same kind of CPU
-job (`--surface-output`/`--barrier-output`); registered-resolution data
-already exists at `output/equif/h6/{r1,r3}_{surface,barrier}.csv` (16
-windows, 11×11 grid, 21-point barrier, both forcings) — check there before
-offering to regenerate it, since a fresh run takes roughly an hour per arm.
-
-### Step 3 — Read the relevant reference
-
-Each reference file contains:
-- The exact ddrs output schema it expects
-- A complete, runnable notebook template (imports, data loading, plot calls, save lines)
-- Conventions inherited from DDR (warmup periods, NaN handling, metric clipping)
-
-Read the reference before writing the notebook. Don't invent column names — the schemas are documented there.
-
-### Step 4 — Generate the notebook
-
-Write `<CKPT_DIR>/plots/<plot_name>.ipynb`. Suggested names:
-- `hydrograph_<gage_id>_<year>.ipynb`
-- `parameter_map_<variable>_<region>.ipynb`
-- `metrics_distribution.ipynb`
-- `h5_parameter_swap.ipynb` (saves into `<h5_csv_dir>/plots/`, not a checkpoint dir — see `references/parameter_swap.md`)
-
-Each notebook ends by saving PNGs to the same `<CKPT_DIR>/plots/` directory. Include a markdown cell at the top documenting: which checkpoint, which inputs, what region/gauge/year was selected, the date generated.
-
-**After writing the notebook, report the absolute path back to the user.** Format:
+Then report the paths — **non-optional**:
 
 ```
 notebook → <absolute path to .ipynb>
-plots will save to → <absolute path to CKPT_DIR/plots/>
+plots will save to → <RUN_DIR>/plots/
 ```
 
-This is non-optional. The user needs to know where artifacts land before deciding whether to execute.
+Offer to execute; only run if the user agrees (zarr reads and the MERIT shapefile
+join are slow). **After execution, list every PNG with its absolute path.** Do not
+summarize as "plots are in `<dir>`".
 
-### Step 5 — Offer to run it
+## Missing inputs — generate them
 
-After writing, offer to execute the notebook from `ddrs-py`'s venv:
+**`plot/kan_parameters.nc` absent (parameter maps).** One deterministic command with
+an output path you control — offer to run it, and on consent run it. It is a
+`cargo build` + GPU job (minutes, ~70 MB), so confirm first unless already
+authorized.
 
 ```bash
-cd ./ddrs-py && uv run jupyter nbconvert --to notebook --execute \
-    <full_notebook_path> --output <basename> --output-dir <PLOT_DIR>
+cargo run --release --bin dump_parameters -- \
+  --config <run_dir>/config.yaml \
+  --checkpoint <run_dir>/checkpoints/<epoch_E_mb_M>/head \
+  --output <run_dir>/plot/kan_parameters.nc
 ```
 
-Only run if the user agrees — execution can be slow (zarr reads, MERIT shapefile join) and the user may want to tweak the notebook first. If the venv hasn't been set up yet, run `cd ./ddrs-py && uv sync --extra plots` first.
+Note `--checkpoint` takes the **head base** (no `.mpk`) here, while `eval` takes the
+**directory**. Optional `--batch-size` (default 50000) and `--backend` (default
+`cuda`).
 
-**After execution completes, list every PNG written** with absolute paths so the user can open them directly. Use `ls <CKPT_DIR>/plots/*.png` and quote each path verbatim — don't summarize as "plots are in `<dir>`". Format:
+If it errors with `conus_adjacency not resolved — invoke via ddrs run --plot`, use
+the throwaway-config recipe in `references/parameter_map.md`.
 
-```
-saved plots:
-  <CKPT_DIR>/plots/hydrograph_<gage>_<year>.png
-  <CKPT_DIR>/plots/<other>.png
-```
+**`eval/predictions.zarr` absent.** That is a full routing run, not one forward pass.
+Quote the command (`ddrs run --workflow train-and-test`, or the `eval` binary against
+an existing checkpoint) and let the user run it.
 
-## Defaults and conventions
+## Interpreting what you plotted
 
-These match DDR's `plots.py` and `evaluate.ipynb` so notebooks look familiar:
+### Did it beat the baseline?
 
-- **Warmup**: drop the first 3 timesteps from hydrographs (DDR's `plot_time_series` default).
-- **Metric clipping**: NSE/KGE clipped to `[-1, 1]` before plotting (matches `evaluate.ipynb`).
-- **Basemap**: CartoDB.Positron, alpha 0.6, attribution off (matches `param_plot`).
-- **CONUS bounds** for full-CONUS maps: `xlim=(-125, -66)`, `ylim=(24, 53)`.
-- **Colormaps**: `plasma_r` for Manning's n (high n = rough = red), `viridis` for p/q, `Blues` for depth/width, `bamako` or `plasma` for NSE.
-- **Backend**: `matplotlib.use("Agg")` only if running headlessly; in a notebook, leave default.
-- **Save kwargs**: `dpi=300, bbox_inches="tight", facecolor="white"` for publication-quality PNGs.
+The bar is the **summed-Q′ baseline on the same gauge population**. For CONUS with
+the dHBV2-UH store that is **median NSE 0.6781 / KGE 0.7172 on 2,365 gauges**.
+
+> Never use `0.689 / 0.723` as a CONUS bar — that is a *global* MERIT number on a
+> different 5,224-gauge network. And never compare a 2,365-gauge trained median to a
+> 3,211-gauge baseline median: the raw gage list contains 513 single-divide gauges
+> that scored phantom zeros before the 2026-07-28 fix. Both series must come from the
+> same population and the same metric code.
+
+Best documented trained result: **0.7152 NSE / 0.7106 KGE** (precip-driven disagg +
+L1, run `2026-06-23T02-49-12Z-conus-hourly-train-and-test`) — that is +0.037 NSE and
+−0.007 KGE against the baseline. Full table and the 2026-07-30 KGE qualification:
+`ddrs-dev` → `references/research-status.md`.
+
+`ddrs show <id> | grep -E "nse|kge|loss"` is the cheap pre-plot triage.
+
+### Have the parameters converged?
+
+Read `references/parameter_map.md` §Convergence. The signals that matter: late-half
+movement as a fraction of total movement, whether the IQR is contracting or
+expanding, realized span as a percentage of the declared range, and the fraction of
+reaches at a bound. Expanding IQR plus a realized span of a few percent of the
+declared range means **near initialization, not saturated** — under-training, not
+convergence.
+
+For comparing two runs' parameter fields, the equifinality read-out is
+`median(|Δn|) / IQR(n)` on a same-seed ON/OFF pair: **< 0.10** none · **0.10–0.49**
+weak or ambiguous · **≥ 0.50** confirmed. Caveats: single seed per arm, and CUDA
+scatter-add nondeterminism adds ~2–5% to parameter distributions — treat as
+suggestive, and if ambiguous run each arm twice to compare within-arm spread against
+the cross-arm shift.
+
+### Reading a zeta variable
+
+`zeta` is dimensioned by the **eval network** (64,892 reaches for the 2,365-gauge
+set), not the 346,321-reach CONUS network. The historical activity bar was
+`|zeta| > 0.01 m³/s` on ≥10% of eval reaches. That bar was met (10.4%) and the term
+was still ruled NO-GO — passing it is necessary, not sufficient.
+
+## Conventions (match DDR's `plots.py` and `evaluate.ipynb`)
+
+- **Warmup**: drop the first 3 timesteps from hydrographs.
+- **Metric clipping**: NSE/KGE clipped to `[-1, 1]` before plotting.
+- **Basemap**: CartoDB.Positron, alpha 0.6, attribution off.
+- **CONUS bounds**: `xlim=(-125, -66)`, `ylim=(24, 53)`.
+- **Colormaps**: `plasma_r` for Manning's n (high n = rough = red), `viridis` for
+  p/q, `Blues` for depth/width, `bamako` or `plasma` for NSE.
+- **Save kwargs**: `dpi=300, bbox_inches="tight", facecolor="white"`.
+- Report **medians**, not means — the per-gauge NSE/KGE distribution is strongly
+  left-skewed and a few catastrophic gauges dominate the mean.
 
 ## When NOT to use this skill
 
-- The user is plotting DDR-Python output directly — point them at DDR's own notebooks (this skill is for ddrs).
-- The user wants `examples/benchmark_hydrograph.rs` (the 10-reach synthetic chain) — that's a Rust example, not a trained model.
-- The user is debugging gradient parity against DDR — use `examples/compare_ddr_sandbox.rs`, not plots.
+- Building, configuring, testing, or debugging ddrs → `ddrs-dev`.
+- Plotting DDR-Python output directly → DDR's own notebooks.
+- `examples/benchmark_hydrograph.rs` (the 10-reach synthetic chain) → a Rust example,
+  not a trained model.
+- Debugging gradient parity against DDR → `examples/compare_ddr_sandbox.rs`.
+- **H5/H6 selective-equifinality plots** — campaign CLOSED, both **INCONCLUSIVE**.
+  The authoritative analysis is `scripts/h5_h6_audit_analysis.py` +
+  `docs/2026-07-09-h5-h6-equifinality-v2-findings.md`. Do **not** regenerate the v1
+  figures: the `f_n ≥ 2/3` bars used an unpaired variance estimate (the correct
+  paired test has 15–40× smaller variance), and the `min × 1.05` sublevel contour
+  saturated — it swallowed 100–105 of 121 grid points. Both instruments are refuted.
 
-## Files in this skill
+## Files
 
-- `SKILL.md` — this file
-- `references/hydrograph.md` — single-gauge predictions vs. observations
-- `references/parameter_map.md` — learned KAN parameters over MERIT polygons
-- `references/metrics.md` — NSE/KGE/bias distributions across gauges
-- `references/parameter_swap.md` — H5 transfer-penalty / f_n plots (implemented, self-contained pandas/matplotlib, no `ddr` dependency)
-- `references/loss_landscape_h6.md` — H6 loss-landscape overlay (`--mode landscape` on `probe_zeta_gradient`; implemented, registered-resolution data exists at `output/equif/h6/`)
-- `references/kan_interpretability.md` — sensitivity-sweep plots for ddrs's KAN heads (disagg head implemented via `examples/kan_sensitivity_sweep.rs`; true per-edge spline plots feasible via `rskan::KanLayer`'s public fields but not yet built — see reference for status)
-- `scripts/load_ddrs_predictions.py` — **always use this** to open predictions/baseline zarrs. Handles two pitfalls every notebook hits otherwise:
-  1. ddrs writes zarr v3 with `_ARRAY_DIMENSIONS` but no `dimension_names`, so `xr.open_zarr` raises `KeyError`.
-  2. `gage_ids` is stored as `(G, W) uint8` (W = longest ID, min 8; widened 2026-06-12 so global `Provider__GageId` names are no longer truncated), not 1D bytes/string — naïve `.decode()` won't work.
-
-  Both reference templates already import it. Don't reinvent the loading code.
+- `references/hydrograph.md` — single-gauge predictions vs observations
+- `references/metrics.md` — NSE/KGE/bias distributions, CDFs, box plots vs baseline
+- `references/parameter_map.md` — learned parameters over MERIT polygons, plus
+  epoch-to-epoch convergence drift
+- `references/parity.md` — DDR-vs-ddrs parameter distributions at init and trained
+- `scripts/load_ddrs_predictions.py` — **always use this** to open the predictions
+  zarr and the f32 baseline. It handles two pitfalls every notebook otherwise hits:
+  ddrs writes zarr v3 with `_ARRAY_DIMENSIONS` but no `dimension_names` (so
+  `xr.open_zarr` raises `KeyError`), and `gage_ids` is `(G, W) uint8` fixed-width
+  ASCII (W = max(id length, 8)), not 1D bytes.
 - `evals/evals.json` — test prompts

@@ -64,14 +64,18 @@ stores, drop `geospatial_fabric` and set both `conus_adjacency` and
 
 | Path | Written by | Purpose |
 |---|---|---|
-| `ddrs.yaml` | `ddrs plan` (via `$EDITOR`) | Workflow + experiment config |
+| `ddrs.yaml` | `ddrs plan` (via `$EDITOR`) | Workflow + experiment config (gitignored) |
 | `.ddrs/system.json` | `ddrs plan` | GPU/driver/smoke-test record |
 | `.ddrs/sources.lock` | `ddrs plan` | Fingerprints of `data_sources` paths |
 | `.ddrs/adjacency/<key>/` | `ddrs plan` (managed build) | Cached CONUS + gauges adjacency zarr stores |
+| `.ddrs/baselines/<key>/` | `ddrs plan` | Cached summed-Q' baseline |
 | `.ddrs/runs/<id>/manifest.json` | `ddrs run` | Per-run manifest (config + sources + git SHA + outputs) |
+| `.ddrs/runs/<id>/config.yaml` | `ddrs run` | Snapshot of the config that produced this run |
 | `.ddrs/runs/<id>/run.log` | `ddrs run` | Timestamped tee of everything the run printed (stdout + stderr, incl. CUDA messages) |
-| `.ddrs/runs/<id>/eval/predictions.zarr` | `ddrs run --workflow eval` / `train-and-test` Phase 2 | Predictions for plotting |
-| `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*/` | `ddrs run --workflow train` / `train-and-test` Phase 1 | KAN checkpoints |
+| `.ddrs/runs/<id>/eval/predictions.zarr` | `train-and-test` Phase 2 | Predictions for plotting |
+| `.ddrs/runs/<id>/baseline/` | `train-and-test` | Copy of the cached summed-Q' baseline (`*.f32` + `manifest.json`) |
+| `.ddrs/runs/<id>/checkpoints/epoch_*_mb_*/` | `ddrs run --workflow train` / `train-and-test` Phase 1 | KAN checkpoints (`head.mpk`, `optim.mpk`, `state.json`) |
+| `.ddrs/runs/<id>/plot/kan_parameters.nc` | `ddrs run --plot` | Per-COMID learned KAN parameters (full CONUS) |
 | `.ddrs/runs/<id>/kan_parameters.nc` | `train-and-test` Phase 2 (leakance runs only) | Per-reach eval-window `zeta` diagnostic (see Leakance below) |
 
 Run ids are `<UTC timestamp>-[<group>-]<workflow>` — e.g.
@@ -85,11 +89,22 @@ The `workflow:` key in `ddrs.yaml` is what `plan`/`run` use by default. To
 override for a single invocation:
 
 ```bash
-ddrs plan --workflow eval
+ddrs plan --workflow train-and-test
 ddrs run --workflow train
 ```
 
 `mode:` and `workflow:` must agree (`mode: training` ↔ `workflow ∈ {train, train-and-test}`; `mode: testing` ↔ `workflow: eval`). `ddrs plan` will reject contradictions at load time.
+
+> **`ddrs run --workflow eval` is not implemented.** It returns
+> `"standalone --workflow eval needs a --from-run <run-id> flag"`, and
+> `--from-run` does not exist yet. To produce eval output use
+> `--workflow train-and-test`; to evaluate an existing checkpoint without
+> retraining, use the legacy `eval` binary (see `--help`). `ddrs init` is also a
+> dead stub — it exits 2 and tells you to run `ddrs plan`.
+
+Add `--backend cpu` to any `ddrs run` invocation to route on the CPU. The default
+is `cuda`, and a training workflow under `--backend cuda` exits 5 if the system
+probe finds no GPU.
 
 The top-level `device:` key in `ddrs.yaml` selects the CUDA device ordinal
 (default `0`, mirrors DDR's `device:` key) — on multi-GPU hosts set e.g.
@@ -102,8 +117,8 @@ Named "save files" for the `data_sources:` block, stored under
 
 | Group | Streamflow source | Notes |
 |---|---|---|
-| `conus` | dHBV2 UH retrospective (daily) | Default CONUS source |
-| `conus-hourly` | same + AORC precip | Enables daily→hourly disaggregation head |
+| `conus` | dHBV2 UH retrospective (daily) | Default CONUS source; MHPI cluster paths + managed adjacency |
+| `conus-hourly` | dHBV2 UH retrospective + AORC precip | Feeds the daily→hourly disaggregation head. Not simply `conus` plus one key — it uses workstation paths and explicit adjacency zarr |
 | `global` | Global zarr-v2 Q' stores | 2.94M reaches |
 | `daily-lstm` | CudaLSTM unit-catchment forwards (daily) | NH LSTM output |
 | `hourly-lstm` | MTS-LSTM unit-catchment forwards (hourly-native) | NH LSTM output; no disagg |
@@ -145,9 +160,12 @@ See `docs/nh-qprime-store-contract.md` for the full producer/consumer contract.
 ### Leakance (experimental, NOT promotable)
 
 An optional groundwater–surface-water loss term
-`zeta = leakance_factor · area_z · K_D · (depth − d_gw)` subtracted from the
-routing right-hand side each timestep (positive zeta = losing stream), with
-the three parameters learned per reach by the KAN head. Off by default;
+`zeta = leakance_factor · area_z · K_D · max(0, depth − d_gw)` subtracted from
+the routing right-hand side each timestep (positive zeta = losing stream), with
+the three parameters learned per reach by the KAN head. The `max(0, ·)` clamp is
+`params.leakance_losing_only`, which defaults to **true**, so gaining reaches
+produce `zeta ≡ 0`; `params.leakance_impervious_threshold` (default 0.7)
+additionally masks reaches whose `corridor_impervious` exceeds it. Off by default;
 enabling it takes `params.use_leakance: true`, the three extra
 `learnable_parameters`, and their `parameter_ranges` — see the "Leakance"
 section in `CLAUDE.md` for the exact keys, and
@@ -161,9 +179,49 @@ in place as the anchor for the paper's selective-equifinality axis. Do not
 attempt to promote it without reading
 `docs/2026-07-06-leakance-nogo-scientific-summary.md`.
 
+### Daily→hourly disaggregation head
+
+The Muskingum-Cunge solver steps hourly, but the Q' forcing is daily. Adding a
+`kan_head.disaggregation:` block enables a mass-preserving KAN sub-head that
+learns the within-day shape from hourly AORC precip, conserving the daily mean
+exactly. This is what makes routing's within-day effect visible to the gradient —
+without it, flat repeat-24 upsampling plus daily-mean aggregation puts that effect
+in the gradient null space and training loss goes flat.
+
+```yaml
+kan_head:
+  disaggregation:
+    hidden_size: 16          # architecture fields must match any pretrained
+    num_hidden_layers: 2     #   checkpoint or load_record fails loudly
+    grid: 20
+    k: 3
+    boundary_blend: 0.0      # day-boundary shape continuity; used when chunk_days <= 1
+    chunk_days: 1            # > 1 relaxes mass balance to the chunk aggregate
+    pretrained_checkpoint: output/disagg_pretrain/capacity_chunk1.mpk
+    freeze: true             # requires pretrained_checkpoint
+```
+
+The block's presence makes `data_sources.aorc_precip` **mandatory** — the head
+always consumes precip, and a missing source is a hard error at dataset open
+rather than a silent degradation to flat repeat-24. (There is no `use_precip`
+key; it was removed when the head became unconditionally precip-driven.)
+
+### Choosing the training objective
+
+`experiment.loss.kind` selects the objective — `l1` (default), `nnse-kge`, `kge`,
+or — once PR #31 lands — `nse-batch` (dHBV's batch-NSE, which pairs with
+`experiment.optimizer: adadelta`). See CLAUDE.md §"Training objective" for why
+the menu exists and what each term buys.
+
 ### Advanced
 
 - `ddrs show <run_id>` — inspect a past run's manifest
 - `ddrs status` — list runs
 - `ddrs gc` — clean up old run directories
+- `ddrs run` flags: `--backend {cuda|cpu}`, `--plot`, `--strict`,
+  `--max-mini-batches N`, `--batch-order-from PATH`, `--json`
+- Global flags: `--config PATH`, `--workspace PATH`. **Pass `--workspace`
+  whenever you pass `--config`** — the workspace otherwise defaults to `.ddrs`
+  *beside the config file*, so `--config config/experiments/x.yaml` silently
+  creates `config/experiments/.ddrs/`.
 - `ddrs <cmd> --help` for full flag list

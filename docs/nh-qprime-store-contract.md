@@ -15,7 +15,12 @@ lives here.
 
 - An **icechunk repository** (`main` branch, local filesystem), root group.
 - One data variable **`Qr(divide_id, time)`**, dtype **float32**, attr
-  `units: m^3/s`.
+  `units: m^3/s`. The dtype is not checked at `open` — `open` only
+  resolves the array handle (`src/data/store/icechunk.rs:239-241`). It is
+  enforced at the first *read*, where `retrieve_array_subset::<Vec<f32>>`
+  errors on a non-f32 array. `ddrs import` triggers that read itself via
+  `sample_read`, so a dtype violation surfaces at import rather than
+  mid-training.
 - `Qr` values are the **local lateral inflow per MERIT unit catchment** —
   no upstream accumulation (routing does that).
 - `divide_id`: int64 MERIT COMIDs.
@@ -66,7 +71,27 @@ experiment window reaching into 1980 hard-errors rather than clamping.
 2. `ddrs import <store> --dry-run` — validates the contract + prints a
    COMID-coverage report.
 3. `ddrs import <store> --name <group>` — registers it under
-   `config/sources/<group>.yaml`.
+   `config/sources/<group>.yaml`. Add `--force` to overwrite an existing
+   group of the same name; without it, a name collision is an error
+   (`src/cli/import.rs:36-37`).
 4. `ddrs sources use <group> && ddrs plan && ddrs run --workflow train`.
+
+### Only icechunk stores are contract-checked
+
+`ddrs import` validates the full contract **only for icechunk stores**.
+When `StreamflowSource::open` sniffs a global zarr-v2 store instead, the
+command prints
+
+```text
+note        detailed contract validation and coverage are icechunk-only;
+            open succeeded, which exercises the same reader the training
+            loop uses
+```
+
+and skips the units check, the `sample_read`, and the COMID-coverage
+report entirely (`src/cli/import.rs:99-106`). A successful import of a
+zarr-v2 store therefore means "the reader opened it", not "it satisfies
+this contract" — the checks in the sections above are unenforced for that
+format.
 
 Design history: `docs/superpowers/specs/2026-07-01-nh-qprime-import-design.md`.

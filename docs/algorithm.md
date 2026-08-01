@@ -5,15 +5,20 @@ reach per timestep across a CONUS-scale river network. The physics is
 fixed — trapezoidal channels, Leopold-Maddock hydraulic geometry,
 Manning's equation, and the standard four-coefficient Muskingum update.
 What is *learned* is the spatial parameter field
-`(n, q_spatial, p_spatial)`: a per-reach Manning's roughness and the two
-Leopold-Maddock width/depth exponents, emitted by an MLP head from
-catchment attributes. What makes the whole thing differentiable is that
-every algebraic op in the per-step chain is autograd-traced through
+`(n, q_spatial, p_spatial)`: a per-reach Manning's roughness plus the
+Leopold-Maddock width **exponent** `q_spatial` and width **coefficient**
+`p_spatial` (the power law is `top_width = p · depth^q`), emitted by a
+KAN head (`rskan::KanLayer` via `src/nn/kan_head.rs`) from catchment
+attributes. What makes the whole thing differentiable is that every
+algebraic op in the per-step chain is autograd-traced through
 `TimestepOp`'s analytical backward.
 
 The result: gradients of any loss on routed discharge flow back to the
-MLP weights in **one** `Backward<I, 5>` node per timestep (not ~33), and
-ddrs matches DDR gradient-for-gradient at the f32 precision floor.
+KAN head's weights in **one** `Backward<I, 5>` node per timestep (not
+~33), and ddrs matches DDR gradient-for-gradient at the f32 precision
+floor. With the optional leakance term enabled the per-timestep node is
+a `Backward<I, 8>` (`TimestepLeakanceOp`) instead — same collapse, three
+extra parents.
 
 ## What it is
 
@@ -66,7 +71,7 @@ The intermediate `ratio` (numerator over `denominator = p·√s + 1e-8`)
 and the `exponent = 3 / (5 + 3·q_eps)` are both saved for the backward.
 The `clamp_min(..., depth_lb)` floor (from
 `cfg.params.attribute_minimums.depth`) protects the downstream side-slope
-and bottom-width formulas when the MLP head is mid-training and the
+and bottom-width formulas when the KAN head is mid-training and the
 unclamped geometry would otherwise turn non-physical.
 
 Top width from the Leopold-Maddock power law (S7):
@@ -147,8 +152,9 @@ The SpMV-assemble-solve-clamp tail of `forward_chain_inner`
 ```mermaid
 flowchart TD
     Q_t[Q_t] --> SpMV[N · Q_t = i_t]
-    SpMV --> bRHS[b_rhs = c2·i_t + c3·Q_t + c4·q′_t]
+    SpMV --> bRHS[b_rhs = c2·i_t + c3·Q_t + c4·q′_t − ζ]
     Coeffs[c1..c4 from geometry] --> bRHS
+    Zeta[ζ leakance term — absent unless use_leakance] --> bRHS
     Coeffs --> Assemble[A = I − c1·N]
     Assemble --> Solve[Solve A·x = b_rhs]
     bRHS --> Solve
@@ -158,7 +164,10 @@ flowchart TD
 - **S24** — `i_t = N · q_t` via `spmv_primitive` (cuSPARSE on GPU,
   scatter-add on CPU).
 - **S25** — `b_rhs = c2·i_t + c3·q_t + c4·q_prime_t`, assembled
-  element-wise.
+  element-wise. When the optional leakance term is active this same step
+  also subtracts the water-loss flux — `b_rhs = … − zeta`
+  (`src/routing/mmc_op.rs:894-899`). See
+  [Leakance](#leakance-the-optional-water-loss-term) below.
 - **S26** — `a_values = assemble_primitive(c1)` builds the CSR values of
   $A = I - c_1 \cdot N$ in-place over the shared `Arc<CsrPattern>`.
 - **S27** — `x_sol = triangular_csr_solve(a_values, b_rhs)` runs
@@ -174,9 +183,74 @@ flowchart TD
 clamps `q_prime` once, seeds column 0 with the cold-start discharge, then
 calls `route_timestep` for each of the remaining steps and concatenates
 the columns into an `[n, T]` output (segment × time). Each
-`route_timestep` delegates to `timestep_forward` (the per-step
-tape-registering entry point) or, when CUDA graphs are active, to
-`timestep_forward_via_graph`.
+`route_timestep` (`src/routing/mmc.rs:375-383`) dispatches three ways:
+to `timestep_forward_leakance` when all three leakance params are bound,
+else to `timestep_forward_via_graph` when CUDA graphs are active, else to
+`timestep_forward` — the plain per-step tape-registering entry point.
+
+### Leakance: the optional water-loss term
+
+Off by default. When `params.use_leakance` is true and the head emits
+`K_D`, `d_gw`, and `leakance_factor`, every timestep computes a
+groundwater–surface-water exchange flux `zeta` and subtracts it from the
+S25 right-hand side. `zeta_forward` (`src/routing/leakance.rs`) reuses
+quantities the geometry block already produced — the S6 `depth` $d$ and
+the S1 $q_\varepsilon$ — so leakance adds no second depth solve:
+
+$$w_z = (p \cdot d)^{q_\varepsilon}, \qquad A_z = w_z \cdot L, \qquad
+h = \max(0,\ d - d_{\text{gw}})$$
+
+$$\zeta = \text{leakance\_factor} \cdot A_z \cdot K_D \cdot h,
+\qquad b_{\text{rhs}} \leftarrow b_{\text{rhs}} - \zeta$$
+
+$w_z$ is a plan-view wetted width and $A_z = w_z \cdot L$ the plan-view
+wetted area (m²) of the reach. A **positive $\zeta$ means a losing
+reach** — water leaves the channel, so the term is subtracted.
+
+- The $\max(0, \cdot)$ on the head term is the **losing-only clamp**,
+  active when `params.leakance_losing_only` is true — which is the
+  default (`src/config.rs:456`). Set it false and the head is the
+  unclamped $d - d_{\text{gw}}$, so gaining reaches
+  ($d < d_{\text{gw}}$) yield negative $\zeta$.
+- `params.leakance_impervious_threshold` (default `0.7`,
+  `src/config.rs:457`) builds a per-reach 0/1 mask from the
+  `corridor_impervious` attribute: reaches above the threshold get
+  $\zeta \equiv 0$ and zero gradient into the leakance params. The mask
+  is a saved constant, not a parent.
+- Every op inside `zeta_forward` is a plain inner-backend
+  `Tensor<I, 1>` — **no autograd tape**. The gradient comes from
+  `zeta_backward`, called inside `TimestepLeakanceOp`, an analytical
+  `Backward<I, 8>` node defined in `src/routing/mmc_op.rs:615-617`. Its
+  eight parents are `TimestepOp`'s five (`n`, `q_spatial`, `p_spatial`,
+  `q_t`, `q_prime_t`) plus `K_D`, `d_gw`, `leakance_factor`. Because
+  `b_rhs = … − zeta`, the seed is
+  $\partial L/\partial \zeta = -\,\partial L/\partial b_{\text{rhs}}$.
+- Leakance and CUDA graphs are mutually exclusive: config load rejects
+  `use_leakance: true` together with `use_cuda_graphs: true`, and
+  `route_timestep` tests the leakance branch *before* the graph branch.
+
+Gates for any change here — `cargo test --test leakance_gradcheck`
+(analytical ≈ finite difference), `cargo test --test leakance_off_parity`
+(byte-identical to the no-leakance path when off), and
+`cargo test --test zeta_accum` (the eval diagnostic equals what was
+actually subtracted from `b_rhs`). The term's *scientific* status is
+**NO-GO / not promotable** — see CLAUDE.md §Leakance and
+`docs/2026-07-06-leakance-nogo-scientific-summary.md` before re-opening
+it.
+
+### Hourly forcing from daily Q'
+
+$\Delta t$ is hardcoded to 3600 s, but the Q' forcing store is daily.
+The gap is closed by the optional **disaggregation head**
+(`src/nn/disagg_head.rs`), enabled by a `kan_head.disaggregation:` block:
+a mass-preserving KAN sub-head that learns the within-day shape from
+hourly AORC precip while conserving the daily mean exactly. Without it,
+daily Q' is upsampled by flat `repeat-24`, which puts routing's
+within-day lag/attenuation into the gradient null space of a daily-mean
+loss. Hourly-native Q' stores are sliced directly and must **not** be
+combined with a disaggregation block. Configuration details live in
+[Formatting inputs](usage/inputs-formatting.md); the README section
+"Daily→hourly disaggregation head" has the full YAML.
 
 ### Cold start
 
@@ -275,6 +349,8 @@ the chain and added cuSPARSE + CUDA-graph paths.
 | `forward_chain_inner` | `src/routing/mmc_op.rs` | S1..S28 on the inner backend |
 | `timestep_forward` | `src/routing/mmc_op.rs` | Run S1..S28, register the `TimestepOp` node |
 | `TimestepOp::backward` | `src/routing/mmc_op.rs` | Analytical B28..B1 reverse pass |
+| `timestep_forward_leakance` | `src/routing/mmc_op.rs` | Run S1..S28 with `zeta` subtracted at S25, register `TimestepLeakanceOp` (`Backward<I, 8>`) |
+| `zeta_forward` / `zeta_backward` | `src/routing/leakance.rs` | The `zeta` flux and its analytical partials (inner backend, no tape) |
 | `compute_trapezoidal_geometry` | `src/geometry.rs` | Standalone S1..S15 diagnostic path |
 
 ### Gotchas
@@ -289,7 +365,7 @@ the chain and added cuSPARSE + CUDA-graph paths.
    hard-coded `[0.5, 50]` band on side slope and `[v_lb, 15]` cap on
    velocity. Changing any of these without re-validating against DDR
    breaks the V1 invariant; they exist precisely because the unclamped
-   geometry can go non-physical when the MLP head is mid-training.
+   geometry can go non-physical when the KAN head is mid-training.
 3. **Gradient-exact match against DDR is the bar.** Forward parity alone
    isn't sufficient — `sp8_gradcheck` exists because a subtly wrong
    analytical backward will silently miscompute parameter updates. If you
@@ -306,7 +382,7 @@ The two gates for any change to the routing-core math:
 
 ```bash
 # Finite-difference check on the TimestepOp analytical backward.
-cargo test --test sp8_gradcheck -- --ignored
+cargo test --test sp8_gradcheck
 
 # V1 ABSOLUTE MATCH against the 5-reach RAPID sandbox.
 cargo run --release --example compare_ddr_sandbox

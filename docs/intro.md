@@ -7,25 +7,43 @@ landed forward CUDA Graphs in SP-10 with a measured V7a wall-time ratio
 of **0.385** — CUDA finishes a 3-batch smoke train in 1.96 minutes versus
 CPU's 5.09 minutes, a 2.6× speed-up.
 
-The published mdBook is regenerated from the canonical agent-readable
-reference docs under `.claude/references/ddrs-*.md` via the `/regenerate-docs`
-meta-skill. Each chapter expands its source reference into prose while
-preserving the technical content verbatim. If you find a discrepancy
-between a chapter and the source code it documents, the source code is
-the truth — file an issue or run `/regenerate-docs` to refresh.
+**The chapters of this book are the canonical documentation.** The
+condensed agent-readable notes under `.claude/references/ddrs-*.md` are
+an older back-port of the same material (last updated 2026-06-10) kept
+for in-repo agent lookups; where the two disagree, the chapter here
+wins. If you find a discrepancy between a chapter and the source code
+it documents, the source code is the truth — file an issue.
+
+If you arrive from a `.claude/references/` note, its counterpart chapter is:
+
+| `.claude/references/` | Chapter |
+|---|---|
+| `ddrs-algorithm.md` | [Algorithm](algorithm.md) |
+| `ddrs-architecture.md` | [Architecture](architecture.md) |
+| `ddrs-baseline.md` | [The summed Q' baseline](reference/baseline.md) |
+| `ddrs-burn-autograd.md` | [BURN autograd recipe](reference/burn-autograd.md) |
+| `ddrs-comparing-to-ddr.md` | [Comparing to DDR](reference/ddr-comparison.md) |
+| `ddrs-formatting-inputs.md` | [Formatting inputs](usage/inputs-formatting.md) |
+| `ddrs-graph-objects.md` | [Graph objects](usage/graph-objects.md) |
+| `ddrs-perf-and-cuda-graphs.md` | [Performance & CUDA Graphs](reference/perf.md) |
+| `ddrs-reading-inputs.md` | [Reading inputs](usage/inputs-reading.md) |
+| `ddrs-reading-outputs.md` | [Reading outputs](usage/outputs.md) |
+| `ddrs-running-the-code.md` | [Running the code](usage/running.md) |
+| `ddrs-setup.md` | [Setup](setup.md) |
 
 ## Dataflow
 
-The per-batch dataflow runs from raw catchment attributes, through an
-MLP head that emits per-reach Manning's roughness and Leopold-Maddock
-exponents, through the trapezoidal channel geometry that turns those
-parameters into Muskingum coefficients, through one sparse triangular
-solve per timestep, and back via a single custom-Backward node per
-timestep so gradients trace cleanly to the MLP weights.
+The per-batch dataflow runs from raw catchment attributes, through a
+KAN head (`rskan::KanLayer` via `src/nn/kan_head.rs`) that emits
+per-reach Manning's roughness and Leopold-Maddock exponents, through
+the trapezoidal channel geometry that turns those parameters into
+Muskingum coefficients, through one sparse triangular solve per
+timestep, and back via a single custom-Backward node per timestep so
+gradients trace cleanly to the KAN head's weights.
 
 ```mermaid
 flowchart LR
-    A[Lumped Attributes] --> B[MLP head]
+    A[Lumped Attributes] --> B[KAN head]
     B --> C[Spatial parameters]
     C --> D[Trapezoidal geometry]
     D --> E[Muskingum coefficients]
@@ -54,7 +72,13 @@ module map and [Algorithm](algorithm.md) for the per-step math.
 | Tune the GPU performance path | [Performance & CUDA Graphs](reference/perf.md) |
 | Write a custom Backward op against BURN 0.21 | [BURN autograd recipe](reference/burn-autograd.md) |
 
-## Status — SP-10 close
+## Status — SP-10 close (historical snapshot, 2026-05-29)
+
+> This section records the state of the port at the SP-10 milestone
+> (2026-05-29). It is kept for context and is **not** a statement of
+> current project status. The maintained SP-8 / SP-9 / SP-10 write-ups
+> live in `.claude/ARCHITECTURE.md`; the performance picture is in
+> [Performance & CUDA Graphs](reference/perf.md).
 
 The forward CUDA-graph capture path landed in commit `e35af29`
 ("SP-10 close — forward CUDA Graphs at V7a=0.385"). Defaults in
@@ -68,8 +92,9 @@ candidate work for SP-11.
 
 ## Critical invariants
 
-These are the four invariants the port exists to preserve. Any change
-that breaks them is by definition broken:
+These are the seven invariants the port exists to preserve — `CLAUDE.md`
+is the authoritative list, reproduced here. Any change that breaks them
+is by definition broken:
 
 1. **V1 ABSOLUTE MATCH** against the 5-reach RAPID sandbox
    (`< 1e-3 m³/s` max abs diff). See
@@ -82,3 +107,18 @@ that breaks them is by definition broken:
 4. **Sparse backward stays hand-written.** `CsrSolveOp impl Backward`
    in `src/sparse/mod.rs` keeps the tape O(nnz) per timestep instead of
    O(n²); see [BURN autograd recipe](reference/burn-autograd.md).
+5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`** —
+   do not reintroduce the plain feed-forward placeholder head it
+   replaced. The stack matches
+   DDR's `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) ×
+   num_hidden_layers → Linear(H, P) → Sigmoid`, with no inter-block
+   ReLU, and every inner `KanLayer` receiving the same seed (a DDR
+   `kan.py` quirk preserved for parity).
+6. **`rskan` is a git dependency pinned to a tag.** Updating it means
+   bumping the tag in `Cargo.toml`, then re-running `tests/kan_head.rs`
+   and the full parity sweep before merging — see [Setup](setup.md).
+7. **KAN-head parity vs DDR must pass on every PR** that touches
+   `src/nn/`, the `rskan` pin in `Cargo.toml`, or DDR's `nn/kan.py`.
+   The sweep is `cargo test --features fixtures --test
+   kan_head_init_repro --test kan_head_init_parity --test
+   kan_head_fixture_forward --test kan_head_fixture_backward`.

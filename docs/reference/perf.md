@@ -24,7 +24,7 @@ and `use_cuda_graphs: true|false`.
 | SP-7 | early | Wire `burn_cubecl::cubecl-cuda` as a backend behind the same `Backend` generic. Patched cubecl fork adds `stream_accessor` so ddrs can submit work on a thread-bound stream. | CUDA backend runs end-to-end; no V7a measurement yet. |
 | SP-8 | 2026-05-22 | Collapse the per-timestep dataflow into a single fused autograd op (`mmc_op::timestep_forward`, `src/routing/mmc_op.rs`). One autograd node per step instead of ~33. Saved-state struct holds the 24 intermediates the analytical backward needs. | Wall-time 5.58 → 4.06 min on both backends (27% — symmetric). V7a = **1.000** — fusion benefit was Rust-side graph collapse, shared by CPU + GPU. V7b = **77.5%** — `scatter_kernel_t_f32_i_i32` still dominated GPU time. |
 | SP-9 | 2026-05-22 → 2026-05-26 | Replace three `Tensor::scatter(0, ..., IndexingUpdateOp::Add)` call sites in `src/sparse/mod.rs` with `cusparseSpMV` (two descriptors: `sp_mat_spmv` for forward/backward y=N·q, `sp_mat_rowsum` for the backward `gc = -N·gA`). Dispatch in `src/sparse/dispatch.rs` selects per `cfg.params.sparse_solver`. | V8 bit-match: GREEN (max_rel = 0). V7b: GREEN — scatter hotspot is **0.0%** of GPU time. V7a: PARTIAL — **0.919** (CUDA 8% faster). New floor: ~8M `cuLaunchKernel` calls at ~2.3 μs each, dominated by `kernel_binop_*` ops. |
-| SP-10 | 2026-05-29 | Capture the forward per-timestep kernel sequence into a `CUgraphExec` once during `setup_inputs`; replay via one `cuGraphLaunch` per timestep. Required three fused `#[cube]` kernels (K1, K2, K3) plus a `PersistentScratch` buffer pool, plus a `flush_no_sync` patch to the cubecl fork. | V9 bit-match: GREEN (ABSOLUTE MATCH under `DDRS_FORCE_GRAPHS=1`). V10: PARTIAL — **29.2%** launch drop (5,442,735 vs SP-9's 7,684,365); below 40% target because backward still direct-launches. V7a: GREEN — **0.385**. 2.4× improvement over SP-9. |
+| SP-10 | 2026-05-29 | Capture the forward per-timestep kernel sequence into a `CUgraphExec` once during `setup_inputs`; replay via one `cuGraphLaunch` per timestep. Required three fused `#[cube]` kernels (K1, K2, K3) plus a `PersistentScratch` buffer pool, plus a `flush_no_sync` patch to the cubecl fork. | V9 bit-match: recorded GREEN (ABSOLUTE MATCH under `DDRS_FORCE_GRAPHS=1`) — but see the V9 caveat under [Gates](#gates): that command exercises the CUDA *backend*, not graph capture. V10: PARTIAL — **29.2%** launch drop (5,442,735 vs SP-9's 7,684,365); below 40% target because backward still direct-launches. V7a: GREEN — **0.385**. 2.4× improvement over SP-9. |
 
 Full prose in `.claude/ARCHITECTURE.md` sections "SP-8 fused MC
 timestep", "SP-9 cuSPARSE SpMV", and "SP-10 CUDA Graphs" —
@@ -38,16 +38,29 @@ fused `#[cube]` kernels as the real fix, per-batch pool fragmentation).
 ## Toggles
 
 Two booleans under `params:` in the training YAML control the entire
-perf stack. Defaults reflect what passes the gates today:
+perf stack — but **the Rust defaults and the shipped-YAML values are
+opposites**, so it matters a great deal whether a config sets the keys at
+all:
+
+| Key | Rust default (key omitted) | `config/merit_training.yaml` |
+|---|---|---|
+| `sparse_solver` | **`cpu`** — `SparseSolver::#[default] Cpu`, `src/config.rs:407-410` | `cuda` (line 138) |
+| `use_cuda_graphs` | **`false`** — `src/config.rs:454` | `true` (line 141) |
+
+The fast path is therefore **opt-in**. A config that omits both keys runs
+the CPU sparse solver with no graph capture, silently and without
+warning — which is exactly what the DDR sandbox does (see
+[Comparing to DDR](ddr-comparison.md)). The values that pass the gates
+today, as shipped in `config/merit_training.yaml`:
 
 ```yaml
 params:
-  sparse_solver: cuda    # default since commit dbcf6e6 (SP-9 close)
-  use_cuda_graphs: true  # default since the SP-10 close commit (e35af29)
+  sparse_solver: cuda    # YAML value since commit dbcf6e6 (SP-9 close)
+  use_cuda_graphs: true  # YAML value since the SP-10 close commit (e35af29)
 ```
 
 To force the CPU-only baseline (e.g. for debugging or a fairness
-comparison):
+comparison) — also what you get by leaving both keys out:
 
 ```yaml
 params:
@@ -79,15 +92,20 @@ stages of `forward_chain_inner` in `src/routing/mmc_op.rs`
 line-by-line:
 
 - **K1 — `forward_k1_kernel` (S1..S23).** Geometry + Muskingum
-  coefficients. Inputs: `(p_spatial, n_manning, q_t)` per-timestep
-  plus the cached `(top_width, slope, length, x_storage,
-  q_spatial)` static attributes. Outputs: 19 named buffers
-  (`depth`, `top_width`, `side_slope`, `bottom_width`,
-  `hydraulic_radius`, `velocity_unclamped`, `velocity_clamped`,
-  `celerity`, `k_muskingum`, `denom`, `c1`, `c2`, `c3`, `c4`,
-  `a_values`, `q_prime`, and a handful of cached attributes piped
-  through for backward). One thread per segment (rank-1, n threads).
-  Every intermediate (alpha_1, alpha_2, hydraulic radius, etc.)
+  coefficients. Eight tensor inputs — `n`, `q_spatial`, `p_spatial`,
+  `q_t`, `q_prime_t` (accepted but unused: `c4` multiplies it in S25,
+  not here), `length`, `slope`, `x_storage` — plus four `F` scalars
+  (`bottom_width_lb`, `depth_lb`, `velocity_lb`, `dt`). Outputs: 19
+  buffers of shape `[n_segments]`, in `forward_saved_idx` order **minus
+  `{14 A_VALUES, 15 B_RHS, 16 I_T, 17 X_SOL}`, which are produced later**
+  (`src/cuda_graph/geometry_kernel.rs:197-218`): `depth`, `top_width`,
+  `side_slope`, `bottom_width`, `hydraulic_radius`,
+  `velocity_unclamped`, `velocity_clamped`, `celerity`, `k_muskingum`,
+  `denom`, `c1`, `c2`, `c3`, `c4`, `ratio`, `denominator`, `q_eps`,
+  `side_slope_raw`, `bw_raw`. In particular `a_values` is **not** a K1
+  output — `assemble_kernel` (S26) produces it, and it is the one
+  `[nnz]`-sized saved-state buffer. One thread per segment (rank-1, n
+  threads). Every intermediate (alpha_1, alpha_2, hydraulic radius, etc.)
   stays in GPU registers — zero cubecl-pool slot allocations inside
   the captured region.
 - **K2 — `b_rhs_kernel` (S25).** Builds the RHS for the triangular
@@ -100,8 +118,13 @@ The two cuSPARSE calls (`SpMV` for S24, `SpSV` for S27) sit between
 them and capture cleanly because cuSPARSE 12.x takes
 externally-managed workspace buffers at `bufferSize`/`analysis`
 time — the per-call routine itself is allocation-free.
-`assemble_kernel` (S26) is a non-fused cubecl kernel that splices
-the dense `b` vector into the sparse triangular system's RHS.
+`assemble_kernel` (S26, `src/cuda_graph/geometry_kernel.rs:382-408`) is
+the fourth `#[cube]` kernel in the captured region. It builds the sparse
+matrix values themselves — `a_values[k] = diag_mask[k] − c[row[k]] ·
+adj[k]`, i.e. `A = I − c·N` — one thread per nnz, writing straight into
+the caller-owned `state_a_values` handle. (It mirrors `assemble_primitive`
+in `src/sparse/mod.rs:642`; it does **not** touch the RHS `b`, which is
+K2's job.)
 
 The reason the fused-kernel design was load-bearing: **the cubecl
 memory allocator recycles pool slots between successive tensor ops.**
@@ -116,10 +139,10 @@ sidesteps the pool entirely for the captured region.
 
 ## PersistentScratch
 
-`src/cuda_graph/scratch.rs` defines `PersistentScratch`: 33 cubecl
-`Handle`s pre-allocated once per `MuskingumCunge` instance during
-`setup_inputs` and held for the lifetime of the
-`CudaPatternCache`. Layout:
+`src/cuda_graph/scratch.rs` defines `PersistentScratch`: **39** cubecl
+`Handle`s (`src/cuda_graph/scratch.rs:14-71`) pre-allocated once per
+`MuskingumCunge` instance during `setup_inputs` and held for the lifetime
+of the `CudaPatternCache`. Layout:
 
 - **3 forward I/O** — `in_q`, `in_qp`, `out_q`.
 - **6 static-input mirrors** (SP-10 Phase 3) — `in_n`, `in_qsp`,
@@ -130,15 +153,30 @@ sidesteps the pool entirely for the captured region.
   pointers can move between batches.
 - **1 pattern buffer** — `pattern_diag_mask` (nnz f32), persistent
   device upload of `pattern.diag_mask`, read by `assemble_kernel`.
-- **23 saved-state buffers** — `state_depth`, `state_top_width`,
-  `state_side_slope`, ... `state_q_eps`. Outputs of forward K1/K2/K3
-  *and* inputs to the analytical backward. The forward writes these
-  and the backward reads them across the timestep loop.
+- **23 saved-state buffers** — `state_depth`, `state_top_width`, …
+  `state_bw_raw` (`:40-62`). Outputs of forward K1/K2/K3 *and* inputs to
+  the analytical backward. The forward writes these and the backward
+  reads them across the timestep loop. All are `[n_segments]` f32 except
+  `state_a_values`, which is `[nnz]`.
+- **6 backward I/O** (`:64-70`) — one input, `in_grad_q_next`, and five
+  outputs, `out_grad_n`, `out_grad_q_spatial`, `out_grad_p_spatial`,
+  `out_grad_q_t`, `out_grad_q_prime_t`. These are allocated even though
+  the backward is not itself captured (SP-11 open work, below).
 
-Total memory: ~32n × 4 bytes — ~525 KB for an n=5K gauge subgraph,
-~44 MB for full CONUS at n=346,321. Pointers are stable for the
-lifetime of the cache, which is exactly the property the captured
-graph requires.
+That is 3 + 6 + 1 + 23 + 6 = **39** handles: 37 sized `[n_segments]` f32
+and 2 sized `[nnz]` f32 (`state_a_values` and `pattern_diag_mask`).
+
+Counting only the n-sized buffers, total memory is **~37n × 4 bytes** —
+**~740 KB** for an n=5K gauge subgraph and **~51 MB** for full CONUS at
+n=346,321, plus `2 × nnz × 4` bytes for the two pattern-sized buffers.
+Pointers are stable for the lifetime of the cache, which is exactly the
+property the captured graph requires.
+
+> The module docstring at `src/cuda_graph/scratch.rs:4-7` still says
+> "32 Handles total … ~32n × 4 bytes (~525 KB … ~44 MB)". That count
+> predates the six Phase-3 static-input mirrors and `pattern_diag_mask`;
+> the field list immediately below it is authoritative. (The old
+> "~525 KB" was never self-consistent either — 32 × 5,000 × 4 is 640 KB.)
 
 ## Gates
 
@@ -150,11 +188,28 @@ Three gates protect the perf path:
 | **V7a** | `tests/sp10_v7a_perf.rs` (CUDA-with-graphs vs CPU; median of 3 timed runs after warmup) | `cuda_wall / cpu_wall ≤ 0.7` | **0.385** |
 | **V10** | `scripts/sp10_check_launches.sh` (nsys `cuda_api_sum` row for `cuLaunchKernel`) | `(1 - calls/SP9_BASELINE) ≥ 40%` | **29.2%** — partial, capped by backward direct-launch |
 
-V1 is the absolute correctness invariant from `CLAUDE.md` and is
-reused unchanged for V9 (graph vs no-graph bit-match) when
-`DDRS_FORCE_GRAPHS=1` forces the capture path on the sandbox. V7a is
-what answers "is GPU actually worth using?" and the V7a test pre-warms
-the JIT with one discarded run before taking the median of three.
+V1 is the absolute correctness invariant from `CLAUDE.md`. It was reused
+unchanged as **V9**, recorded at the SP-10 close as "graph vs no-graph
+bit-match: GREEN" on the strength of
+`DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox`.
+
+> **That V9 framing does not hold up, and the recorded result is weaker
+> than the label.** `DDRS_FORCE_GRAPHS` only selects the `Cuda<f32, i32>`
+> inner backend (`examples/compare_ddr_sandbox.rs:113-117`); capture
+> additionally requires `use_cuda_graphs && sparse_solver ==
+> SparseSolver::Cuda` (`src/routing/mmc.rs:289-294`), and the sandbox
+> `Config` is `Config::default()` (`src/sandbox.rs:88-89`) — `false` and
+> `Cpu` — with `fixtures/sandbox/config.csv` setting neither. So the
+> ABSOLUTE MATCH recorded for V9 certifies the **CUDA backend against the
+> CPU backend with the CPU sparse solver**, not the graph-capture path.
+> The capture path has no standing bit-match gate. Treat "graphs are
+> bit-identical to no-graphs" as **unverified by this command**; a real
+> V9 needs a sandbox config (or a harness) that sets both toggles. See
+> [Comparing to DDR](ddr-comparison.md) for the full chain of evidence.
+
+V7a is what answers "is GPU actually worth using?" and the V7a test
+pre-warms the JIT with one discarded run before taking the median of
+three.
 V10 measures the mechanical objective of CUDA Graphs — collapsing
 host-side launch count — and exposes the gap left by the un-captured
 backward.
@@ -229,7 +284,8 @@ backward.
 ## Verification
 
 ```bash
-# V1 — correctness floor, default config and forced-graph config both pass
+# V1 — correctness floor; both the CPU backend and the CUDA backend pass.
+# (Neither run enables graph capture — see the V9 caveat under Gates.)
 cargo run --release --example compare_ddr_sandbox
 DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox
 

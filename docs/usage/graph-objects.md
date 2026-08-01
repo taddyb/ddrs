@@ -9,6 +9,40 @@ newtype IDs, the cached `CsrPattern`, the constant `AValuesAssembler`, and
 an invariant; getting them right once at `setup_inputs` is what lets every
 subsequent timestep be a cheap reuse.
 
+## Where the adjacency comes from
+
+`SparseAdjacency` — the head of the chain below — is built from the COO
+triplets in a `ConusAdjacencyStore` / `GagesAdjacencyStore` zarr pair. Those
+stores are usually **managed**: with `data_sources.geospatial_fabric` set and
+both adjacency keys absent, `ddrs plan` calls
+
+```rust
+adjacency::cache::resolve_or_build(workspace_root, fabric, fabric_layer, gages_csv)
+```
+
+(`src/adjacency/cache.rs`), which reads the fabric's attribute table
+(`.shp` → sibling `.dbf`, or a `.gpkg` via SQL — geometry is never opened),
+runs the topological sort, BFSes every gauge subgraph, and writes both zarr
+stores into `.ddrs/adjacency/<key>/`. The key is
+
+```
+blake3(fabric_fingerprint ∥ gages_fingerprint ∥ [layer] ∥ BUILDER_VERSION)[..16]
+```
+
+where the fingerprints are content hashes of the file *bytes*, so moving or
+renaming an input does not invalidate the cache and two byte-identical fabrics
+share one entry. The `layer` term participates only when set. Builds are
+crash-safe (temp dir + atomic rename), and the output matches an engine-built
+store element-for-element (`tests/adjacency_parity.rs`). Providing both
+`conus_adjacency` and `gages_adjacency` explicitly skips the build entirely.
+
+One filter applies before any of this reaches the solver:
+`GageSubgraph::is_headwater()` — true when a gauge's catchment is a single
+MERIT divide, so the subgraph has zero edges. `MeritGagesDataset::open` drops
+those gauges, and every downstream consumer must drop the same ones: a
+zero-edge subgraph has an empty `upstream_comids`, and summing an empty set
+silently yields an all-zero prediction rather than an error.
+
 ## The construction chain
 
 The path from on-disk adjacency to a stepping solver is four objects deep,
@@ -23,8 +57,8 @@ CsrPattern        (Arc-shared; structural-only, no learnable values)
    ▼ AValuesAssembler::<I>::new(&pattern, &device)
 AValuesAssembler  (constant uploads of adj_values, diag_mask, row_idx, col_idx)
    │
-   ▼ MuskingumCunge::setup_inputs(adj, streamflow, params, carry_state)
-MuskingumCunge<I> (cold-start solved, discharge_t seeded, ready to .forward(...))
+   ▼ MuskingumCunge::setup_inputs(adj, streamflow, params, carry_state, initial_state)
+MuskingumCunge<I> (discharge_t seeded, ready to .forward(...))
 ```
 
 `setup_inputs` is the **only** function that builds graph objects. After it
@@ -173,12 +207,19 @@ ready-to-step solver. Signature:
 ```rust
 pub fn setup_inputs(
     &mut self,
-    inputs: RoutingInputs<I>,           // adjacency + x_storage
-    streamflow: Tensor<Autodiff<I>, 2>, // [T, n] lateral inflow q'
-    params: SpatialParameters<I>,       // n, q_spatial, p_spatial in [0,1]
+    inputs: RoutingInputs<I>,                       // adjacency + x_storage
+    streamflow: Tensor<Autodiff<I>, 2>,             // [T, n] lateral inflow q'
+    params: SpatialParameters<I>,                   // NN outputs in [0,1]
     carry_state: bool,
+    initial_state: Option<Tensor<Autodiff<I>, 1>>,  // window-start Q_0, m³/s
 )
 ```
+
+Five parameters, not four. `initial_state` is the state-cache injection
+point: when `Some`, that per-reach `Q_0` vector (same order as the network) is
+used as-is; when `None`, the `carry_state` / hotstart logic runs exactly as it
+did before the field existed, so every call site that passes `None` is
+byte-identical to the pre-state-cache code path.
 
 What it does, in order:
 
@@ -191,14 +232,16 @@ What it does, in order:
    `self` for the lifetime of this engine instance.
 3. **Stash the per-batch state** — `n_segments`, `length`, `slope`,
    `x_storage`, `q_prime`.
-4. **Denormalize the NN parameters** — `params.n`, `params.q_spatial`, and
-   `params.p_spatial` (if provided), each run through `denormalize`
-   (`src/routing/utils.rs`) with the configured range and log-space flag from
-   `cfg.params`.
-5. **Cold-start** — if `!carry_state || discharge_t.is_none()`, solve
-   `(I − N) · Q_0 = q'_0` by calling `triangular_csr_solve` with `c = 1` (an
-   all-ones vector assembled through the same `AValuesAssembler`). Clamp the
-   result to `attribute_minimums.discharge` and store in `self.discharge_t`.
+4. **Denormalize the NN parameters** — `params.n` and `params.q_spatial`
+   always; `params.p_spatial` when provided; and the leakance trio
+   `k_d` / `d_gw` / `leakance_factor` when provided (cleared to `None`
+   otherwise). Each runs through `denormalize` (`src/routing/utils.rs`) with
+   the configured range and log-space flag from `cfg.params` — note the
+   log-space lookup for `k_d` matches the string `"K_D"`, DDR's uppercase
+   spelling. `params.impervious_mask` is stored **as-is**: it is a constant on
+   the inner backend, not autograd-tracked, and is never denormalized.
+5. **Seed `discharge_t`** — see [Initial state](#initial-state-carry_state-vs-initial_state)
+   below.
 6. **SP-10 optional** — eagerly capture the per-timestep CUDA graph if
    `use_cuda_graphs && sparse_solver == Cuda && backend_is_cuda::<I>()`.
 
@@ -209,6 +252,51 @@ any graph object.
 `slope` are bundled inside `SparseAdjacency` (same topological order, loaded
 together). `x_storage` (the Muskingum storage weight) is kept separate so it
 can be supplied as a learnable or per-batch tensor.
+
+### `SpatialParameters<I>` has eight fields
+
+```rust
+pub struct SpatialParameters<I: Backend> {
+    pub n: Tensor<Autodiff<I>, 1>,
+    pub q_spatial: Tensor<Autodiff<I>, 1>,
+    pub p_spatial: Option<Tensor<Autodiff<I>, 1>>,
+    /// Leakance params — all-or-nothing. Any `None` ⇒ the non-leakance path.
+    pub k_d: Option<Tensor<Autodiff<I>, 1>>,
+    pub d_gw: Option<Tensor<Autodiff<I>, 1>>,
+    pub leakance_factor: Option<Tensor<Autodiff<I>, 1>>,
+    /// Per-reach hard-zero mask (0.0 = impervious, 1.0 = normal).
+    /// Inner backend `I` — constant, no gradient. `None` ⇒ all-ones no-op.
+    pub impervious_mask: Option<Tensor<I, 1>>,
+}
+```
+
+Only `n` and `q_spatial` are unconditional. The leakance trio is
+**all-or-nothing**: `route_timestep` dispatches to
+`timestep_forward_leakance` only when all three are `Some`; any `None` routes
+the ordinary path. `impervious_mask` is precomputed by the caller from the
+`corridor_impervious` attribute using `cfg.params.leakance_impervious_threshold`
+(`MeritGagesDataset::build_impervious_mask`), which is why it arrives as a
+plain constant tensor rather than something the head emits.
+
+### Initial state: `carry_state` vs `initial_state`
+
+The two are not peers — `initial_state` wins outright:
+
+```
+initial_state = Some(q0)  ──► discharge_t = q0.clamp_min(discharge_lb)
+                              (hotstart solve SKIPPED, carry_state IGNORED)
+
+initial_state = None      ──► if !carry_state || discharge_t.is_none():
+                                  solve (I − N)·Q_0 = q'_0 via
+                                  triangular_csr_solve with c = 1,
+                                  clamp to attribute_minimums.discharge
+                              else:
+                                  keep the existing discharge_t
+```
+
+So the cold-start does **not** always run on a first call: with
+`initial_state: Some(...)` it never runs at all, even when `discharge_t` is
+`None`. Both branches apply the same `attribute_minimums.discharge` floor.
 
 ## The `Arc<CsrPattern>` single-instance rule
 
@@ -241,17 +329,23 @@ adjacency would be undefined.
 - **Adjacency MUST be topologically sorted and lower-triangular**
   (`rows[k] >= cols[k]`). The forward-sub solver assumes it, and `from_sparse`
   has a `debug_assert!` that fires on the first off-diagonal that breaks it.
-  The invariant is tested against the real MERIT CONUS zarr via
-  `data::store::zarr::tests::conus_adjacency_loads_real_merit_zarr`. If you
-  load adjacency from a new source, run that test first.
+  The invariant is tested against the real MERIT CONUS zarr by
+  `conus_adjacency_loads_real_merit_zarr`, an **integration** test at
+  `tests/data_zarr_store.rs` — run it with
+  `cargo test --test data_zarr_store conus_adjacency_loads_real_merit_zarr`.
+  If you load adjacency from a new source, run that test first.
 - **`setup_inputs` is the ONLY place `CsrPattern` is built.** No public API
   rebuilds it. If you find yourself wanting to call `from_sparse` inside a
   training loop, you are doing something wrong — re-instantiate the
   `MuskingumCunge` instead.
-- **`carry_state` semantics.** `carry_state == true` preserves `discharge_t`
-  from the previous setup (skips the cold-start solve). `carry_state == false`
-  reruns the cold-start. If `discharge_t.is_none()` (first call), the
-  cold-start runs regardless of the flag.
+- **`carry_state` semantics — only when `initial_state` is `None`.**
+  Within the `None` branch: `carry_state == true` preserves `discharge_t` from
+  the previous setup (skips the cold-start solve), `carry_state == false`
+  reruns the cold-start, and if `discharge_t.is_none()` (first call) the
+  cold-start runs regardless of the flag. But when `initial_state` is `Some`,
+  the hotstart solve is skipped unconditionally and `carry_state` is not
+  consulted at all — don't reason about `carry_state` without first checking
+  which branch you're in.
 - **`n` varies between batches.** Gauge subgraphs from `GagesAdjacencyStore`
   are different sizes per batch. The `CudaPatternCache` is **per-instance**
   (inside the `CsrPattern`), not global — different `MuskingumCunge` instances
@@ -271,6 +365,8 @@ adjacency would be undefined.
 |---|---|---|---|
 | `Comid` / `Staid` | `src/data/ids.rs` | reader open time | typed domain IDs (newtypes over `i64` / padded `String`) |
 | `IdIndex<T>` | `src/data/ids.rs` | store open time | ID → array-position map (`positions_of` reports missing) |
+| `GageSubgraph` | `src/data/store/zarr.rs` | `GagesAdjacencyStore::open` | per-gauge COO in CONUS position space; `is_headwater()` gates the dataset's third filter stage |
+| managed adjacency cache | `src/adjacency/cache.rs` | first `ddrs plan` | `resolve_or_build` → `.ddrs/adjacency/<key>/`, content-addressed |
 | `SparseAdjacency` | `src/sparse/mod.rs` | dataloader | COO triplets + `length_m` + `slope`, plain CPU `Vec<f32>` |
 | `CsrPattern` | `src/sparse/mod.rs` | `setup_inputs` | structural-only CSR of `A = I − c·N`, `Arc`-shared, lower-triangular |
 | `AValuesAssembler<I>` | `src/sparse/mod.rs` | `setup_inputs` | constant device tensors; `assemble(c)` and `spmv(q)` per timestep |
@@ -280,19 +376,36 @@ adjacency would be undefined.
 ### Verification
 
 ```bash
-cargo test --test mmc mc_routes_linear_chain
+cargo test --test mmc          # 13 tests
 ```
 
-The `mc_routes_linear_chain` test (5-reach linear chain) exercises the full
-chain — `SparseAdjacency::from_dense` → `CsrPattern::from_sparse` →
-`MuskingumCunge::setup_inputs` → repeated `route_timestep` — and compares the
-output to a hand-rolled cumsum baseline. Passing it confirms the graph objects
-are built and reused correctly.
+The ones that exercise the construction chain end to end —
+`SparseAdjacency::from_dense` → `CsrPattern::from_sparse` →
+`MuskingumCunge::setup_inputs` → `forward()`:
 
-For the full CONUS adjacency invariant (lower-triangular, topological):
+| Test | Locks |
+|---|---|
+| `forward_different_network_sizes` | the chain builds and steps at `n ∈ {1, 5, 50, 100}`; output shape `[n, t]`, all values finite and ≥ `attribute_minimums.discharge` |
+| `forward_reproducible` | same inputs → same outputs across two independent engines |
+| `setup_inputs_uses_hotstart` / `carry_state_skips_hotstart` | the `carry_state` branch of the `initial_state = None` path |
+| `carry_state_preserves_discharge_across_setup_inputs_calls` | `discharge_t` survives a second `setup_inputs` with a new forcing window — what chunked eval depends on |
+| `setup_inputs_slope_clamping` | `attribute_minimums.slope` is applied at upload |
+| `forward_gradients_flow_to_spatial_params` | autograd reaches `n` and `q_spatial` through the whole chain |
+
+Run one with e.g. `cargo test --test mmc forward_different_network_sizes`.
+
+For the full CONUS adjacency invariant (lower-triangular, topological) — this
+is an integration test, so `--test`, not `--lib`:
 
 ```bash
-cargo test --lib data::store::zarr::tests::conus_adjacency_loads_real_merit_zarr
+cargo test --test data_zarr_store conus_adjacency_loads_real_merit_zarr
+```
+
+For the managed adjacency builder:
+
+```bash
+cargo test --test adjacency_build                 # 10 tests
+cargo test --test adjacency_parity -- --ignored   # element-for-element vs the engine store (~10 s, reads the real dbf)
 ```
 
 ## See also
