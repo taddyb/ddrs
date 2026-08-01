@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use burn::module::{AutodiffModule, ModuleMapper, ModuleVisitor, Param, ParamId};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
+use burn::optim::{AdamConfig, GradientsParams, LearningRate, Optimizer};
 use burn::prelude::ElementConversion;
 use burn::tensor::{Tensor, backend::AutodiffBackend};
 
@@ -43,6 +43,107 @@ where
         .with_beta_2(0.999)
         .with_epsilon(1e-8)
         .init::<B, M>()
+}
+
+/// Optimizer selected by `experiment.optimizer`.
+///
+/// Exists because `bootstrap_head_and_state` returns ONE type: Adam and
+/// AdaDelta are different `OptimizerAdaptor`s, so a runtime choice needs a
+/// wrapper. The `Record` is an enum too, so a checkpoint written by one
+/// optimizer refuses to load into the other instead of silently
+/// reinterpreting moment tensors.
+#[derive(Clone)]
+pub enum HeadOptimizer<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    Adam(burn::optim::adaptor::OptimizerAdaptor<burn::optim::Adam, M, B>),
+    AdaDelta(burn::optim::adaptor::OptimizerAdaptor<crate::training::adadelta::AdaDelta, M, B>),
+}
+
+/// Record for [`HeadOptimizer`]. Only the active variant is populated.
+#[derive(burn::record::Record)]
+pub enum HeadOptimizerRecord<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    Adam(
+        <burn::optim::adaptor::OptimizerAdaptor<burn::optim::Adam, M, B> as Optimizer<M, B>>::Record,
+    ),
+    AdaDelta(
+        <burn::optim::adaptor::OptimizerAdaptor<crate::training::adadelta::AdaDelta, M, B> as Optimizer<M, B>>::Record,
+    ),
+}
+
+impl<M, B> Optimizer<M, B> for HeadOptimizer<M, B>
+where
+    M: AutodiffModule<B> + core::fmt::Debug + Send,
+    B: AutodiffBackend,
+{
+    type Record = HeadOptimizerRecord<M, B>;
+
+    fn step(&mut self, lr: LearningRate, module: M, grads: GradientsParams) -> M {
+        match self {
+            Self::Adam(o) => o.step(lr, module, grads),
+            Self::AdaDelta(o) => o.step(lr, module, grads),
+        }
+    }
+
+    fn step_multi(
+        &mut self,
+        lr: LearningRate,
+        module: M,
+        grads: burn::optim::MultiGradientsParams,
+    ) -> M {
+        match self {
+            Self::Adam(o) => o.step_multi(lr, module, grads),
+            Self::AdaDelta(o) => o.step_multi(lr, module, grads),
+        }
+    }
+
+    fn to_record(&self) -> Self::Record {
+        match self {
+            Self::Adam(o) => HeadOptimizerRecord::Adam(o.to_record()),
+            Self::AdaDelta(o) => HeadOptimizerRecord::AdaDelta(o.to_record()),
+        }
+    }
+
+    fn load_record(self, record: Self::Record) -> Self {
+        match (self, record) {
+            (Self::Adam(o), HeadOptimizerRecord::Adam(r)) => Self::Adam(o.load_record(r)),
+            (Self::AdaDelta(o), HeadOptimizerRecord::AdaDelta(r)) => {
+                Self::AdaDelta(o.load_record(r))
+            }
+            _ => panic!(
+                "optimizer checkpoint kind does not match `experiment.optimizer` — \
+                 resuming an Adam run as AdaDelta (or vice versa) would reinterpret \
+                 the saved moment tensors"
+            ),
+        }
+    }
+}
+
+/// Build the optimizer selected by `experiment.optimizer` (default Adam).
+pub fn build_head_optimizer<M, B>(kind: crate::config::OptimizerKind) -> HeadOptimizer<M, B>
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    use crate::config::OptimizerKind;
+    match kind {
+        OptimizerKind::Adam => HeadOptimizer::Adam(
+            AdamConfig::new()
+                .with_beta_1(0.9)
+                .with_beta_2(0.999)
+                .with_epsilon(1e-8)
+                .init::<B, M>(),
+        ),
+        OptimizerKind::Adadelta => HeadOptimizer::AdaDelta(
+            crate::training::adadelta::AdaDeltaConfig::default().init::<B, M>(),
+        ),
+    }
 }
 
 // ── gradient clipping ──────────────────────────────────────────────────────
@@ -87,6 +188,28 @@ where
     // `module.map` visits every Param and calls `map_float`, which is where
     // we swap the scaled grad back.  We discard the returned module (params
     // are unchanged; only the GradientsParams side is rebuilt).
+    let _ = module.clone().map(&mut scaler);
+    scaler.grads
+}
+
+/// Multiply every gradient in `grads` by `scale` (consume + return, same
+/// pattern as [`clip_grad_norm`]).
+///
+/// Used by the gradient-accumulation path: micro-batch losses are scaled by
+/// their pooled-denominator count `n_i` BEFORE `backward()` (turning each
+/// mean back into a sum), the per-micro gradients are summed in a
+/// `GradientsAccumulator`, and this rescales the total by `1 / Σ n_i` — the
+/// result is exactly the gradient of the pooled large-batch mean loss.
+pub fn scale_grads<M, B>(grads: GradientsParams, module: &M, scale: f32) -> GradientsParams
+where
+    M: AutodiffModule<B>,
+    B: AutodiffBackend,
+{
+    let mut scaler = GradScaler::<M, B> {
+        grads,
+        scale,
+        _phantom: std::marker::PhantomData,
+    };
     let _ = module.clone().map(&mut scaler);
     scaler.grads
 }
@@ -154,6 +277,60 @@ where
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn scale_grads_multiplies_every_gradient() {
+        use burn::backend::{Autodiff, NdArray};
+        use burn::module::Module;
+        use crate::nn::kan_head::{KanHead, KanHeadConfig};
+        type B = Autodiff<NdArray<f32>>;
+        let device = Default::default();
+        let head = KanHeadConfig::new(
+            (0..3).map(|i| format!("attr_{i}")).collect(),
+            vec!["n".into(), "q_spatial".into()],
+            42,
+        )
+        .with_hidden_size(4)
+        .with_num_hidden_layers(1)
+        .init::<B>(&device);
+
+        let x: Tensor<B, 2> =
+            Tensor::random([5, 3], burn::tensor::Distribution::Default, &device);
+        let loss = head
+            .forward(x)
+            .into_values()
+            .map(|t| t.sum())
+            .reduce(|a, b| a + b)
+            .expect("head emits at least one parameter");
+        let grads = GradientsParams::from_grads(loss.backward(), &head);
+        let n_before = grads.len();
+        assert!(n_before > 0, "head must produce gradients");
+
+        // Scaling by 0.25 must scale the global L2 norm by exactly 0.25
+        // and keep every param's gradient registered.
+        let mut c = NormCollector::<KanHead<B>, B> {
+            grads: &grads,
+            sum_sq: 0.0,
+            _phantom: std::marker::PhantomData,
+        };
+        head.visit(&mut c);
+        let norm_before = c.sum_sq.sqrt();
+        assert!(norm_before > 0.0);
+
+        let scaled = scale_grads(grads, &head, 0.25);
+        assert_eq!(scaled.len(), n_before, "scaling must not drop params");
+        let mut c2 = NormCollector::<KanHead<B>, B> {
+            grads: &scaled,
+            sum_sq: 0.0,
+            _phantom: std::marker::PhantomData,
+        };
+        head.visit(&mut c2);
+        let norm_after = c2.sum_sq.sqrt();
+        assert!(
+            (norm_after - 0.25 * norm_before).abs() <= 1e-5 * norm_before,
+            "norm {norm_after} != 0.25 × {norm_before}"
+        );
+    }
 
     #[test]
     fn resolve_lr_picks_largest_key_leq_epoch() {

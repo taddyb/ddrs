@@ -594,7 +594,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         let p_filt = p_post.select(0, keep_t.clone());
         let o_filt = o_post.select(0, keep_t);
 
-        let loss = batch_loss(p_filt, o_filt, &exp.loss);
+        let loss = batch_loss(p_filt, o_filt, &exp.loss, None);
         let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
         let grads = loss.backward();

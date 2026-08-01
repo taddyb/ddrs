@@ -22,7 +22,7 @@ use crate::training::checkpoint::{
     state_path,
 };
 use crate::training::driver::TrainState;
-use crate::training::optimizer::build_adam;
+use crate::training::optimizer::{build_head_optimizer, HeadOptimizer};
 
 /// Initialise the KAN head, the mutable training state, and the Adam
 /// optimizer from `cfg`.
@@ -48,7 +48,7 @@ pub fn bootstrap_head_and_state<I>(
 ) -> Result<(
     KanHead<Autodiff<I>>,
     TrainState<I>,
-    impl Optimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
+    HeadOptimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
 )>
 where
     I: Backend,
@@ -59,7 +59,14 @@ where
 
     <Autodiff<I> as Backend>::seed(device, cfg.seed);
     let mut head: KanHead<Autodiff<I>> = head_cfg.init::<Autodiff<I>>(device);
-    let mut optimizer = build_adam::<KanHead<Autodiff<I>>, Autodiff<I>>();
+    let optim_kind = cfg
+        .experiment
+        .as_ref()
+        .map(|e| e.optimizer)
+        .unwrap_or_default();
+    eprintln!("optimizer: {optim_kind:?}");
+    let mut optimizer =
+        build_head_optimizer::<KanHead<Autodiff<I>>, Autodiff<I>>(optim_kind);
 
     // Warm-start the disaggregation submodule from a standalone-pretrained
     // checkpoint (`kan_head.disaggregation.pretrained_checkpoint`), optionally

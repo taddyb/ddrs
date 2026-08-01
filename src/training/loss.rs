@@ -139,18 +139,51 @@ pub fn l1_loss_post_warmup(
     diff.iter().map(|v| v.abs()).sum::<f32>() / (diff.len() as f32)
 }
 
+/// The pooled-mean denominator of [`batch_loss`] for a micro-batch of
+/// `g_kept` surviving gauges × `t_post` post-warmup days.
+///
+/// This is the exact-recombination weight for gradient accumulation: a
+/// micro-batch loss `L_i` (a mean over this count) scaled by `n_i` turns
+/// back into a SUM, so `Σ_i (L_i·n_i) / Σ_i n_i` equals the loss of the
+/// pooled batch — and, by linearity of the gradient, the accumulated
+/// scaled gradients equal the true large-batch gradient. A naive 1/N
+/// average is wrong whenever micro-batches differ in surviving-gauge
+/// count (the NaN filter makes that the common case).
+///
+/// L1 averages over ELEMENTS (`(p - o).abs().mean()`); the composite
+/// objectives compute per-gauge scores then average over GAUGES.
+pub fn loss_denominator(cfg: &LossConfig, g_kept: usize, t_post: usize) -> usize {
+    match cfg.kind {
+        LossKind::L1 | LossKind::NseBatch => g_kept * t_post,
+        LossKind::NnseKge | LossKind::Kge => g_kept,
+    }
+}
+
 /// Dispatch a mini-batch to the configured training objective.
 ///
 /// `p` / `o` are `(G, T_post_warmup)` with autograd alive on `p`. `o` must
 /// be NaN-free (the driver drops gauges with any NaN in the window before
 /// calling). Returns the scalar batch loss with the autograd graph intact.
+/// `gauge_std` is the per-gauge observed-discharge standard deviation over the
+/// TRAINING period, shape `(G,)`, aligned to `p`'s rows. Required by
+/// [`LossKind::NseBatch`]; ignored by every other objective (pass `None`).
 pub fn batch_loss<B: Backend>(
     p: Tensor<B, 2>,
     o: Tensor<B, 2>,
     cfg: &LossConfig,
+    gauge_std: Option<Tensor<B, 1>>,
 ) -> Tensor<B, 1> {
     match cfg.kind {
         LossKind::L1 => (p - o).abs().mean(),
+        LossKind::NseBatch => nse_batch_loss(
+            p,
+            o,
+            gauge_std.expect(
+                "loss.kind: nse-batch requires per-gauge std — the driver must pass \
+                 RoutingBatch::gauge_obs_std for the surviving gauges",
+            ),
+            cfg.eps,
+        ),
         LossKind::NnseKge => nnse_kge_loss(p, o, cfg.nnse_weight, cfg.kge_weight, cfg.eps),
         LossKind::Kge => kge_component_loss(
             p,
@@ -163,6 +196,35 @@ pub fn batch_loss<B: Backend>(
             cfg.eps,
         ),
     }
+}
+
+/// dHBV's batch-NSE loss (hydroDL `crit.py::NSELossBatch`, Frederick 2019).
+///
+/// `mean over (gauge, day) of (p − o)² / (σ_gauge + eps)²` — a squared-error
+/// loss with each gauge's residuals normalized by that gauge's observed
+/// standard deviation over the **training period** (a fixed vector, NOT
+/// recomputed per window; recomputing per window would make the objective
+/// drift between micro-batches and break accumulation exactness).
+///
+/// Why: raw L1/L2 weight every m³/s equally, so a handful of large,
+/// high-variance basins dominate the batch gradient and the head optimizes
+/// them at the expense of everything else. Dividing by σ puts all gauges on a
+/// comparable scale — the same normalization NSE itself uses, hence the name.
+/// `eps` (dHBV default 0.1) keeps a near-constant gauge from exploding.
+///
+/// `p` / `o` are `(G, T)` with autograd alive on `p` and `o` NaN-free (the
+/// driver's NaN-gauge filter runs first); `sigma` is `(G,)`.
+pub fn nse_batch_loss<B: Backend>(
+    p: Tensor<B, 2>,
+    o: Tensor<B, 2>,
+    sigma: Tensor<B, 1>,
+    eps: f32,
+) -> Tensor<B, 1> {
+    let g = p.dims()[0];
+    let denom = sigma.add_scalar(eps).reshape([g, 1]); // (G, 1), broadcasts over time
+    let resid = p - o;
+    let sq = resid.clone() * resid;
+    (sq / (denom.clone() * denom)).mean()
 }
 
 /// Per-gauge `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)`, averaged over gauges.
@@ -414,6 +476,102 @@ mod tests {
         // indices 1,3 are peaks (pred 2.5 < obs 3); 0,2 are troughs.
         assert!(gv[1] < 0.0 && gv[3] < 0.0, "peak grads not negative: {gv:?}");
         assert!(gv[0] > 0.0 && gv[2] > 0.0, "trough grads not positive: {gv:?}");
+    }
+
+    #[test]
+    fn nse_batch_loss_matches_hand_computation() {
+        // dHBV NSELossBatch (hydroDL crit.py:102-122):
+        //   mean over valid (day, gauge) of (sim - obs)^2 / (sigma_gauge + eps)^2
+        // Two gauges, 4 days. sigma = [1.0, 2.0], eps = 0.1.
+        //   gauge 0 residuals: [1, -1, 1, -1] -> sq 1 each; /(1.1^2)=0.826446 each
+        //   gauge 1 residuals: [2, 2, 2, 2]   -> sq 4 each; /(2.1^2)=0.907029 each
+        //   mean over 8 elements = (4*0.826446 + 4*0.907029)/8 = 0.866738
+        let p = mk::<Bp>(&[[2.0, 0.0, 2.0, 0.0], [5.0, 5.0, 5.0, 5.0]]);
+        let o = mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0], [3.0, 3.0, 3.0, 3.0]]);
+        let sigma = Tensor::<Bp, 1>::from_data(
+            burn::tensor::TensorData::new(vec![1.0_f32, 2.0], [2]),
+            &Default::default(),
+        );
+        let v: f32 = nse_batch_loss(p, o, sigma, 0.1).into_scalar();
+        let want = (4.0 * 1.0 / 1.1_f32.powi(2) + 4.0 * 4.0 / 2.1_f32.powi(2)) / 8.0;
+        assert!((v - want).abs() < 1e-5, "got {v}, want {want}");
+    }
+
+    #[test]
+    fn nse_batch_loss_downweights_high_variance_gauges() {
+        // The whole point vs L1: the same absolute residual costs LESS at a
+        // flashy (high-sigma) gauge than at a steady one, so big basins stop
+        // dominating the batch gradient.
+        let p = mk::<Bp>(&[[2.0, 2.0, 2.0, 2.0]]);
+        let o = mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0]]);
+        let dev = Default::default();
+        let lo = Tensor::<Bp, 1>::from_data(burn::tensor::TensorData::new(vec![0.5_f32], [1]), &dev);
+        let hi = Tensor::<Bp, 1>::from_data(burn::tensor::TensorData::new(vec![50.0_f32], [1]), &dev);
+        let l_lo: f32 = nse_batch_loss(p.clone(), o.clone(), lo, 0.1).into_scalar();
+        let l_hi: f32 = nse_batch_loss(p, o, hi, 0.1).into_scalar();
+        assert!(l_hi < l_lo * 0.01, "high-sigma loss {l_hi} not << low-sigma {l_lo}");
+    }
+
+    #[test]
+    fn nse_batch_gradient_points_toward_observations() {
+        let p = mk::<Ad>(&[[2.0, 0.0, 2.0, 0.0]]).require_grad();
+        let o = mk::<Ad>(&[[1.0, 1.0, 1.0, 1.0]]);
+        let sigma = Tensor::<Ad, 1>::from_data(
+            burn::tensor::TensorData::new(vec![1.0_f32], [1]),
+            &Default::default(),
+        );
+        let loss = nse_batch_loss(p.clone(), o, sigma, 0.1);
+        let grads = loss.backward();
+        let gv: Vec<f32> = p.grad(&grads).unwrap().into_data().to_vec().unwrap();
+        // over-prediction -> positive grad (push down); under -> negative.
+        assert!(gv[0] > 0.0 && gv[2] > 0.0, "over-pred grads not positive: {gv:?}");
+        assert!(gv[1] < 0.0 && gv[3] < 0.0, "under-pred grads not negative: {gv:?}");
+    }
+
+    #[test]
+    fn loss_denominator_matches_each_objective_mean() {
+        use crate::config::LossConfig;
+        // L1 is a mean over (gauge, timestep) ELEMENTS.
+        let l1 = LossConfig::default();
+        assert_eq!(loss_denominator(&l1, 3, 5), 15);
+        // The composite objectives are per-gauge means (mean over GAUGES).
+        let mut nk = LossConfig::default();
+        nk.kind = LossKind::NnseKge;
+        assert_eq!(loss_denominator(&nk, 3, 5), 3);
+        let mut kge = LossConfig::default();
+        kge.kind = LossKind::Kge;
+        assert_eq!(loss_denominator(&kge, 3, 5), 3);
+        // Batch-NSE is a mean over ELEMENTS, like L1.
+        let mut nb = LossConfig::default();
+        nb.kind = LossKind::NseBatch;
+        assert_eq!(loss_denominator(&nb, 3, 5), 15);
+    }
+
+    #[test]
+    fn scaled_micro_losses_recombine_to_pooled_l1() {
+        // The accumulation identity the driver relies on:
+        //   Σ_i (L_i · n_i) / Σ_i n_i  ==  L over the pooled batch,
+        // with n_i = loss_denominator. Unequal micro-batch sizes on purpose.
+        use crate::config::LossConfig;
+        let cfg = LossConfig::default();
+        let p_all = mk::<Bp>(&[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [0.0, 0.0, 0.0, 0.0]]);
+        let o_all = mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0], [8.0, 8.0, 8.0, 8.0], [1.0, 2.0, 3.0, 4.0]]);
+        let pooled: f32 = batch_loss(p_all.clone(), o_all.clone(), &cfg, None).into_scalar();
+
+        // Micro 1 = gauges {0, 1}; micro 2 = gauge {2}.
+        let p1 = p_all.clone().slice([0..2, 0..4]);
+        let o1 = o_all.clone().slice([0..2, 0..4]);
+        let p2 = p_all.slice([2..3, 0..4]);
+        let o2 = o_all.slice([2..3, 0..4]);
+        let n1 = loss_denominator(&cfg, 2, 4) as f32;
+        let n2 = loss_denominator(&cfg, 1, 4) as f32;
+        let l1_: f32 = batch_loss(p1, o1, &cfg, None).into_scalar();
+        let l2_: f32 = batch_loss(p2, o2, &cfg, None).into_scalar();
+        let recombined = (l1_ * n1 + l2_ * n2) / (n1 + n2);
+        assert!(
+            (recombined - pooled).abs() <= 1e-6 * pooled.abs().max(1.0),
+            "recombined {recombined} != pooled {pooled}"
+        );
     }
 
     #[test]

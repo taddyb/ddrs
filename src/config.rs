@@ -157,6 +157,61 @@ pub struct Experiment {
     /// without a `loss:` block are byte-for-byte unchanged in behavior.
     #[serde(default)]
     pub loss: LossConfig,
+    /// Master switch for optimizer micro-batching (gradient accumulation),
+    /// following the `use_leakance`/`use_cuda_graphs` flag convention.
+    /// Default `false` ⇒ byte-identical single-batch training regardless of
+    /// `grad_accum_steps` (the tuning stays in the file, inert). `true`
+    /// requires `grad_accum_steps >= 2` — rejected at load otherwise, so the
+    /// switch can never be a silent no-op.
+    /// Which optimizer to use. `adam` (default) preserves every historical
+    /// run; `adadelta` matches dHBV's `torch.optim.Adadelta(params)` — a
+    /// scale-free update that needs no lr schedule (`lr` is ignored) and can
+    /// take meaningful steps when gradient accumulation reduces the run to a
+    /// few dozen updates, where Adam's per-step movement is capped at `lr`.
+    #[serde(default)]
+    pub optimizer: OptimizerKind,
+    #[serde(default)]
+    pub use_grad_accum: bool,
+    /// Group size for `use_grad_accum: true`: number of micro-batches (each
+    /// `batch_size` gauges) whose gradients are summed into ONE optimizer
+    /// step — effective batch `N × batch_size` at the peak memory of a single
+    /// micro-batch. Each micro-batch loss is weighted by its share of the
+    /// pooled valid-residual denominator, so the accumulated gradient equals
+    /// the true large-batch gradient (see `tests/grad_accum_equivalence.rs`).
+    /// When accumulating, the sampler keeps the partial tail batch
+    /// (`drop_last = false`) instead of silently dropping
+    /// `n_gauges % batch_size` gauges each epoch.
+    /// NOTE: iterations-per-epoch shrink by ~N — keep total update count in
+    /// mind when comparing to a single-batch baseline.
+    #[serde(default)]
+    pub grad_accum_steps: Option<usize>,
+}
+
+impl Experiment {
+    /// The micro-batch group size the trainer actually runs: `1` (single
+    /// batch) unless `use_grad_accum: true`, in which case the validated
+    /// `grad_accum_steps`. Single source of truth for the driver.
+    pub fn effective_grad_accum_steps(&self) -> usize {
+        if self.use_grad_accum {
+            self.grad_accum_steps.unwrap_or(1).max(1)
+        } else {
+            1
+        }
+    }
+}
+
+/// Which optimizer the training loop constructs. See `experiment.optimizer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OptimizerKind {
+    /// `torch.optim.Adam` defaults (β=0.9/0.999, ε=1e-8) with the YAML
+    /// `learning_rate` schedule. The historical choice.
+    #[default]
+    Adam,
+    /// `torch.optim.Adadelta` defaults (ρ=0.9, ε=1e-6, lr=1.0). Ignores the
+    /// `learning_rate` schedule by design — AdaDelta derives its own step
+    /// size from the ratio of accumulated updates to accumulated gradients.
+    Adadelta,
 }
 
 /// Selects the training objective and (for the composite objective) its
@@ -223,6 +278,14 @@ pub enum LossKind {
     /// so no gradient singularity at perfect KGE), letting `α_w` up-weight the
     /// anti-attenuation restoring force. See `src/training/loss.rs`.
     Kge,
+    /// dHBV's batch-NSE (hydroDL `NSELossBatch`, Frederick 2019):
+    /// `mean over valid (day, gauge) of (sim − obs)² / (σ_gauge + eps)²`,
+    /// where `σ_gauge` is the gauge's observed-discharge standard deviation
+    /// over the **training period** (fixed, not per window). Normalizing by
+    /// σ stops high-variance basins from dominating the batch gradient the
+    /// way raw L1 does — the conditioning half of the dHBV recipe that
+    /// pairs with the AdaDelta optimizer.
+    NseBatch,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -673,6 +736,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_grad_accum(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
@@ -761,6 +828,32 @@ fn validate_disagg_pretrained(cfg: &Config) -> std::result::Result<(), String> {
             return Err(
                 "kan_head.disaggregation: `freeze: true` requires `pretrained_checkpoint` \
                  — freezing a randomly-initialized disaggregation head would train nothing."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `use_grad_accum: true` without a meaningful group size would silently run
+/// single-batch training — reject at load time (mirrors the disaggregation
+/// freeze/pretrained contradiction check). `grad_accum_steps: 0` is likewise
+/// meaningless in any combination.
+fn validate_grad_accum(cfg: &Config) -> std::result::Result<(), String> {
+    if let Some(exp) = cfg.experiment.as_ref() {
+        if exp.grad_accum_steps == Some(0) {
+            return Err(
+                "experiment: `grad_accum_steps: 0` is invalid — set 2 or more \
+                 micro-batches per optimizer step (with `use_grad_accum: true`), \
+                 or omit the key for single-batch training."
+                    .to_string(),
+            );
+        }
+        if exp.use_grad_accum && exp.grad_accum_steps.unwrap_or(1) < 2 {
+            return Err(
+                "experiment: `use_grad_accum: true` requires `grad_accum_steps: N` \
+                 with N >= 2 — accumulating a single micro-batch is identical to \
+                 single-batch training and would be a silent no-op."
                     .to_string(),
             );
         }
@@ -882,6 +975,98 @@ mod tests {
         assert_eq!(exp.start_time, "1995/10/01");
         assert_eq!(exp.end_time, "2010/09/30");
         assert!(exp.rho.is_none(), "rho should be cleared by testing overlay");
+    }
+
+    #[test]
+    fn optimizer_defaults_to_adam_and_parses_adadelta() {
+        // Absent key ⇒ Adam ⇒ every historical run unchanged.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.optimizer, OptimizerKind::Adam);
+
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\noptimizer: adadelta\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.optimizer, OptimizerKind::Adadelta);
+
+        // A typo must fail loudly, not silently fall back to Adam.
+        assert!(serde_yaml::from_str::<Experiment>(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\noptimizer: adadelta_typo\n",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn nse_batch_loss_kind_parses() {
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\nloss:\n  kind: nse-batch\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.loss.kind, LossKind::NseBatch);
+    }
+
+    #[test]
+    fn grad_accum_defaults_off_and_parses() {
+        // Absent keys ⇒ toggle off ⇒ byte-identical single-batch training.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert!(!exp.use_grad_accum);
+        assert_eq!(exp.grad_accum_steps, None);
+        assert_eq!(exp.effective_grad_accum_steps(), 1);
+
+        // Toggle on with a step count.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\nuse_grad_accum: true\ngrad_accum_steps: 4\n",
+        )
+        .expect("parse experiment");
+        assert!(exp.use_grad_accum);
+        assert_eq!(exp.effective_grad_accum_steps(), 4);
+    }
+
+    #[test]
+    fn grad_accum_steps_inert_when_toggle_off() {
+        // Keeping the tuning in the file with the switch off must fall back
+        // to single-batch training — the off switch, not an error.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\nuse_grad_accum: false\ngrad_accum_steps: 4\n",
+        )
+        .expect("parse experiment");
+        assert!(!exp.use_grad_accum);
+        assert_eq!(exp.effective_grad_accum_steps(), 1);
+    }
+
+    #[test]
+    fn grad_accum_enabled_without_steps_rejected_at_load() {
+        // `use_grad_accum: true` with no (or degenerate) step count would be
+        // a silent no-op — reject at load, mirroring the freeze/pretrained
+        // contradiction check.
+        for steps_line in ["", "  grad_accum_steps: 1\n", "  grad_accum_steps: 0\n"] {
+            let yaml = format!(
+                "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n\
+                 experiment:\n  batch_size: 4\n  start_time: 2000/01/01\n\
+                 \x20 end_time: 2000/01/02\n  epochs: 1\n  rho: 10\n  warmup: 1\n\
+                 \x20 use_grad_accum: true\n{steps_line}"
+            );
+            let path = std::env::temp_dir().join("ddrs_config_grad_accum_bad.yaml");
+            std::fs::write(&path, yaml).unwrap();
+            let err = Config::from_yaml_file(&path).unwrap_err();
+            assert!(
+                err.to_string().contains("grad_accum"),
+                "steps_line={steps_line:?}: expected grad_accum load error, got: {err}"
+            );
+        }
     }
 
     #[test]
