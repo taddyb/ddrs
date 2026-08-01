@@ -444,11 +444,22 @@ The architecture's correctness is verified at multiple levels:
 | V1 ABSOLUTE MATCH | `cargo run --release --example compare_ddr_sandbox` | End-to-end forward parity with DDR on the 5-reach sandbox |
 | MMC unit tests | `cargo test --test mmc` | Hotstart, coefficients, forward, autodiff on the 5-reach linear chain |
 | Sparse gradcheck | `cargo test --test sparse_gradcheck` | Finite-difference check on `CsrSolveOp`'s analytical backward |
-| V9 (graph bit-match) | `DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox` | The CUDA-graph capture path produces ABSOLUTE MATCH against the no-graph path |
+| CUDA-backend parity | `DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox` | ABSOLUTE MATCH on the CUDA backend. **Does not test graph capture** — see below |
 
-V1 is the cross-language gate (does ddrs match DDR?); the unit tests
-cover the in-crate invariants; V9 covers the graph-capture path
-specifically. The architecture is correct iff all pass.
+V1 is the cross-language gate (does ddrs match DDR?) and the unit tests
+cover the in-crate invariants. The architecture is correct iff all pass.
+
+> **The CUDA-graph capture path has no gate.** `DDRS_FORCE_GRAPHS` only
+> selects the backend — it is read with `.is_ok()`, so even
+> `DDRS_FORCE_GRAPHS=0` triggers it. Capture additionally requires
+> `use_cuda_graphs && sparse_solver == Cuda` (`src/routing/mmc.rs:289-294`),
+> and the sandbox starts from `Config::default()` (`src/sandbox.rs:88-89`)
+> = `use_cuda_graphs: false` + `SparseSolver::Cpu`, with
+> `fixtures/sandbox/config.csv` setting neither. So this row exercises the
+> CUDA backend with the **CPU** sparse solver and **no capture**. The
+> historical "V9 GREEN" verdict in `.claude/ARCHITECTURE.md` rests on this
+> run and is therefore unverified for the property it names. Closing it
+> needs a sandbox config that sets both toggles.
 
 ## See also
 
