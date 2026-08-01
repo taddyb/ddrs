@@ -85,6 +85,11 @@ struct MicroBatchOutcome<I: Backend> {
     loss_f32: f32,
     /// Pooled-mean denominator of `loss` (see `loss_denominator`).
     n_valid: usize,
+    /// Median physical Manning's `n` over this batch's network, and the
+    /// fraction of its reaches within 1% of the range floor. Logging only —
+    /// see `forward::manning_n_stats` for why.
+    median_n: f32,
+    n_at_floor: f32,
 }
 
 /// Steps 2–6 of the per-mini-batch flow (collate → forward → NaN filter →
@@ -115,6 +120,8 @@ fn run_micro_batch<I: Backend>(
 
     // to_tensors::<Autodiff<I>> lifts plain ndarray buffers to the device.
     let tensors = batch.to_tensors::<Autodiff<I>>(device);
+    let (median_n, n_at_floor) =
+        crate::training::forward::manning_n_stats::<I>(cfg, &tensors, head);
     let pred_hourly = forward::<I>(cfg, &tensors, head, device, false);
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
     let dims = daily.dims();
@@ -197,6 +204,8 @@ fn run_micro_batch<I: Backend>(
         loss,
         loss_f32,
         n_valid: loss_denominator(&exp.loss, surviving_g, t_post),
+        median_n,
+        n_at_floor,
     }))
 }
 
@@ -296,7 +305,14 @@ pub fn train<I: Backend>(
                     &window,
                     state.mini_batch,
                 )?;
-                let Some(MicroBatchOutcome { loss, loss_f32, .. }) = outcome else {
+                let Some(MicroBatchOutcome {
+                    loss,
+                    loss_f32,
+                    median_n,
+                    n_at_floor,
+                    ..
+                }) = outcome
+                else {
                     state.mini_batch += 1;
                     mb_done += 1;
                     if let Some(limit) = max_mini_batches {
@@ -325,7 +341,12 @@ pub fn train<I: Backend>(
                 // the full diagnosis.
                 crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
 
-                eprintln!("  mb={} loss={:.6}", state.mini_batch, loss_f32);
+                eprintln!(
+                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%",
+                    state.mini_batch,
+                    loss_f32,
+                    n_at_floor * 100.0
+                );
                 state.mini_batch += 1;
                 mb_done += 1;
                 if let Some(limit) = max_mini_batches {
@@ -363,6 +384,8 @@ pub fn train<I: Backend>(
                         loss,
                         loss_f32,
                         n_valid,
+                        median_n,
+                        n_at_floor,
                     }) = outcome
                     {
                         // Scale the mean loss back to a SUM before backward;
@@ -377,8 +400,10 @@ pub fn train<I: Backend>(
                         loss_weighted_sum += loss_f32 as f64 * n_valid as f64;
                         micros_valid += 1;
                         eprintln!(
-                            "    micro {micros_drawn}/{accum_steps} gauges={} loss={loss_f32:.6} n={n_valid}",
+                            "    micro {micros_drawn}/{accum_steps} gauges={} loss={loss_f32:.6} \
+                             n={n_valid} median_n={median_n:.5} n_at_floor={:.1}%",
                             idx.len(),
+                            n_at_floor * 100.0,
                         );
                     }
                     // Free the micro-batch's activations/pool slices before the

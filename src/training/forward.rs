@@ -167,6 +167,58 @@ pub fn forward_with_frozen_params<I: Backend>(
 
 use crate::nn::kan_head::KanHead;
 
+/// Summary of the physical Manning's `n` the head currently emits for this
+/// batch's network: `(median, fraction within 1% of the range floor)`.
+///
+/// Diagnostic only. Runs the head a second time and reads the result straight
+/// back to the host, so nothing survives on the autograd tape and the training
+/// gradient is untouched. Cost is one KAN forward over the micro-batch's
+/// reaches (milliseconds) against a ~27 s routing forward — it does not move
+/// the wall clock.
+///
+/// Why this exists: the loss curve cannot distinguish a healthy run from one
+/// whose `n` field has collapsed onto the lower bound of
+/// `params.parameter_ranges.n`, where the sigmoid derivative vanishes and
+/// those reaches stop learning for good. The 2026-08-01 `lr: 0.01` run ended
+/// with 47% of CONUS pinned at `n = 0.015`, and that was only visible after a
+/// 14 h run plus a `dump_parameters` pass. Logging it per micro-batch turns a
+/// post-mortem into a first-epoch observation.
+pub fn manning_n_stats<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<Autodiff<I>>,
+    head: &KanHead<Autodiff<I>>,
+) -> (f32, f32) {
+    let params_map = head.forward(tensors.spatial_attributes.clone());
+    let n_norm = params_map.get("n").expect("KAN head missing n").clone();
+    let n_phys = denormalize(
+        n_norm,
+        cfg.params.parameter_ranges.n,
+        cfg.params.log_space_parameters.iter().any(|s| s == "n"),
+    )
+    .detach();
+
+    let mut vals: Vec<f32> = n_phys.into_data().into_vec().unwrap();
+    vals.retain(|v| v.is_finite());
+    if vals.is_empty() {
+        return (f32::NAN, f32::NAN);
+    }
+
+    let [lo, hi] = cfg.params.parameter_ranges.n;
+    // "At the floor" = within 1% of the declared span. Matches the threshold
+    // the parameter-map notebooks use, so log and plot agree.
+    let floor_tol = lo + 0.01 * (hi - lo);
+    let at_floor = vals.iter().filter(|&&v| v <= floor_tol).count() as f32 / vals.len() as f32;
+
+    vals.sort_unstable_by(|a, b| a.partial_cmp(b).expect("finite"));
+    let mid = vals.len() / 2;
+    let median = if vals.len() % 2 == 0 {
+        0.5 * (vals[mid - 1] + vals[mid])
+    } else {
+        vals[mid]
+    };
+    (median, at_floor)
+}
+
 /// One training-step forward pass. Computes MLP outputs from normalized
 /// attributes, denormalizes through the engine's `setup_inputs`, runs MC,
 /// and scatter-adds to per-gauge predictions. Returns `(num_gauges, T_hours)`
