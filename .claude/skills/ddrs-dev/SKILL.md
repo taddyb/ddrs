@@ -26,6 +26,7 @@ config reference, test-authoring patterns, and the current research status.
 | Write a new gradcheck / parity / fixture test | `references/testing.md` §Authoring patterns |
 | Diagnose a failed, hung, or wrong-result run | `references/traps.md` §Symptom → trap |
 | Check whether a question is already settled | `references/research-status.md` |
+| Build or change the training gauge CSV / population | `references/gauge-population.md` |
 | Plot or interpret eval output | skill `ddrs-eval-plots` |
 
 ## Contents
@@ -66,6 +67,13 @@ Gauge-set definitions (2,365 vs 2,698 vs 3,211 vs 5,224) · Benchmarks + the KGE
 claim restated · Closed campaigns: leakance NO-GO, selective equifinality H1–H6,
 Q′-store waves, synthetic-n interim · **Do-not-use list** · Structural constants ·
 Evidence standard · Doc conventions · Open questions
+
+**`references/gauge-population.md`** (100 lines)
+Regenerating `gages_2000_area_balanced.csv` (one command, seed 42, all-local
+inputs) · Relative `DA_VALID` (`ABS_DIFF/DRAIN_SQKM ≤ 10%`) vs the scale-biased
+absolute criterion · The filter funnel (coverage in both configured windows,
+non-headwater subgraph) · Consequences of changing the population: baseline
+cache invalidation, incomparable metrics, run-log verification string
 
 ## The five facts that cause the most wasted time
 
