@@ -29,6 +29,7 @@ Most wrong numbers in this repo are population confusions, not arithmetic errors
 | **Training / eval set** | **2,365** | after the `gages_adjacency` filter (dropped 494 headwater). **Every trained median is on this set** |
 | Post-fix baseline population | 2,698 | 3,211 − 513 headwater. `ddrs plan` baselines from 2026-07-29 onward |
 | Global matched set | 5,224 | a **different network** (global MERIT). Only in `6_19_26_journal.md` (repo root, not `docs/`) |
+| Area-balanced set (2026-08-02) | 1,841 | `~/projects/ddr/references/gage_info/gages_2000_area_balanced.csv`, built by `scripts/build_gages_2000_area_balanced.py` (seed 42) from GAGES-II with `DA_VALID` recomputed as **relative** `ABS_DIFF/DRAIN_SQKM ≤ 10%`, ≥80% obs coverage in both the 1981-10→1995-09 and 1995-10→2010-09 windows, non-headwater subgraph required. All 582 basins ≥5,000 km² kept + 418 random from [1k,5k) + 841 (all available) <1,000 km² → 45.7%/54.3% either side of 1,000 km². **Metrics on this set are incomparable to every 2,365/2,698-gauge number**; switching `data_sources.gages` to it invalidates the cached summed-Q′ baseline (`ddrs plan` recomputes) |
 
 ## Benchmarks — CONUS, eval 1995-10-01 → 2010-09-30, 2,365 gauges
 
