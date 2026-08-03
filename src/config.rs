@@ -185,6 +185,19 @@ pub struct Experiment {
     /// mind when comparing to a single-batch baseline.
     #[serde(default)]
     pub grad_accum_steps: Option<usize>,
+    /// On/off switch for the (typically frozen, pretrained) KAN
+    /// disaggregation head declared at `kan_head.disaggregation:`. Default
+    /// `true` preserves existing behavior — the block's presence enables the
+    /// head. `false` strips the block at config load, so the loader falls
+    /// back to flat repeat-24 (nearest) daily→hourly upsampling, the whole
+    /// `disaggregation:` block stays in the YAML inert, and `aorc_precip`
+    /// is ignored.
+    #[serde(default = "default_use_frozen_kan_head")]
+    pub use_frozen_kan_head: bool,
+}
+
+fn default_use_frozen_kan_head() -> bool {
+    true
 }
 
 impl Experiment {
@@ -741,6 +754,16 @@ impl Config {
         })?;
         let testing_raw = raw.testing.clone();
         let mut cfg: Self = raw.into();
+        // `experiment.use_frozen_kan_head: false` disables the disaggregation
+        // head by stripping its block before validation — every downstream
+        // consumer (dataset precip gating, head construction, the
+        // hourly-resolution guard) keys off `disaggregation.is_some()`, so
+        // the stripped config behaves exactly like one without the block.
+        if let (Some(exp), Some(head)) = (&cfg.experiment, &mut cfg.kan_head) {
+            if !exp.use_frozen_kan_head {
+                head.disaggregation = None;
+            }
+        }
         validate_mode_workflow(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -750,6 +773,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_leakance(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -835,6 +862,20 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
         return Err(
             "params: `use_leakance: true` requires `use_cuda_graphs: false` — the \
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_ddr_match(cfg: &Config) -> std::result::Result<(), String> {
+    if !cfg.params.ddr_match && cfg.params.use_cuda_graphs {
+        return Err(
+            "params: `ddr_match: false` requires `use_cuda_graphs: false` — the \
+             CUDA-graph kernel hardcodes DDR's `5/3` celerity, so the corrected \
+             forward would not be captured while the backward would use the corrected \
+             chain rule, producing a silent forward/backward mismatch. \
+             Set `use_cuda_graphs: false` to use `ddr_match: false`."
                 .to_string(),
         );
     }
@@ -1534,6 +1575,63 @@ params:
             msg.contains("use_leakance") && msg.contains("use_cuda_graphs"),
             "expected leakance/graphs conflict, got: {msg}"
         );
+    }
+
+    #[test]
+    fn ddr_match_false_rejects_cuda_graphs() {
+        // ddr_match: false + use_cuda_graphs: true must fail at load: the
+        // CUDA-graph kernel hardcodes DDR's 5/3 celerity, so the corrected
+        // forward would never be captured while the backward would use the
+        // corrected chain rule — a silent forward/backward mismatch.
+        let yaml_reject = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  ddr_match: false
+  use_cuda_graphs: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_ddr_match_graphs_reject.yaml");
+        std::fs::write(&path, yaml_reject).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ddr_match") && msg.contains("use_cuda_graphs"),
+            "expected ddr_match/cuda_graphs conflict, got: {msg}"
+        );
+
+        // ddr_match: true + use_cuda_graphs: true must still load (default path).
+        let yaml_ok_true = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  ddr_match: true
+  use_cuda_graphs: true
+"#;
+        let path2 = std::env::temp_dir().join("ddrs_ddr_match_true_graphs.yaml");
+        std::fs::write(&path2, yaml_ok_true).unwrap();
+        let cfg2 = Config::from_yaml_file(&path2).expect("ddr_match:true + cuda_graphs:true must load");
+        assert!(cfg2.params.ddr_match);
+        assert!(cfg2.params.use_cuda_graphs);
+
+        // ddr_match: false + use_cuda_graphs: false must also load.
+        let yaml_ok_false = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  ddr_match: false
+  use_cuda_graphs: false
+"#;
+        let path3 = std::env::temp_dir().join("ddrs_ddr_match_false_no_graphs.yaml");
+        std::fs::write(&path3, yaml_ok_false).unwrap();
+        let cfg3 = Config::from_yaml_file(&path3).expect("ddr_match:false + cuda_graphs:false must load");
+        assert!(!cfg3.params.ddr_match);
+        assert!(!cfg3.params.use_cuda_graphs);
     }
 
     #[test]
