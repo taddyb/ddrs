@@ -4,9 +4,9 @@ Struct: `src/config.rs::Config`. Loaded via
 `Config::from_yaml_file_with_mode(path, ConfigMode::Training|Testing)`.
 Six top-level sections. Verified against source 2026-07-30.
 
-**No `deny_unknown_fields` anywhere** — a typo'd key silently takes its default
-instead of erroring. This is the single most common cause of "my config change did
-nothing".
+**No `deny_unknown_fields` except `DisaggregationSection`** (added 2026-08-03) —
+everywhere else a typo'd key silently takes its default instead of erroring. This
+is the single most common cause of "my config change did nothing".
 
 ## Contents
 
@@ -119,9 +119,17 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 > **Current contract:** presence of the `disaggregation:` block ⇒ the head always
 > consumes precip ⇒ `data_sources.aorc_precip` is mandatory, else
 > `MeritGagesDataset::open` errors. It cannot silently degrade to flat repeat-24.
+> **Exception (2026-08-03):** `disaggregation.enabled: false` strips the block at
+> load time, making it inert — the sanctioned way to A/B the head vs nearest
+> (repeat-24) without deleting the block. (This replaced the short-lived
+> `experiment.use_frozen_kan_head`, which never ran an experiment.)
+> The section is `#[serde(deny_unknown_fields)]` (2026-08-03): phantom keys like
+> `use_precip` now FAIL LOAD with "unknown field" instead of silently taking
+> defaults — the one section where a typo'd key cannot silently no-op.
 
 | Key | Default | Notes |
 |---|---|---|
+| `enabled` | **true** | `false` ⇒ block stripped at load ⇒ flat repeat-24 (nearest) upsampling; the one-line ablation switch. `tests/disagg_enabled.rs` |
 | `hidden_size` | 16 | |
 | `num_hidden_layers` | 1 | |
 | `grid` | 3 | |

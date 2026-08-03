@@ -109,9 +109,9 @@ pub struct DataSources {
     pub observations: std::path::PathBuf,
     pub gages: std::path::PathBuf,
     /// Optional hourly AORC precipitation store (`merit_unit_catchments.zarr`,
-    /// zarr v3). CONUS-only; drives the precip-conditioned disaggregation head
-    /// (`kan_head.disaggregation.use_precip`). Absent ⇒ the head conditions on
-    /// daily Q' only (or, with disaggregation off, flat repeat-24).
+    /// zarr v3). CONUS-only; drives the precip-conditioned disaggregation head.
+    /// Mandatory whenever `kan_head.disaggregation:` is present and enabled
+    /// (the head always consumes precip); unused otherwise.
     #[serde(default)]
     pub aorc_precip: Option<std::path::PathBuf>,
     /// Path to the MERIT flowlines fabric: `.shp` (sibling `.dbf` read),
@@ -185,19 +185,6 @@ pub struct Experiment {
     /// mind when comparing to a single-batch baseline.
     #[serde(default)]
     pub grad_accum_steps: Option<usize>,
-    /// On/off switch for the (typically frozen, pretrained) KAN
-    /// disaggregation head declared at `kan_head.disaggregation:`. Default
-    /// `true` preserves existing behavior — the block's presence enables the
-    /// head. `false` strips the block at config load, so the loader falls
-    /// back to flat repeat-24 (nearest) daily→hourly upsampling, the whole
-    /// `disaggregation:` block stays in the YAML inert, and `aorc_precip`
-    /// is ignored.
-    #[serde(default = "default_use_frozen_kan_head")]
-    pub use_frozen_kan_head: bool,
-}
-
-fn default_use_frozen_kan_head() -> bool {
-    true
 }
 
 impl Experiment {
@@ -319,11 +306,23 @@ pub struct KanHeadConfigSection {
     pub disaggregation: Option<DisaggregationSection>,
 }
 
-/// YAML `kan_head.disaggregation:` block (presence enables the head).
-/// The head always consumes `(daily Q', that day's 24h precip)` — requires
-/// `data_sources.aorc_precip` to be set. See `src/nn/disagg_head.rs`.
+/// YAML `kan_head.disaggregation:` block (presence enables the head, unless
+/// `enabled: false`). The head always consumes `(daily Q', that day's 24h
+/// precip)` — requires `data_sources.aorc_precip` to be set. See
+/// `src/nn/disagg_head.rs`. `deny_unknown_fields` because phantom keys here
+/// (e.g. the removed `use_precip`) silently produced a different head than
+/// intended.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisaggregationSection {
+    /// On/off switch. Default `true` — a bare block enables the head,
+    /// preserving the historical presence-only contract. `false` strips the
+    /// whole block at config load, so the loader falls back to flat
+    /// repeat-24 (nearest) daily→hourly upsampling and the block stays in
+    /// the YAML inert (the ablation switch: flip one line, change nothing
+    /// else).
+    #[serde(default = "default_disagg_enabled")]
+    pub enabled: bool,
     #[serde(default = "default_disagg_hidden")]
     pub hidden_size: usize,
     #[serde(default = "default_disagg_num_hidden_layers")]
@@ -398,6 +397,9 @@ fn default_grid() -> usize {
 }
 fn default_k() -> usize {
     3
+}
+fn default_disagg_enabled() -> bool {
+    true
 }
 fn default_disagg_hidden() -> usize {
     16
@@ -754,13 +756,13 @@ impl Config {
         })?;
         let testing_raw = raw.testing.clone();
         let mut cfg: Self = raw.into();
-        // `experiment.use_frozen_kan_head: false` disables the disaggregation
-        // head by stripping its block before validation — every downstream
-        // consumer (dataset precip gating, head construction, the
-        // hourly-resolution guard) keys off `disaggregation.is_some()`, so
-        // the stripped config behaves exactly like one without the block.
-        if let (Some(exp), Some(head)) = (&cfg.experiment, &mut cfg.kan_head) {
-            if !exp.use_frozen_kan_head {
+        // `kan_head.disaggregation.enabled: false` disables the head by
+        // stripping its block before validation — every downstream consumer
+        // (dataset precip gating, head construction, the hourly-resolution
+        // guard) keys off `disaggregation.is_some()`, so the stripped config
+        // behaves exactly like one without the block.
+        if let Some(head) = &mut cfg.kan_head {
+            if head.disaggregation.as_ref().is_some_and(|d| !d.enabled) {
                 head.disaggregation = None;
             }
         }

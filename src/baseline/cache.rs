@@ -390,7 +390,6 @@ mod tests {
             optimizer: Default::default(),
             use_grad_accum: false,
             grad_accum_steps: None,
-            use_frozen_kan_head: true,
         });
         cfg
     }
@@ -518,7 +517,6 @@ mod tests {
             optimizer: Default::default(),
             use_grad_accum: false,
             grad_accum_steps: None,
-            use_frozen_kan_head: true,
         });
         let result = cache_key(&cfg);
         assert!(

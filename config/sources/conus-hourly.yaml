@@ -1,8 +1,8 @@
 data_sources:
   # CONUS MERIT inputs + hourly AORC precip (local workstation paths).
   # Same as `conus` but adds `aorc_precip` to drive the precip-conditioned
-  # mass-preserving daily->hourly disaggregation head
-  # (kan_head.disaggregation.use_precip: true).
+  # mass-preserving daily->hourly disaggregation head (enabled by the
+  # presence of a `kan_head.disaggregation:` block).
   attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
   conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
   gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
