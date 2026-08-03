@@ -479,6 +479,8 @@ impl<I: Backend> MuskingumCunge<I> {
         let mut columns: Vec<Tensor<Autodiff<I>, 2>> = Vec::with_capacity(num_timesteps);
         columns.push(initial.unsqueeze_dim::<2>(1));
 
+        crate::routing::mmc_op::reset_negative_solve_stats();
+
         for t in 1..num_timesteps {
             let q_prime_t: Tensor<Autodiff<I>, 1> = q_prime_clamped
                 .clone()
@@ -487,6 +489,15 @@ impl<I: Backend> MuskingumCunge<I> {
             let q_next = self.route_timestep(q_prime_t);
             columns.push(q_next.clone().unsqueeze_dim::<2>(1));
             self.discharge_t = Some(q_next);
+        }
+
+        let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
+        if total > 0 && neg > 0 {
+            eprintln!(
+                "  negative solves before clamp: {neg}/{total} ({:.3}%) — Muskingum \
+                 coefficient sign violation (see .claude/PHYSICS-CORRECTIONS.md)",
+                100.0 * neg as f64 / total as f64
+            );
         }
 
         Tensor::cat(columns, 1)

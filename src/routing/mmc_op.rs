@@ -8,6 +8,7 @@
 //! Parents in fixed order: [n, q_spatial, p_spatial, q_t, q_prime_t].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use burn::backend::Autodiff;
 use burn::backend::autodiff::checkpoint::base::Checkpointer;
@@ -18,6 +19,32 @@ use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
 
 use crate::config::Config;
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
+
+/// Count of solve outputs that came out NEGATIVE before the S28
+/// `clamp_min(discharge_lb)` rewrote them to `+1e-4`.
+///
+/// Why this exists: Muskingum coefficients are only non-negative for
+/// `2X <= Cr <= 2(1-X)` with `Cr = dt/K`. Measured on CONUS at mean flow with
+/// `X = 0.3`, 69.8% of reaches sit outside that window (28.4% give `c1 < 0`,
+/// 41.4% give `c3 < 0`), so negative discharge is expected — and the clamp
+/// both CREATES MASS and removes the only symptom. Nothing measured this
+/// before 2026-08-02.
+///
+/// Diagnostic only: reads the solve to host, changes no numerics, and behaves
+/// identically in both `ddr_match` modes.
+static NEG_SOLVES: AtomicU64 = AtomicU64::new(0);
+static TOTAL_SOLVES: AtomicU64 = AtomicU64::new(0);
+
+/// `(negative_count, total_count)` accumulated since the last reset.
+pub fn negative_solve_stats() -> (u64, u64) {
+    (NEG_SOLVES.load(Ordering::Relaxed), TOTAL_SOLVES.load(Ordering::Relaxed))
+}
+
+/// Zero both counters. Call at the start of each `forward`.
+pub fn reset_negative_solve_stats() {
+    NEG_SOLVES.store(0, Ordering::Relaxed);
+    TOTAL_SOLVES.store(0, Ordering::Relaxed);
+}
 
 /// Inner-backend leakance inputs threaded into `forward_chain_inner`.
 #[derive(Clone)]
@@ -920,6 +947,16 @@ where
     );
     let x_sol = wrap(x_sol_prim.clone());
 
+    // Diagnostic: count negative solve outputs before the S28 clamp rewrites
+    // them to +1e-4. Uses a single host read of x_sol_prim (which is already
+    // cloned above), so the autograd graph is not disturbed.
+    {
+        let x_host: Vec<f32> = primitive_to_vec::<I>(x_sol_prim.clone());
+        let n_neg = x_host.iter().filter(|&&v| v < 0.0).count() as u64;
+        NEG_SOLVES.fetch_add(n_neg, Ordering::Relaxed);
+        TOTAL_SOLVES.fetch_add(x_host.len() as u64, Ordering::Relaxed);
+    }
+
     // S28: q_next = max(x_sol, discharge_lb)
     let q_next = x_sol.clone().clamp_min(discharge_lb);
     let q_next_prim = unwrap(q_next);
@@ -1270,6 +1307,9 @@ where
     let x_sol = wrap(x_sol_prim.clone());
 
     // S28: q_next = max(x_sol, discharge_lb)
+    // NOTE: negative-solve counter is NOT instrumented here — this function is
+    // #[allow(dead_code)] with no live callers. Only forward_chain_inner is
+    // instrumented.
     let q_next = x_sol.clone().clamp_min(discharge_lb);
     pin_clone(&q_next, pin);
     let q_next_prim = unwrap(q_next);
