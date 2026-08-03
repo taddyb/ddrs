@@ -149,6 +149,17 @@ pub(crate) struct ZetaGeomGrads<I: Backend> {
     pub g_p_spatial: Tensor<I, 1>,
 }
 
+/// The four extra chain-rule terms the trapezoidal celerity
+/// (`ddr_match: false`, S17) contributes. Each is ADDED to the accumulator
+/// that already carries that quantity's gradient through the `hyd_radius`
+/// chain — see B17 for the derivation.
+struct BetaGrads<I: Backend> {
+    g_area: Tensor<I, 1>,
+    g_top_width: Tensor<I, 1>,
+    g_wp: Tensor<I, 1>,
+    g_side_slope: Tensor<I, 1>,
+}
+
 /// The five accumulated parent gradients produced by [`timestep_backward_core`],
 /// in parent order `[n, q_spatial, p_spatial, q_t, q_prime_t]`.
 pub(crate) struct FiveGrads<I: Backend> {
@@ -368,6 +379,18 @@ where
         let gk_muskingum = g_2k_total * 2.0;
 
         // ===========================================================
+        // Geometry recomputed from the saved primitives. Hoisted above B18
+        // because the `ddr_match: false` celerity (B17) needs A, T, P and
+        // sqrt(1+z²) too; B14/B13 below reuse the exact same tensors.
+        //   wp   = bw + 2·d·sqrt(1+ss²)   (S13)
+        //   area = R · wp                 (S14 inverted; area itself unsaved)
+        // ===========================================================
+        let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
+        let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
+        let wp = _bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
+        let area = hyd_radius.clone() * wp.clone();
+
+        // ===========================================================
         // B18. k_muskingum = length / celerity
         //   ∂k/∂celerity = -length / celerity²
         // ===========================================================
@@ -375,9 +398,36 @@ where
         let gcelerity = -gk_muskingum * length.clone() / celerity_sq;
 
         // ===========================================================
-        // B17. celerity = velocity_cl · 5/3
+        // B17. celerity = velocity_cl · beta
+        //
+        //   ddr_match=true : beta ≡ 5/3 (constant) → gvelocity_cl = gc · 5/3.
+        //
+        //   ddr_match=false: beta = 5/3 − G,  G ≡ (4/3)·A·u/(T·P), u = √(1+z²).
+        //     ∂celerity/∂velocity_cl = beta      (NOT the constant 5/3)
+        //     gbeta = gcelerity · velocity_cl
+        //     ∂beta/∂A = −G/A     ∂beta/∂T = +G/T
+        //     ∂beta/∂P = +G/P     ∂beta/∂z = −G·z/(1+z²)
+        //   The four terms are ADDITIONAL contributions folded into the
+        //   existing gA (B12), gT (gtw_total), gP (B13) and gz (B9)
+        //   accumulators — A, T, P and z all already carry gradient through
+        //   the hyd_radius chain.
         // ===========================================================
-        let gvelocity_cl = gcelerity * (5.0 / 3.0);
+        let (gvelocity_cl, beta_grads) = if state.ddr_match {
+            (gcelerity * (5.0 / 3.0), None)
+        } else {
+            let g_term = area.clone() * sqrt_1_plus_ss_sq.clone()
+                / (top_width.clone() * wp.clone())
+                * (4.0 / 3.0);
+            let beta = -g_term.clone() + (5.0 / 3.0);
+            let gbeta = gcelerity.clone() * _velocity_cl.clone();
+            let grads = BetaGrads {
+                g_area: -gbeta.clone() * g_term.clone() / area.clone(),
+                g_top_width: gbeta.clone() * g_term.clone() / top_width.clone(),
+                g_wp: gbeta.clone() * g_term.clone() / wp.clone(),
+                g_side_slope: -gbeta * g_term * side_slope.clone() / one_plus_ss_sq.clone(),
+            };
+            (gcelerity * beta, Some(grads))
+        };
 
         // ===========================================================
         // B16. velocity_cl = clamp(velocity_un, velocity_lb, 15)
@@ -403,17 +453,9 @@ where
         // B14. R = area / wp
         //   ∂R/∂area = 1 / wp
         //   ∂R/∂wp = -area / wp² = -R/wp
-        // Need wp and area. We saved wp implicitly via area = R·wp. Re-derive wp:
+        // `wp` and `area` are recomputed above B18 (area is not saved; it is
+        // recovered exactly as R·wp).
         // ===========================================================
-        // Recompute wp from saved bottom_width + 2·depth·sqrt(1+ss²) — equivalently
-        // wp = area / hyd_radius (cheap and exact).
-        // Use area from saved? We didn't save area, but area = R · wp. We need wp directly.
-        // Recompute: wp = bottom_width + 2·depth·sqrt(1 + side_slope²).
-        let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
-        let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
-        let wp = _bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
-        let area = hyd_radius.clone() * wp.clone();
-
         let gr = gr_from_s15;
         let garea_from_r = gr.clone() / wp.clone();
         let gwp_from_r = -gr * area.clone() / (wp.clone() * wp.clone());
@@ -424,7 +466,12 @@ where
         //   ∂wp/∂d = 2·sqrt(1+ss²)
         //   ∂wp/∂ss = 2·d · ss / sqrt(1+ss²)
         // ===========================================================
-        let gwp = gwp_from_r;
+        // `beta` (ddr_match=false) reads P directly at S17, so its ∂beta/∂P
+        // term joins gwp BEFORE the S13 decomposition.
+        let gwp = match beta_grads.as_ref() {
+            Some(bg) => gwp_from_r + bg.g_wp.clone(),
+            None => gwp_from_r,
+        };
         let gbw_from_s13 = gwp.clone();
         let gd_from_s13 = gwp.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
         let gss_from_s13 = gwp * depth.clone() * 2.0 * side_slope.clone() / sqrt_1_plus_ss_sq;
@@ -435,7 +482,11 @@ where
         //   ∂area/∂bw = d/2
         //   ∂area/∂d  = (tw + bw)/2
         // ===========================================================
-        let garea = garea_from_r;
+        // Likewise ∂beta/∂A joins garea BEFORE the S12 decomposition.
+        let garea = match beta_grads.as_ref() {
+            Some(bg) => garea_from_r + bg.g_area.clone(),
+            None => garea_from_r,
+        };
         let half_d = depth.clone() * 0.5;
         let gtw_from_s12 = garea.clone() * half_d.clone();
         let gbw_from_s12 = garea.clone() * half_d.clone();
@@ -463,7 +514,11 @@ where
         // B9. side_slope = clamp(side_slope_raw, 0.5, 50)
         //   gradient passes where 0.5 < ss_raw < 50.
         // ===========================================================
-        let gss_combined = gss_from_s13 + gss_from_s10;
+        let gss_combined = match beta_grads.as_ref() {
+            // ∂beta/∂z enters through u = √(1+z²) at S17.
+            Some(bg) => gss_from_s13 + gss_from_s10 + bg.g_side_slope.clone(),
+            None => gss_from_s13 + gss_from_s10,
+        };
         let mask_ss_lo = side_slope_raw.clone().greater_elem(0.5);
         let mask_ss_hi = side_slope_raw.clone().lower_elem(50.0);
         let mask_ss = mask_ss_lo.bool_and(mask_ss_hi);
@@ -484,7 +539,11 @@ where
             / (two_d.clone() * depth.clone());
 
         // Accumulate gtw before S7 (since S7 produces depth → uses tw in its derivative wrt q_eps).
-        let gtw_total = gtw_from_s12 + gtw_from_s10 + gtw_from_s8;
+        // ∂beta/∂T (S17) is the fourth contributor when ddr_match=false.
+        let gtw_total = match beta_grads.as_ref() {
+            Some(bg) => gtw_from_s12 + gtw_from_s10 + gtw_from_s8 + bg.g_top_width.clone(),
+            None => gtw_from_s12 + gtw_from_s10 + gtw_from_s8,
+        };
 
         // ===========================================================
         // B7. top_width = p · depth^q_eps
@@ -826,10 +885,7 @@ where
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
-    // ddr_match is not yet branched on here — later physics-correction tasks
-    // will add the S17/S19 branches. TimestepState carries it for the backward.
     let ddr_match = cfg.params.ddr_match;
-    let _ = ddr_match;
 
     let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
         match t.into_primitive() {
@@ -878,8 +934,22 @@ where
         * slope_in.clone().sqrt();
     // S16
     let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
-    // S17
-    let celerity = velocity_cl.clone() * (5.0_f32 / 3.0_f32);
+    // S17: celerity.
+    //   ddr_match=true  -> c = v·5/3, the wide-rectangular Kleitz-Seddon limit.
+    //                      Mirrors ddr/mmc.py:167. WRONG for the trapezoid built
+    //                      in S7-S13: kappa = b/y ~ 0.7-1.8 here, so the true
+    //                      ratio is ~1.30-1.36, not 1.667 (22-27% high).
+    //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
+    //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
+    //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
+    let celerity = if ddr_match {
+        velocity_cl.clone() * (5.0_f32 / 3.0_f32)
+    } else {
+        let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
+        let beta =
+            -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
+        velocity_cl.clone() * beta
+    };
 
     // S18..S23: Muskingum coefficients
     let k_muskingum = length_in.clone() / celerity.clone();
