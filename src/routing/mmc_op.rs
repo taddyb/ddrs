@@ -107,6 +107,7 @@ pub(crate) struct TimestepState<B: Backend> {
     pub discharge_lb: f32,
     pub dt: f32,
     pub use_cuda: bool,
+    pub ddr_match: bool,
 }
 
 #[derive(Debug)]
@@ -781,6 +782,7 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     xst_in: Tensor<I, 1>,
     leakance: Option<LeakanceTensors<I>>,
     leak_out: &mut Option<LeakanceSaved<I>>,
+    ddr_match: bool,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -797,6 +799,9 @@ where
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+    // ddr_match is threaded here for use by later physics-correction tasks;
+    // not yet branched on — no behaviour change.
+    let _ = ddr_match;
 
     let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
         match t.into_primitive() {
@@ -1332,6 +1337,7 @@ where
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+    let ddr_match = cfg.params.ddr_match;
 
     // Extract AutodiffTensor (carries `primitive` + `node`).
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
@@ -1374,6 +1380,7 @@ where
         wrap(xst_p.clone()),
         None,
         &mut None,
+        ddr_match,
     );
 
     // Unpack saved-state array into named TimestepState fields. Indices MUST
@@ -1430,6 +1437,7 @@ where
         discharge_lb,
         dt,
         use_cuda,
+        ddr_match,
     };
 
     // Register the op on the autograd tape.
@@ -1497,6 +1505,7 @@ where
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+    let ddr_match = cfg.params.ddr_match;
 
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
         TensorPrimitive::Float(p) => p,
@@ -1551,6 +1560,7 @@ where
         wrap(xst_p.clone()),
         Some(leakance),
         &mut leak_out,
+        ddr_match,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
 
@@ -1626,6 +1636,7 @@ where
         discharge_lb,
         dt,
         use_cuda,
+        ddr_match,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -1725,6 +1736,7 @@ where
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
+    let ddr_match = cfg.params.ddr_match;
 
     // Unwrap autograd primitives.
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
@@ -1910,6 +1922,7 @@ where
         discharge_lb,
         dt,
         use_cuda,
+        ddr_match,
     };
 
     let result_prim = match TimestepOp
@@ -1958,6 +1971,7 @@ where
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
         &mut None,
+        cfg.params.ddr_match,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -2021,6 +2035,7 @@ where
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
         &mut None,
+        cfg.params.ddr_match,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

@@ -501,6 +501,22 @@ pub struct Params {
     /// supplied at routing setup (the mask is precomputed by the caller).
     /// Default 0.7 (70% impervious surface ≈ concrete-lined channel).
     pub leakance_impervious_threshold: f32,
+    /// When `true` (default) the routing core reproduces DDR's formulation
+    /// bit-for-bit, including two known physical approximations:
+    ///   * celerity `c = v · 5/3` (the wide-rectangular Kleitz-Seddon limit,
+    ///     ~22-27% high for the trapezoid this code actually builds), and
+    ///   * Muskingum `X ≡ 0.3` (constant, NOT Cunge-derived, giving a median
+    ///     10-30x excess numerical diffusion).
+    ///
+    /// Set `false` to enable the corrected physics. This CHANGES FORWARD
+    /// OUTPUT and will break `examples/compare_ddr_sandbox`'s ABSOLUTE MATCH
+    /// (invariant 1) — which is why the default preserves DDR behaviour.
+    /// See `.claude/PHYSICS-CORRECTIONS.md`.
+    pub ddr_match: bool,
+}
+
+fn default_ddr_match() -> bool {
+    true
 }
 
 impl Default for Params {
@@ -518,6 +534,7 @@ impl Default for Params {
             use_leakance: false,
             leakance_losing_only: true,
             leakance_impervious_threshold: 0.7,
+            ddr_match: default_ddr_match(),
         }
     }
 }
@@ -539,6 +556,7 @@ struct ParamsRaw {
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
     leakance_impervious_threshold: Option<f32>,
+    ddr_match: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -607,6 +625,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(v) = r.leakance_impervious_threshold {
             p.leakance_impervious_threshold = v;
+        }
+        if let Some(b) = r.ddr_match {
+            p.ddr_match = b;
         }
         p
     }
