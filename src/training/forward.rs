@@ -300,6 +300,9 @@ pub fn forward<I: Backend>(
         carry_state,
         tensors.initial_state.clone(),
     );
+    // Enable negative-discharge tracking so the count appears in the training
+    // log. When use_cuda_graphs is true, forward will print UNAVAILABLE instead.
+    engine.enable_negative_discharge_tracking();
 
     let runoff = engine.forward(); // (N, T_hours)
 

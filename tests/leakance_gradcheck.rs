@@ -166,6 +166,7 @@ fn run_forward(
         fac_t.clone(),
         mask,
         None,
+        false,
     );
 
     (

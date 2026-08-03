@@ -809,6 +809,7 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     xst_in: Tensor<I, 1>,
     leakance: Option<LeakanceTensors<I>>,
     leak_out: &mut Option<LeakanceSaved<I>>,
+    track_neg: bool,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -948,9 +949,10 @@ where
     let x_sol = wrap(x_sol_prim.clone());
 
     // Diagnostic: count negative solve outputs before the S28 clamp rewrites
-    // them to +1e-4. Uses a single host read of x_sol_prim (which is already
-    // cloned above), so the autograd graph is not disturbed.
-    {
+    // them to +1e-4. Gated on `track_neg` so the default (off) path pays zero
+    // cost — no host sync, no blocking device→host transfer. Mirror of the
+    // `collect_zeta` / `enable_zeta_accumulation` pattern on MuskingumCunge.
+    if track_neg {
         let x_host: Vec<f32> = primitive_to_vec::<I>(x_sol_prim.clone());
         let n_neg = x_host.iter().filter(|&&v| v < 0.0).count() as u64;
         NEG_SOLVES.fetch_add(n_neg, Ordering::Relaxed);
@@ -1369,6 +1371,7 @@ pub fn timestep_forward<I: Backend + 'static>(
     length_at: Tensor<Autodiff<I>, 1>,
     slope_at: Tensor<Autodiff<I>, 1>,
     x_storage_at: Tensor<Autodiff<I>, 1>,
+    track_neg: bool,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -1425,6 +1428,7 @@ where
         wrap(xst_p.clone()),
         None,
         &mut None,
+        track_neg,
     );
 
     // Unpack saved-state array into named TimestepState fields. Indices MUST
@@ -1536,6 +1540,7 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     leakance_factor_at: Tensor<Autodiff<I>, 1>,
     impervious_mask: Option<Tensor<I, 1>>,
     zeta_out: Option<&mut Option<ZetaStepDiag<I>>>,
+    track_neg: bool,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -1604,6 +1609,7 @@ where
         wrap(xst_p.clone()),
         Some(leakance),
         &mut leak_out,
+        track_neg,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
 
@@ -1756,11 +1762,15 @@ where
         unsafe { crate::sparse::cusparse::ensure_cuda_cache::<I>(pattern, &cache_device) };
 
     // If no graph was installed (capture failed), fall through to direct launch.
+    // Pass track_neg=false: when graphs were requested, `forward` will print
+    // the UNAVAILABLE notice covering both the graph-replay and capture-failure
+    // cases, so there is no point incurring the host-sync cost here.
     if cache.graph_fwd.is_none() || cache.scratch.is_none() {
         return timestep_forward::<I>(
             cfg, pattern, assembler,
             n_at, q_spatial_at, p_spatial_at,
             q_t_at, q_prime_t_at, length_at, slope_at, x_storage_at,
+            false,
         );
     }
 
@@ -2013,7 +2023,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None,
+        &mut None, false,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -2076,7 +2086,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None,
+        &mut None, false,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

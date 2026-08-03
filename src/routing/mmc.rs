@@ -99,6 +99,13 @@ pub struct MuskingumCunge<I: Backend> {
     /// `enable_zeta_accumulation` turns it on. Sums live on the inner backend
     /// (no autograd tape) and grow by one elementwise add per timestep.
     collect_zeta: bool,
+
+    /// Per-timestep negative-discharge tracking. Off by default;
+    /// `enable_negative_discharge_tracking` turns it on. When off, the host
+    /// sync in `forward_chain_inner` is skipped entirely — zero added cost.
+    /// Enable in the training forward path; leave off in eval (the diagnostic
+    /// is only meaningful during training where we want to observe the rate).
+    track_negative_discharge: bool,
     zeta_abs_sum: Option<Tensor<I, 1>>,
     zeta_net_sum: Option<Tensor<I, 1>>,
     depth_sum: Option<Tensor<I, 1>>,
@@ -156,6 +163,7 @@ impl<I: Backend> MuskingumCunge<I> {
             q_prime: None,
             discharge_t: None,
             collect_zeta: false,
+            track_negative_discharge: false,
             zeta_abs_sum: None,
             zeta_net_sum: None,
             depth_sum: None,
@@ -388,6 +396,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 k_d, d_gw, leakance_factor,
                 self.impervious_mask.as_ref().cloned(),
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
+                self.track_negative_discharge,
             );
             if let Some(diag) = zeta_step {
                 fn add<I: Backend>(slot: &mut Option<Tensor<I, 1>>, v: Tensor<I, 1>) {
@@ -428,6 +437,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 n, q_spatial, p_spatial,
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
+                self.track_negative_discharge,
             )
         }
     }
@@ -491,13 +501,43 @@ impl<I: Backend> MuskingumCunge<I> {
             self.discharge_t = Some(q_next);
         }
 
-        let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
-        if total > 0 && neg > 0 {
-            eprintln!(
-                "  negative solves before clamp: {neg}/{total} ({:.3}%) — Muskingum \
-                 coefficient sign violation (see .claude/PHYSICS-CORRECTIONS.md)",
-                100.0 * neg as f64 / total as f64
-            );
+        // Fix 1: distinguish three cases after the timestep loop.
+        //
+        // When `use_cuda_graphs` is true, `route_timestep` dispatches to
+        // `timestep_forward_via_graph`, which replays an on-device CUDA graph
+        // and never enters `forward_chain_inner`. Both counters stay at zero,
+        // which is *indistinguishable* from "measured, found zero negatives" —
+        // the silence would be a lie. Print an UNAVAILABLE notice so the
+        // output can never be misread as a zero-negative measurement.
+        //
+        // The fallback inside `timestep_forward_via_graph` (capture failed →
+        // direct launch) also carries this notice, because the user requested
+        // graphs and we cannot distinguish "all replays succeeded" from "some
+        // fell back silently". A config-based check is acceptable here because
+        // the leakance guard already rejects `use_cuda_graphs + leakance` at
+        // load time, so reaching this point with graphs on means the non-
+        // leakance graph path was requested.
+        let graphs_requested = self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>();
+
+        if graphs_requested {
+            if self.track_negative_discharge {
+                eprintln!(
+                    "  negative solves: UNAVAILABLE — use_cuda_graphs is true; \
+                     the CUDA-graph path does not enter forward_chain_inner, so \
+                     no count was taken. Disable use_cuda_graphs to measure."
+                );
+            }
+        } else {
+            let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
+            if total > 0 && neg > 0 {
+                eprintln!(
+                    "  negative solves before clamp: {neg}/{total} ({:.3}%) — Muskingum \
+                     coefficient sign violation (see .claude/PHYSICS-CORRECTIONS.md)",
+                    100.0 * neg as f64 / total as f64
+                );
+            }
         }
 
         Tensor::cat(columns, 1)
@@ -508,6 +548,18 @@ impl<I: Backend> MuskingumCunge<I> {
     /// stays `None`. Eval-time use — the training path never enables this.
     pub fn enable_zeta_accumulation(&mut self) {
         self.collect_zeta = true;
+    }
+
+    /// Turn on per-timestep negative-discharge tracking. When off (the
+    /// default), the host sync in `forward_chain_inner` is skipped entirely
+    /// — zero added cost on the forward. Enable in the training driver path
+    /// (per-micro-batch) so the negative-solve rate is visible. The CUDA-graph
+    /// path (`use_cuda_graphs: true`) never enters `forward_chain_inner`, so
+    /// enabling this flag there has no effect; `forward` will print an
+    /// UNAVAILABLE notice instead of a count. Training use only — the eval
+    /// path never enables this.
+    pub fn enable_negative_discharge_tracking(&mut self) {
+        self.track_negative_discharge = true;
     }
 
     /// Eval-time leakance diagnostic sums accumulated across `route_timestep`
