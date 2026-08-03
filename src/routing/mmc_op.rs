@@ -103,6 +103,16 @@ pub(crate) struct TimestepState<B: Backend> {
     pub length: B::FloatTensorPrimitive,
     pub slope: B::FloatTensorPrimitive,
     pub x_storage: B::FloatTensorPrimitive,
+    /// The Muskingum X the forward ACTUALLY used at S19. Equals `x_storage`
+    /// when `ddr_match`; the Cunge-derived `clamp(0.5(1 − Q/(B·S·c·L)), 0, 0.5)`
+    /// otherwise. The backward reads it both to evaluate the c1..c4 chain and
+    /// to build the `[0, 0.5]` clamp mask (B19).
+    ///
+    /// Deliberately NOT part of the `forward_saved_idx` array: that array is
+    /// index-locked to `cuda_graph::PersistentScratch`'s `state_*` fields, and
+    /// the CUDA-graph path is `ddr_match: true`-only by config validation. It
+    /// travels through `forward_chain_inner`'s `x_eff_out` sink instead.
+    pub x_effective: B::FloatTensorPrimitive,
     // Forward intermediates (saved for backward).
     pub depth: B::FloatTensorPrimitive,
     pub top_width: B::FloatTensorPrimitive,
@@ -147,6 +157,16 @@ pub(crate) struct ZetaGeomGrads<I: Backend> {
     pub g_depth: Tensor<I, 1>,
     pub g_q_eps: Tensor<I, 1>,
     pub g_p_spatial: Tensor<I, 1>,
+}
+
+/// The three extra chain-rule terms the Cunge-derived Muskingum `X`
+/// (`ddr_match: false`, S19) contributes. Each is ADDED to the accumulator
+/// that already carries that quantity's gradient — see B19 for the derivation
+/// and for the ordering constraint each one imposes.
+struct XGrads<I: Backend> {
+    g_q_t: Tensor<I, 1>,
+    g_top_width: Tensor<I, 1>,
+    g_celerity: Tensor<I, 1>,
 }
 
 /// The four extra chain-rule terms the trapezoidal celerity
@@ -213,7 +233,10 @@ where
         let q_prime_t = wrap(state.q_prime_t.clone());
         let length = wrap(state.length.clone());
         let slope = wrap(state.slope.clone());
-        let x_storage = wrap(state.x_storage.clone());
+        // The X the forward ACTUALLY used at S19 — equal to `state.x_storage`
+        // under `ddr_match`, Cunge-derived otherwise. `state.x_storage` is
+        // deliberately never read here: it is not what c1..c4 were built from.
+        let x_eff = wrap(state.x_effective.clone());
 
         let depth = wrap(state.depth.clone());
         let top_width = wrap(state.top_width.clone());
@@ -337,9 +360,9 @@ where
         // and ∂L/∂num_i_from_ci = gci / denom.
         // ===========================================================
         let denom_sq = denom.clone() * denom.clone();
-        let one_minus_x = -x_storage.clone() + 1.0;
+        let one_minus_x = -x_eff.clone() + 1.0;
         let two_k = k_muskingum.clone() * 2.0;
-        let two_kx = two_k.clone() * x_storage.clone();
+        let two_kx = two_k.clone() * x_eff.clone();
         let two_k_1mx = two_k.clone() * one_minus_x.clone();
 
         // num_c1 = -2kx + dt
@@ -370,9 +393,53 @@ where
         let g_2kx_total = g_2kx_from_c1 + g_2kx_from_c2;
         let g_2k1mx_total = g_2k1mx_from_c3 + g_2k1mx_from_denom;
 
-        // 2kx = 2k · x_storage → ∂(2kx)/∂(2k) = x_storage
-        let g_2k_from_2kx = g_2kx_total.clone() * x_storage.clone();
-        // 2k(1-x) = 2k · (1 - x_storage) → ∂(2k(1-x))/∂(2k) = (1 - x_storage)
+        // ===========================================================
+        // B19. Muskingum X (`ddr_match: false` only).
+        //
+        // X feeds ONLY `two_kx = 2k·X` and `two_k_1mx = 2k·(1−X)`, so
+        //   gX = 2k · (g_2kx_total − g_2k1mx_total)
+        //
+        // With W ≡ Q/(B·S·c·L) and X_raw = 0.5·(1 − W):
+        //   ∂X/∂Q = −0.5·W/Q   ∂X/∂B = +0.5·W/B   ∂X/∂c = +0.5·W/c
+        // and 0 wherever the [0, 0.5] clamp saturated. S and L are constants,
+        // not parents, so they get no term.
+        //
+        // The three contributions are ADDED into accumulators that already
+        // carry gradient for those quantities: `gcelerity` (B18), `gtw_total`
+        // (before B7), and `gq_t_total` (final). Each MUST land before its
+        // accumulator is consumed — see the comment at each site.
+        //
+        // NOTE: this is a SECOND gradient path for `q_t`, which already
+        // reaches the loss through the S25 RHS and the S2 depth chain.
+        // ===========================================================
+        let x_grads = if state.ddr_match {
+            None
+        } else {
+            let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
+            // Zero where the [0, 0.5] clamp saturated (X is then constant).
+            let unsat = x_eff
+                .clone()
+                .greater_elem(0.0)
+                .bool_and(x_eff.clone().lower_elem(0.5));
+            let gx = gx.mask_fill(unsat.bool_not(), 0.0);
+            // Same expression as the forward's S19 (including the +1e-12).
+            let bscl =
+                top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
+            let half_w = q_t.clone() / bscl.clone() * 0.5;
+            Some(XGrads {
+                // ∂X/∂Q = −0.5·W/Q, but W = Q/(B·S·c·L) so Q cancels exactly.
+                // Written in the cancelled form on purpose: `q_t` is only
+                // floored at `discharge_lb` AFTER the solve, so the raw
+                // per-step q_t can legitimately be 0 and `W/Q` would be 0/0.
+                g_q_t: -gx.clone() * 0.5 / bscl,
+                g_top_width: gx.clone() * half_w.clone() / top_width.clone(),
+                g_celerity: gx * half_w / celerity.clone(),
+            })
+        };
+
+        // 2kx = 2k · x_eff → ∂(2kx)/∂(2k) = x_eff
+        let g_2k_from_2kx = g_2kx_total.clone() * x_eff.clone();
+        // 2k(1-x) = 2k · (1 - x_eff) → ∂(2k(1-x))/∂(2k) = (1 - x_eff)
         let g_2k_from_2k1mx = g_2k1mx_total.clone() * one_minus_x.clone();
         let g_2k_total = g_2k_from_2kx + g_2k_from_2k1mx;
         // 2k = 2 · k_muskingum
@@ -394,8 +461,15 @@ where
         // B18. k_muskingum = length / celerity
         //   ∂k/∂celerity = -length / celerity²
         // ===========================================================
+        // ORDERING: B19's ∂X/∂c term must join here, BEFORE B17 consumes
+        // `gcelerity` — celerity reaches the loss both through K (this line)
+        // and, under `ddr_match: false`, through X.
         let celerity_sq = celerity.clone() * celerity.clone();
         let gcelerity = -gk_muskingum * length.clone() / celerity_sq;
+        let gcelerity = match x_grads.as_ref() {
+            Some(xg) => gcelerity + xg.g_celerity.clone(),
+            None => gcelerity,
+        };
 
         // ===========================================================
         // B17. celerity = velocity_cl · beta
@@ -539,10 +613,15 @@ where
             / (two_d.clone() * depth.clone());
 
         // Accumulate gtw before S7 (since S7 produces depth → uses tw in its derivative wrt q_eps).
-        // ∂beta/∂T (S17) is the fourth contributor when ddr_match=false.
+        // ∂beta/∂T (S17) is the fourth contributor when ddr_match=false, and
+        // ∂X/∂B (S19, B19) is the fifth. Both MUST land before B7 consumes it.
         let gtw_total = match beta_grads.as_ref() {
             Some(bg) => gtw_from_s12 + gtw_from_s10 + gtw_from_s8 + bg.g_top_width.clone(),
             None => gtw_from_s12 + gtw_from_s10 + gtw_from_s8,
+        };
+        let gtw_total = match x_grads.as_ref() {
+            Some(xg) => gtw_total + xg.g_top_width.clone(),
+            None => gtw_total,
         };
 
         // ===========================================================
@@ -629,7 +708,14 @@ where
         if let Some(zg) = zeta_geom.as_ref() {
             gp_total = gp_total + zg.g_p_spatial.clone();
         }
+        // q_t reaches the loss through the S25 RHS (c3·q_t), the S24 SpMV
+        // (N·q_t), the S2 depth chain — and, under `ddr_match: false`, a
+        // FOURTH path: the Cunge X at S19 (B19).
         let gq_t_total = gq_t_from_s25 + gq_t_from_s24 + gq_t_from_s2;
+        let gq_t_total = match x_grads.as_ref() {
+            Some(xg) => gq_t_total + xg.g_q_t.clone(),
+            None => gq_t_total,
+        };
 
         // Touch unused intermediate bindings to silence dead-code warnings.
         let _ = (_q_spatial, _velocity_cl);
@@ -868,6 +954,9 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     xst_in: Tensor<I, 1>,
     leakance: Option<LeakanceTensors<I>>,
     leak_out: &mut Option<LeakanceSaved<I>>,
+    // Receives the S19 Muskingum X the chain actually used (see
+    // `TimestepState::x_effective`). Always written.
+    x_eff_out: &mut Option<I::FloatTensorPrimitive>,
     track_neg: bool,
 ) -> (
     I::FloatTensorPrimitive,
@@ -953,9 +1042,36 @@ where
 
     // S18..S23: Muskingum coefficients
     let k_muskingum = length_in.clone() / celerity.clone();
-    let one_minus_x = -xst_in.clone() + 1.0;
+
+    // S19: Muskingum storage weight X.
+    //   ddr_match=true  -> the caller's constant (forward.rs sets 0.3). NOT
+    //                      Cunge-derived: severs the link between the scheme's
+    //                      numerical diffusion and the channel's physical
+    //                      hydraulic diffusivity, giving a median 28x
+    //                      over-diffusion on CONUS. It is exact only on the
+    //                      measure-zero locus Q/(B·S·c·L) == 0.4.
+    //   ddr_match=false -> Cunge: X = clamp(0.5(1 - Q/(B·S·c·L)), 0, 0.5),
+    //                      which makes D_num = c·L·(0.5-X) equal D_phys =
+    //                      Q/(2·B·S). Measured X ~ 0.49 on CONUS, which also
+    //                      narrows the non-negative-coefficient window
+    //                      2X <= Cr <= 2(1-X) from [0.6, 1.4] to ~[0.98, 1.02]
+    //                      (see Task 5, Courant sub-stepping).
+    // NOTE for the backward: X feeds ONLY `two_kx` and `two_k_1mx`, and
+    // depends on q_t, top_width and celerity. See B19 in
+    // `timestep_backward_core`.
+    let x_eff = if ddr_match {
+        xst_in.clone()
+    } else {
+        let w = qt_in.clone()
+            / (top_width.clone() * slope_in.clone() * celerity.clone() * length_in.clone()
+                + 1e-12);
+        ((-w + 1.0) * 0.5).clamp(0.0, 0.5)
+    };
+    *x_eff_out = Some(unwrap(x_eff.clone()));
+
+    let one_minus_x = -x_eff.clone() + 1.0;
     let two_k = k_muskingum.clone() * 2.0;
-    let two_kx = two_k.clone() * xst_in.clone();
+    let two_kx = two_k.clone() * x_eff.clone();
     let two_k_1mx = two_k.clone() * one_minus_x.clone();
     let denom = two_k_1mx.clone() + dt;
     let c1 = (-two_kx.clone() + dt) / denom.clone();
@@ -1485,6 +1601,7 @@ where
         Tensor::from_primitive(TensorPrimitive::Float(p))
     };
 
+    let mut x_eff_out: Option<I::FloatTensorPrimitive> = None;
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg,
         pattern,
@@ -1498,8 +1615,10 @@ where
         wrap(xst_p.clone()),
         None,
         &mut None,
+        &mut x_eff_out,
         track_neg,
     );
+    let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
     // Unpack saved-state array into named TimestepState fields. Indices MUST
     // match `forward_saved_idx`.
@@ -1526,6 +1645,7 @@ where
         length: length_p,
         slope: slope_p,
         x_storage: xst_p,
+        x_effective,
         depth: depth_p,
         top_width: top_width_p,
         side_slope: side_slope_p,
@@ -1665,6 +1785,7 @@ where
         mask: impervious_mask,
     };
     let mut leak_out: Option<LeakanceSaved<I>> = None;
+    let mut x_eff_out: Option<I::FloatTensorPrimitive> = None;
 
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg,
@@ -1679,9 +1800,11 @@ where
         wrap(xst_p.clone()),
         Some(leakance),
         &mut leak_out,
+        &mut x_eff_out,
         track_neg,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
+    let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
     use forward_saved_idx as fsi;
     let [
@@ -1726,6 +1849,7 @@ where
         length: length_p,
         slope: slope_p,
         x_storage: xst_p,
+        x_effective,
         depth: depth_p,
         top_width: top_width_p,
         side_slope: side_slope_p,
@@ -2002,6 +2126,14 @@ where
     ] = state_arr;
     let _ = (fsi::DEPTH, fsi::BW_RAW); // index sanity touch
 
+    // The captured graph encodes the DDR chain only. Config load rejects
+    // `ddr_match: false` + `use_cuda_graphs: true` precisely so this holds.
+    debug_assert!(
+        ddr_match,
+        "CUDA-graph replay cannot serve ddr_match=false (captured graph has \
+         neither the trapezoidal celerity nor the Cunge X branch)"
+    );
+
     // Build TimestepState. Backward needs the per-step `q_t`/`q_prime_t`
     // primitives (NOT scratch handles — scratch gets overwritten on next
     // replay, but the backward closure runs on `loss.backward()` after the
@@ -2015,7 +2147,12 @@ where
         q_prime_t: qpt_p,
         length: length_p,
         slope: slope_p,
-        x_storage: xst_p,
+        // The captured graph is the `ddr_match: true` chain (S19 returns the
+        // caller's constant unchanged), and config load rejects
+        // `ddr_match: false` together with `use_cuda_graphs: true`, so
+        // `x_effective == x_storage` here by construction.
+        x_storage: xst_p.clone(),
+        x_effective: xst_p,
         depth: depth_p,
         top_width: top_width_p,
         side_slope: side_slope_p,
@@ -2093,7 +2230,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, false,
+        &mut None, &mut None, false,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -2156,7 +2293,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, false,
+        &mut None, &mut None, false,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {
