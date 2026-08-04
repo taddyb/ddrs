@@ -155,6 +155,11 @@ pub(crate) struct TimestepState<B: Backend> {
     pub dt: f32,
     pub use_cuda: bool,
     pub ddr_match: bool,
+    /// Mirrors `forward_chain_inner`'s `enforce_pos` — i.e. the ALREADY-COMBINED
+    /// `!ddr_match && cfg.params.enforce_positivity`, not the raw config flag.
+    /// Tells the backward whether S18' (K floor) and S19' (three-way X min) ran,
+    /// so B18'/B19' apply their masks. `false` ⇒ the pre-clamp math, unchanged.
+    pub enforce_pos: bool,
 }
 
 #[derive(Debug)]
@@ -272,6 +277,8 @@ where
         let bw_raw = wrap(state.bw_raw.clone());
 
         let dt = state.dt;
+        // Already the combined `!ddr_match && params.enforce_positivity`.
+        let enforce_pos = state.enforce_pos;
         let bottom_width_lb = state.bottom_width_lb;
         let depth_lb = state.depth_lb;
         let velocity_lb = state.velocity_lb;
@@ -421,21 +428,94 @@ where
         //
         // NOTE: this is a SECOND gradient path for `q_t`, which already
         // reaches the loss through the S25 RHS and the S2 depth chain.
+        //
+        // ---------------------------------------------------------------
+        // B19'. Positivity clamp (`enforce_positivity`, S19'):
+        //
+        //   x_eff = min(x_cunge, hi_a, hi_b)
+        //   hi_a  = cr·0.5·(1−δ)        hi_b = (1 − 0.5·cr)·(1−δ)
+        //   cr    = Δt / k_musk
+        //
+        // A `min` routes the incoming gradient to exactly ONE branch per
+        // element, so the three branch masks must PARTITION the reaches — no
+        // element counted twice, none dropped. Tie-break priority (matching
+        // `branch_report` in `tests/positivity_clamp.rs`):
+        //
+        //   Cunge  >  hi_a  >  hi_b
+        //     mask_cunge = (x_cunge <= hi_a) && (x_cunge <= hi_b)
+        //     mask_a     = !mask_cunge && (hi_a <= hi_b)
+        //     mask_b     = !mask_cunge && !mask_a
+        //
+        // Ties are a measure-zero subgradient choice; the ordering just has to
+        // be deterministic and total, which the `<=` cascade guarantees.
+        //
+        // Consequences:
+        //   * the existing `∂X/∂Q`, `∂X/∂B`, `∂X/∂c` terms are the Cunge
+        //     branch's, so they are additionally masked by `mask_cunge`;
+        //   * `hi_a`/`hi_b` open a NEW path `x_eff → cr → k_musk → celerity`
+        //     that did not exist before the clamp. Its contribution is
+        //     accumulated into `gk_from_x_cap` and folded into `gk_muskingum`
+        //     BELOW (before the S18' floor mask and before B18 consumes it).
+        //   * the `[0, 0.5]` clamp mask belongs to `x_cunge`, NOT to `x_eff`:
+        //     when `hi_a`/`hi_b` win, `x_eff` can sit anywhere in `[0, 0.5]`
+        //     while `x_cunge` is saturated, and vice versa.
         // ===========================================================
+        //
+        // `hi_a`/`hi_b` → `k_muskingum`. `None` unless `enforce_pos`.
+        let mut gk_from_x_cap: Option<Tensor<I, 1>> = None;
         let x_grads = if state.ddr_match {
             None
         } else {
             let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
-            // Zero where the [0, 0.5] clamp saturated (X is then constant).
-            let unsat = x_eff
-                .clone()
-                .greater_elem(0.0)
-                .bool_and(x_eff.clone().lower_elem(0.5));
-            let gx = gx.mask_fill(unsat.bool_not(), 0.0);
             // Same expression as the forward's S19 (including the +1e-12).
             let bscl =
                 top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
-            let half_w = q_t.clone() / bscl.clone() * 0.5;
+            let w = q_t.clone() / bscl.clone();
+            let half_w = w.clone() * 0.5;
+            // `gx` is ∂L/∂x_eff. Split it across the S19' min branches and pick
+            // the tensor whose `[0, 0.5]` clamp mask applies to the Cunge term.
+            // Without the clamp, x_eff IS x_cunge and both reduce to identity.
+            let (gx, x_for_clamp) = if enforce_pos {
+                // Recomputed bit-identically to the forward (same ops, same
+                // saved operands), so the comparisons below reproduce the
+                // `min_pair` chain's choice exactly.
+                let x_cunge = ((-w + 1.0) * 0.5).clamp(0.0, 0.5);
+                let cr = k_muskingum.clone().recip() * dt;
+                let hi_a = cr.clone() * (0.5 * (1.0 - POSITIVITY_DELTA));
+                let hi_b = (-cr * 0.5 + 1.0) * (1.0 - POSITIVITY_DELTA);
+
+                let mask_cunge = x_cunge
+                    .clone()
+                    .lower_equal(hi_a.clone())
+                    .bool_and(x_cunge.clone().lower_equal(hi_b.clone()));
+                let mask_a = mask_cunge
+                    .clone()
+                    .bool_not()
+                    .bool_and(hi_a.lower_equal(hi_b));
+                let mask_b = mask_cunge
+                    .clone()
+                    .bool_not()
+                    .bool_and(mask_a.clone().bool_not());
+
+                let g_hi_a = gx.clone().mask_fill(mask_a.bool_not(), 0.0);
+                let g_hi_b = gx.clone().mask_fill(mask_b.bool_not(), 0.0);
+                let gx_cunge = gx.mask_fill(mask_cunge.bool_not(), 0.0);
+
+                // ∂hi_a/∂cr = +0.5(1−δ),  ∂hi_b/∂cr = −0.5(1−δ)
+                let half_1md = 0.5 * (1.0 - POSITIVITY_DELTA);
+                let gcr = (g_hi_a - g_hi_b) * half_1md;
+                // cr = Δt/k_musk  →  ∂cr/∂k_musk = −Δt/k_musk²
+                gk_from_x_cap = Some(-gcr * dt / (k_muskingum.clone() * k_muskingum.clone()));
+                (gx_cunge, x_cunge)
+            } else {
+                (gx, x_eff.clone())
+            };
+            // Zero where the [0, 0.5] clamp saturated (X is then constant).
+            let unsat = x_for_clamp
+                .clone()
+                .greater_elem(0.0)
+                .bool_and(x_for_clamp.lower_elem(0.5));
+            let gx = gx.mask_fill(unsat.bool_not(), 0.0);
             Some(XGrads {
                 // ∂X/∂Q = −0.5·W/Q, but W = Q/(B·S·c·L) so Q cancels exactly.
                 // Written in the cancelled form on purpose: `q_t` is only
@@ -454,6 +534,15 @@ where
         let g_2k_total = g_2k_from_2kx + g_2k_from_2k1mx;
         // 2k = 2 · k_muskingum
         let gk_muskingum = g_2k_total * 2.0;
+        // ORDERING: B19's `x_eff → cr → k_musk` term (enforce_positivity only)
+        // MUST join here, i.e. AFTER the c1..c4 contribution and BEFORE the
+        // S18' floor mask below — both paths reach `celerity` through the SAME
+        // `clamp_min`, so a term added after the mask would leak gradient on
+        // reaches where the floor binds.
+        let gk_muskingum = match gk_from_x_cap {
+            Some(g) => gk_muskingum + g,
+            None => gk_muskingum,
+        };
 
         // ===========================================================
         // Geometry recomputed from the saved primitives. Hoisted above B18
@@ -468,6 +557,24 @@ where
         let area = hyd_radius.clone() * wp.clone();
 
         // ===========================================================
+        // B18'. K floor (`enforce_positivity` only, S18'):
+        //   k_musk = max(k_raw, k_floor)  →  ∂k_musk/∂k_raw = 1 where
+        //   k_raw > k_floor, else 0 (the reach is sub-grid and K is pinned to
+        //   the constant floor, so celerity gets NO gradient there).
+        // `k_raw = length/celerity` is recomputed from the saved `length` and
+        // `celerity` with the same op the forward used, so the mask reproduces
+        // the forward's `clamp_min` decision exactly.
+        // ===========================================================
+        let gk_raw = if enforce_pos {
+            let k_raw = length.clone() / celerity.clone();
+            let k_floor = dt * (1.0 + POSITIVITY_DELTA) / 2.0;
+            let unfloored = k_raw.greater_elem(k_floor);
+            gk_muskingum.mask_fill(unfloored.bool_not(), 0.0)
+        } else {
+            gk_muskingum
+        };
+
+        // ===========================================================
         // B18. k_muskingum = length / celerity
         //   ∂k/∂celerity = -length / celerity²
         // ===========================================================
@@ -475,7 +582,7 @@ where
         // `gcelerity` — celerity reaches the loss both through K (this line)
         // and, under `ddr_match: false`, through X.
         let celerity_sq = celerity.clone() * celerity.clone();
-        let gcelerity = -gk_muskingum * length.clone() / celerity_sq;
+        let gcelerity = -gk_raw * length.clone() / celerity_sq;
         let gcelerity = match x_grads.as_ref() {
             Some(xg) => gcelerity + xg.g_celerity.clone(),
             None => gcelerity,
@@ -1621,6 +1728,8 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    // Must mirror `forward_chain_inner`'s gate EXACTLY (S18'/S19' vs B18'/B19').
+    let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
     // Extract AutodiffTensor (carries `primitive` + `node`).
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
@@ -1725,6 +1834,7 @@ where
         dt,
         use_cuda,
         ddr_match,
+        enforce_pos,
     };
 
     // Register the op on the autograd tape.
@@ -1794,6 +1904,8 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    // Must mirror `forward_chain_inner`'s gate EXACTLY (S18'/S19' vs B18'/B19').
+    let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
         TensorPrimitive::Float(p) => p,
@@ -1929,6 +2041,7 @@ where
         dt,
         use_cuda,
         ddr_match,
+        enforce_pos,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -2232,6 +2345,10 @@ where
         dt,
         use_cuda,
         ddr_match,
+        // The captured graph is the `ddr_match: true` chain (asserted above),
+        // and `enforce_positivity` requires `ddr_match: false` at config load,
+        // so S18'/S19' can never have run on this path.
+        enforce_pos: false,
     };
 
     let result_prim = match TimestepOp
