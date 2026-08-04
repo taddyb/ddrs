@@ -600,6 +600,26 @@ impl<I: Backend> MuskingumCunge<I> {
         self.pattern.as_ref()
     }
 
+    /// Inner-backend snapshot of every input `forward_chain_inner` consumes,
+    /// for the S18'/S19' Courant diagnostic in
+    /// [`crate::routing::courant_probe`]. Diagnostic only: strips the tape,
+    /// changes nothing. Call after `setup_inputs`.
+    pub fn probe_inputs(&self) -> crate::routing::courant_probe::ProbeInputs<I> {
+        let n_seg = self.n_segments.expect("setup_inputs not called");
+        crate::routing::courant_probe::ProbeInputs {
+            pattern: self.pattern.as_ref().expect("pattern").clone(),
+            n: self.n.as_ref().expect("n").clone().inner(),
+            q_spatial: self.q_spatial.as_ref().expect("q_spatial").clone().inner(),
+            p_spatial: self.p_spatial_broadcast(n_seg).inner(),
+            length: self.length.as_ref().expect("length").clone().inner(),
+            slope: self.slope.as_ref().expect("slope").clone().inner(),
+            x_storage: self.x_storage.as_ref().expect("x_storage").clone().inner(),
+            q_prime: self.q_prime.as_ref().expect("q_prime").clone().inner(),
+            q0: self.discharge_t.as_ref().expect("discharge_t").clone().inner(),
+            n_segments: n_seg,
+        }
+    }
+
     fn p_spatial_broadcast(&self, n: usize) -> Tensor<Autodiff<I>, 1> {
         let dims = self.p_spatial.dims();
         if dims[0] == n {
