@@ -200,3 +200,51 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | Task 5 sub-step | timestep loop | tape depth ×n_sub | yes (flag-gated) | `substep_courant` |
 | `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |
 | `enforce_positivity` | S18′ K floor, S19′ X cap | gk_musk mask + new cr→k path; XGrads masked by mask_cunge | no (default off; requires `ddr_match: false`) | `positivity_clamp` |
+
+## CUDA backend coverage
+
+Every gate above declares `type I = NdArray<f32>` — **CPU only**. Since
+`ddr_match: false` + `use_cuda_graphs: false` + a CUDA backend is a legal and
+actively-used configuration, `tests/cuda_backward_parity.rs` re-runs the same
+gradchecks with `burn_cuda::Cuda<f32, i32>` as the inner backend:
+
+```bash
+cargo test --features cuda --test cuda_backward_parity
+```
+
+Run it alongside `positivity_clamp` / `cunge_x` / `celerity_beta` on any change
+to `src/routing/mmc_op.rs`. What it covers:
+
+* native central-difference gradcheck **on CUDA** for β, Cunge X and the
+  positivity clamp (correctness, not just CPU agreement);
+* CUDA-vs-CPU analytic gradient parity, plus a zero-pattern assertion that
+  catches a mask disagreeing across backends;
+* the transitive guard `enforce_positivity ⟹ !use_cuda_graphs`, which nothing
+  else asserts — it falls out of `validate_enforce_positivity` and
+  `validate_ddr_match` separately, and which one fires depends on `ddr_match`.
+
+Measured 2026-08-04 on an RTX 4080 SUPER (driver 610.43.02, nvcc 13.2, burn
+0.21 fork `a033dc8`, cubecl `d562ab9`), `sparse_solver: cpu`:
+
+* forward `x_sol` is **bit-identical** CPU vs CUDA on the 10-reach fixture
+  (max abs diff 0.0, both clamp settings) — the S1..S23 geometry chain's
+  `powf`/`sqrt`/`recip`/`min_pair` agree exactly at these operating points;
+* analytic gradients differ by at most **2.784e-7 relative** (~2 f32 ulp),
+  from the extra transcendentals the backward adds (`ratio.log()` in B6);
+* CUDA analytic-vs-FD worst relative error **7.5e-4** (β + Cunge X + clamp).
+
+Falsification results (each mutation applied to `mmc_op.rs`, run, reverted):
+
+| Mutation | CUDA FD gradcheck | CPU↔CUDA parity |
+|---|---|---|
+| drop `∂β/∂z` | FAIL, rel 5.4e-2 (all 8) | passes |
+| drop `∂X/∂B` | FAIL, rel 9.4e-2 … 1.6e0 (all 8) | passes |
+| invert the B18′ K-floor mask | FAIL, rel 1.0 (4 clamp cases) | passes |
+| swap the B19′ `hi_a`/`hi_b` tie-break | FAIL, rel 7.8e-1 (4 clamp cases) | passes |
+| drop the new `x_eff→cr→k_musk` term | FAIL, rel 3.9e-1 (4 clamp cases) | passes |
+
+The right-hand column is not a defect: both backends run the same source, so a
+physics error is invisible to a cross-backend comparison **by construction**.
+The FD gradcheck is the falsifier for wrong physics; the parity test is the
+falsifier for a backend-specific divergence. Do not treat either as a
+substitute for the other.
