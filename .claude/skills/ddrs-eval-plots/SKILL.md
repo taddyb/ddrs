@@ -33,6 +33,13 @@ Companion cells: distribution histogram, parameter vs log10(drainage area) hexbi
 **§Convergence: has training actually moved the parameters?** — per-epoch dumps,
 the four diagnostics, template · Notes
 
+**`references/channel_geometry.md`**
+Baseflow width & depth for all 346,321 CONUS reaches from the learned `n`, `p`,
+`q` and post-clamp slope · CONUS maps of width / depth / `w:d` · **downstream
+hydraulic-geometry exponents vs Leopold & Maddock** — the only internal test of
+whether `p_spatial`/`q_spatial` are physically sensible, since the attributes
+carry no width or depth to validate against · plausibility bands
+
 **`references/parity.md`** (235 lines)
 Init-time parity (when to use, inputs, load → histograms → pass/fail, KS criterion) ·
 Trained parity (inputs, load → per-distribution stats → histograms → per-reach
@@ -119,6 +126,7 @@ boundary.
 | NSE, KGE, bias, RMSE, FHV, FLV, CDF, box plot, "did it beat the baseline" | **metrics** | `references/metrics.md` |
 | Manning's n, p_spatial, q_spatial, slope, map, basin, spatial pattern | **parameter_map** | `references/parameter_map.md` |
 | "have the parameters converged", epoch drift, movement across epochs | **parameter convergence** | `references/parameter_map.md` §Convergence |
+| width, depth, channel geometry, w:d ratio, "are the geometry parameters right", hydraulic geometry, Leopold & Maddock | **channel_geometry** | `references/channel_geometry.md` |
 | DDR-vs-ddrs parameter distributions, at init or trained | **parity** | `references/parity.md` |
 
 Vague request ("plot my trained model")? Offer the default bundle:
@@ -246,6 +254,8 @@ was still ruled NO-GO — passing it is necessary, not sufficient.
 - `references/metrics.md` — NSE/KGE/bias distributions, CDFs, box plots vs baseline
 - `references/parameter_map.md` — learned parameters over MERIT polygons, plus
   epoch-to-epoch convergence drift
+- `references/channel_geometry.md` — baseflow width/depth over MERIT, plus the
+  Leopold & Maddock exponent check on `p_spatial`/`q_spatial`
 - `references/parity.md` — DDR-vs-ddrs parameter distributions at init and trained
 - `scripts/load_ddrs_predictions.py` — **always use this** to open the predictions
   zarr and the f32 baseline. It handles two pitfalls every notebook otherwise hits:
