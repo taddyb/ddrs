@@ -64,8 +64,16 @@ pub struct CompressedAdj {
     pub cols: Vec<i32>,
     /// Per-gauge compressed position of the gauge outlet, length `G_present`.
     pub gauge_compressed: Vec<usize>,
-    /// For each gauge, the compressed cols whose row index equals the
-    /// gauge's outlet. Mirrors DDR's `outflow_idx`.
+    /// For each gauge, the compressed reach indices whose routed discharge is
+    /// summed to form that gauge's prediction. Which reaches those are depends
+    /// on `params.ddr_match` — see `compress` step 5:
+    ///
+    /// * `ddr_match: false` (physically correct) — the single-element
+    ///   `[gauge_compressed[g]]`: the gauge's OWN reach. The MC solve there
+    ///   already integrates the whole upstream network plus that reach's own
+    ///   lateral inflow.
+    /// * `ddr_match: true` (DDR-faithful default) — the gauge's UPSTREAM
+    ///   neighbours, which omit the gauge reach's own local drainage.
     pub outflow_idx: Vec<Vec<usize>>,
 }
 
@@ -75,9 +83,14 @@ pub struct CompressedAdj {
 ///
 /// Hard-asserts the lower-triangular invariant (`rows >= cols`); fails
 /// with `DataError::Malformed` if violated.
+///
+/// `ddr_match` selects the `outflow_idx` convention (see step 5): `true`
+/// reproduces DDR's `merit.py:226-234` bit-for-bit, `false` uses the
+/// physically correct gauge-reach index. Comes from `params.ddr_match`.
 pub fn compress(
     unioned: &UnionedCoo,
     conus_order: &[Comid],
+    ddr_match: bool,
 ) -> Result<CompressedAdj> {
     use std::collections::BTreeSet;
 
@@ -130,27 +143,59 @@ pub fn compress(
     let gauge_compressed: Vec<usize> =
         unioned.gauges.iter().map(|(_, g, _)| mapping[g]).collect();
 
-    // 5. outflow_idx[g] = list of cols where rows[k] == gauge_compressed[g].
-    // Fallback (matches DDR `_collate_gages` lines ~226-235): when a gauge
-    // has no incoming edges in this batch's union, use the gauge's own
-    // compressed index as the sole outflow. Headwater gauges are filtered
-    // upstream of compress(), so this fallback only fires for gauges at
-    // merge nodes whose upstream edges weren't in the batch.
-    let mut outflow_idx: Vec<Vec<usize>> = Vec::with_capacity(gauge_compressed.len());
-    for &g_comp in &gauge_compressed {
-        let g_row = g_comp as i32;
-        let cols_for_g: Vec<usize> = rows
+    // 5. outflow_idx — which reaches are summed to form a gauge's prediction.
+    //
+    // `ddr_match: false` (CORRECT) — the gauge's OWN compressed index.
+    // A USGS gauge measures every drop of drainage above it, including the
+    // lateral inflow of the reach the gauge sits on, and we do not know where
+    // along that reach the gauge physically sits. The Muskingum-Cunge solve at
+    // the gauge reach already accumulates all upstream contributions plus its
+    // own `q_prime` by mass conservation, so the gauge's prediction is that
+    // ONE reach's routed discharge.
+    //
+    // `ddr_match: true` (DEFAULT, DDR-FAITHFUL) — the gauge's UPSTREAM
+    // neighbours. Reproduces DDR's `_collate_gages`
+    // (`~/projects/ddr/src/ddr/geodatazoo/merit.py:226-234`), which collects
+    // the COO *cols* whose row equals the gauge outlet and only falls back to
+    // the gauge's own index when that list is empty. In this adjacency
+    // `indices_0` = rows = DOWNSTREAM segment and `indices_1` = cols =
+    // UPSTREAM segment (`src/data/store/zarr.rs:39-42`), so this silently
+    // drops the gauge reach's own local runoff from every prediction.
+    //
+    // Why `false` is the physical answer: gauge 01457000 (366.8 km² drainage,
+    // of which the gauge reach alone is 250.1 km² = 68%) read 1.58 m³/s
+    // against an observed 7.60 and a summed-Q' baseline of 7.38 — a constant
+    // 0.215× suppression across all 15 eval years, on peaks as well as means.
+    // 26 of 1841 gauges fell below 0.5× baseline, all of them small basins
+    // where the gauge reach is a large share of the area. Because the omitted
+    // mass is always positive, this biases EVERY ddrs-vs-baseline comparison
+    // against ddrs.
+    //
+    // DDR's Lynker path validates `outflow_idx` against the flowpath `toid`
+    // column (`~/projects/ddr/src/ddr/geodatazoo/lynker_hydrofabric.py:239-250`);
+    // the MERIT path has no such check — that is where this would have been
+    // caught upstream.
+    let outflow_idx: Vec<Vec<usize>> = if ddr_match {
+        gauge_compressed
             .iter()
-            .zip(cols.iter())
-            .filter(|(r, _)| **r == g_row)
-            .map(|(_, c)| *c as usize)
-            .collect();
-        if cols_for_g.is_empty() {
-            outflow_idx.push(vec![g_comp]);
-        } else {
-            outflow_idx.push(cols_for_g);
-        }
-    }
+            .map(|&g_comp| {
+                let g_row = g_comp as i32;
+                let cols_for_g: Vec<usize> = rows
+                    .iter()
+                    .zip(cols.iter())
+                    .filter(|(r, _)| **r == g_row)
+                    .map(|(_, c)| *c as usize)
+                    .collect();
+                if cols_for_g.is_empty() {
+                    vec![g_comp]
+                } else {
+                    cols_for_g
+                }
+            })
+            .collect()
+    } else {
+        gauge_compressed.iter().map(|&g_comp| vec![g_comp]).collect()
+    };
 
     Ok(CompressedAdj {
         divide_comids,
@@ -306,14 +351,17 @@ mod tests {
                 (Staid::new("0000000B"), 3, "comid400".to_string()),
             ],
         };
-        let c = compress(&unioned, &conus_order).expect("compress");
+        let c = compress(&unioned, &conus_order, true).expect("compress");
         // Active = {0, 1, 2, 3, 4} → all 5. Compressed positions match.
         assert_eq!(c.divide_comids, conus_order);
         assert_eq!(c.rows, vec![2, 3, 4, 4]);
         assert_eq!(c.cols, vec![0, 1, 2, 3]);
         assert_eq!(c.gauge_compressed, vec![4, 3]);
-        // outflow_idx: gauge A at row 4 receives from cols 2, 3.
-        // gauge B at row 3 receives from col 1.
+        // Pins the `ddr_match: true` (DDR-faithful) convention: outflow_idx is
+        // the gauge's UPSTREAM cols — gauge A at row 4 receives from cols 2, 3;
+        // gauge B at row 3 from col 1. Both omit the gauge reach itself; see
+        // `outflow_idx_includes_the_gauge_reach_when_not_ddr_match` for the
+        // corrected convention.
         assert_eq!(c.outflow_idx[0], vec![2, 3]);
         assert_eq!(c.outflow_idx[1], vec![1]);
     }
@@ -326,7 +374,7 @@ mod tests {
             edges: vec![(9, 7), (9, 5), (7, 2)],
             gauges: vec![(Staid::new("0000000A"), 9, "comid900".to_string())],
         };
-        let c = compress(&unioned, &conus_order).expect("compress");
+        let c = compress(&unioned, &conus_order, true).expect("compress");
         assert_eq!(c.divide_comids, vec![Comid(200), Comid(500), Comid(700), Comid(900)]);
         // Edges in compressed space: (3,2), (3,1), (2,0). Same order as input edges,
         // but mapped through the compressed index space.
@@ -346,7 +394,7 @@ mod tests {
             edges: vec![(0, 1)],
             gauges: vec![(Staid::new("0000000A"), 0, "x".to_string())],
         };
-        let err = compress(&unioned, &conus_order).unwrap_err();
+        let err = compress(&unioned, &conus_order, true).unwrap_err();
         match err {
             crate::data::error::DataError::Malformed { .. } => {}
             other => panic!("expected Malformed, got {other:?}"),
@@ -360,7 +408,7 @@ mod tests {
             edges: vec![],
             gauges: vec![],
         };
-        let err = compress(&unioned, &conus_order).unwrap_err();
+        let err = compress(&unioned, &conus_order, true).unwrap_err();
         match err {
             crate::data::error::DataError::Malformed { .. } => {}
             other => panic!("expected Malformed, got {other:?}"),
@@ -368,18 +416,63 @@ mod tests {
     }
 
     #[test]
+    fn outflow_idx_includes_the_gauge_reach_when_not_ddr_match() {
+        // We do NOT know where along its reach a gauge physically sits, so the
+        // gauge reach's own lateral inflow MUST be counted. The MC solve at that
+        // reach already accumulates everything upstream by mass conservation, so
+        // the gauge's prediction is that ONE reach.
+        //
+        // Regression: gauge 01457000 (366.8 km2; its own reach is 250.1 km2 = 68%
+        // of the basin) read 1.58 m3/s against an observed 7.60 and a summed-Q'
+        // baseline of 7.38 -- a constant 0.215x suppression for 15 straight years,
+        // affecting 26/1841 gauges and biasing every ddrs-vs-baseline comparison.
+        //
+        // The affected case is a gauge that HAS incoming edges: two headwaters
+        // (CONUS positions 0, 1) draining into the gauge reach (position 2) --
+        // exactly the 01457000 topology.
+        let conus_order = vec![Comid(73006562), Comid(73006585), Comid(73005764)];
+        let unioned = UnionedCoo {
+            edges: vec![(2, 0), (2, 1)],
+            gauges: vec![(Staid::new("01457000"), 2, "73005764".to_string())],
+        };
+
+        let corrected = compress(&unioned, &conus_order, false).expect("compress");
+        assert_eq!(corrected.gauge_compressed, vec![2]);
+        assert_eq!(
+            corrected.outflow_idx[0],
+            vec![2],
+            "ddr_match=false: outflow_idx must be the gauge's OWN reach, not its \
+             upstream cols [0, 1]"
+        );
+
+        // And the DDR-faithful path is preserved byte-for-byte under the flag.
+        let ddr = compress(&unioned, &conus_order, true).expect("compress");
+        assert_eq!(ddr.gauge_compressed, vec![2]);
+        assert_eq!(
+            ddr.outflow_idx[0],
+            vec![0, 1],
+            "ddr_match=true must reproduce DDR merit.py:226-234 (upstream cols)"
+        );
+    }
+
+    #[test]
     fn outflow_idx_falls_back_to_self_when_no_incoming_edges() {
         // Gauge at CONUS-position 2 with no upstream edges in this batch
-        // (active = {2} as a single-node graph). DDR's fallback yields the
-        // gauge's own compressed index as the sole outflow column.
+        // (active = {2} as a single-node graph). Pins the `ddr_match: true`
+        // convention: DDR's empty-cols fallback yields the gauge's own
+        // compressed index. Under `ddr_match: false` this is not a fallback at
+        // all -- it is the general rule -- so both flag values agree here.
         let conus_order = vec![Comid(0), Comid(1), Comid(2)];
         let unioned = UnionedCoo {
             edges: vec![],
             gauges: vec![(Staid::new("0000000A"), 2, "comid2".to_string())],
         };
-        let c = compress(&unioned, &conus_order).expect("compress");
-        assert_eq!(c.gauge_compressed, vec![0]);
-        assert_eq!(c.outflow_idx[0], vec![0], "self-edge fallback");
+        let ddr = compress(&unioned, &conus_order, true).expect("compress");
+        assert_eq!(ddr.gauge_compressed, vec![0]);
+        assert_eq!(ddr.outflow_idx[0], vec![0], "self-edge fallback");
+
+        let corrected = compress(&unioned, &conus_order, false).expect("compress");
+        assert_eq!(corrected.outflow_idx[0], vec![0]);
     }
 
     use crate::data::store::{GageMetadata, GageRow};

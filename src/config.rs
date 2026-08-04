@@ -517,16 +517,20 @@ pub struct Params {
     /// Default 0.7 (70% impervious surface ≈ concrete-lined channel).
     pub leakance_impervious_threshold: f32,
     /// When `true` (default) the routing core reproduces DDR's formulation
-    /// bit-for-bit, including two known physical approximations:
+    /// bit-for-bit, including three known defects:
     ///   * celerity `c = v · 5/3` (the wide-rectangular Kleitz-Seddon limit,
-    ///     ~22-27% high for the trapezoid this code actually builds), and
+    ///     ~22-27% high for the trapezoid this code actually builds),
     ///   * Muskingum `X ≡ 0.3` (constant, NOT Cunge-derived, giving a median
-    ///     10-30x excess numerical diffusion).
+    ///     10-30x excess numerical diffusion), and
+    ///   * `outflow_idx` = the gauge's UPSTREAM neighbours rather than the
+    ///     gauge's own reach, which drops that reach's local drainage from
+    ///     every prediction (`src/data/collate.rs` step 5).
     ///
-    /// Set `false` to enable the corrected physics. This CHANGES FORWARD
-    /// OUTPUT and will break `examples/compare_ddr_sandbox`'s ABSOLUTE MATCH
-    /// (invariant 1) — which is why the default preserves DDR behaviour.
-    /// See `.claude/PHYSICS-CORRECTIONS.md`.
+    /// Set `false` to enable the corrected physics. The first two CHANGE
+    /// FORWARD OUTPUT and will break `examples/compare_ddr_sandbox`'s ABSOLUTE
+    /// MATCH (invariant 1) — which is why the default preserves DDR behaviour.
+    /// The `outflow_idx` correction is downstream of the solver and does NOT
+    /// affect the sandbox. See `.claude/PHYSICS-CORRECTIONS.md`.
     pub ddr_match: bool,
 }
 

@@ -166,7 +166,9 @@ fn layer_b_step1_subgraph_adjacency_matches_ddr() {
     let staid = Staid::new(STAID_STR);
     let g = gages.get(&staid).expect("gauge not in gages store");
     let unioned = ddrs::data::collate::union_subgraphs(&[staid.clone()], &gages);
-    let compressed = ddrs::data::collate::compress(&unioned, &conus.order)
+    // `ddr_match: true` — this test compares against a DDR-generated fixture,
+    // so it must use DDR's `outflow_idx` convention.
+    let compressed = ddrs::data::collate::compress(&unioned, &conus.order, true)
         .expect("compress failed");
 
     // Convert divide_comids to i64 for comparison.

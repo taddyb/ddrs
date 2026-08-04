@@ -48,6 +48,39 @@ MATCH (invariant 1). `false` enables the corrected physics.
                        └─────────────────────────────────────────────┘  before
 ```
 
+## Outside the forward chain: per-gauge extraction (`outflow_idx`)
+
+`ddr_match` also gates `collate::compress`'s `outflow_idx` — WHICH reaches are
+summed to form a gauge's prediction. This is downstream of the solver, so it
+does **not** affect `compare_ddr_sandbox` (which never builds `outflow_idx`).
+
+```
+  gauge 01457000        73006562 ──┐
+  (the 26-gauge case)              ├──> 73005764  (gauge reach, 250.1 km²
+                        73006585 ──┘                 = 68% of the 366.8 km² basin)
+
+  ddr_match = true    outflow_idx = upstream cols  [73006562, 73006585]
+                      → drops the gauge reach's own local drainage
+                      → predicted 1.58 vs observed 7.60, summed-Q' 7.38
+                        (0.215x, constant across all 15 eval years)
+
+  ddr_match = false   outflow_idx = [73005764]  — the gauge reach itself
+                      → mass-conserving: the MC solve there already carries
+                        everything upstream PLUS its own lateral inflow
+```
+
+A USGS gauge measures all drainage above it and we do not know where along its
+reach it sits, so `false` is the physical answer. `true` reproduces DDR's
+`geodatazoo/merit.py:226-234`; DDR's Lynker path validates `outflow_idx`
+against the flowpath `toid` column (`lynker_hydrofabric.py:239-250`), the MERIT
+path does not — that is where this would have been caught upstream.
+
+Impact: 26 of 1841 gauges below 0.5x baseline (all small basins, 139-453 km²,
+3-9 reaches; median ratio over all gauges 0.952). The omitted mass is always
+positive, so `true` biases EVERY ddrs-vs-baseline comparison against ddrs.
+Gate: `tests/gauge_mass_conservation.rs` (steady-state mass check, both flag
+values) + `collate.rs::outflow_idx_includes_the_gauge_reach_when_not_ddr_match`.
+
 ## Why the corrections are coupled
 
 Muskingum non-negative coefficients require `2X ≤ Cr ≤ 2(1−X)` with
@@ -74,3 +107,4 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | Task 3 β | S17 | new gβ → gA, gT, gP, gz | yes (flag-gated) | `celerity_beta_gradcheck` |
 | Task 4 Cunge X | new S19 | new gX → gq_t, gT, gc | yes (flag-gated) | `cunge_x_gradcheck` |
 | Task 5 sub-step | timestep loop | tape depth ×n_sub | yes (flag-gated) | `substep_courant` |
+| `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |

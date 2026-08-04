@@ -292,6 +292,10 @@ pub struct MeritGagesDataset {
     gauge_std: OnceCell<std::collections::HashMap<Staid, f32>>,
     /// Whether the configured loss needs `gauge_std` (`loss.kind: nse-batch`).
     want_gauge_std: bool,
+    /// `params.ddr_match`, captured at open. Selects the `outflow_idx`
+    /// convention in `collate::compress`: `true` (default) reproduces DDR's
+    /// upstream-cols behaviour, `false` reads the gauge's own reach.
+    ddr_match: bool,
     /// Optional day-boundary discharge state cache. `None` ⇒ every code path
     /// byte-identical to no-cache behavior (`RoutingBatch::initial_state = None`).
     state_cache: Option<crate::data::store::StateCache>,
@@ -519,6 +523,7 @@ impl MeritGagesDataset {
                 .as_ref()
                 .map(|e| e.loss.kind == crate::config::LossKind::NseBatch)
                 .unwrap_or(false),
+            ddr_match: cfg.params.ddr_match,
             state_cache,
             leakance_impervious_threshold,
         })
@@ -618,7 +623,7 @@ impl MeritGagesDataset {
         let gauge_staids: Vec<Staid> =
             unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
 
-        let compressed = compress(&unioned, &self.conus.order)?;
+        let compressed = compress(&unioned, &self.conus.order, self.ddr_match)?;
         let n = compressed.divide_comids.len();
 
         // ----- 2. SparseAdjacency: rows/cols + length/slope sliced -----
@@ -1001,7 +1006,7 @@ impl MeritGagesDataset {
         }
         let gauge_staids: Vec<Staid> =
             unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
-        let compressed = compress(&unioned, &self.conus.order)?;
+        let compressed = compress(&unioned, &self.conus.order, self.ddr_match)?;
         let n = compressed.divide_comids.len();
 
         // 2. SparseAdjacency.
