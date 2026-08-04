@@ -48,6 +48,97 @@ MATCH (invariant 1). `false` enables the corrected physics.
                        └─────────────────────────────────────────────┘  before
 ```
 
+## `enforce_positivity` — provably zero negative solves
+
+`params.enforce_positivity: bool` (default **false**, rejected at load unless
+`ddr_match: false`). Inserts two clamps at S18′/S19′ so the solve output cannot
+be negative. `δ = POSITIVITY_DELTA = 1e-2`.
+
+```
+  S18′ K floor         k_raw   = length / celerity
+                       k_musk  = max(k_raw, dt·(1+δ)/2)      ⇒ Cr ≤ 2/(1+δ)
+                                     │
+  S19′ X stability cap cr      = dt / k_musk
+                       hi_a    = (1−δ)·0.5·cr                ⇒ c1 ≥ 0
+                       hi_b    = (1−δ)·(1 − 0.5·cr)          ⇒ c3 ≥ 0
+                       x_eff   = min(x_cunge, hi_a, hi_b)
+```
+
+### Why this is a proof, not a heuristic
+
+`c2, c4 > 0` always. `c1 ≥ 0 ⟺ Cr ≥ 2X`; `c3 ≥ 0 ⟺ Cr ≤ 2(1−X)` — i.e. exactly
+the classical window `2X ≤ Cr ≤ 2(1−X)` (0 mismatches in 200k random draws).
+The solve is forward substitution in topological order,
+`x[i] = b[i] + c1[i]·Σ_{j∈up(i)} x[j]`, with `q_t > 0` (S28 clamp + hotstart,
+`utils.rs:97`) and `q′ > 0` (`mmc.rs:453`), so `b ≥ 0`. Induction over the
+topological order gives `x ≥ 0` everywhere. ∎
+
+**Clamp the INPUTS (K, X), never the coefficients.** `c1+c2+c3 = 1` holds for
+any `(K, X)`, so clamping K and X preserves mass exactly; clamping `c3` to zero
+would break it.
+
+**δ is mandatory, not cosmetic.** At δ=0 the clamp lands exactly on `c1=0`/`c3=0`
+and f32 roundoff crosses it (7,149 `c1<0`, 964 `c3<0` in a 400k f32 sweep).
+Sign safety comes from the *numerator*: `dt − 2KX ≥ δ·dt = 36 s` independent of
+K, ~1e5× the f32 representation error at that magnitude. The *value* of `c1` can
+still be small (measured min +2.5e−6) because `denom ≈ 2K` grows without bound
+for slow reaches — small, but never negative.
+
+### Verified on real CONUS data (`src/bin/probe_courant.rs`)
+
+Trained head, 1,841 gauges → 92,488 reaches, 2,135 hourly steps:
+
+| | OFF | ON |
+|---|---|---|
+| negative solves | 55,181 / 197,461,880 (0.0279 %) | **0 / 197,461,880** |
+| min c1 / min c3 | −9.99e−1 / −9.97e−1 | +2.50e−6 / +5.00e−5 |
+| cells c1<0 / c3<0 | 8,081,351 / 1,351,260 | 0 / 0 |
+
+Replicated at a second time window, on a 256-gauge batch, on the NdArray/CPU
+backend, and against a second (differently trained) head — **exactly 0 in all
+five**.
+
+### The cost — larger than first estimated
+
+Measured `Cr = dt/K` on the full network: p5 0.0142 · p25 0.0741 · **p50 0.226**
+· p75 0.603 · p95 2.724. Only **7.3 %** of reach-timesteps have `Cr > 2` and get
+K floored (median inflation 1.77×, p95 9.6×).
+
+The X cap binds on **95.3 %** of reach-timesteps. Median X used falls
+**0.4976 → 0.0794, a 6.3× reduction**:
+
+| | p5 | p25 | p50 | p75 | p95 |
+|---|---|---|---|---|---|
+| X_cunge (pre-cap) | 0.330 | 0.485 | 0.4976 | 0.4997 | 0.5000 |
+| X_eff (capped) | 0.0055 | 0.0219 | **0.0794** | 0.1936 | 0.398 |
+
+So `enforce_positivity` does not merely *shade* the Cunge X of `54ec215` — it
+**replaces it almost everywhere**. Numerical diffusion becomes stability-set
+rather than hydraulic-diffusivity-matched. **Skill impact is unmeasured; do not
+promote this flag on the positivity guarantee alone.**
+
+> **Erratum.** An earlier version of this section and of
+> `docs/superpowers/plans/2026-08-04-positivity-clamp.md` reported X falling only
+> to ~0.45 at the median. That was a methodological error: `X_max(Cr)` is
+> non-monotone (it peaks at `Cr = 1`), so evaluating it *at* each Cr percentile
+> does not yield the percentiles of X. The tell was that the p95 entry came out
+> *below* the p75 entry. The measured numbers above supersede it.
+
+### Why sub-stepping still does not substitute
+
+The Task-5 abandonment analysed landing *inside* `[2X, 2(1−X)]` at fixed X≈0.49.
+Here the K constraint is one-sided (`K ≥ dt/2n_sub`), which shrinking `dt` does
+satisfy — but it also drives `Cr` further from 1 for the ~93 % of reaches that
+are already `Cr < 2`, shrinking `X_max` and making the cap bite *harder*.
+
+**The measured Cr distribution reframes the variable-Δx fix.** Median Cr = 0.226
+means the typical MERIT reach is ~4.4× too *long* for an hourly step, not too
+short. Splitting a reach into `m` pieces gives `Cr → m·Cr`, so `m ≈ 4` puts the
+bulk of the network near `Cr ≈ 1`, where `X_max → 0.5` and the Cunge X survives
+the cap. That is mostly **subdivision**, not merging, and it is a static
+preprocessing step — no autograd change. Only 7.3 % of reaches (`Cr > 2`) would
+instead need merging.
+
 ## Outside the forward chain: per-gauge extraction (`outflow_idx`)
 
 `ddr_match` also gates `collate::compress`'s `outflow_idx` — WHICH reaches are
@@ -108,3 +199,4 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | Task 4 Cunge X | new S19 | new gX → gq_t, gT, gc | yes (flag-gated) | `cunge_x_gradcheck` |
 | Task 5 sub-step | timestep loop | tape depth ×n_sub | yes (flag-gated) | `substep_courant` |
 | `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |
+| `enforce_positivity` | S18′ K floor, S19′ X cap | gk_musk mask + new cr→k path; XGrads masked by mask_cunge | no (default off; requires `ddr_match: false`) | `positivity_clamp` |
