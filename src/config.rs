@@ -532,6 +532,20 @@ pub struct Params {
     /// The `outflow_idx` correction is downstream of the solver and does NOT
     /// affect the sandbox. See `.claude/PHYSICS-CORRECTIONS.md`.
     pub ddr_match: bool,
+    /// Enforce the Muskingum non-negativity window `2X <= Cr <= 2(1-X)`
+    /// (`Cr = dt/K`) on every reach-timestep, so the S27 solve can never
+    /// produce a negative discharge for S28's `clamp_min` to rewrite to
+    /// `+1e-4` (which silently creates mass).
+    ///
+    /// Implemented by clamping the *inputs* — `K >= dt(1+d)/2` and
+    /// `X <= min(0.5·Cr, 1 - 0.5·Cr)·(1-d)` with `d = 1e-2` — never the
+    /// coefficients: `c1+c2+c3 = 1` holds for any `(K, X)`, so clamping inputs
+    /// preserves mass exactly while clamping `c3` would not.
+    ///
+    /// Off by default. Requires `ddr_match: false` — the clamp changes K and X,
+    /// which would break `examples/compare_ddr_sandbox`'s ABSOLUTE MATCH
+    /// (invariant 1). See `.claude/PHYSICS-CORRECTIONS.md`.
+    pub enforce_positivity: bool,
 }
 
 fn default_ddr_match() -> bool {
@@ -554,6 +568,7 @@ impl Default for Params {
             leakance_losing_only: true,
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
+            enforce_positivity: false,
         }
     }
 }
@@ -576,6 +591,7 @@ struct ParamsRaw {
     leakance_losing_only: Option<bool>,
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
+    enforce_positivity: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -647,6 +663,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(b) = r.ddr_match {
             p.ddr_match = b;
+        }
+        if let Some(b) = r.enforce_positivity {
+            p.enforce_positivity = b;
         }
         p
     }
@@ -786,6 +805,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_enforce_positivity(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         validate_disagg_pretrained(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -882,6 +905,23 @@ fn validate_ddr_match(cfg: &Config) -> std::result::Result<(), String> {
              forward would not be captured while the backward would use the corrected \
              chain rule, producing a silent forward/backward mismatch. \
              Set `use_cuda_graphs: false` to use `ddr_match: false`."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The positivity clamp raises K and lowers X, so it CHANGES FORWARD OUTPUT.
+/// Under `ddr_match: true` that would break `examples/compare_ddr_sandbox`'s
+/// ABSOLUTE MATCH (invariant 1), so the combination is rejected at load rather
+/// than silently producing a non-DDR forward on the DDR-faithful path.
+fn validate_enforce_positivity(cfg: &Config) -> std::result::Result<(), String> {
+    if cfg.params.enforce_positivity && cfg.params.ddr_match {
+        return Err(
+            "params: `enforce_positivity: true` requires `ddr_match: false` — the \
+             positivity clamp floors K at dt(1+d)/2 and caps X at the stability \
+             window, changing forward output and breaking the DDR sandbox \
+             ABSOLUTE MATCH. Set `ddr_match: false` to use `enforce_positivity`."
                 .to_string(),
         );
     }
