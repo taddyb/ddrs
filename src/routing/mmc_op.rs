@@ -46,6 +46,16 @@ pub fn reset_negative_solve_stats() {
     TOTAL_SOLVES.store(0, Ordering::Relaxed);
 }
 
+/// Safety margin pulling the S18'/S19' positivity clamp strictly INSIDE the
+/// `2X <= Cr <= 2(1-X)` window (`params.enforce_positivity`).
+///
+/// At `δ = 0` the clamp lands exactly on `c1 = 0` / `c3 = 0` and f32 roundoff
+/// crosses it (measured min `c1` −3.3e−8, min `c3` −6.8e−8 over a 400k-draw
+/// sweep). `δ = 1e-2` is ~400x f32 eps; it moves the measured minima to
+/// +1.8e−4 / +5.0e−5 and costs only a 1% tightening of the X ceiling and a
+/// 1% rise in the K floor.
+pub const POSITIVITY_DELTA: f32 = 1e-2;
+
 /// Inner-backend leakance inputs threaded into `forward_chain_inner`.
 #[derive(Clone)]
 pub(crate) struct LeakanceTensors<I: Backend> {
@@ -975,6 +985,10 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    // S18'/S19' positivity clamp. `ddr_match: true` must stay byte-identical to
+    // DDR (invariant 1), so the clamp is gated on BOTH flags even though
+    // `validate_enforce_positivity` already rejects the combination at load.
+    let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
     let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
         match t.into_primitive() {
@@ -1041,7 +1055,20 @@ where
     };
 
     // S18..S23: Muskingum coefficients
-    let k_muskingum = length_in.clone() / celerity.clone();
+    //
+    // S18': K floor (`enforce_positivity` only). A reach with K < dt/2 is
+    // SUB-GRID: the timestep cannot resolve its transit, and the unclamped
+    // scheme expressed that as oscillation which S28's `clamp_min(1e-4)`
+    // silently rewrote to +1e-4 (creating mass). Flooring K makes the
+    // coarse-graining explicit and puts Cr = dt/K inside (0, 2/(1+δ)], which
+    // is the feasible region for the S19' X cap below (it is what guarantees
+    // `hi_b > 0`, so no `clamp_min` is needed on the three-way min).
+    let k_raw = length_in.clone() / celerity.clone();
+    let k_muskingum = if enforce_pos {
+        k_raw.clamp_min(dt * (1.0 + POSITIVITY_DELTA) / 2.0)
+    } else {
+        k_raw
+    };
 
     // S19: Muskingum storage weight X.
     //   ddr_match=true  -> the caller's constant (forward.rs sets 0.3). NOT
@@ -1065,7 +1092,29 @@ where
         let w = qt_in.clone()
             / (top_width.clone() * slope_in.clone() * celerity.clone() * length_in.clone()
                 + 1e-12);
-        ((-w + 1.0) * 0.5).clamp(0.0, 0.5)
+        let x_cunge = ((-w + 1.0) * 0.5).clamp(0.0, 0.5);
+        if enforce_pos {
+            // S19': stability cap. Muskingum's non-negative-coefficient window
+            // is 2X <= Cr <= 2(1-X); solving both sides for X gives
+            //     X <= 0.5·Cr        (<=> c1 = (dt - 2KX)/denom >= 0)
+            //     X <= 1 - 0.5·Cr    (<=> c3 = (2K(1-X) - dt)/denom >= 0)
+            // and c2, c4 > 0 unconditionally. With b >= 0 and the forward
+            // substitution x[i] = b[i] + c1[i]·Σ_up x[j] taken in topological
+            // order, c1, c3 >= 0 makes every x[i] >= 0 by induction — no
+            // negative solve can reach S28.
+            //
+            // The (1-δ) factor is MANDATORY, not cosmetic: at δ = 0 the cap
+            // lands exactly on c1 = 0 / c3 = 0 and f32 roundoff crosses it
+            // (measured min c1 = -3.3e-8, min c3 = -6.8e-8 over a 400k sweep).
+            // δ = 1e-2 (~400x f32 eps) puts the measured minima at +1.8e-4 and
+            // +5.0e-5 and costs a 1% tightening of the X ceiling.
+            let cr = k_muskingum.clone().recip() * dt;
+            let hi_a = cr.clone() * (0.5 * (1.0 - POSITIVITY_DELTA));
+            let hi_b = (-cr * 0.5 + 1.0) * (1.0 - POSITIVITY_DELTA);
+            x_cunge.min_pair(hi_a).min_pair(hi_b)
+        } else {
+            x_cunge
+        }
     };
     *x_eff_out = Some(unwrap(x_eff.clone()));
 
