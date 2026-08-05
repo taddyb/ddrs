@@ -68,13 +68,80 @@ pub struct CompressedAdj {
     /// summed to form that gauge's prediction. Which reaches those are depends
     /// on `params.ddr_match` — see `compress` step 5:
     ///
-    /// * `ddr_match: false` (physically correct) — the single-element
-    ///   `[gauge_compressed[g]]`: the gauge's OWN reach. The MC solve there
-    ///   already integrates the whole upstream network plus that reach's own
-    ///   lateral inflow.
+    /// * `ddr_match: false` (physically correct) — a single element: the
+    ///   gauge's OWN reach, at its outlet piece. The MC solve there already
+    ///   integrates the whole upstream network plus that reach's own lateral
+    ///   inflow. Without subdivision that is `gauge_compressed[g]` itself.
     /// * `ddr_match: true` (DDR-faithful default) — the gauge's UPSTREAM
     ///   neighbours, which omit the gauge reach's own local drainage.
     pub outflow_idx: Vec<Vec<usize>>,
+    /// Reach-subdivision parent map in **compressed** space, length
+    /// `n_parent_active + 1`: compressed rows
+    /// `[parent_offset[p], parent_offset[p + 1])` are the sub-reach pieces of
+    /// the `p`-th parent present in this batch. Feeds
+    /// `SparseAdjacency::parent_offset`, which the engine turns into the
+    /// per-row lateral-inflow divisor.
+    ///
+    /// `None` when the caller passed no CONUS parent map. Identity
+    /// (`0..=n_active`) when the store is not subdivided — the engine treats
+    /// both alike and skips the split.
+    pub parent_offset: Option<Vec<i32>>,
+}
+
+/// Parent index owning sub-reach row `row`. `parent_offset` is strictly
+/// increasing, so the owner is the last offset that is `<= row`.
+#[inline]
+fn parent_of_row(parent_offset: &[i32], row: usize) -> usize {
+    parent_offset.partition_point(|&o| o <= row as i32) - 1
+}
+
+/// Re-express a CONUS-space `parent_offset` in compressed space.
+///
+/// `active` is the sorted list of CONUS sub-reach positions this batch kept.
+/// A parent's pieces occupy a contiguous ascending run of CONUS rows, and a
+/// gauge subgraph always enters a parent at its outlet and then walks the
+/// internal chain upstream — so every parent present in `active` must be
+/// present *in full*, as an unbroken run. That is asserted here rather than
+/// assumed: a partially-present parent would hand the engine a piece count
+/// `m` smaller than the one the piece lengths were derived from (silently
+/// creating mass) and would move the parent's outlet row.
+fn compressed_parent_offset(
+    active: &[usize],
+    conus_parent_offset: &[i32],
+) -> Result<Vec<i32>> {
+    let n_rows = *conus_parent_offset.last().unwrap_or(&0);
+    let mut offsets: Vec<i32> = vec![0];
+    let mut i = 0usize;
+    while i < active.len() {
+        let row = active[i];
+        if row as i32 >= n_rows {
+            return Err(DataError::Malformed {
+                path: PathBuf::from("<collate>"),
+                message: format!(
+                    "compress: CONUS row {row} is outside the parent map \
+                     (which covers {n_rows} rows)"
+                ),
+            });
+        }
+        let p = parent_of_row(conus_parent_offset, row);
+        let lo = conus_parent_offset[p] as usize;
+        let hi = conus_parent_offset[p + 1] as usize;
+        let m = hi - lo;
+        if active.len() - i < m || (0..m).any(|k| active[i + k] != lo + k) {
+            return Err(DataError::Malformed {
+                path: PathBuf::from("<collate>"),
+                message: format!(
+                    "compress: parent {p} owns CONUS rows {lo}..{hi}, but the active \
+                     set does not hold them contiguously from compressed row {i} — a \
+                     partial sub-reach chain would mis-scale lateral inflow and move \
+                     the gauge outlet"
+                ),
+            });
+        }
+        i += m;
+        offsets.push(i as i32);
+    }
+    Ok(offsets)
 }
 
 /// Compress a unioned COO into dense compressed-position space, preserving
@@ -87,10 +154,18 @@ pub struct CompressedAdj {
 /// `ddr_match` selects the `outflow_idx` convention (see step 5): `true`
 /// reproduces DDR's `merit.py:226-234` bit-for-bit, `false` uses the
 /// physically correct gauge-reach index. Comes from `params.ddr_match`.
+///
+/// `conus_parent_offset` is `ConusAdjacencyStore::parent_offset` — the
+/// reach-subdivision map in CONUS sub-reach space. Pass it whenever it is
+/// available (it is the identity `0..=n` on un-subdivided stores, which costs
+/// nothing); `None` disables both the compressed parent map and the
+/// outlet-piece resolution below, which is what the pure-topology unit tests
+/// want.
 pub fn compress(
     unioned: &UnionedCoo,
     conus_order: &[Comid],
     ddr_match: bool,
+    conus_parent_offset: Option<&[i32]>,
 ) -> Result<CompressedAdj> {
     use std::collections::BTreeSet;
 
@@ -143,15 +218,39 @@ pub fn compress(
     let gauge_compressed: Vec<usize> =
         unioned.gauges.iter().map(|(_, g, _)| mapping[g]).collect();
 
+    // 4b. Reach-subdivision parent map, re-expressed in compressed space.
+    let parent_offset: Option<Vec<i32>> = match conus_parent_offset {
+        Some(off) => Some(compressed_parent_offset(&active_vec, off)?),
+        None => None,
+    };
+
     // 5. outflow_idx — which reaches are summed to form a gauge's prediction.
     //
-    // `ddr_match: false` (CORRECT) — the gauge's OWN compressed index.
+    // `ddr_match: false` (CORRECT) — the gauge's OWN reach, read at the
+    // OUTLET piece of that reach.
     // A USGS gauge measures every drop of drainage above it, including the
     // lateral inflow of the reach the gauge sits on, and we do not know where
     // along that reach the gauge physically sits. The Muskingum-Cunge solve at
     // the gauge reach already accumulates all upstream contributions plus its
     // own `q_prime` by mass conservation, so the gauge's prediction is that
     // ONE reach's routed discharge.
+    //
+    // Under reach subdivision that reach spans several rows. The solve is
+    // mass-conserving down the internal chain, so the whole reach's runoff —
+    // upstream network plus its own lateral inflow, which was split `q'/m`
+    // across the pieces — only arrives at the LAST piece,
+    // `parent_offset[p + 1] - 1`. Reading an earlier piece would drop the
+    // downstream fraction of the reach's own lateral inflow: the same class of
+    // bug as the upstream-cols defect below, in a new form.
+    //
+    // `gauge_compressed` holds COMPRESSED SUB-REACH positions, not parent
+    // indices, so the parent must be recovered from the *compressed*
+    // `parent_offset` before its outlet can be taken. (Indexing the CONUS
+    // parent map with a compressed row is a category error — the compression
+    // renumbers rows.) In practice `outlet == gauge_compressed[g]` already,
+    // because the gauge subgraph builder resolves a gauge COMID to its last
+    // matching row (`cache.rs::resolve_or_build`); deriving it here keeps the
+    // guarantee local instead of resting on that builder detail.
     //
     // `ddr_match: true` (DEFAULT, DDR-FAITHFUL) — the gauge's UPSTREAM
     // neighbours. Reproduces DDR's `_collate_gages`
@@ -194,7 +293,16 @@ pub fn compress(
             })
             .collect()
     } else {
-        gauge_compressed.iter().map(|&g_comp| vec![g_comp]).collect()
+        match &parent_offset {
+            Some(off) => gauge_compressed
+                .iter()
+                .map(|&g_comp| {
+                    let p = parent_of_row(off, g_comp);
+                    vec![off[p + 1] as usize - 1]
+                })
+                .collect(),
+            None => gauge_compressed.iter().map(|&g_comp| vec![g_comp]).collect(),
+        }
     };
 
     Ok(CompressedAdj {
@@ -203,6 +311,7 @@ pub fn compress(
         cols,
         gauge_compressed,
         outflow_idx,
+        parent_offset,
     })
 }
 
@@ -351,7 +460,7 @@ mod tests {
                 (Staid::new("0000000B"), 3, "comid400".to_string()),
             ],
         };
-        let c = compress(&unioned, &conus_order, true).expect("compress");
+        let c = compress(&unioned, &conus_order, true, None).expect("compress");
         // Active = {0, 1, 2, 3, 4} → all 5. Compressed positions match.
         assert_eq!(c.divide_comids, conus_order);
         assert_eq!(c.rows, vec![2, 3, 4, 4]);
@@ -374,7 +483,7 @@ mod tests {
             edges: vec![(9, 7), (9, 5), (7, 2)],
             gauges: vec![(Staid::new("0000000A"), 9, "comid900".to_string())],
         };
-        let c = compress(&unioned, &conus_order, true).expect("compress");
+        let c = compress(&unioned, &conus_order, true, None).expect("compress");
         assert_eq!(c.divide_comids, vec![Comid(200), Comid(500), Comid(700), Comid(900)]);
         // Edges in compressed space: (3,2), (3,1), (2,0). Same order as input edges,
         // but mapped through the compressed index space.
@@ -394,7 +503,7 @@ mod tests {
             edges: vec![(0, 1)],
             gauges: vec![(Staid::new("0000000A"), 0, "x".to_string())],
         };
-        let err = compress(&unioned, &conus_order, true).unwrap_err();
+        let err = compress(&unioned, &conus_order, true, None).unwrap_err();
         match err {
             crate::data::error::DataError::Malformed { .. } => {}
             other => panic!("expected Malformed, got {other:?}"),
@@ -408,7 +517,7 @@ mod tests {
             edges: vec![],
             gauges: vec![],
         };
-        let err = compress(&unioned, &conus_order, true).unwrap_err();
+        let err = compress(&unioned, &conus_order, true, None).unwrap_err();
         match err {
             crate::data::error::DataError::Malformed { .. } => {}
             other => panic!("expected Malformed, got {other:?}"),
@@ -436,7 +545,7 @@ mod tests {
             gauges: vec![(Staid::new("01457000"), 2, "73005764".to_string())],
         };
 
-        let corrected = compress(&unioned, &conus_order, false).expect("compress");
+        let corrected = compress(&unioned, &conus_order, false, None).expect("compress");
         assert_eq!(corrected.gauge_compressed, vec![2]);
         assert_eq!(
             corrected.outflow_idx[0],
@@ -446,7 +555,7 @@ mod tests {
         );
 
         // And the DDR-faithful path is preserved byte-for-byte under the flag.
-        let ddr = compress(&unioned, &conus_order, true).expect("compress");
+        let ddr = compress(&unioned, &conus_order, true, None).expect("compress");
         assert_eq!(ddr.gauge_compressed, vec![2]);
         assert_eq!(
             ddr.outflow_idx[0],
@@ -467,12 +576,105 @@ mod tests {
             edges: vec![],
             gauges: vec![(Staid::new("0000000A"), 2, "comid2".to_string())],
         };
-        let ddr = compress(&unioned, &conus_order, true).expect("compress");
+        let ddr = compress(&unioned, &conus_order, true, None).expect("compress");
         assert_eq!(ddr.gauge_compressed, vec![0]);
         assert_eq!(ddr.outflow_idx[0], vec![0], "self-edge fallback");
 
-        let corrected = compress(&unioned, &conus_order, false).expect("compress");
+        let corrected = compress(&unioned, &conus_order, false, None).expect("compress");
         assert_eq!(corrected.outflow_idx[0], vec![0]);
+    }
+
+    /// Subdivided CONUS space: parents 0 and 1 are single-piece headwaters,
+    /// parent 2 (the gauge reach) is split 4 ways into rows 2..6.
+    ///
+    ///     0 ─┐
+    ///        ├─> 2 → 3 → 4 → 5   (gauge reach, outlet = 5)
+    ///     1 ─┘
+    fn subdivided_gauge_reach() -> (Vec<Comid>, Vec<i32>, UnionedCoo) {
+        let conus_order = vec![
+            Comid(73006562),
+            Comid(73006585),
+            Comid(73005764),
+            Comid(73005764),
+            Comid(73005764),
+            Comid(73005764),
+        ];
+        let conus_parent_offset = vec![0, 1, 2, 6];
+        let unioned = UnionedCoo {
+            // Two external edges onto the gauge reach's INLET piece, plus the
+            // internal chain 2→3→4→5.
+            edges: vec![(2, 0), (2, 1), (3, 2), (4, 3), (5, 4)],
+            // The subgraph builder resolves a gauge COMID to its parent's last
+            // row, so `gage_idx` is already the outlet piece.
+            gauges: vec![(Staid::new("01457000"), 5, "73005764".to_string())],
+        };
+        (conus_order, conus_parent_offset, unioned)
+    }
+
+    #[test]
+    fn compressed_parent_offset_is_the_conus_map_renumbered() {
+        let (order, off, unioned) = subdivided_gauge_reach();
+        let c = compress(&unioned, &order, false, Some(&off)).expect("compress");
+        // Active set is all 6 rows here, so compression is the identity and the
+        // compressed map equals the CONUS map. What matters is the CONTRACT:
+        // the map is expressed in the same space as `rows`/`cols`.
+        assert_eq!(c.parent_offset, Some(vec![0, 1, 2, 6]));
+        assert_eq!(c.divide_comids.len(), 6);
+    }
+
+    #[test]
+    fn outflow_idx_reads_the_outlet_piece_of_a_subdivided_gauge_reach() {
+        let (order, off, unioned) = subdivided_gauge_reach();
+        let c = compress(&unioned, &order, false, Some(&off)).expect("compress");
+        assert_eq!(c.gauge_compressed, vec![5]);
+        assert_eq!(
+            c.outflow_idx[0],
+            vec![5],
+            "the gauge's whole reach discharges at its LAST piece (compressed row \
+             `parent_offset[p + 1] - 1` = 5); pieces 2, 3, 4 each omit part of the \
+             reach's own lateral inflow"
+        );
+    }
+
+    #[test]
+    fn compress_rejects_a_partial_sub_reach_chain() {
+        // Every edge touching row 2 is gone, so the gauge reach's inlet piece
+        // is missing from the active set. The parent's chain is then only 3 of
+        // its 4 rows — the engine would divide q' by 3 while the lengths were
+        // cut for 4, creating mass. That must be an error, not a silent pass.
+        let (order, off, _) = subdivided_gauge_reach();
+        let unioned = UnionedCoo {
+            edges: vec![(4, 3), (5, 4)],
+            gauges: vec![(Staid::new("01457000"), 5, "73005764".to_string())],
+        };
+        let err = compress(&unioned, &order, false, Some(&off)).unwrap_err();
+        match err {
+            crate::data::error::DataError::Malformed { message, .. } => {
+                assert!(
+                    message.contains("contiguously"),
+                    "expected a partial-chain diagnostic, got: {message}"
+                );
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identity_parent_offset_leaves_outflow_idx_at_the_gauge_reach() {
+        // Un-subdivided store: `parent_offset` is `0..=n`, so every parent owns
+        // exactly one row and the outlet resolution must be a no-op.
+        let conus_order = vec![Comid(73006562), Comid(73006585), Comid(73005764)];
+        let unioned = UnionedCoo {
+            edges: vec![(2, 0), (2, 1)],
+            gauges: vec![(Staid::new("01457000"), 2, "73005764".to_string())],
+        };
+        let identity: Vec<i32> = vec![0, 1, 2, 3];
+        let c = compress(&unioned, &conus_order, false, Some(&identity)).expect("compress");
+        assert_eq!(c.parent_offset, Some(vec![0, 1, 2, 3]));
+        assert_eq!(c.outflow_idx[0], vec![2]);
+        // Byte-identical to passing no map at all.
+        let bare = compress(&unioned, &conus_order, false, None).expect("compress");
+        assert_eq!(c.outflow_idx, bare.outflow_idx);
     }
 
     use crate::data::store::{GageMetadata, GageRow};

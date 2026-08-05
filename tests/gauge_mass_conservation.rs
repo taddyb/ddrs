@@ -41,6 +41,8 @@ use ddrs::training::forward::scatter_add_by_group;
 type I = NdArray<f32>;
 type AB = Autodiff<I>;
 
+/// Parent (MERIT) reaches in the fixture network. The *row* count grows when
+/// the gauge reach is subdivided, but the mass balance is set by this.
 const N: usize = 3;
 /// Long enough for a 1 km / 0.1%-slope network at the configured dt to settle.
 const T: usize = 64;
@@ -65,43 +67,87 @@ fn mock_cfg(ddr_match: bool) -> Config {
     cfg
 }
 
-/// Two headwaters (0, 1) → gauge reach (2). Lower-triangular, topological.
-fn confluence_sparse() -> SparseAdjacency {
-    let mut dense = vec![0.0_f32; N * N];
-    dense[2 * N] = 1.0; // adj[2, 0]
-    dense[2 * N + 1] = 1.0; // adj[2, 1]
-    SparseAdjacency::from_dense(N, &dense, vec![1000.0; N], vec![0.001; N])
+/// Two headwaters (0, 1) → gauge reach (2), with the gauge reach split into
+/// `pieces` sub-reaches chained in series (reach subdivision, Task 3):
+///
+/// ```text
+///   0 ─┐
+///      ├─> 2 → 3 → … → (1 + pieces)     (gauge reach; outlet is the last)
+///   1 ─┘
+/// ```
+///
+/// Total gauge-reach length is held at 1000 m regardless of `pieces`, so the
+/// steady state is unchanged — the physics is identical, only the discretization
+/// differs. Returns the adjacency plus its CONUS-space `parent_offset`.
+fn confluence_sparse(pieces: usize) -> (SparseAdjacency, Vec<i32>) {
+    assert!(pieces >= 1);
+    let n = 2 + pieces;
+    let mut rows: Vec<i32> = vec![2, 2];
+    let mut cols: Vec<i32> = vec![0, 1];
+    for k in 1..pieces {
+        cols.push((2 + k - 1) as i32);
+        rows.push((2 + k) as i32);
+    }
+    let piece_len = 1000.0 / pieces as f32;
+    let mut length_m = vec![1000.0_f32; 2];
+    length_m.extend(std::iter::repeat_n(piece_len, pieces));
+    let parent_offset: Vec<i32> = vec![0, 1, 2, n as i32];
+    let adj = SparseAdjacency {
+        n,
+        values: vec![1.0; rows.len()],
+        rows,
+        cols,
+        length_m,
+        slope: vec![0.001; n],
+        parent_offset: Some(parent_offset.clone()),
+    };
+    (adj, parent_offset)
 }
 
 /// Run `collate::compress` over the same topology to get `outflow_idx` from
 /// the REAL production code path (not a hand-rolled copy).
-fn outflow_idx_from_collate(ddr_match: bool) -> Vec<Vec<usize>> {
-    let conus_order = vec![Comid(73006562), Comid(73006585), Comid(73005764)];
+fn outflow_idx_from_collate(ddr_match: bool, pieces: usize) -> Vec<Vec<usize>> {
+    let gauge_comid = Comid(73005764);
+    let mut conus_order = vec![Comid(73006562), Comid(73006585)];
+    conus_order.extend(std::iter::repeat_n(gauge_comid, pieces));
+    let (adj, parent_offset) = confluence_sparse(pieces);
+    let edges: Vec<(usize, usize)> = adj
+        .rows
+        .iter()
+        .zip(adj.cols.iter())
+        .map(|(&r, &c)| (r as usize, c as usize))
+        .collect();
+    // The subgraph builder resolves a gauge COMID to its parent's LAST row, so
+    // `gage_idx` is the outlet piece (`cache.rs::resolve_or_build`).
     let unioned = UnionedCoo {
-        edges: vec![(2, 0), (2, 1)],
-        gauges: vec![(Staid::new("01457000"), 2, "73005764".to_string())],
+        edges,
+        gauges: vec![(Staid::new("01457000"), adj.n - 1, "73005764".to_string())],
     };
-    compress(&unioned, &conus_order, ddr_match)
+    compress(&unioned, &conus_order, ddr_match, Some(&parent_offset))
         .expect("compress")
         .outflow_idx
 }
 
 /// Route the network to steady state and extract the gauge series exactly as
 /// training does. Returns `(gauge_series, all_reach_discharge_row_major_NxT)`.
-fn route_and_extract(ddr_match: bool) -> (Vec<f32>, Vec<f32>) {
+fn route_and_extract(ddr_match: bool, pieces: usize) -> (Vec<f32>, Vec<f32>) {
     let cfg = mock_cfg(ddr_match);
     let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let (adjacency, _) = confluence_sparse(pieces);
+    let n = adjacency.n;
 
-    // Constant q_prime everywhere, shape (T, N).
+    // Constant q_prime on every ROW — exactly what `StreamflowStore::read_window`
+    // hands back, since every piece of a parent carries the parent's COMID. The
+    // engine is what divides by the piece count (`mmc.rs`, Task 5).
     let q_prime: Tensor<AB, 2> =
-        Tensor::from_data(TensorData::new(vec![Q_PRIME; T * N], [T, N]), &device);
+        Tensor::from_data(TensorData::new(vec![Q_PRIME; T * n], [T, n]), &device);
 
     // Mid-range normalized params → n ≈ 0.055, q_spatial ≈ 0.5, p_spatial ≈ 100.
-    let mk = |v: f32| -> Tensor<AB, 1> { Tensor::from_floats([v; N], &device) };
+    let mk = |v: f32| -> Tensor<AB, 1> { Tensor::from_floats(vec![v; n].as_slice(), &device) };
     let mut engine = MuskingumCunge::<I>::new(cfg, device.clone());
     engine.setup_inputs(
         RoutingInputs {
-            adjacency: confluence_sparse(),
+            adjacency,
             x_storage: mk(0.3),
         },
         q_prime,
@@ -121,7 +167,7 @@ fn route_and_extract(ddr_match: bool) -> (Vec<f32>, Vec<f32>) {
     // (N, T) routed discharge.
     let runoff: Tensor<I, 2> = engine.forward().inner();
 
-    let outflow_idx = outflow_idx_from_collate(ddr_match);
+    let outflow_idx = outflow_idx_from_collate(ddr_match, pieces);
     let flat: Vec<i32> = outflow_idx[0].iter().map(|&c| c as i32).collect();
     let groups: Vec<i32> = vec![0; flat.len()];
     let flat_t: Tensor<I, 1, Int> =
@@ -144,7 +190,7 @@ const EXPECTED: f32 = Q_PRIME * N as f32; // 30.0
 
 #[test]
 fn gauge_prediction_conserves_mass_when_not_ddr_match() {
-    let (series, all) = route_and_extract(false);
+    let (series, all) = route_and_extract(false, 1);
     let final_q = series[T - 1];
     println!(
         "ddr_match=false: gauge={final_q:.4} m3/s  expected={EXPECTED:.4}  \
@@ -180,7 +226,7 @@ fn ddr_match_gauge_prediction_omits_the_gauge_reach() {
     // the mass check above actually discriminates between the two conventions.
     // Summing the two headwaters yields 2/3 of the network's lateral inflow;
     // the gauge reach's own 10 m³/s is silently dropped.
-    let (series, all) = route_and_extract(true);
+    let (series, all) = route_and_extract(true, 1);
     let final_q = series[T - 1];
     let ddr_expected = Q_PRIME * (N as f32 - 1.0); // 20.0
     println!(
@@ -206,4 +252,58 @@ fn ddr_match_gauge_prediction_omits_the_gauge_reach() {
         "gauge reach discharge {reach2_final} should still conserve mass \
          ({EXPECTED}); the defect is in extraction, not routing"
     );
+}
+
+/// Steady-state gauge discharge with the gauge's own reach split `pieces` ways.
+fn gauge_steady_state(pieces: usize) -> f32 {
+    route_and_extract(false, pieces).0[T - 1]
+}
+
+#[test]
+fn gauge_conserves_mass_when_its_reach_is_subdivided() {
+    // Same topology as `gauge_prediction_conserves_mass_when_not_ddr_match`,
+    // but the gauge's own reach is split 4 ways. The answer must not change:
+    // the MC solve is mass-conserving down the internal chain, so the whole
+    // reach's runoff — upstream network plus its own `q'`, split `q'/4` across
+    // the pieces — arrives at the LAST piece.
+    let un_split = gauge_steady_state(1);
+    let split = gauge_steady_state(4);
+    println!(
+        "subdivision: 1 piece = {un_split:.6} m3/s   4 pieces = {split:.6} m3/s   \
+         expected = {EXPECTED:.6}"
+    );
+    assert!((un_split - EXPECTED).abs() < 1e-3, "control changed: {un_split}");
+    assert!(
+        (split - EXPECTED).abs() < 1e-3,
+        "subdivided gauge lost mass: got {split}, expected {EXPECTED}. Reading \
+         any piece other than the outlet drops the downstream fraction of the \
+         gauge reach's own lateral inflow — the inlet piece carries only \
+         {:.1} m3/s here.",
+        Q_PRIME * (N as f32 - 1.0) + Q_PRIME / 4.0,
+    );
+}
+
+#[test]
+fn subdivided_interior_pieces_carry_less_than_the_outlet() {
+    // Proves the test above actually discriminates: the four pieces of the
+    // gauge reach form a strictly increasing ramp (22.5, 25.0, 27.5, 30.0), so
+    // pointing `outflow_idx` at anything but the last piece is detectable.
+    let (_, all) = route_and_extract(false, 4);
+    let n = 2 + 4;
+    let piece_q: Vec<f32> = (2..n).map(|r| all[r * T + (T - 1)]).collect();
+    println!("gauge-reach pieces at steady state: {piece_q:?}");
+    for w in piece_q.windows(2) {
+        assert!(
+            w[1] > w[0] + 1e-3,
+            "pieces must accumulate downstream, got {piece_q:?}"
+        );
+    }
+    let expected_inlet = Q_PRIME * (N as f32 - 1.0) + Q_PRIME / 4.0; // 22.5
+    assert!(
+        (piece_q[0] - expected_inlet).abs() < 1e-2,
+        "inlet piece {} != {expected_inlet} (two headwaters + one quarter of \
+         the gauge reach's own lateral inflow)",
+        piece_q[0]
+    );
+    assert!((piece_q[3] - EXPECTED).abs() < 1e-2, "outlet {} != {EXPECTED}", piece_q[3]);
 }

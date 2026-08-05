@@ -623,7 +623,12 @@ impl MeritGagesDataset {
         let gauge_staids: Vec<Staid> =
             unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
 
-        let compressed = compress(&unioned, &self.conus.order, self.ddr_match)?;
+        let compressed = compress(
+            &unioned,
+            &self.conus.order,
+            self.ddr_match,
+            Some(&self.conus.parent_offset),
+        )?;
         let n = compressed.divide_comids.len();
 
         // ----- 2. SparseAdjacency: rows/cols + length/slope sliced -----
@@ -645,10 +650,10 @@ impl MeritGagesDataset {
             values,
             length_m,
             slope,
-            // `compress` works in parent space: one row per COMID, so there is
-            // no sub-reach map to carry and the engine's lateral-inflow split
-            // is a no-op.
-            parent_offset: None,
+            // Reach-subdivision map in compressed space. Identity (hence a
+            // no-op split) unless the store was built with
+            // `params.subdivision.enabled`.
+            parent_offset: compressed.parent_offset.clone(),
         };
 
         // ----- 3. flow_scale + q_prime read & fuse -----
@@ -1010,7 +1015,12 @@ impl MeritGagesDataset {
         }
         let gauge_staids: Vec<Staid> =
             unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
-        let compressed = compress(&unioned, &self.conus.order, self.ddr_match)?;
+        let compressed = compress(
+            &unioned,
+            &self.conus.order,
+            self.ddr_match,
+            Some(&self.conus.parent_offset),
+        )?;
         let n = compressed.divide_comids.len();
 
         // 2. SparseAdjacency.
@@ -1032,10 +1042,10 @@ impl MeritGagesDataset {
             values,
             length_m,
             slope,
-            // `compress` works in parent space: one row per COMID, so there is
-            // no sub-reach map to carry and the engine's lateral-inflow split
-            // is a no-op.
-            parent_offset: None,
+            // Reach-subdivision map in compressed space. Identity (hence a
+            // no-op split) unless the store was built with
+            // `params.subdivision.enabled`.
+            parent_offset: compressed.parent_offset.clone(),
         };
 
         // 3. flow_scale.

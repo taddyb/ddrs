@@ -169,7 +169,7 @@ fn layer_b_step1_subgraph_adjacency_matches_ddr() {
     let unioned = ddrs::data::collate::union_subgraphs(&[staid.clone()], &gages);
     // `ddr_match: true` — this test compares against a DDR-generated fixture,
     // so it must use DDR's `outflow_idx` convention.
-    let compressed = ddrs::data::collate::compress(&unioned, &conus.order, true)
+    let compressed = ddrs::data::collate::compress(&unioned, &conus.order, true, None)
         .expect("compress failed");
 
     // Convert divide_comids to i64 for comparison.
