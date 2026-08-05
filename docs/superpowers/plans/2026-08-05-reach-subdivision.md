@@ -864,12 +864,16 @@ otherwise synthesize the identity (`parent_order = order`,
 In `src/adjacency/cache.rs`, extend `content_key` (`cache.rs:316-329`) to hash the
 two subdivision fields after `BUILDER_VERSION`, and bump `BUILDER_VERSION` by 1:
 
-**Hash ALL SIX fields, not just `enabled` + `max_pieces`.** Every one of
-`reference_n`, `reference_discharge_coefficient`, `reference_discharge_exponent`
-and `min_length_fraction` changes the reference celerity → `dx_target` → both
-`pieces` and the clamped `length_m`, i.e. it changes the built graph. Hashing only
-two of them would silently reuse a stale cached adjacency after an edit to any of
-the other four.
+**Hash ALL SEVEN fields, not just `enabled` + `max_pieces`.** Every one of
+`reference_n`, `reference_discharge_coefficient`, `reference_discharge_exponent`,
+`min_length_fraction` and `max_clamp_factor` changes the reference celerity →
+`dx_target` → both `pieces` and the clamped `length_m`, i.e. it changes the built
+graph. Hashing only two of them would silently reuse a stale cached adjacency
+after an edit to any of the others.
+
+> `max_clamp_factor` was added after this plan was first written (commit
+> `2a06c0f`), so hash it too — the field list to hash is exactly the field list
+> of `Subdivision`.
 
 ```rust
 // `content_key` takes `s: &Subdivision` as a new parameter (thread it from the
@@ -882,14 +886,25 @@ h.update(s.reference_n.to_bits().to_le_bytes().as_ref());
 h.update(s.reference_discharge_coefficient.to_bits().to_le_bytes().as_ref());
 h.update(s.reference_discharge_exponent.to_bits().to_le_bytes().as_ref());
 h.update(s.min_length_fraction.to_bits().to_le_bytes().as_ref());
+h.update(s.max_clamp_factor.to_bits().to_le_bytes().as_ref());
 ```
 
 Expose `content_key_for_test` as `#[doc(hidden)] pub` so the test can call it.
 
-In `src/adjacency/build.rs`, call `plan_reaches` + `subdivide` after
-`build_conus_adjacency` and **before** gauge-subgraph construction, so subgraphs are
-cut from the expanded graph. Drainage area comes from the attributes NetCDF
-(`catchsize`); thread it in as a `&[f32]` aligned to `order`.
+Call `plan_reaches` + `subdivide` after `build_conus_adjacency` and **before**
+gauge-subgraph construction, so subgraphs are cut from the expanded graph. The
+sequencing lives in `cache.rs::resolve_or_build`, not `build.rs`.
+
+> **`catchsize` is NOT drainage area.** It is the *local* divide area — median
+> 36.7 km², max ~612 km² even for continental rivers — whereas
+> `reference_celerity` wants upstream accumulated area `uparea_km2`. Passing it
+> raw under-feeds `Q_ref` by 3–4 orders of magnitude on large rivers. Accumulate
+> it downstream over the topological order
+> (`cache.rs::upstream_area_km2`). Validated: the accumulated value reproduces
+> the fabric's own `10^log10_uparea` at ratio p5/p50/p95 = 1.000/1.000/1.000 over
+> all 346,321 CONUS reaches. `log10_uparea` cannot be used directly as the
+> source — it is NaN on 88 % of `merit_global_attributes_v2.nc` (finite only over
+> CONUS).
 
 - [ ] **Step 4: Verify** — `cargo test --test subdivide` → PASS.
 
@@ -1168,6 +1183,18 @@ max 48,597×, +17.1 % total length — but those used a crude reference celerity
 `min_length_fraction` is reduced or disabled, that population returns. Record the
 actual residual `frac c1 < 0` / `frac c3 < 0` — do **not** claim a guarantee the
 measurement does not support.
+
+- [ ] **Step 4b: Decide the hotstart question (carried from Task 5)**
+
+`setup_inputs` cold-starts with `(I − N)·Q₀ = q'₀` using the **undivided** `q_prime`
+row 0 (`mmc.rs:~300`). Task 5 scoped the division to `forward` only, so under
+subdivision the initial condition is inflated roughly `m×` per reach. Steady state
+is unaffected (measured: 10.000000 vs 10.000001 m³/s), but the spin-up is longer.
+
+Measure it: run the probe with subdivision on, and compare the first ~200 timesteps
+against a long-run steady state to see how many steps the inflated Q₀ takes to wash
+out. If it exceeds the configured `warmup`, divide the hotstart too — ~3 lines,
+touching only the subdivided path. Record the decision either way.
 
 - [ ] **Step 5: Run the full gate set**
 
