@@ -645,6 +645,10 @@ impl MeritGagesDataset {
             values,
             length_m,
             slope,
+            // `compress` works in parent space: one row per COMID, so there is
+            // no sub-reach map to carry and the engine's lateral-inflow split
+            // is a no-op.
+            parent_offset: None,
         };
 
         // ----- 3. flow_scale + q_prime read & fuse -----
@@ -1028,6 +1032,10 @@ impl MeritGagesDataset {
             values,
             length_m,
             slope,
+            // `compress` works in parent space: one row per COMID, so there is
+            // no sub-reach map to carry and the engine's lateral-inflow split
+            // is a no-op.
+            parent_offset: None,
         };
 
         // 3. flow_scale.

@@ -32,6 +32,34 @@ use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAd
 /// Hardcoded routing timestep in seconds. Matches `self.t` in `mmc.py:192`.
 pub const DT_SECONDS: f32 = 3600.0;
 
+/// Per-row lateral-inflow divisor from a `parent_offset` map: every row owned
+/// by parent `p` gets `m_p = parent_offset[p + 1] - parent_offset[p]`, the
+/// number of sub-reach pieces the parent was split into.
+///
+/// Returns `None` when no parent owns more than one row — the network is not
+/// subdivided, every divisor would be `1.0`, and the caller can skip the
+/// division entirely instead of emitting a no-op tensor op.
+fn pieces_per_row_divisor(parent_offset: &[i32], n: usize) -> Option<Vec<f32>> {
+    let mut divisor = Vec::with_capacity(n);
+    let mut subdivided = false;
+    for w in parent_offset.windows(2) {
+        let m = w[1] - w[0];
+        assert!(
+            m >= 1,
+            "parent_offset must be strictly increasing; parent owns {m} rows"
+        );
+        subdivided |= m > 1;
+        divisor.extend(std::iter::repeat_n(m as f32, m as usize));
+    }
+    assert_eq!(
+        divisor.len(),
+        n,
+        "parent_offset covers {} sub-reach rows but the network has {n}",
+        divisor.len()
+    );
+    subdivided.then_some(divisor)
+}
+
 /// Static channel attributes and topology for a network.
 ///
 /// Adjacency, channel length, and slope come bundled inside `SparseAdjacency`
@@ -93,6 +121,12 @@ pub struct MuskingumCunge<I: Backend> {
     assembler: Option<AValuesAssembler<I>>,
 
     q_prime: Option<Tensor<Autodiff<I>, 2>>,
+    /// Per-row lateral-inflow divisor `[n]`: the piece count of each row's
+    /// parent reach, from `SparseAdjacency::parent_offset`. Built once at
+    /// `setup_inputs`; `None` when the network is not subdivided (every
+    /// divisor would be `1.0`), so the un-subdivided path skips the op and
+    /// stays byte-identical.
+    pieces_per_row: Option<Tensor<Autodiff<I>, 1>>,
     discharge_t: Option<Tensor<Autodiff<I>, 1>>,
 
     /// Eval-time zeta accumulation (leakance diagnostics). Off by default;
@@ -161,6 +195,7 @@ impl<I: Backend> MuskingumCunge<I> {
             pattern: None,
             assembler: None,
             q_prime: None,
+            pieces_per_row: None,
             discharge_t: None,
             collect_zeta: false,
             track_negative_discharge: false,
@@ -211,6 +246,16 @@ impl<I: Backend> MuskingumCunge<I> {
             &self.device,
         )
         .clamp_min(slope_min);
+
+        // Per-row lateral-inflow divisor, built once here rather than per
+        // timestep. A reach split into `m` pieces of length `L/m` gives each
+        // piece `q'/m` (see `forward`).
+        self.pieces_per_row = inputs
+            .adjacency
+            .parent_offset
+            .as_deref()
+            .and_then(|off| pieces_per_row_divisor(off, n))
+            .map(|d| Tensor::<Autodiff<I>, 1>::from_floats(d.as_slice(), &self.device));
 
         // Build CSR pattern + assembler constants directly from COO (O(nnz)).
         let pattern = Arc::new(CsrPattern::from_sparse(&inputs.adjacency));
@@ -451,6 +496,22 @@ impl<I: Backend> MuskingumCunge<I> {
         let discharge_lb = self.cfg.params.attribute_minimums.discharge;
         // Clamp once (single op + single tape node) instead of T times in-loop.
         let q_prime_clamped = q_prime.clamp_min(discharge_lb);
+        // Split lateral inflow evenly along a subdivided reach: a piece of
+        // length `L/m` receives `q'/m`. This is HEC-HMS's own treatment — its
+        // lateral term is `C4·(q_L·Δx)` with `q_L` an inflow per unit length —
+        // and it conserves each parent reach's total `q'` exactly, because the
+        // pieces chain in series so the outlet piece still carries the whole
+        // reach's runoff.
+        //
+        // MUST stay AFTER the clamp above. Clamping first applies the
+        // `discharge_lb` floor once, to the parent's inflow; dividing first
+        // would floor each of the `m` pieces independently, so a dry reach
+        // would inject `m · discharge_lb` instead of `discharge_lb` — mass
+        // created in proportion to the piece count.
+        let q_prime_clamped = match self.pieces_per_row.as_ref() {
+            Some(d) => q_prime_clamped / d.clone().unsqueeze_dim::<2>(0),
+            None => q_prime_clamped,
+        };
         let initial = self
             .discharge_t
             .as_ref()

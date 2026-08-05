@@ -190,6 +190,7 @@ fn adjacency_from_fixture(conus: &ConusAdjacencyStore) -> SparseAdjacency {
         values,
         length_m,
         slope,
+        parent_offset: None,
     }
 }
 

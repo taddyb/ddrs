@@ -132,6 +132,7 @@ fn adjacency_from_fixture(
         values,
         length_m,
         slope,
+        parent_offset: None,
     }
 }
 
