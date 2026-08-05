@@ -638,3 +638,109 @@ fn real_pre_subdivision_conus_store_still_loads() {
     assert_eq!(store.index.position(&probe), Some(12_345));
     assert_eq!(store.outlet_row(12_345), 12_345);
 }
+
+// ── the silent-inertness guard ───────────────────────────────────────────────
+//
+// `cli::plan::resolve_adjacency` only reaches the managed builder — and hence
+// `subdivide` — when `data_sources` carries NO explicit adjacency paths. With
+// them set, `params.subdivision.enabled: true` would be a silent no-op: the run
+// would route the un-split network while its manifest claimed otherwise. Config
+// load rejects that combination, EXCEPT when the store really is subdivided.
+
+/// A config with a full `data_sources` block. `adjacency` is spliced in as-is
+/// (two-space indented), so a test can supply explicit paths or a fabric.
+fn yaml_with_sources(adjacency: &str, subdivision: &str) -> String {
+    format!(
+        r#"
+mode: training
+geodataset: merit
+seed: 42
+np_seed: 42
+data_sources:
+  attributes: /tmp/attrs.nc
+  streamflow: /tmp/streamflow.ic
+  observations: /tmp/obs
+  gages: /tmp/gages.csv
+{adjacency}
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+{subdivision}"#
+    )
+}
+
+const SUBDIV_ON: &str = "  subdivision:\n    enabled: true\n";
+
+#[test]
+fn subdivision_rejects_explicit_adjacency_paths() {
+    let a = chain3();
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Written by the pre-subdivision writer: no parent map at all.
+    write_conus_store(&a, dir.path()).expect("write legacy store");
+    let adjacency = format!(
+        "  conus_adjacency: {}\n  gages_adjacency: {}\n",
+        dir.path().display(),
+        dir.path().display()
+    );
+
+    let err = try_load_cfg(&yaml_with_sources(&adjacency, SUBDIV_ON))
+        .expect_err("explicit adjacency + subdivision must be rejected");
+    assert!(
+        err.to_string().contains("SILENTLY INERT"),
+        "error must name the conflict, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("geospatial_fabric"),
+        "error must point at the remedy, got: {err}"
+    );
+}
+
+#[test]
+fn subdivision_rejects_explicit_paths_to_an_identity_parent_map() {
+    // A managed store built with subdivision OFF still carries `parent_order`,
+    // but at n_parent == n. Asking to subdivide against it is just as inert.
+    let (_store, dir) = round_trip_store(&chain3(), &[1, 1, 1]);
+    let adjacency = format!(
+        "  conus_adjacency: {}\n  gages_adjacency: {}\n",
+        dir.path().display(),
+        dir.path().display()
+    );
+    let err = try_load_cfg(&yaml_with_sources(&adjacency, SUBDIV_ON))
+        .expect_err("identity parent map is not a subdivided store");
+    assert!(err.to_string().contains("n_parent == n"), "got: {err}");
+}
+
+#[test]
+fn subdivision_accepts_an_explicit_path_to_an_already_subdivided_store() {
+    let (_store, dir) = round_trip_store(&chain3(), &[3, 2, 1]);
+    let adjacency = format!(
+        "  conus_adjacency: {}\n  gages_adjacency: {}\n",
+        dir.path().display(),
+        dir.path().display()
+    );
+    let cfg = try_load_cfg(&yaml_with_sources(&adjacency, SUBDIV_ON))
+        .expect("a genuinely subdivided store is a legitimate explicit path");
+    assert!(cfg.params.subdivision.enabled);
+}
+
+#[test]
+fn subdivision_accepts_a_fabric_only_config() {
+    let cfg = try_load_cfg(&yaml_with_sources(
+        "  geospatial_fabric: /tmp/riv.dbf\n",
+        SUBDIV_ON,
+    ))
+    .expect("fabric-only reaches the managed builder");
+    assert!(cfg.params.subdivision.enabled);
+}
+
+#[test]
+fn explicit_adjacency_paths_are_fine_when_subdivision_is_off() {
+    let cfg = try_load_cfg(&yaml_with_sources(
+        "  conus_adjacency: /tmp/does_not_exist.zarr\n  gages_adjacency: /tmp/nope.zarr\n",
+        "",
+    ))
+    .expect("the guard must only fire when subdivision is enabled");
+    assert!(!cfg.params.subdivision.enabled);
+}

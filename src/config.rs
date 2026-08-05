@@ -1043,7 +1043,56 @@ fn validate_subdivision(cfg: &Config) -> std::result::Result<(), String> {
                 .to_string(),
         );
     }
+    if s.enabled {
+        validate_subdivision_reaches_the_builder(cfg)?;
+    }
     Ok(())
+}
+
+/// Subdivision runs *inside* the managed adjacency builder
+/// (`adjacency::cache::resolve_or_build`), and `cli::plan::resolve_adjacency`
+/// only reaches that builder when `data_sources` supplies **no** explicit
+/// adjacency paths. With `conus_adjacency`/`gages_adjacency` set, the flag would
+/// be **silently inert**: no subdivision, no warning, and a run whose manifest
+/// says `subdivision.enabled: true` while the routed network is the un-split
+/// one. This repo has been bitten by that class of silent no-op before (the
+/// 2026-07-01 stale-binary disaggregation 2×2), so it is rejected at load.
+///
+/// The one legitimate combination is an explicit path to a store that was
+/// *already* built with subdivision — that graph really is split, and rebuilding
+/// it would be wasted work. `adjacency::validate::store_is_subdivided`
+/// distinguishes the two from the store's zarr metadata (`n_parent < n`) without
+/// reading any array data.
+fn validate_subdivision_reaches_the_builder(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(ds) = cfg.data_sources.as_ref() else {
+        return Ok(()); // no data_sources at all — unit-test / default configs
+    };
+    let (Some(conus), Some(_gages)) = (&ds.conus_adjacency, &ds.gages_adjacency) else {
+        return Ok(()); // managed build: the builder is reached, subdivision runs
+    };
+    match crate::adjacency::validate::store_is_subdivided(conus) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "params.subdivision: `enabled: true` conflicts with the explicit \
+             adjacency paths in `data_sources`. Subdivision only runs inside the \
+             managed adjacency builder, which is bypassed when `conus_adjacency` \
+             and `gages_adjacency` are set — so the flag would be SILENTLY INERT \
+             and the run would route the un-split network. The store at {} \
+             carries no subdivision map (n_parent == n). Fix: remove \
+             `conus_adjacency` and `gages_adjacency` and set `geospatial_fabric` \
+             instead, so ddrs builds (and caches) the subdivided graph.",
+            conus.display()
+        )),
+        None => Err(format!(
+            "params.subdivision: `enabled: true` with explicit adjacency paths, \
+             and the store at {} could not be inspected (missing or unreadable \
+             `order`/`parent_order` metadata) — so ddrs cannot confirm it is a \
+             subdivided graph. Subdivision only runs inside the managed adjacency \
+             builder, which these keys bypass. Fix: remove `conus_adjacency` and \
+             `gages_adjacency` and set `geospatial_fabric` instead.",
+            conus.display()
+        )),
+    }
 }
 
 /// `freeze: true` without a `pretrained_checkpoint` would permanently pin the
