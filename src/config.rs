@@ -524,6 +524,21 @@ pub struct Subdivision {
     /// create the `X ~ Cr ~ 1/n` coupling that drove n to its floor.
     #[serde(default = "default_min_length_fraction")]
     pub min_length_fraction: f32,
+    /// Hard bound on how far the short-reach clamp may stretch a reach:
+    /// `length <= original_length * max_clamp_factor`.
+    ///
+    /// Without this the clamp is unbounded, because `reference_celerity` uses a
+    /// depth relation `r = Q_ref^0.4` with no slope dependence while `v` scales
+    /// as `sqrt(S)`. Steep small catchments therefore get big-river depth AND
+    /// steep-slope velocity, reaching ~8.9 m/s at slope 1e-2 — a `dx_target` of
+    /// 32 km that would stretch every short steep headwater to 32 km. Measured
+    /// unbounded clamp factors ran to p99 = 36x and max = 48,597x.
+    ///
+    /// Bounding the distortion means the worst reaches stay over-Courant rather
+    /// than being silently rewritten into 30 km channels. That residual is a
+    /// reported number, not a hidden one.
+    #[serde(default = "default_max_clamp_factor")]
+    pub max_clamp_factor: f32,
 }
 
 fn default_max_pieces() -> usize {
@@ -538,6 +553,10 @@ fn default_ref_q_coeff() -> f32 {
 fn default_ref_q_exp() -> f32 {
     0.9
 }
+fn default_max_clamp_factor() -> f32 {
+    4.0
+}
+
 fn default_min_length_fraction() -> f32 {
     1.0
 }
@@ -551,6 +570,7 @@ impl Default for Subdivision {
             reference_discharge_coefficient: default_ref_q_coeff(),
             reference_discharge_exponent: default_ref_q_exp(),
             min_length_fraction: default_min_length_fraction(),
+            max_clamp_factor: default_max_clamp_factor(),
         }
     }
 }

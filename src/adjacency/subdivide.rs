@@ -23,8 +23,20 @@ pub fn reference_celerity(uparea_km2: f32, slope: f32, cfg: &Subdivision) -> f32
     // the Leopold & Maddock downstream depth exponent.
     let r = (q_ref.max(1e-3)).powf(0.4).max(0.01);
     let v = (1.0 / cfg.reference_n) * r.powf(2.0 / 3.0) * s.sqrt();
-    (v * (5.0 / 3.0)).clamp(0.01, 15.0)
+    // Clamped to a physical FLOOD-WAVE celerity band, deliberately tighter than
+    // the solver's own [0.01, 15.0] velocity clamp. The upper bound matters:
+    // `dx_target = c * dt`, so at dt = 3600 s a celerity of 8.9 m/s (which this
+    // relation reaches at slope 1e-2) implies a 32 km space step, and every
+    // shorter reach would be stretched to it. 5 m/s caps `dx_target` at 18 km,
+    // and `max_clamp_factor` bounds the residual distortion.
+    (v * (5.0 / 3.0)).clamp(0.05, 5.0)
 }
+
+/// Absolute lower bound on a reach length, in metres. Independent of the clamp
+/// so that `min_length_fraction: 0.0` on a zero-length reach still cannot
+/// produce `K = L/c = 0`, which would make `c1 = 1` and break the solve.
+/// MERIT contains sub-10 m reaches, so this is reachable in practice.
+const ABS_MIN_LENGTH_M: f32 = 1.0;
 
 /// Both sides of the two-sided rule. `pieces[i]` is how many sub-reaches parent
 /// `i` becomes; `length_m[i]` is its (possibly clamped) total length, which
@@ -61,7 +73,18 @@ pub fn plan_reaches(
         // Short reach: stretch it so Cr ~ 1 at the reference flow. This is a
         // STATIC constant, unlike the runtime K floor in `enforce_positivity`
         // — no gradient path, so it cannot pull `n` toward its bound.
-        let l_eff = (l.max(0.0)).max(dx_target * cfg.min_length_fraction);
+        let l_raw = l.max(0.0);
+        let want = dx_target * cfg.min_length_fraction;
+        // Never stretch a reach more than `max_clamp_factor` times its true
+        // length. A zero-length reach has no meaningful factor, so it takes the
+        // target directly — it is degenerate geometry either way.
+        let ceiling = if l_raw > 0.0 {
+            l_raw * cfg.max_clamp_factor
+        } else {
+            f32::INFINITY
+        };
+        // ABS_MIN_LENGTH_M is applied LAST so it survives min_length_fraction: 0.0.
+        let l_eff = l_raw.max(want.min(ceiling)).max(ABS_MIN_LENGTH_M);
         // Long reach: split.
         let m = ((l_eff / dx_target).ceil().max(1.0) as u32).min(cfg.max_pieces as u32);
         pieces.push(m);

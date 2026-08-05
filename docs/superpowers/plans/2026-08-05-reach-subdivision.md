@@ -815,12 +815,25 @@ duplicates and a COMID→row lookup would be ambiguous.
 
 ```rust
 #[test]
-fn cache_key_changes_with_subdivision_settings() {
+fn cache_key_changes_with_every_subdivision_field() {
     use ddrs::adjacency::cache::content_key_for_test as key;
-    let base = key("fab", "gag", None, /*enabled*/ false, /*max_pieces*/ 8);
-    assert_ne!(base, key("fab", "gag", None, true, 8), "enabling must invalidate");
-    assert_ne!(key("fab", "gag", None, true, 4), key("fab", "gag", None, true, 8),
-        "changing max_pieces must invalidate");
+    use ddrs::config::Subdivision;
+    let on = Subdivision { enabled: true, ..Default::default() };
+    let base = key("fab", "gag", None, &Subdivision::default());
+    assert_ne!(base, key("fab", "gag", None, &on), "enabling must invalidate");
+
+    // Every field that feeds `plan_reaches` must invalidate, or a config edit
+    // silently reuses a graph built with different geometry.
+    for (name, modified) in [
+        ("max_pieces",  Subdivision { max_pieces: 4, ..on.clone() }),
+        ("reference_n", Subdivision { reference_n: 0.03, ..on.clone() }),
+        ("q_coeff",     Subdivision { reference_discharge_coefficient: 0.02, ..on.clone() }),
+        ("q_exp",       Subdivision { reference_discharge_exponent: 0.8, ..on.clone() }),
+        ("min_len_fr",  Subdivision { min_length_fraction: 0.5, ..on.clone() }),
+    ] {
+        assert_ne!(key("fab", "gag", None, &on), key("fab", "gag", None, &modified),
+            "changing {name} must invalidate the cache");
+    }
 }
 
 #[test]
@@ -851,10 +864,24 @@ otherwise synthesize the identity (`parent_order = order`,
 In `src/adjacency/cache.rs`, extend `content_key` (`cache.rs:316-329`) to hash the
 two subdivision fields after `BUILDER_VERSION`, and bump `BUILDER_VERSION` by 1:
 
+**Hash ALL SIX fields, not just `enabled` + `max_pieces`.** Every one of
+`reference_n`, `reference_discharge_coefficient`, `reference_discharge_exponent`
+and `min_length_fraction` changes the reference celerity → `dx_target` → both
+`pieces` and the clamped `length_m`, i.e. it changes the built graph. Hashing only
+two of them would silently reuse a stale cached adjacency after an edit to any of
+the other four.
+
 ```rust
+// `content_key` takes `s: &Subdivision` as a new parameter (thread it from the
+// caller's `cfg.params.subdivision`), so the test can vary one field at a time.
 h.update(BUILDER_VERSION.to_le_bytes().as_ref());
-h.update(&[subdivision_enabled as u8]);
-h.update((max_pieces as u32).to_le_bytes().as_ref());
+h.update(&[s.enabled as u8]);
+h.update((s.max_pieces as u32).to_le_bytes().as_ref());
+// f32::to_bits gives a stable byte pattern; NaN is impossible here (validated).
+h.update(s.reference_n.to_bits().to_le_bytes().as_ref());
+h.update(s.reference_discharge_coefficient.to_bits().to_le_bytes().as_ref());
+h.update(s.reference_discharge_exponent.to_bits().to_le_bytes().as_ref());
+h.update(s.min_length_fraction.to_bits().to_le_bytes().as_ref());
 ```
 
 Expose `content_key_for_test` as `#[doc(hidden)] pub` so the test can call it.

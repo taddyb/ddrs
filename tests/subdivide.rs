@@ -110,16 +110,19 @@ fn long_reaches_split_and_are_capped() {
 #[test]
 fn short_reaches_are_length_clamped_not_split() {
     let c = cfg(8);
-    // 50 m reach with a fast celerity: far below dx_target, so it stretches.
-    let p = plan_reaches(&[50.0], &[1e-2], &[10_000.0], 3600.0, &c);
-    assert_eq!(p.pieces[0], 1, "short reach must not split");
     let dx = reference_celerity(10_000.0, 1e-2, &c) * 3600.0;
+    // The fixture must sit INSIDE `max_clamp_factor`, or that bound binds first
+    // and we would be testing the bound instead of the clamp. Half of dx_target
+    // is a 2x stretch, comfortably under the default 4x ceiling.
+    let raw = dx / 2.0;
+    let p = plan_reaches(&[raw], &[1e-2], &[10_000.0], 3600.0, &c);
+    assert_eq!(p.pieces[0], 1, "short reach must not split");
     assert!(
         (p.length_m[0] - dx).abs() < 1e-3,
         "expected clamp to dx_target {dx}, got {}",
         p.length_m[0]
     );
-    assert!(p.length_m[0] > 50.0, "clamp must lengthen, not shorten");
+    assert!(p.length_m[0] > raw, "clamp must lengthen, not shorten");
 }
 
 #[test]
@@ -162,5 +165,56 @@ fn degenerate_input_never_yields_zero_pieces_or_zero_length() {
         p.length_m.iter().all(|&v| v > 0.0),
         "length must be > 0 (a 0 m reach gives K = 0 and c1 = 1), got {:?}",
         p.length_m
+    );
+}
+
+// ── Bounds added after Task 2 review ────────────────────────────────────────
+// Two holes the original six tests did not cover.
+
+#[test]
+fn zero_length_reach_survives_min_length_fraction_zero() {
+    // The combination `min_length_fraction: 0.0` + a 0 m reach previously gave
+    // l_eff = 0, hence K = L/c = 0 and c1 = 1, breaking the solve. MERIT
+    // contains sub-10 m reaches, so this is reachable, not hypothetical.
+    let mut c = cfg(8);
+    c.min_length_fraction = 0.0;
+    let p = plan_reaches(&[0.0], &[1e-3], &[100.0], 3600.0, &c);
+    assert!(
+        p.length_m[0] >= 1.0,
+        "absolute floor must apply even with the clamp disabled, got {}",
+        p.length_m[0]
+    );
+    assert_eq!(p.pieces[0], 1);
+}
+
+#[test]
+fn clamp_cannot_stretch_a_reach_beyond_max_clamp_factor() {
+    // A steep headwater: dx_target is large, but a 100 m reach must not be
+    // rewritten into a multi-km channel. Unbounded, measured clamp factors
+    // reached p99 = 36x and max = 48,597x.
+    let mut c = cfg(8);
+    c.max_clamp_factor = 4.0;
+    let p = plan_reaches(&[100.0], &[1e-2], &[100.0], 3600.0, &c);
+    assert!(
+        p.length_m[0] <= 100.0 * 4.0 + 1e-3,
+        "stretched {}x, exceeding max_clamp_factor",
+        p.length_m[0] / 100.0
+    );
+    assert!(p.length_m[0] >= 100.0, "clamp must never shorten a reach");
+}
+
+#[test]
+fn reference_celerity_stays_in_a_physical_flood_wave_band() {
+    let c = cfg(8);
+    // Steep + large: the case that previously produced 8.9 m/s and a 32 km dx.
+    let fast = reference_celerity(10_000.0, 1e-2, &c);
+    assert!(
+        (0.05..=5.0).contains(&fast),
+        "celerity {fast} m/s outside the physical flood-wave band"
+    );
+    assert!(
+        fast * 3600.0 <= 18_000.0 + 1.0,
+        "dx_target {} m is larger than any plausible MERIT reach",
+        fast * 3600.0
     );
 }
