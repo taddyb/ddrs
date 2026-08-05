@@ -454,6 +454,60 @@ Campaign docs (chronological):
 `docs/2026-07-04-synthetic-recoverability-findings.md`,
 `docs/2026-07-06-phase-c-findings.md`.
 
+## Reach subdivision (`params.subdivision`, off by default)
+
+**What it is.** A build-time (not runtime) normalization of reach length toward
+`Δx ≈ c_ref·Δt` inside the managed adjacency builder, so `Cr = Δt/K` lands near
+1. Two-sided: reaches longer than `Δx_target` are **split** into
+`m = min(ceil(L/Δx_target), max_pieces)` pieces of length `L/m` with `q' → q'/m`;
+shorter reaches have their **length clamped up** (never merged — merging would
+destroy junction topology), bounded by `max_clamp_factor`. The runtime just sees
+a bigger graph: no autograd change, no gradient path, `mmc_op.rs` untouched.
+
+**STATUS: NO-GO for its stated purpose (2026-08-05).** It was built to make the
+Muskingum coefficients non-negative by construction and retire
+`enforce_positivity`. Measured on 1,841 CONUS gauges with `enforce_positivity`
+off, `frac c1 < 0` gets **worse** (93.0 % off → 98.79 % at `max_pieces: 8`) and
+negative solves fall only 35 % for a 2.05× network, 1.5× step time and +23.9 %
+total channel length. Reason: both coefficients are non-negative only inside
+`[2X, 2(1−X)]`, a window of width `2(1−2X)` — **1.4 % wide at the measured CONUS
+median X = 0.4966** — and a static piece count cannot hold a flow-varying `Cr`
+inside it. It *does* nearly eliminate `Cr > 2` / `c3 < 0` (3.93 % → 0.31 %), via
+the length clamp rather than the splitting. The code is correct, gated off, and
+**stays in-tree** as the measurement apparatus. Do not re-open the "Cr ≈ 1 ⇒
+non-negative" argument without reading `.claude/REACH-SUBDIVISION.md`.
+
+**How to enable** (`params.subdivision.enabled: true`), and what will reject you:
+
+1. **Requires `geospatial_fabric`.** Subdivision runs inside the managed
+   adjacency builder, which explicit `conus_adjacency`/`gages_adjacency` paths
+   bypass — so `enabled: true` alongside them is a **config error**, not a
+   warning (`validate_subdivision_reaches_the_builder`, `src/config.rs:1066`).
+   Otherwise the flag would be *silently inert* while the manifest claimed
+   subdivision. The one allowed exception is an explicit path to a store already
+   built subdivided, detected from zarr metadata (`n_parent < n`).
+2. **Requires `use_cuda_graphs: false`** — a captured graph is sized to a fixed
+   reach count.
+3. **Requires retraining.** Every learned parameter was fit against the un-split
+   network's effective diffusion; checkpoints do not transfer.
+
+Fields (all seven are hashed into the adjacency cache key, so editing any one
+rebuilds the graph): `enabled` (false), `max_pieces` (8 — uncapped is infeasible:
+13.2× reaches, 9.2× solver critical path, and `Σm` cannot be pinned down),
+`reference_n` (0.05 — **a guess; the trained CONUS median is 0.130**, and this
+sets `dx_target` directly, so sweep it), `reference_discharge_coefficient`
+(0.01), `reference_discharge_exponent` (0.9), `min_length_fraction` (1.0; 0
+disables the short-reach clamp), `max_clamp_factor` (4.0 — unbounded, measured
+clamp factors reached 48,597×).
+
+Implementation: `src/adjacency/subdivide.rs` + `src/adjacency/cache.rs`;
+persistence of `parent_order`/`parent_offset` in `src/data/store/zarr.rs`
+(`IdIndex` is built from `parent_order`, since `order` gains duplicates).
+Gates: `cargo test --test subdivide --test subdivision_integration --test
+adjacency_parity --test gauge_mass_conservation`, plus `compare_ddr_sandbox`
+staying an ABSOLUTE MATCH. Design, measurements and gotchas:
+`.claude/REACH-SUBDIVISION.md`.
+
 ## Baseline
 
 `ddrs plan` and `ddrs run --workflow train-and-test` compute a **summed Q'**

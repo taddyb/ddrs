@@ -131,13 +131,53 @@ Here the K constraint is one-sided (`K ≥ dt/2n_sub`), which shrinking `dt` doe
 satisfy — but it also drives `Cr` further from 1 for the ~93 % of reaches that
 are already `Cr < 2`, shrinking `X_max` and making the cap bite *harder*.
 
-**The measured Cr distribution reframes the variable-Δx fix.** Median Cr = 0.226
-means the typical MERIT reach is ~4.4× too *long* for an hourly step, not too
-short. Splitting a reach into `m` pieces gives `Cr → m·Cr`, so `m ≈ 4` puts the
-bulk of the network near `Cr ≈ 1`, where `X_max → 0.5` and the Cunge X survives
-the cap. That is mostly **subdivision**, not merging, and it is a static
-preprocessing step — no autograd change. Only 7.3 % of reaches (`Cr > 2`) would
-instead need merging.
+### Reach subdivision does NOT substitute either — measured, 2026-08-05
+
+> **Erratum.** This section previously argued that the measured Cr distribution
+> (median 0.226 — the typical MERIT reach is ~4.4× too *long* for an hourly
+> step) "reframes the variable-Δx fix": split each reach into `m ≈ 4` pieces,
+> land the network at `Cr ≈ 1`, and both `X_max → 0.5` and non-negative
+> coefficients follow, making `enforce_positivity` unnecessary. **It was built
+> and measured. It does not work, and the underlying claim was wrong.**
+>
+> The claim held only at `Cr` **exactly** 1. Both coefficients are non-negative
+> only inside `[2X, 2(1−X)]`, a window of width `2(1−2X)` — 80 % wide at
+> `X = 0.3`, but **1.4 % wide at the measured CONUS median `X = 0.4966`**. A
+> build-time piece count fixes Δx from a *reference* flow while `Cr` tracks the
+> *routed* celerity, which varies severalfold within one storm. No cap lands a
+> flow-varying Cr inside a 1.4 % window.
+>
+> Measured on 1,841 gauges with `enforce_positivity` OFF (`probe_courant`):
+>
+> | arm | rows | Cr p50 | Cr > 2 | **c1 < 0** | c3 < 0 | both ≥ 0 | neg solves | ms/step |
+> |---|---|---|---|---|---|---|---|---|
+> | off | 92,488 | 0.096 | 2.10 % | **93.0 %** | 3.93 % | 3.1 % | 0.1356 % | 1.90 |
+> | cap 4 | 171,381 | 0.115 | 0.18 % | **98.75 %** | 0.33 % | 0.9 % | 0.0945 % | 2.73 |
+> | cap 8 | 184,676 | 0.123 | 0.16 % | **98.79 %** | 0.31 % | 0.9 % | 0.0876 % | 2.87 |
+>
+> `frac c1 < 0` gets **worse**; negative solves fall only 35 % for a 2.05×
+> network, 1.5× step time and **+23.9 % total channel length**.
+>
+> What it *does* buy: `frac Cr > 2` 2.10 % → 0.16 %, nearly eliminating
+> `c3 < 0` (3.93 % → 0.31 %) — and a clamp-off control shows it is the
+> short-reach **length clamp**, not the splitting, that does this. `c3 < 0` is
+> the smaller population.
+>
+> **A second erratum, same section.** Subdivision also does not restore the
+> Cunge X's dynamic range: raw `X_cunge` median moves only **0.4973 → 0.4815**
+> even uncapped. `D = q/(So·c·Δx)` is small because of the
+> `attribute_minimums.slope = 1e-3` floor and large top width `B`, not because
+> Δx is long.
+>
+> Root cause of the collapsed window: the cell Reynolds number on MERIT is
+> `D ≈ 0.012` — advection-dominated, so Cunge correctly returns near-pure
+> translation and `X → 0.5`. This **retroactively vindicates the constant
+> `X = 0.3`** as a deliberate stability trade (80 % window width), not an
+> oversight.
+>
+> Full write-up, cost tables and the code that stays in-tree:
+> `.claude/REACH-SUBDIVISION.md`. Plan of record:
+> `docs/superpowers/plans/2026-08-05-reach-subdivision.md`.
 
 ## Outside the forward chain: per-gauge extraction (`outflow_idx`)
 
@@ -200,6 +240,7 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | Task 5 sub-step | timestep loop | tape depth ×n_sub | yes (flag-gated) | `substep_courant` |
 | `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |
 | `enforce_positivity` | S18′ K floor, S19′ X cap | gk_musk mask + new cr→k path; XGrads masked by mask_cunge | no (default off; requires `ddr_match: false`) | `positivity_clamp` |
+| `params.subdivision` | build-time graph only (larger N, `q'/m`, KAN gather, hot-start divisor) | **none** — no gradient path | no (default off) | `subdivide`, `subdivision_integration`, `adjacency_parity` |
 
 ## CUDA backend coverage
 
