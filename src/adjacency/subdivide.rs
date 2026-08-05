@@ -7,6 +7,7 @@
 //! This module is a pure preprocessing step: plain `Vec`s in, plain `Vec`s out.
 //! No BURN, no I/O, no dependence on training state.
 
+use crate::adjacency::build::ConusAdjacency;
 use crate::config::Subdivision;
 
 /// Reference celerity (m/s) used ONLY to choose the piece count.
@@ -93,5 +94,148 @@ pub fn plan_reaches(
     ReachPlan {
         pieces,
         length_m: lengths,
+    }
+}
+
+/// The expanded network: one row per sub-reach, plus the map back to parents.
+///
+/// Two index spaces coexist. **Parent space** (`parent_order`, length `N`) is
+/// where COMID lookups live — `order` gains duplicates after expansion, so a
+/// COMID→row lookup on it would be ambiguous. **Sub-reach space** (`order`,
+/// `rows`, `cols`, `length_m`, `slope`, length `N' = Σ m_p`) is what the solver
+/// sees. Parent `p` owns the contiguous rows `parent_offset[p]..parent_offset[p+1]`,
+/// ordered upstream→downstream, so its inlet is the first and its outlet the last.
+///
+/// ```text
+///    BEFORE                       AFTER (m = 3)
+///    U ──> P ──> D                U₂ ──> P₀ ──> P₁ ──> P₂ ──> D₀
+///                                        └─ q'/3   q'/3   q'/3
+///    len(P) = L                   len(Pᵢ) = L/3,  slope unchanged
+/// ```
+#[derive(Debug, Clone)]
+pub struct SubdividedAdjacency {
+    /// COMID per sub-reach row — the parent's COMID, repeated `m_p` times.
+    pub order: Vec<i32>,
+    /// Original COMID topological order, length `N`. COMID→position indexes
+    /// (`IdIndex<Comid>`) must be built from THIS, not from `order`.
+    pub parent_order: Vec<i32>,
+    /// Length `N + 1`. Rows `[parent_offset[p], parent_offset[p + 1])` belong to
+    /// parent `p`, ordered upstream→downstream.
+    pub parent_offset: Vec<i32>,
+    /// COO `indices_0` — downstream sub-reach row.
+    pub rows: Vec<i32>,
+    /// COO `indices_1` — upstream sub-reach row.
+    pub cols: Vec<i32>,
+    /// Per-piece length in metres: the parent's (possibly clamped) length / `m`.
+    pub length_m: Vec<f32>,
+    /// Per-piece slope — inherited unchanged from the parent.
+    pub slope: Vec<f32>,
+}
+
+impl SubdividedAdjacency {
+    /// First (most upstream) sub-reach row of `parent`.
+    #[inline]
+    pub fn inlet(&self, parent: usize) -> usize {
+        self.parent_offset[parent] as usize
+    }
+
+    /// Last (most downstream) sub-reach row of `parent`. A gauge on this reach
+    /// must be read here: any earlier piece omits the downstream fraction of the
+    /// reach's own lateral inflow.
+    #[inline]
+    pub fn outlet(&self, parent: usize) -> usize {
+        self.parent_offset[parent + 1] as usize - 1
+    }
+
+    /// Number of sub-reaches owned by `parent`.
+    #[inline]
+    pub fn pieces(&self, parent: usize) -> usize {
+        (self.parent_offset[parent + 1] - self.parent_offset[parent]) as usize
+    }
+}
+
+/// Expand `adj` into the sub-reach graph described by `plan`.
+///
+/// **Topology rules.** Parent `p` owns rows `[off[p], off[p+1])` ordered
+/// upstream→downstream; consecutive pieces are joined by internal chain edges.
+/// An external edge `u -> p` (`u` upstream of `p`) becomes
+/// `outlet(u) -> inlet(p)`. Each piece gets `plan.length_m[p] / m` — the
+/// **clamped** length from `plan_reaches`, not `adj.length_m[p]`. Slope is
+/// inherited unchanged.
+///
+/// **Why the result is still lower-triangular** (routing invariant 3, which the
+/// forward-substitution solver in `src/sparse/` depends on and which fails
+/// silently rather than loudly):
+/// - Internal edges run `base + k - 1 -> base + k`, strictly increasing.
+/// - External edges: the input satisfies `r > c` (`build.rs` rejects `r < c`,
+///   and the real CONUS COO carries no `r == c`), so `r >= c + 1` and therefore
+///   `inlet(r) = off[r] >= off[c + 1] > off[c + 1] - 1 = outlet(c)`.
+///
+/// Because `rows`/`cols` are `downstream`/`upstream` (`zarr.rs:39-42`,
+/// `build.rs:231-232`), reversing the mapping to `inlet(u) -> outlet(p)` would
+/// still be lower-triangular and would NOT be caught by that argument — the
+/// direction is pinned by tests instead.
+pub fn subdivide(adj: &ConusAdjacency, plan: &ReachPlan) -> SubdividedAdjacency {
+    let n = adj.order.len();
+    assert_eq!(plan.pieces.len(), n, "pieces must be one per parent reach");
+    assert_eq!(plan.length_m.len(), n, "lengths must be one per parent reach");
+
+    let mut parent_offset = Vec::with_capacity(n + 1);
+    let mut acc: i32 = 0;
+    parent_offset.push(0);
+    for &m in &plan.pieces {
+        acc += m.max(1) as i32;
+        parent_offset.push(acc);
+    }
+    let n_sub = acc as usize;
+
+    let mut order = Vec::with_capacity(n_sub);
+    let mut length_m = Vec::with_capacity(n_sub);
+    let mut slope = Vec::with_capacity(n_sub);
+    let mut rows = Vec::with_capacity(adj.rows.len() + n_sub - n);
+    let mut cols = Vec::with_capacity(adj.cols.len() + n_sub - n);
+
+    for p in 0..n {
+        let m = plan.pieces[p].max(1) as usize;
+        let base = parent_offset[p] as usize;
+        // plan.length_m, NOT adj.length_m: short reaches were clamped UP in the
+        // two-sided rule above, and the expansion must honour that.
+        let piece_len = plan.length_m[p] / m as f32;
+        for k in 0..m {
+            order.push(adj.order[p]);
+            length_m.push(piece_len);
+            slope.push(adj.slope[p]);
+            if k > 0 {
+                // Internal chain link: piece k-1 flows into piece k.
+                cols.push((base + k - 1) as i32);
+                rows.push((base + k) as i32);
+            }
+        }
+    }
+
+    // External edges: upstream parent's OUTLET -> downstream parent's INLET.
+    for (&r, &c) in adj.rows.iter().zip(adj.cols.iter()) {
+        // A self-edge (r == c) would map to outlet(p) -> inlet(p), i.e.
+        // off[p]+m-1 -> off[p], which is UPPER triangular and would break the
+        // forward-substitution invariant *silently*. `build.rs:236-240` only
+        // rejects r < c, so r == c is permitted by that check — but the real
+        // CONUS COO (346,321 reaches / 338,814 edges) has zero of them, the
+        // diagonal being synthesized later by `CsrPattern::from_sparse`. This is
+        // therefore an assertion documenting that fact, not a filter.
+        assert!(r != c, "self-edge on parent {r}: subdivision cannot expand it");
+        let up_outlet = parent_offset[c as usize + 1] - 1;
+        let down_inlet = parent_offset[r as usize];
+        cols.push(up_outlet);
+        rows.push(down_inlet);
+    }
+
+    SubdividedAdjacency {
+        order,
+        parent_order: adj.order.clone(),
+        parent_offset,
+        rows,
+        cols,
+        length_m,
+        slope,
     }
 }
