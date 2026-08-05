@@ -488,6 +488,73 @@ pub enum SparseSolver {
     Cuda,
 }
 
+/// YAML `params.subdivision:` block — static reach subdivision so
+/// `Cr = c·Δt/Δx` lands near 1 network-wide.
+///
+/// Off by default; `enabled: false` reproduces current behaviour exactly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subdivision {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hard cap on pieces per reach. Uncapped subdivision is infeasible:
+    /// 13.2x reaches and 9.2x solver critical path, and Sum(m) cannot be
+    /// pinned down (2.3M-10.5M across defensible reference-flow choices).
+    /// Capping bounds the cost AND makes it estimable (+/-12% at M=8).
+    #[serde(default = "default_max_pieces")]
+    pub max_pieces: usize,
+    /// Manning's n used ONLY to compute the reference celerity that sets m.
+    /// Deliberately NOT taken from a checkpoint: the graph must not depend on
+    /// training state. 0.05 is the trained CONUS median.
+    #[serde(default = "default_reference_n")]
+    pub reference_n: f32,
+    /// Reference discharge Q_ref = coefficient * uparea_km2^exponent (m3/s).
+    #[serde(default = "default_ref_q_coeff")]
+    pub reference_discharge_coefficient: f32,
+    #[serde(default = "default_ref_q_exp")]
+    pub reference_discharge_exponent: f32,
+    /// Short reaches get their length clamped UP to
+    /// `min_length_fraction * c_ref * dt`, giving `Cr <= 1/min_length_fraction`
+    /// at the reference flow. 1.0 targets Cr = 1; 0.5 targets Cr <= 2 (the
+    /// non-negativity bound) with half the length distortion; 0.0 disables the
+    /// clamp entirely, leaving short reaches over-Courant.
+    ///
+    /// This is a BUILD-TIME constant, unlike the runtime K floor in
+    /// `enforce_positivity`. It therefore has no gradient path and cannot
+    /// create the `X ~ Cr ~ 1/n` coupling that drove n to its floor.
+    #[serde(default = "default_min_length_fraction")]
+    pub min_length_fraction: f32,
+}
+
+fn default_max_pieces() -> usize {
+    8
+}
+fn default_reference_n() -> f32 {
+    0.05
+}
+fn default_ref_q_coeff() -> f32 {
+    0.01
+}
+fn default_ref_q_exp() -> f32 {
+    0.9
+}
+fn default_min_length_fraction() -> f32 {
+    1.0
+}
+
+impl Default for Subdivision {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_pieces: default_max_pieces(),
+            reference_n: default_reference_n(),
+            reference_discharge_coefficient: default_ref_q_coeff(),
+            reference_discharge_exponent: default_ref_q_exp(),
+            min_length_fraction: default_min_length_fraction(),
+        }
+    }
+}
+
 /// Routing parameter configuration.
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -546,6 +613,8 @@ pub struct Params {
     /// which would break `examples/compare_ddr_sandbox`'s ABSOLUTE MATCH
     /// (invariant 1). See `.claude/PHYSICS-CORRECTIONS.md`.
     pub enforce_positivity: bool,
+    /// Static reach subdivision (variable Δx). Off by default.
+    pub subdivision: Subdivision,
 }
 
 fn default_ddr_match() -> bool {
@@ -569,6 +638,7 @@ impl Default for Params {
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
+            subdivision: Subdivision::default(),
         }
     }
 }
@@ -592,6 +662,8 @@ struct ParamsRaw {
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
     enforce_positivity: Option<bool>,
+    #[serde(default)]
+    subdivision: Subdivision,
 }
 
 impl From<ParamsRaw> for Params {
@@ -667,6 +739,10 @@ impl From<ParamsRaw> for Params {
         if let Some(b) = r.enforce_positivity {
             p.enforce_positivity = b;
         }
+        // Non-Option: `ParamsRaw`'s struct-level `#[serde(default)]` already
+        // yields `Subdivision::default()` when the block is absent, which is
+        // exactly what `Params::default()` carries.
+        p.subdivision = r.subdivision;
         p
     }
 }
@@ -809,6 +885,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_subdivision(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         validate_disagg_pretrained(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -922,6 +1002,24 @@ fn validate_enforce_positivity(cfg: &Config) -> std::result::Result<(), String> 
              positivity clamp floors K at dt(1+d)/2 and caps X at the stability \
              window, changing forward output and breaking the DDR sandbox \
              ABSOLUTE MATCH. Set `ddr_match: false` to use `enforce_positivity`."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Subdivision expands the reach count, so a CUDA graph captured for the
+/// un-split network is the wrong size; and `max_pieces: 0` would ask for a
+/// network with zero rows. Both are rejected at load.
+fn validate_subdivision(cfg: &Config) -> std::result::Result<(), String> {
+    let s = &cfg.params.subdivision;
+    if s.enabled && s.max_pieces < 1 {
+        return Err("params.subdivision: `max_pieces` must be >= 1".to_string());
+    }
+    if s.enabled && cfg.params.use_cuda_graphs {
+        return Err(
+            "params.subdivision: `enabled: true` requires `use_cuda_graphs: false` \
+             — the captured graph is sized to a fixed reach count."
                 .to_string(),
         );
     }
