@@ -127,6 +127,21 @@ pub struct MuskingumCunge<I: Backend> {
     /// divisor would be `1.0`), so the un-subdivided path skips the op and
     /// stays byte-identical.
     pieces_per_row: Option<Tensor<Autodiff<I>, 1>>,
+    /// Whether the cold-start solve `(I − N)·Q_0 = q'_0` sees the SAME divided
+    /// forcing `forward` routes. **Default `true`.** On an un-subdivided network
+    /// there is no divisor, so this is an exact no-op there; under subdivision
+    /// the undivided `q'_0` makes parent `p`'s outlet start at `m_p ×` its true
+    /// steady state.
+    ///
+    /// Measured (2026-08-05, 1,841 CONUS gauges / 184,676 sub-reach rows,
+    /// `max_pieces: 8`): the undivided cold start put 2.94× the correct total
+    /// discharge into the network, and the A/B difference took **221 hourly
+    /// steps to fall below 10 %** and 282 to fall below 5 % — against a
+    /// configured `warmup` of 5 days = 120 steps, at which point it was still
+    /// 41.7 %. The inflated state therefore leaks into the scored window, so it
+    /// is divided by default. `false` reproduces the un-divided behaviour for
+    /// `probe_courant --divide-hotstart` A/B runs.
+    pub divide_hotstart_by_pieces: bool,
     discharge_t: Option<Tensor<Autodiff<I>, 1>>,
 
     /// Eval-time zeta accumulation (leakance diagnostics). Off by default;
@@ -196,6 +211,7 @@ impl<I: Backend> MuskingumCunge<I> {
             assembler: None,
             q_prime: None,
             pieces_per_row: None,
+            divide_hotstart_by_pieces: true,
             discharge_t: None,
             collect_zeta: false,
             track_negative_discharge: false,
@@ -315,6 +331,18 @@ impl<I: Backend> MuskingumCunge<I> {
                         .clone()
                         .slice([0..1, 0..n])
                         .reshape([n]);
+                    // Give the cold start the same `q'/m` lateral inflow
+                    // `forward` routes. Without it a subdivided network starts
+                    // ~m× too wet at every parent outlet and drains that
+                    // surplus for ~220 hourly steps — far past `warmup`.
+                    // `None` divisor (un-subdivided) ⇒ exact no-op.
+                    let q_prime_0 = match (
+                        self.divide_hotstart_by_pieces,
+                        self.pieces_per_row.as_ref(),
+                    ) {
+                        (true, Some(d)) => q_prime_0 / d.clone(),
+                        _ => q_prime_0,
+                    };
                     // Hotstart: solve (I − N) · Q_0 = q'_0 via the same CSR solver
                     // with c = 1 (all-ones vector), then clamp.
                     let device = self.device.clone();
@@ -676,6 +704,7 @@ impl<I: Backend> MuskingumCunge<I> {
             slope: self.slope.as_ref().expect("slope").clone().inner(),
             x_storage: self.x_storage.as_ref().expect("x_storage").clone().inner(),
             q_prime: self.q_prime.as_ref().expect("q_prime").clone().inner(),
+            pieces_per_row: self.pieces_per_row.as_ref().map(|d| d.clone().inner()),
             q0: self.discharge_t.as_ref().expect("discharge_t").clone().inner(),
             n_segments: n_seg,
         }

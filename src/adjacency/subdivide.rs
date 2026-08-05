@@ -97,6 +97,107 @@ pub fn plan_reaches(
     }
 }
 
+/// Cost accounting for a [`ReachPlan`], measured against the raw fabric lengths.
+///
+/// The length clamp is the price of the short-reach branch: a reach modelled
+/// `f×` longer than reality has an `f×` longer travel time, which is a real
+/// physical distortion traded for numerical stability. `max_clamp_factor`
+/// bounds `f`, and `n_at_clamp_ceiling` counts the reaches pinned at that bound
+/// — those stay over-Courant by design and will still produce negative
+/// coefficients.
+#[derive(Debug, Clone)]
+pub struct PlanStats {
+    /// Parent reaches considered.
+    pub n: usize,
+    /// `Σ pieces` — the sub-reach count the solver will see.
+    pub sum_pieces: u64,
+    /// Reaches with `m > 1`.
+    pub n_split: usize,
+    /// Reaches whose length was stretched (`length_m > raw + 1e-3`).
+    pub n_clamped: usize,
+    /// Reaches pinned at `raw * max_clamp_factor` — the clamp wanted more.
+    pub n_at_clamp_ceiling: usize,
+    /// Clamp factor `length_m / raw` over the CLAMPED reaches only: p50/p95/p99/max.
+    pub clamp_factor_p50: f32,
+    pub clamp_factor_p95: f32,
+    pub clamp_factor_p99: f32,
+    pub clamp_factor_max: f32,
+    /// Total network channel length (m) before and after the clamp.
+    pub total_length_before_m: f64,
+    pub total_length_after_m: f64,
+    /// Histogram of piece counts, `pieces_hist[m]` for `m` in `0..=max_pieces`.
+    pub pieces_hist: Vec<usize>,
+}
+
+impl PlanStats {
+    /// Fractional inflation of total channel length, e.g. `0.171` for +17.1 %.
+    pub fn length_inflation(&self) -> f64 {
+        self.total_length_after_m / self.total_length_before_m - 1.0
+    }
+}
+
+/// Measure a [`ReachPlan`] against the RAW fabric lengths it was built from.
+///
+/// `raw_length_m` must be `ConusAdjacency::length_m` — the un-clamped input to
+/// [`plan_reaches`] — not `plan.length_m`.
+pub fn plan_stats(raw_length_m: &[f32], plan: &ReachPlan, cfg: &Subdivision) -> PlanStats {
+    let n = raw_length_m.len();
+    let mut factors: Vec<f32> = Vec::new();
+    let mut n_at_ceiling = 0usize;
+    let mut before = 0f64;
+    let mut after = 0f64;
+    let mut hist = vec![0usize; cfg.max_pieces.max(1) + 1];
+    let mut sum_pieces = 0u64;
+    let mut n_split = 0usize;
+
+    for i in 0..n {
+        let raw = raw_length_m[i].max(0.0);
+        let eff = plan.length_m[i];
+        before += raw as f64;
+        after += eff as f64;
+        if eff > raw + 1e-3 {
+            let f = if raw > 0.0 { eff / raw } else { f32::INFINITY };
+            factors.push(f);
+            // Pinned at the ceiling: the clamp wanted `dx_target *
+            // min_length_fraction` but got `raw * max_clamp_factor`.
+            if raw > 0.0 && (f - cfg.max_clamp_factor).abs() <= 1e-3 * cfg.max_clamp_factor {
+                n_at_ceiling += 1;
+            }
+        }
+        let m = plan.pieces[i] as usize;
+        sum_pieces += m as u64;
+        if m > 1 {
+            n_split += 1;
+        }
+        if m < hist.len() {
+            hist[m] += 1;
+        }
+    }
+
+    factors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let q = |p: f64| -> f32 {
+        if factors.is_empty() {
+            return f32::NAN;
+        }
+        factors[(((factors.len() - 1) as f64) * p).round() as usize]
+    };
+
+    PlanStats {
+        n,
+        sum_pieces,
+        n_split,
+        n_clamped: factors.len(),
+        n_at_clamp_ceiling: n_at_ceiling,
+        clamp_factor_p50: q(0.50),
+        clamp_factor_p95: q(0.95),
+        clamp_factor_p99: q(0.99),
+        clamp_factor_max: factors.last().copied().unwrap_or(f32::NAN),
+        total_length_before_m: before,
+        total_length_after_m: after,
+        pieces_hist: hist,
+    }
+}
+
 /// The expanded network: one row per sub-reach, plus the map back to parents.
 ///
 /// Two index spaces coexist. **Parent space** (`parent_order`, length `N`) is

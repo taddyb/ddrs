@@ -83,6 +83,17 @@ fn subdivided_reach(pieces: usize, with_parent_map: bool) -> SparseAdjacency {
 
 /// Route to steady state and return the outlet piece's discharge (m³/s).
 fn steady_state_outflow(pieces: usize, with_parent_map: bool) -> f32 {
+    let row = outlet_series(pieces, with_parent_map, None);
+    row[T - 1]
+}
+
+/// The outlet piece's full discharge series (length `T`). Column 0 is the
+/// cold-start `Q_0` that `setup_inputs` solved, so `[0]` measures the initial
+/// condition and `[T-1]` the steady state.
+///
+/// `divide_hotstart` overrides `MuskingumCunge::divide_hotstart_by_pieces`;
+/// `None` leaves the shipped default in place.
+fn outlet_series(pieces: usize, with_parent_map: bool, divide_hotstart: Option<bool>) -> Vec<f32> {
     let n = pieces;
     let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
 
@@ -95,6 +106,9 @@ fn steady_state_outflow(pieces: usize, with_parent_map: bool) -> f32 {
     // Mid-range normalized params → n ≈ 0.055, q_spatial ≈ 0.5, p_spatial ≈ 100.
     let mk = |v: f32| -> Tensor<AB, 1> { Tensor::from_floats(vec![v; n].as_slice(), &device) };
     let mut engine = MuskingumCunge::<I>::new(mock_cfg(), device.clone());
+    if let Some(d) = divide_hotstart {
+        engine.divide_hotstart_by_pieces = d;
+    }
     engine.setup_inputs(
         RoutingInputs {
             adjacency: subdivided_reach(pieces, with_parent_map),
@@ -117,7 +131,7 @@ fn steady_state_outflow(pieces: usize, with_parent_map: bool) -> f32 {
     // (N, T) routed discharge; the parent's outlet is the LAST piece.
     let runoff: Tensor<I, 2> = engine.forward().inner();
     let all: Vec<f32> = runoff.into_data().to_vec::<f32>().expect("runoff to host");
-    all[(n - 1) * T + (T - 1)]
+    all[(n - 1) * T..n * T].to_vec()
 }
 
 /// A 1-reach network with constant q' must reach the SAME steady-state outflow
@@ -397,4 +411,121 @@ fn identity_parent_offset_leaves_values_untouched() {
             "identity map must not perturb a single bit (offset {offset:?})"
         );
     }
+}
+
+// ── cold start under subdivision ─────────────────────────────────────────────
+//
+// `setup_inputs` cold-starts with `(I − N)·Q_0 = q'_0`. The `q'/m` split lives
+// in `forward`, so without `divide_hotstart_by_pieces` the cold start feeds the
+// UNDIVIDED `q'_0` into a chain of `m` pieces and parent `p`'s outlet begins at
+// `m_p ×` its true steady state.
+//
+// Measured on the real network (2026-08-05, `probe_courant --max-pieces 8`,
+// 1,841 CONUS gauges / 184,676 rows): the undivided start put 2.94× the correct
+// total discharge into the network and needed **221 hourly steps to decay
+// below a 10 % difference** (282 below 5 %, still >1 % at 500), against a
+// configured `warmup` of 5 days = 120 steps — at which point it was still
+// 41.7 % off. Hence the division is on by default.
+
+/// The cold start must be mass-consistent: subdividing a reach must not change
+/// the discharge the solver starts that reach's outlet at.
+#[test]
+fn divided_hotstart_gives_a_subdivided_reach_the_same_initial_condition() {
+    let un_split = outlet_series(1, true, None)[0];
+    let split = outlet_series(4, true, None)[0];
+    println!("Q_0 outlet: 1 piece = {un_split:.6}, 4 pieces = {split:.6}");
+    assert!(
+        (split - un_split).abs() / un_split < 1e-3,
+        "cold start not mass-consistent: 1 piece = {un_split}, 4 pieces = {split} \
+         (ratio {:.4}; a ratio near 4 means the hot-start q'_0 was not divided)",
+        split / un_split
+    );
+}
+
+/// The discriminating control: with the division off, the cold start really is
+/// inflated `m×`. This is the state the real-network wash-out was measured on.
+#[test]
+fn undivided_hotstart_inflates_the_initial_condition_by_the_piece_count() {
+    let un_split = outlet_series(1, true, Some(false))[0];
+    let split = outlet_series(4, true, Some(false))[0];
+    println!("Q_0 outlet (undivided hot start): 1 piece = {un_split:.6}, 4 pieces = {split:.6}");
+    assert!(
+        (split / un_split - 4.0).abs() < 1e-2,
+        "expected a 4x inflated cold start, got ratio {:.4}",
+        split / un_split
+    );
+}
+
+/// Steady state is reached either way — the cold start only sets how long the
+/// spin-up takes — so the fix must not move the converged answer.
+#[test]
+fn hotstart_division_does_not_move_the_steady_state() {
+    let divided = outlet_series(4, true, Some(true))[T - 1];
+    let undivided = outlet_series(4, true, Some(false))[T - 1];
+    println!("steady state: divided = {divided:.6}, undivided = {undivided:.6}");
+    assert!(
+        (divided - undivided).abs() / divided < 1e-3,
+        "the cold start changed the steady state: {divided} vs {undivided}"
+    );
+}
+
+/// An un-subdivided network has no divisor, so the default must be an EXACT
+/// no-op there — this is what keeps `params.subdivision.enabled: false`
+/// byte-identical (and `compare_ddr_sandbox` an ABSOLUTE MATCH).
+#[test]
+fn hotstart_division_is_a_no_op_without_subdivision() {
+    assert_eq!(
+        outlet_series(1, true, Some(true)),
+        outlet_series(1, true, Some(false)),
+        "the hot-start divisor must not touch an un-subdivided network"
+    );
+}
+
+// ── the non-negativity window ────────────────────────────────────────────────
+
+/// **Why "Cr ≈ 1 ⇒ non-negative coefficients" does not survive contact with
+/// MERIT.** `c1 ≥ 0 ⟺ Cr ≥ 2X` and `c3 ≥ 0 ⟺ Cr ≤ 2(1−X)`, so BOTH hold only
+/// inside a window of width `2(1−2X)`. That width collapses as `X → 0.5`, and
+/// on the real network the Cunge `X` sits at a median of 0.492–0.497 — a window
+/// **1.3–3.1 % wide** (measured 2026-08-05, `probe_courant`, 1,841 gauges:
+/// `2(1−2X)` p50 = 0.0134 un-split, 0.0310 at `max_pieces: 8`).
+///
+/// A build-time piece count sets `Δx` from a *reference* flow, while `Cr`
+/// tracks the *routed* celerity, which varies several-fold within a single
+/// storm. Landing inside a 1–3 % window is therefore not achievable by
+/// subdivision, whatever the cap. Measured `frac c1 ≥ 0 AND c3 ≥ 0` on CONUS:
+/// 3.1 % un-split → 0.9 % at cap 8.
+#[test]
+fn both_coefficients_are_non_negative_only_inside_a_window_that_collapses_at_x_half() {
+    // Muskingum coefficients, mirroring `mmc_op.rs:1077-1080` with Cr = dt/K.
+    fn coeffs(cr: f32, x: f32) -> (f32, f32) {
+        let k = 1.0 / cr; // dt = 1 in these units
+        let denom = 2.0 * k * (1.0 - x) + 1.0;
+        ((1.0 - 2.0 * k * x) / denom, (2.0 * k * (1.0 - x) - 1.0) / denom)
+    }
+
+    for &x in &[0.30_f32, 0.45, 0.4966] {
+        let lo = 2.0 * x;
+        let hi = 2.0 * (1.0 - x);
+        let width = hi - lo;
+        assert!(
+            (width - 2.0 * (1.0 - 2.0 * x)).abs() < 1e-6,
+            "window width must be 2(1-2X)"
+        );
+        // Inside the window both are non-negative...
+        let (c1, c3) = coeffs(0.5 * (lo + hi), x);
+        assert!(c1 >= 0.0 && c3 >= 0.0, "X={x}: mid-window gave c1={c1}, c3={c3}");
+        // ...and stepping outside it, either side, breaks one of them.
+        let (c1_lo, _) = coeffs(lo * 0.98, x);
+        assert!(c1_lo < 0.0, "X={x}: Cr below 2X must give c1 < 0, got {c1_lo}");
+        let (_, c3_hi) = coeffs(hi * 1.02, x);
+        assert!(c3_hi < 0.0, "X={x}: Cr above 2(1-X) must give c3 < 0, got {c3_hi}");
+    }
+
+    // The measured CONUS median X leaves a window barely 1 % wide.
+    let x = 0.4966_f32;
+    assert!(
+        2.0 * (1.0 - 2.0 * x) < 0.02,
+        "the CONUS-median non-negativity window must be under 2% wide"
+    );
 }

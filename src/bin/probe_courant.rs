@@ -78,6 +78,58 @@ struct Cli {
     /// Optional CSV of the percentile table.
     #[arg(long)]
     output: Option<PathBuf>,
+
+    // ── reach subdivision ────────────────────────────────────────────────────
+    /// MERIT flowlines fabric (`.shp`/`.dbf`/`.gpkg`). Switches the run to the
+    /// MANAGED adjacency build, overriding `data_sources.conus_adjacency` /
+    /// `gages_adjacency`. Required for `--max-pieces` and `--clamp-report`,
+    /// because subdivision only happens inside that builder.
+    #[arg(long)]
+    fabric: Option<PathBuf>,
+
+    /// Layer name for a multi-layer `.gpkg` fabric.
+    #[arg(long)]
+    fabric_layer: Option<String>,
+
+    /// Workspace root holding `adjacency/<key>/` build caches. Note: subdivided
+    /// stores are cached separately per cap, so re-running a cap is instant.
+    #[arg(long, default_value = ".ddrs")]
+    workspace: PathBuf,
+
+    /// Enable subdivision with this `max_pieces` cap. Omit for the un-split
+    /// control. Implies `--fabric`.
+    #[arg(long)]
+    max_pieces: Option<usize>,
+
+    /// Override `params.subdivision.reference_n`. The default 0.05 is a
+    /// *guess* at the trained CONUS median; the reference celerity scales as
+    /// `1/n`, so this directly sets `dx_target` and therefore both the piece
+    /// count and the clamped fraction. Sweep it against the checkpoint's actual
+    /// median `n` before concluding anything about subdivision.
+    #[arg(long)]
+    reference_n: Option<f32>,
+
+    /// Override `params.subdivision.min_length_fraction` (short-reach clamp
+    /// target, as a fraction of `dx_target`; 0 disables the clamp).
+    #[arg(long)]
+    min_length_fraction: Option<f32>,
+
+    /// Report the reach-plan cost (piece histogram, clamped fraction,
+    /// clamp-factor percentiles, total length inflation) and exit without
+    /// routing. Requires `--fabric`; `--max-pieces` selects the cap.
+    #[arg(long, default_value_t = false)]
+    clamp_report: bool,
+
+    /// Divide the cold-start `q'_0` by each row's piece count, so the hot-start
+    /// `(I − N)·Q_0 = q'_0` solve sees the same forcing `forward` routes.
+    /// Without it the subdivided initial condition is inflated ~m× per reach.
+    #[arg(long, default_value_t = false)]
+    divide_hotstart: bool,
+
+    /// Trace the first N timesteps of basin-outlet discharge to
+    /// `<--output>.trace.csv`, for measuring hot-start wash-out. 0 = off.
+    #[arg(long, default_value_t = 0)]
+    trace_steps: usize,
 }
 
 type R<T> = Result<T, Box<dyn std::error::Error>>;
@@ -112,6 +164,79 @@ struct Summary {
     rep: CourantReport,
 }
 
+/// Report the reach-plan cost on the real fabric without writing a store.
+///
+/// This is the price of the SHORT-reach branch of the two-sided rule: reaches
+/// stretched up to `dx_target` (bounded by `max_clamp_factor`) get a
+/// proportionally longer travel time, which is a physical distortion traded for
+/// numerical stability. Reaches pinned AT the ceiling stay over-Courant.
+fn clamp_report(
+    cli: &Cli,
+    fabric: &std::path::Path,
+    subdivision: &ddrs::config::Subdivision,
+    attributes: &[PathBuf],
+) -> R<()> {
+    use ddrs::adjacency::cache::{parent_adjacency_from_fabric, reach_plan};
+    use ddrs::adjacency::subdivide::plan_stats;
+
+    let t0 = std::time::Instant::now();
+    let conus = parent_adjacency_from_fabric(fabric, cli.fabric_layer.as_deref())
+        .map_err(|e| format!("read fabric: {e}"))?;
+    eprintln!(
+        "fabric: {} parents, {} edges ({:.1}s)",
+        conus.order.len(),
+        conus.rows.len(),
+        t0.elapsed().as_secs_f64()
+    );
+
+    let plan = reach_plan(&conus, subdivision, attributes)
+        .map_err(|e| format!("reach plan: {e}"))?;
+    let st = plan_stats(&conus.length_m, &plan, subdivision);
+
+    println!("\n================ reach plan (max_pieces = {}, min_length_fraction = {}, max_clamp_factor = {}) ================",
+        subdivision.max_pieces, subdivision.min_length_fraction, subdivision.max_clamp_factor);
+    println!("parents                 : {}", st.n);
+    println!(
+        "sub-reaches (Σm)        : {} ({:.3}x)",
+        st.sum_pieces,
+        st.sum_pieces as f64 / st.n as f64
+    );
+    println!(
+        "reaches split (m > 1)   : {} ({:.2}%)",
+        st.n_split,
+        100.0 * st.n_split as f64 / st.n as f64
+    );
+    print!("piece histogram         :");
+    for (m, &c) in st.pieces_hist.iter().enumerate().skip(1) {
+        print!(" m={m}:{c}");
+    }
+    println!();
+    println!(
+        "reaches length-clamped  : {} ({:.2}%)",
+        st.n_clamped,
+        100.0 * st.n_clamped as f64 / st.n as f64
+    );
+    println!(
+        "  pinned at max_clamp_factor={:.1}: {} ({:.2}% of all, {:.2}% of clamped) \
+         — these stay over-Courant BY DESIGN",
+        subdivision.max_clamp_factor,
+        st.n_at_clamp_ceiling,
+        100.0 * st.n_at_clamp_ceiling as f64 / st.n as f64,
+        100.0 * st.n_at_clamp_ceiling as f64 / st.n_clamped.max(1) as f64
+    );
+    println!(
+        "  clamp factor p50/p95/p99/max: {:.3} / {:.3} / {:.3} / {:.3}",
+        st.clamp_factor_p50, st.clamp_factor_p95, st.clamp_factor_p99, st.clamp_factor_max
+    );
+    println!(
+        "total channel length    : {:.1} km → {:.1} km ({:+.2}%)",
+        st.total_length_before_m / 1000.0,
+        st.total_length_after_m / 1000.0,
+        100.0 * st.length_inflation()
+    );
+    Ok(())
+}
+
 fn pct(v: &mut Vec<f32>) -> [f32; 5] {
     v.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     [
@@ -143,6 +268,56 @@ where
         exp.checkpoint = Some(ckpt);
     }
 
+    // --- reach subdivision -------------------------------------------------
+    // Subdivision happens inside the MANAGED adjacency builder, which is only
+    // reached when `data_sources` carries no explicit adjacency paths. So
+    // `--fabric` swaps the config over to the managed path and splices the
+    // resolved (possibly subdivided) store paths back in.
+    if let Some(fabric) = cli.fabric.clone() {
+        cfg.params.subdivision.enabled = cli.max_pieces.is_some();
+        if let Some(m) = cli.max_pieces {
+            cfg.params.subdivision.max_pieces = m;
+        }
+        if let Some(v) = cli.reference_n {
+            cfg.params.subdivision.reference_n = v;
+        }
+        if let Some(v) = cli.min_length_fraction {
+            cfg.params.subdivision.min_length_fraction = v;
+        }
+        let ds = cfg.data_sources.as_mut().ok_or("config has no data_sources")?;
+        ds.conus_adjacency = None;
+        ds.gages_adjacency = None;
+        ds.geospatial_fabric = Some(fabric.clone());
+        ds.geospatial_fabric_layer = cli.fabric_layer.clone();
+        let (gages_csv, attributes) = (ds.gages.clone(), ds.attributes.clone());
+
+        if cli.clamp_report {
+            return clamp_report(&cli, &fabric, &cfg.params.subdivision, &attributes);
+        }
+
+        let outcome = ddrs::adjacency::cache::resolve_or_build(
+            &cli.workspace,
+            &fabric,
+            cli.fabric_layer.as_deref(),
+            &gages_csv,
+            &cfg.params.subdivision,
+            &attributes,
+        )
+        .map_err(|e| format!("managed adjacency build: {e}"))?;
+        eprintln!(
+            "adjacency: {} (cache {})",
+            outcome.paths.conus.display(),
+            if outcome.cache_hit { "hit" } else { "miss" }
+        );
+        let ds = cfg.data_sources.as_mut().unwrap();
+        ds.conus_adjacency = Some(outcome.paths.conus);
+        ds.gages_adjacency = Some(outcome.paths.gages);
+    } else if cli.max_pieces.is_some() || cli.clamp_report {
+        return Err("--max-pieces / --clamp-report require --fabric: subdivision \
+                    only runs inside the managed adjacency builder"
+            .into());
+    }
+
     let dataset = MeritGagesDataset::open(&cfg).map_err(|e| format!("open dataset: {e}"))?;
     let axis = dataset.time_axis().clone();
     let staids: Vec<_> = dataset.staids().iter().take(cli.gauges).cloned().collect();
@@ -170,7 +345,14 @@ where
     let (head, _state, _optim) = bootstrap_head_and_state::<I>(&cfg, &device)
         .map_err(|e| format!("bootstrap head: {e}"))?;
 
-    let params_map = head.forward(tensors.spatial_attributes.clone());
+    // The head runs at PARENT resolution; expand onto the routing's sub-reach
+    // rows exactly as `training::forward` does. No-op when not subdivided.
+    let params_map = ddrs::training::forward::gather_params_to_subreaches(
+        head.forward(tensors.spatial_attributes.clone()),
+        tensors.adjacency.parent_offset.as_ref(),
+        n_active,
+        &device,
+    );
     let n_param = params_map.get("n").expect("head missing n").clone();
     let q_param = params_map.get("q_spatial").expect("head missing q_spatial").clone();
     let p_param = params_map.get("p_spatial").cloned();
@@ -200,6 +382,7 @@ where
         cfg_v.params.enforce_positivity = enforce;
 
         let mut engine = MuskingumCunge::<I>::new(cfg_v.clone(), device.clone());
+        engine.divide_hotstart_by_pieces = cli.divide_hotstart;
         engine.setup_inputs(
             RoutingInputs {
                 adjacency: tensors.adjacency.clone(),
@@ -220,10 +403,17 @@ where
         );
         let inp = engine.probe_inputs();
         eprintln!("--- routing with enforce_positivity: {enforce} ---");
-        let rep = run_courant_probe::<I>(&cfg_v, &inp, cli.steps, cli.sample_every);
+        let t0 = std::time::Instant::now();
+        let rep = run_courant_probe::<I>(&cfg_v, &inp, cli.steps, cli.sample_every, cli.trace_steps);
+        let secs = t0.elapsed().as_secs_f64();
         eprintln!(
-            "    {} steps, {} sampled, negative solves {}/{}",
-            rep.n_steps, rep.n_sampled_steps, rep.neg_solves, rep.total_solves
+            "    {} steps, {} sampled, negative solves {}/{} — {:.2}s ({:.2} ms/step)",
+            rep.n_steps,
+            rep.n_sampled_steps,
+            rep.neg_solves,
+            rep.total_solves,
+            secs,
+            1000.0 * secs / rep.n_steps.max(1) as f64
         );
         summaries.push(Summary { label, rep });
     }
@@ -248,6 +438,7 @@ where
 
         let n_s = r.cr.len() as f64;
         let frac_cr_raw_gt2 = r.cr_raw.iter().filter(|&&v| v > 2.0).count() as f64 / n_s;
+        let frac_cr_raw_lt05 = r.cr_raw.iter().filter(|&&v| v < 0.5).count() as f64 / n_s;
         let frac_floored = r.k_ratio.iter().filter(|&&v| v > 1.0 + 1e-6).count() as f64 / n_s;
         let mut floored_ratio: Vec<f32> =
             r.k_ratio.iter().copied().filter(|&v| v > 1.0 + 1e-6).collect();
@@ -260,6 +451,20 @@ where
             / n_s;
         let neg_c1 = r.c1.iter().filter(|&&v| v < 0.0).count();
         let neg_c3 = r.c3.iter().filter(|&&v| v < 0.0).count();
+        // The whole claim under test: "Cr ~ 1 makes c1 and c3 non-negative by
+        // construction". Both are >= 0 exactly when Cr lands inside the
+        // Muskingum window `2X <= Cr <= 2(1-X)`, whose width is `2(1-2X)` — it
+        // COLLAPSES as X -> 0.5. So report the window width alongside the hit
+        // rate; a 1%-wide window cannot be hit by a static piece count.
+        let both_ok = r
+            .c1
+            .iter()
+            .zip(r.c3.iter())
+            .filter(|(a, b)| **a >= 0.0 && **b >= 0.0)
+            .count() as f64
+            / n_s;
+        let mut window: Vec<f32> = r.x_cunge.iter().map(|&x| 2.0 * (1.0 - 2.0 * x)).collect();
+        let q_win = pct(&mut window);
         let min_c1 = r.c1.iter().copied().fold(f32::INFINITY, f32::min);
         let min_c3 = r.c3.iter().copied().fold(f32::INFINITY, f32::min);
 
@@ -290,10 +495,22 @@ where
             r.cr_raw.iter().filter(|&&v| v > 2.0).count(),
             r.cr_raw.len()
         );
+        println!(
+            "frac Cr_raw < 0.5    : {:.4}  ({} of {})",
+            frac_cr_raw_lt05,
+            r.cr_raw.iter().filter(|&&v| v < 0.5).count(),
+            r.cr_raw.len()
+        );
         println!("frac K floored       : {frac_floored:.4}");
         println!("frac X cap binds     : {cap_binds:.4}  (x_eff < x_cunge)");
-        println!("min c1 = {min_c1:.3e}  (c1 < 0: {neg_c1})");
-        println!("min c3 = {min_c3:.3e}  (c3 < 0: {neg_c3})");
+        println!("min c1 = {min_c1:.3e}  (c1 < 0: {neg_c1}, frac {:.4})", neg_c1 as f64 / n_s);
+        println!("min c3 = {min_c3:.3e}  (c3 < 0: {neg_c3}, frac {:.4})", neg_c3 as f64 / n_s);
+        println!("frac c1>=0 AND c3>=0 : {both_ok:.4}");
+        println!(
+            "non-neg window 2(1-2X) p5/p50/p95: {:.5} / {:.5} / {:.5}  \
+             (Cr must land in [2X, 2-2X] for BOTH coefficients)",
+            q_win[0], q_win[2], q_win[4]
+        );
 
         let mut push = |metric: &str, q: [f32; 5], extra: String| {
             csv.push_str(&format!(
@@ -301,7 +518,11 @@ where
                 s.label, metric, q[0], q[1], q[2], q[3], q[4], extra
             ));
         };
-        push("cr_raw", q_cr_raw, format!("frac_gt2={frac_cr_raw_gt2}"));
+        push(
+            "cr_raw",
+            q_cr_raw,
+            format!("frac_gt2={frac_cr_raw_gt2} frac_lt0.5={frac_cr_raw_lt05}"),
+        );
         push("cr", q_cr, String::new());
         push("x_cunge", q_xc, String::new());
         push("x_eff", q_x, format!("frac_cap_binds={cap_binds}"));
@@ -310,7 +531,7 @@ where
             s.label, r.neg_solves, r.total_solves, pc
         ));
         csv.push_str(&format!(
-            "{},coeff_min,,,,,,min_c1={min_c1:.3e} min_c3={min_c3:.3e} neg_c1={neg_c1} neg_c3={neg_c3} frac_k_floored={frac_floored:.4}\n",
+            "{},coeff_min,,,,,,min_c1={min_c1:.3e} min_c3={min_c3:.3e} neg_c1={neg_c1} neg_c3={neg_c3} frac_both_nonneg={both_ok:.4} frac_k_floored={frac_floored:.4}\n",
             s.label
         ));
     }
@@ -318,6 +539,20 @@ where
     if let Some(p) = cli.output {
         std::fs::write(&p, csv).map_err(|e| format!("write {}: {e}", p.display()))?;
         eprintln!("wrote {}", p.display());
+
+        // Hot-start wash-out trace: total network discharge per timestep, one
+        // column per enforce_positivity arm. Index 0 is the cold-start Q_0.
+        if cli.trace_steps > 0 {
+            let mut t = String::from("step,flag,total_q\n");
+            for s in &summaries {
+                for (i, v) in s.rep.trace_total_q.iter().enumerate() {
+                    t.push_str(&format!("{i},{},{v}\n", s.label));
+                }
+            }
+            let tp = p.with_extension("trace.csv");
+            std::fs::write(&tp, t).map_err(|e| format!("write {}: {e}", tp.display()))?;
+            eprintln!("wrote {}", tp.display());
+        }
     }
     Ok(())
 }

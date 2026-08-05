@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use crate::adjacency::build::{build_conus_adjacency, BuildError, ConusAdjacency};
 use crate::adjacency::fabric::{read_fabric_records, resolve_fabric};
 use crate::adjacency::gauges::build_gauge_subgraphs;
-use crate::adjacency::subdivide::{plan_reaches, subdivide, SubdividedAdjacency};
+use crate::adjacency::subdivide::{plan_reaches, subdivide, ReachPlan, SubdividedAdjacency};
 use crate::adjacency::zarr_write::{write_conus_store_subdivided, write_gauges_store};
 use crate::adjacency::BUILDER_VERSION;
 use crate::config::Subdivision;
@@ -354,6 +354,19 @@ fn expand(
     subdivision: &Subdivision,
     attributes: &[PathBuf],
 ) -> Result<SubdividedAdjacency, AdjacencyCacheError> {
+    let plan = reach_plan(conus, subdivision, attributes)?;
+    Ok(subdivide(conus, &plan))
+}
+
+/// The two-sided reach plan for an already-built parent adjacency.
+///
+/// Split out of [`expand`] so the plan can be measured (`subdivide::plan_stats`)
+/// without writing a store — `probe_courant --clamp-report` uses this.
+pub fn reach_plan(
+    conus: &ConusAdjacency,
+    subdivision: &Subdivision,
+    attributes: &[PathBuf],
+) -> Result<ReachPlan, AdjacencyCacheError> {
     let uparea = if subdivision.enabled {
         upstream_area_km2(conus, attributes)?
     } else {
@@ -361,14 +374,23 @@ fn expand(
         // correctly-sized vector keeps the contract intact if that ever changes.
         vec![0.0; conus.order.len()]
     };
-    let plan = plan_reaches(
+    Ok(plan_reaches(
         &conus.length_m,
         &conus.slope,
         &uparea,
         DT_SECONDS,
         subdivision,
-    );
-    Ok(subdivide(conus, &plan))
+    ))
+}
+
+/// Build the parent adjacency straight from a fabric, with no cache and no
+/// store write. The measurement entry point for `probe_courant --clamp-report`.
+pub fn parent_adjacency_from_fabric(
+    fabric: &Path,
+    fabric_layer: Option<&str>,
+) -> Result<ConusAdjacency, AdjacencyCacheError> {
+    let records = read_fabric_records(fabric, fabric_layer).map_err(AdjacencyCacheError::Data)?;
+    build_conus_adjacency(&records).map_err(AdjacencyCacheError::Build)
 }
 
 /// Upstream drainage area (km²) per reach, aligned to `conus.order`.

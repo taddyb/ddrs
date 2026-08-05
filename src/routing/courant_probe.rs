@@ -38,6 +38,11 @@ pub struct ProbeInputs<I: Backend> {
     pub x_storage: Tensor<I, 1>,
     /// `(T_hours, N)` hourly forcing, unclamped (the probe applies S0's clamp).
     pub q_prime: Tensor<I, 2>,
+    /// Per-row parent piece count, or `None` when the network is un-subdivided.
+    /// The probe applies it exactly as `MuskingumCunge::forward` does — AFTER
+    /// the `discharge` clamp — so a subdivided network is routed with the same
+    /// `q'/m` lateral inflow training would use, not `m×` too much water.
+    pub pieces_per_row: Option<Tensor<I, 1>>,
     /// Window-start discharge as `setup_inputs` left it.
     pub q0: Tensor<I, 1>,
     pub n_segments: usize,
@@ -66,6 +71,10 @@ pub struct CourantReport {
     pub k_ratio: Vec<f32>,
     pub c1: Vec<f32>,
     pub c3: Vec<f32>,
+    /// Total network discharge `Σ_i q_t[i]` at each of the first
+    /// `trace_steps` timesteps (index 0 = the hot-start `Q_0` itself).
+    /// Used to measure how long an inflated cold start takes to wash out.
+    pub trace_total_q: Vec<f64>,
 }
 
 fn to_vec<I: Backend>(p: I::FloatTensorPrimitive) -> Vec<f32> {
@@ -82,6 +91,7 @@ pub fn run_courant_probe<I: Backend + 'static>(
     inp: &ProbeInputs<I>,
     n_steps: usize,
     sample_every: usize,
+    trace_steps: usize,
 ) -> CourantReport
 where
     I::FloatTensorPrimitive: 'static,
@@ -94,8 +104,13 @@ where
     let t_avail = inp.q_prime.dims()[0];
     let steps = n_steps.min(t_avail.saturating_sub(1));
     // Mirrors `MuskingumCunge::forward`: one clamp on the whole forcing block,
-    // and the initial state clamped once.
+    // THEN the subdivision divisor (dividing first would floor each of the `m`
+    // pieces independently and create mass), and the initial state clamped once.
     let q_prime = inp.q_prime.clone().clamp_min(discharge_lb);
+    let q_prime = match inp.pieces_per_row.as_ref() {
+        Some(d) => q_prime / d.clone().unsqueeze_dim::<2>(0),
+        None => q_prime,
+    };
     let mut q_t = inp.q0.clone().clamp_min(discharge_lb);
 
     let length: Vec<f32> = inp.length.clone().into_data().to_vec::<f32>().expect("f32");
@@ -116,7 +131,21 @@ where
         k_ratio: Vec::new(),
         c1: Vec::new(),
         c3: Vec::new(),
+        trace_total_q: Vec::new(),
     };
+
+    let total_q = |q: &Tensor<I, 1>| -> f64 {
+        q.clone()
+            .into_data()
+            .to_vec::<f32>()
+            .expect("f32")
+            .iter()
+            .map(|&v| v as f64)
+            .sum()
+    };
+    if trace_steps > 0 {
+        rep.trace_total_q.push(total_q(&q_t));
+    }
 
     for t in 1..=steps {
         let q_prime_t = q_prime
@@ -166,6 +195,9 @@ where
         }
 
         q_t = Tensor::from_primitive(TensorPrimitive::Float(q_next));
+        if t < trace_steps {
+            rep.trace_total_q.push(total_q(&q_t));
+        }
     }
 
     let (neg, total) = negative_solve_stats();
