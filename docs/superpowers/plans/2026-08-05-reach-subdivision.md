@@ -123,6 +123,42 @@ clamp (indicative reference celerity, cap 8):
 Essentially the whole network lands inside the stable window, which is what makes
 "non-negative by construction" an honest claim rather than an aspiration.
 
+### Why the target is `Δx = c·Δt` and NOT the Ponce–Theurer limit
+
+Formulas verified verbatim against [Ponce](https://ponce.sdsu.edu/muskingum_cunge_method_explained.html):
+`K = Δx/c`; `X = ½(1 − q/(So·c·Δx))` with `q` the **unit-width** discharge; and
+`C0 = (Δt−2KX)/denom`, `C1 = (Δt+2KX)/denom`, `C2 = (2K(1−X)−Δt)/denom` — identical
+to ddrs's `c1`, `c2`, `c3` (`mmc_op.rs:1077-1080`). Ponce also confirms the failure
+mode: *"for very large values of the space step, there is a tendency for physically
+unrealistic negative outflows"*, and *"negative values of C2 are invariably
+associated with dips in the rising portion of the outflow hydrograph"* — his `C2` is
+our `c3`.
+
+[Ponce & Theurer](https://ponce.sdsu.edu/accuracy_criteria_in_diffusion_routing.html)
+give the accuracy criterion `C·D ≥ ξ` (a **product**) and the limit
+`Δx ≤ ½(c·Δt + qo/(So·c))`. **That limit was evaluated and rejected for this network:**
+
+| Δx target | Σm (cap 8) | median Cr | frac Cr > 2 | frac `C·D ≥ 0.33` |
+|---|---|---|---|---|
+| `c·Δt` (this plan) | 918 k | **1.08** | **0.00 %** | 0.3 % |
+| Ponce–Theurer `½(c·Δt + qo/So·c)` | 1.42 M | 2.06 | **57.3 %** | 17.7 % |
+
+The cell Reynolds number on MERIT is `D ≈ 0.012` — physical diffusion is ~1–2 % of
+advective transport — so `Δx_D/Δx_C ≈ 0.020` and the Ponce–Theurer limit collapses to
+`≈ c·Δt/2`, i.e. `C ≈ 2`. That **violates** the non-negativity ceiling `C ≤ 2(1−X)`
+(which is `≈ 1` when `X ≈ 0.5`) and puts 57 % of reaches above `Cr = 2` — it makes
+negative coefficients *worse*.
+
+**`C·D ≥ ξ` is unsatisfiable here at any Δx that also keeps coefficients
+non-negative.** It is an accuracy criterion for *diffusion* routing; as `D → 0` there
+is no physical diffusion left to resolve and the criterion degenerates. Confirmed not
+to be an artifact of the slope floor: lowering `attribute_minimums.slope` from `1e-3`
+to `1e-6` moves median `D` only 0.0112 → 0.0120.
+
+So the target is the Courant length, `Δx = c·Δt` — which is also HEC-HMS's Auto-DX
+rule — because at `C = 1` both coefficients reduce to `(1−2X)/(1+2(1−X)) ≥ 0` for any
+`X ≤ 0.5`.
+
 ### Where the cost lives
 
 `corr(log m, log uparea) = −0.14`; `corr(log m, log c) = −0.75`; `corr(log m, log L) = +0.57`.
