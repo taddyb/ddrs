@@ -211,7 +211,16 @@ fn run<I: Backend>(cli: Cli, device: I::Device) -> R<()> {
     let head = load_kan_head::<I>(&cli.checkpoint, template, &device)
         .map_err(|e| format!("load checkpoint: {e}"))?;
 
-    let raw = head.forward(tensors.spatial_attributes.clone());
+    // Gathered to sub-reach rows: everything below is indexed by `n_reaches`
+    // (= `divide_comids.len()`), while the head itself runs at parent
+    // resolution. No-op unless the adjacency was built with
+    // `params.subdivision.enabled`.
+    let raw = ddrs::training::forward::gather_params_to_subreaches(
+        head.forward(tensors.spatial_attributes.clone()),
+        tensors.adjacency.parent_offset.as_ref(),
+        n_reaches,
+        &device,
+    );
     let is_log = |k: &str| cfg.params.log_space_parameters.iter().any(|s| s == k);
     let to_vec = |t: Tensor<I, 1>| -> Vec<f32> { t.into_data().to_vec::<f32>().unwrap() };
 

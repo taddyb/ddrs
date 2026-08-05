@@ -86,6 +86,39 @@ pub struct CompressedAdj {
     /// (`0..=n_active`) when the store is not subdivided — the engine treats
     /// both alike and skips the split.
     pub parent_offset: Option<Vec<i32>>,
+    /// CONUS **sub-reach** position of each compressed row, length `N_active`:
+    /// compressed row `i` was compressed from CONUS row `conus_positions[i]`.
+    ///
+    /// Anything needing per-row CONUS geometry (`length_m`, `slope`) must index
+    /// with this. `ConusAdjacencyStore::index.position(comid)` is NOT a
+    /// substitute: it lives in PARENT space (see the two-index-spaces note on
+    /// `ConusAdjacencyStore`), so under subdivision it would hand every piece of
+    /// a parent the geometry of whatever row the parent's index happens to
+    /// number — the parent's full length instead of `L/m`, and some other
+    /// reach's slope entirely.
+    pub conus_positions: Vec<usize>,
+}
+
+impl CompressedAdj {
+    /// One COMID per parent reach present in this batch, in compressed
+    /// topological order. Equals `divide_comids` when the network is not
+    /// subdivided.
+    ///
+    /// `divide_comids` has one entry per SUB-REACH, so under subdivision it
+    /// repeats a parent's COMID `m` times. Attributes are per-COMID and
+    /// sub-reaches share their parent's hydraulics, so the KAN head is built
+    /// and run at parent resolution and its outputs are gathered onto the
+    /// pieces (`training::forward::gather_params_to_subreaches`). This is the
+    /// COMID list that attribute matrix is sliced from.
+    pub fn parent_comids(&self) -> Vec<Comid> {
+        match &self.parent_offset {
+            Some(off) => off[..off.len() - 1]
+                .iter()
+                .map(|&lo| self.divide_comids[lo as usize])
+                .collect(),
+            None => self.divide_comids.clone(),
+        }
+    }
 }
 
 /// Parent index owning sub-reach row `row`. `parent_offset` is strictly
@@ -312,6 +345,7 @@ pub fn compress(
         gauge_compressed,
         outflow_idx,
         parent_offset,
+        conus_positions: active_vec,
     })
 }
 

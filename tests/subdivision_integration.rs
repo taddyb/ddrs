@@ -17,12 +17,21 @@
 //! Both configurations must reach the SAME steady-state outflow. If the split
 //! is missing, the 4-piece network manufactures 4× the mass.
 
+use std::collections::HashMap;
+
 use burn::backend::{Autodiff, NdArray};
 use burn::tensor::{Tensor, TensorData};
 
+use ddrs::adjacency::build::ConusAdjacency;
+use ddrs::adjacency::subdivide::{subdivide, ReachPlan};
+use ddrs::adjacency::zarr_write::write_conus_store_subdivided;
 use ddrs::config::Config;
+use ddrs::data::collate::UnionedCoo;
+use ddrs::data::dataset::slice_reach_geometry;
+use ddrs::data::{compress, ConusAdjacencyStore, Staid};
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use ddrs::sparse::SparseAdjacency;
+use ddrs::training::forward::gather_params_to_subreaches;
 
 type I = NdArray<f32>;
 type AB = Autodiff<I>;
@@ -192,4 +201,200 @@ fn identity_parent_map_is_bit_identical_to_none() {
         none.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         "identity parent map must not perturb a single bit"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Per-row channel geometry under subdivision
+// ---------------------------------------------------------------------------
+
+/// Chain of 3 reaches `0 → 1 → 2` with deliberately DISTINCT lengths and
+/// slopes, so a row that reads the wrong index is visible rather than lucky.
+fn chain3() -> ConusAdjacency {
+    ConusAdjacency {
+        order: vec![100, 200, 300],
+        rows: vec![1, 2],
+        cols: vec![0, 1],
+        length_m: vec![3000.0, 6000.0, 900.0],
+        slope: vec![1e-3, 2e-3, 3e-3],
+        dropped_comids: vec![],
+    }
+}
+
+/// `chain3` subdivided into `pieces`, written to a zarr store and reloaded —
+/// the same round trip `ddrs plan` performs, so `parent_order` / `parent_offset`
+/// come back through the real reader.
+fn subdivided_store(pieces: &[u32]) -> (ConusAdjacencyStore, tempfile::TempDir) {
+    let a = chain3();
+    let s = subdivide(
+        &a,
+        &ReachPlan {
+            pieces: pieces.to_vec(),
+            length_m: a.length_m.clone(),
+        },
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_conus_store_subdivided(&s, dir.path()).expect("write");
+    let store = ConusAdjacencyStore::open(dir.path()).expect("open");
+    (store, dir)
+}
+
+/// Every sub-reach row must carry its OWN geometry: length `L/m` (of its
+/// parent's possibly-clamped total) and its parent's slope.
+///
+/// This is the regression for the parent/sub-reach index mix-up: the geometry
+/// arrays are in SUB-REACH space, but `ConusAdjacencyStore::index` resolves a
+/// COMID to a PARENT position. Slicing with the latter gives row `i` the
+/// geometry of parent-position `i`, which is only correct when the two spaces
+/// coincide — i.e. everywhere except under subdivision, which is what made the
+/// bug silent.
+#[test]
+fn subdivided_rows_get_their_own_length_and_slope() {
+    let pieces = [3u32, 2, 1];
+    let (store, _dir) = subdivided_store(&pieces);
+    assert_eq!(store.parent_offset, vec![0, 3, 5, 6]);
+
+    // Activate the whole network: every subdivided edge plus a gauge on the
+    // outlet piece of the last parent.
+    let edges: Vec<(usize, usize)> = store
+        .indices_0
+        .iter()
+        .zip(store.indices_1.iter())
+        .map(|(&r, &c)| (r as usize, c as usize))
+        .collect();
+    let unioned = UnionedCoo {
+        edges,
+        gauges: vec![(Staid::new("gauge"), store.outlet_row(2), "300".to_string())],
+    };
+    let compressed = compress(&unioned, &store.order, false, Some(&store.parent_offset))
+        .expect("compress");
+    assert_eq!(
+        compressed.divide_comids.len(),
+        6,
+        "all six sub-reaches must be active for this fixture to be conclusive"
+    );
+
+    let (length_m, slope) = slice_reach_geometry(&store, &compressed);
+    println!("length_m = {length_m:?}\nslope    = {slope:?}");
+
+    let parent = chain3();
+    for (p, &m) in pieces.iter().enumerate() {
+        let lo = store.parent_offset[p] as usize;
+        let hi = store.parent_offset[p + 1] as usize;
+        let expect_len = parent.length_m[p] / m as f32;
+        for row in lo..hi {
+            assert!(
+                (length_m[row] - expect_len).abs() < 1e-3,
+                "row {row} (parent {p}, {m} pieces): length {} != L/m {expect_len}",
+                length_m[row],
+            );
+            assert!(
+                (slope[row] - parent.slope[p]).abs() < 1e-9,
+                "row {row} (parent {p}): slope {} != parent slope {}",
+                slope[row],
+                parent.slope[p],
+            );
+        }
+    }
+
+    // Total length is conserved per parent: splitting must not create channel.
+    for (p, _) in pieces.iter().enumerate() {
+        let lo = store.parent_offset[p] as usize;
+        let hi = store.parent_offset[p + 1] as usize;
+        let total: f32 = length_m[lo..hi].iter().sum();
+        assert!(
+            (total - parent.length_m[p]).abs() < 1e-2,
+            "parent {p}: pieces sum to {total}, parent is {}",
+            parent.length_m[p],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parent -> sub-reach KAN parameter gather
+// ---------------------------------------------------------------------------
+
+/// Gather `parents` onto the rows described by `parent_offset`, forward only.
+fn gather_for_test(parents: &[f32], parent_offset: &[i32]) -> Vec<f32> {
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let n_rows = *parent_offset.last().expect("non-empty offset") as usize;
+    let mut params: HashMap<String, Tensor<I, 1>> = HashMap::new();
+    params.insert("n".to_string(), Tensor::from_floats(parents, &device));
+    let out = gather_params_to_subreaches(
+        params,
+        Some(&parent_offset.to_vec()),
+        n_rows,
+        &device,
+    );
+    out["n"].clone().into_data().into_vec().expect("to host")
+}
+
+/// `d(Σ gathered)/d(parent p)`. Proves `select`'s backward is a scatter-add.
+fn gather_grad_for_test(parents: &[f32], parent_offset: &[i32]) -> Vec<f32> {
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let n_rows = *parent_offset.last().expect("non-empty offset") as usize;
+    let leaf: Tensor<AB, 1> = Tensor::from_floats(parents, &device).require_grad();
+    let mut params: HashMap<String, Tensor<AB, 1>> = HashMap::new();
+    params.insert("n".to_string(), leaf.clone());
+    let out = gather_params_to_subreaches(
+        params,
+        Some(&parent_offset.to_vec()),
+        n_rows,
+        &device,
+    );
+    let grads = out["n"].clone().sum().backward();
+    leaf.grad(&grads)
+        .expect("parent leaf must receive a gradient")
+        .into_data()
+        .into_vec()
+        .expect("to host")
+}
+
+/// Sub-reaches inherit their parent's hydraulics verbatim — MERIT carries no
+/// within-reach variation, so there is nothing better to give them.
+#[test]
+fn every_piece_inherits_its_parents_parameters() {
+    let gathered = gather_for_test(&[0.02, 0.05, 0.10], &[0, 3, 5, 6]);
+    println!("gathered = {gathered:?}");
+    assert_eq!(gathered, vec![0.02, 0.02, 0.02, 0.05, 0.05, 0.10]);
+}
+
+/// The gradient half of the shared-parameter contract: a parent that feeds `m`
+/// pieces must receive the SUM of their gradients, not one piece's. Anything
+/// else (a broadcast, or a gather that forgets the tape) makes long reaches
+/// learn at a different rate than the objective actually implies.
+#[test]
+fn gradient_sums_back_to_the_parent() {
+    let g = gather_grad_for_test(&[0.02, 0.05, 0.10], &[0, 3, 5, 6]);
+    println!("d(sum)/d(parent) = {g:?}");
+    assert_eq!(
+        g,
+        vec![3.0, 2.0, 1.0],
+        "scatter-add must sum piece gradients (expected the piece counts)"
+    );
+}
+
+/// The subdivision-off path must not perturb a value.
+///
+/// Honest about its reach: this is a VALUE-level check. It would still pass if
+/// the `n_parent == n_rows` short-circuit were deleted and the gather ran with
+/// an identity index (that property is structural — `gather_params_to_subreaches`
+/// returns the map itself, recording nothing on the tape). What it does catch is
+/// a mis-built row→parent index, which in the identity case would reorder or
+/// truncate the parameters.
+#[test]
+fn identity_parent_offset_leaves_values_untouched() {
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let vals = [0.02_f32, 0.05, 0.10];
+    let mut params: HashMap<String, Tensor<I, 1>> = HashMap::new();
+    params.insert("n".to_string(), Tensor::from_floats(vals.as_slice(), &device));
+
+    for offset in [None, Some(vec![0i32, 1, 2, 3])] {
+        let out = gather_params_to_subreaches(params.clone(), offset.as_ref(), 3, &device);
+        let got: Vec<f32> = out["n"].clone().into_data().into_vec().expect("to host");
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            vals.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "identity map must not perturb a single bit (offset {offset:?})"
+        );
+    }
 }

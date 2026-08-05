@@ -34,6 +34,75 @@ pub fn scatter_add_by_group<B: Backend>(
 }
 
 // ---------------------------------------------------------------------------
+// Reach subdivision: parent -> sub-reach gather
+// ---------------------------------------------------------------------------
+
+/// Row → parent index for a subdivided network, or `None` when there is nothing
+/// to gather.
+///
+/// `parent_offset` is the reach-subdivision map in the batch's compressed
+/// space: parent `p` owns rows `[off[p], off[p + 1])`. One row per parent means
+/// the map is the identity, and returning `None` makes the caller skip the
+/// gather **entirely** rather than run `select` with an identity index — that is
+/// what keeps `params.subdivision.enabled: false` byte-identical.
+fn parent_row_index(parent_offset: Option<&Vec<i32>>, n_rows: usize) -> Option<Vec<i32>> {
+    let off = parent_offset?;
+    let n_parent = off.len().checked_sub(1)?;
+    if n_parent == n_rows {
+        return None;
+    }
+    let mut idx: Vec<i32> = Vec::with_capacity(n_rows);
+    for (p, w) in off.windows(2).enumerate() {
+        for _ in w[0]..w[1] {
+            idx.push(p as i32);
+        }
+    }
+    debug_assert_eq!(
+        idx.len(),
+        n_rows,
+        "parent_offset covers {} rows but the network has {n_rows}",
+        idx.len()
+    );
+    Some(idx)
+}
+
+/// Expand every KAN output from parent resolution `[N_parent]` onto the
+/// routing's sub-reach resolution `[n_rows]`.
+///
+/// The head is run ONCE per MERIT reach. Sub-reaches inherit their parent's
+/// hydraulics — `n`, `p_spatial`, `q_spatial`, slope — because MERIT carries no
+/// within-reach variation, so duplicating the attribute rows would cost ~5x the
+/// head compute at `max_pieces: 8` for numerically identical outputs.
+///
+/// `select`'s backward is a **scatter-add**, so a parent receives the SUMMED
+/// gradient from all of its pieces. That is the correct semantics for a shared
+/// parameter (a broadcast that only forwarded one piece's gradient would not
+/// be), and `tests/subdivision_integration.rs::gradient_sums_back_to_the_parent`
+/// pins it.
+///
+/// Returns `params` untouched — no op recorded on the tape — when the network
+/// is not subdivided.
+#[doc(hidden)]
+pub fn gather_params_to_subreaches<B: Backend>(
+    params: std::collections::HashMap<String, Tensor<B, 1>>,
+    parent_offset: Option<&Vec<i32>>,
+    n_rows: usize,
+    device: &B::Device,
+) -> std::collections::HashMap<String, Tensor<B, 1>> {
+    let Some(idx) = parent_row_index(parent_offset, n_rows) else {
+        return params;
+    };
+    let idx = Tensor::<B, 1, Int>::from_data(TensorData::from(idx.as_slice()), device);
+    params
+        .into_iter()
+        .map(|(name, t)| {
+            let gathered = t.select(0, idx.clone());
+            (name, gathered)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // FrozenParams + forward_with_frozen_params
 // ---------------------------------------------------------------------------
 
@@ -183,6 +252,10 @@ use crate::nn::kan_head::KanHead;
 /// with 47% of CONUS pinned at `n = 0.015`, and that was only visible after a
 /// 14 h run plus a `dump_parameters` pass. Logging it per micro-batch turns a
 /// post-mortem into a first-epoch observation.
+///
+/// Deliberately NOT gathered onto sub-reaches: under `params.subdivision` the
+/// statistic is one sample per MERIT reach, not one per piece, so long reaches
+/// do not get extra votes on the median and at-floor fraction.
 pub fn manning_n_stats<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<Autodiff<I>>,
@@ -232,13 +305,20 @@ pub fn forward<I: Backend>(
     device: &I::Device,
     carry_state: bool,
 ) -> Tensor<Autodiff<I>, 2> {
-    let params_map = head.forward(tensors.spatial_attributes.clone());
+    let n_active = tensors.adjacency.n;
+    // The head runs at PARENT resolution; expand to the routing's sub-reach
+    // rows before anything denormalizes or slices. No-op when not subdivided.
+    let params_map = gather_params_to_subreaches(
+        head.forward(tensors.spatial_attributes.clone()),
+        tensors.adjacency.parent_offset.as_ref(),
+        n_active,
+        device,
+    );
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
     let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
     let p_param = params_map.get("p_spatial").cloned();
 
-    let n_active = tensors.adjacency.n;
     // Learnable Muskingum X: when the KAN emits `x_storage`, denormalize its
     // [0,1] output to the configured range so the routing learns its own
     // attenuation-vs-translation per reach (gradient already flows via the
@@ -528,7 +608,15 @@ fn forward_eval_core<I: Backend>(
     overrides: Option<&LeakanceOverride>,
     param_overrides: Option<&RoutingParamOverride>,
 ) -> Tensor<I, 2> {
-    let params_map = head.forward(tensors.spatial_attributes.clone());
+    let n_active = tensors.adjacency.n;
+    // Parent → sub-reach gather, before the overrides below: `RoutingParamOverride`
+    // and `LeakanceOverride` are both sized to the routing network.
+    let params_map = gather_params_to_subreaches(
+        head.forward(tensors.spatial_attributes.clone()),
+        tensors.adjacency.parent_offset.as_ref(),
+        n_active,
+        device,
+    );
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
     let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
@@ -552,7 +640,6 @@ fn forward_eval_core<I: Backend>(
         (n_param, q_param, p_param)
     };
 
-    let n_active = tensors.adjacency.n;
     // Learnable Muskingum X (eval path mirrors `forward`): denormalize the
     // KAN's `x_storage` output when present, else the constant 0.3.
     let x_storage: Tensor<I, 1> = match params_map.get("x_storage") {
