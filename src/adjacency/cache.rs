@@ -3,7 +3,7 @@
 //! Layout under `<workspace_root>/adjacency/<key>/`:
 //!
 //! ```text
-//! <fabric>_adjacency.zarr/       — written by zarr_write::write_conus_store
+//! <fabric>_adjacency.zarr/       — zarr_write::write_conus_store_subdivided
 //! <fabric>_gages_adjacency.zarr/ — written by zarr_write::write_gauges_store
 //! manifest.json                  — input paths + fingerprints, graph dims,
 //!                                  dropped COMIDs, build duration, git SHA
@@ -18,10 +18,11 @@
 //! `*_adjacency.zarr` pair is present so old caches keep hitting.
 //!
 //! The key is blake3 of the resolved fabric file bytes (.dbf or .gpkg) ∥
-//! gages CSV file bytes ∥ optional gpkg layer name ∥ BUILDER_VERSION,
-//! truncated to 16 hex chars. Content fingerprints (not stat/path) are used
-//! so that moving or renaming the files does NOT invalidate, and so two
-//! files with identical bytes share a cache entry.
+//! gages CSV file bytes ∥ optional gpkg layer name ∥ BUILDER_VERSION ∥ every
+//! field of `params.subdivision`, truncated to 16 hex chars. Content
+//! fingerprints (not stat/path) are used so that moving or renaming the files
+//! does NOT invalidate, and so two files with identical bytes share a cache
+//! entry.
 //!
 //! Build is crash-safe: everything is written into a temp dir
 //! `<root>/adjacency/.tmp-<key>` then atomically renamed into place.
@@ -33,12 +34,17 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::adjacency::build::{build_conus_adjacency, BuildError};
+use crate::adjacency::build::{build_conus_adjacency, BuildError, ConusAdjacency};
 use crate::adjacency::fabric::{read_fabric_records, resolve_fabric};
 use crate::adjacency::gauges::build_gauge_subgraphs;
-use crate::adjacency::zarr_write::{write_conus_store, write_gauges_store};
+use crate::adjacency::subdivide::{plan_reaches, subdivide, SubdividedAdjacency};
+use crate::adjacency::zarr_write::{write_conus_store_subdivided, write_gauges_store};
 use crate::adjacency::BUILDER_VERSION;
+use crate::config::Subdivision;
 use crate::data::error::DataError;
+use crate::data::ids::Comid;
+use crate::data::store::netcdf::AttributesStore;
+use crate::routing::mmc::DT_SECONDS;
 
 /// Paths to the two zarr stores produced by (or read from) the cache.
 #[derive(Debug, Clone)]
@@ -94,8 +100,13 @@ struct CacheManifest {
     gages_path: PathBuf,
     /// blake3 hex of the gages CSV file bytes.
     gages_fingerprint: String,
-    /// Number of CONUS reaches in `order`.
+    /// Number of rows in `order` — sub-reaches when subdivision is enabled,
+    /// otherwise MERIT reaches.
     n: usize,
+    /// Number of MERIT reaches (parent rows). Equals `n` unless subdivision is
+    /// enabled. Defaulted for manifests written before BUILDER_VERSION 2.
+    #[serde(default)]
+    n_parent: usize,
     /// Number of COO edges (nnz).
     nnz: usize,
     /// Number of gauge subgraphs built.
@@ -123,11 +134,18 @@ struct CacheManifest {
 /// progress line is printed before the build begins so the user knows it is
 /// not hung. For a multi-GB global gpkg the content fingerprint itself costs
 /// a few seconds of hashing on first run.
+///
+/// `subdivision` is `cfg.params.subdivision`. When disabled (the default) the
+/// build is byte-identical to the pre-subdivision one and `attributes` is never
+/// opened; when enabled, `attributes` supplies the `catchsize` column that the
+/// reference celerity needs.
 pub fn resolve_or_build(
     workspace_root: &Path,
     fabric: &Path,
     fabric_layer: Option<&str>,
     gages_csv: &Path,
+    subdivision: &Subdivision,
+    attributes: &[PathBuf],
 ) -> Result<AdjacencyCacheOutcome, AdjacencyCacheError> {
     // Resolve the hashable artifact (.shp → sibling .dbf; .dbf/.gpkg as-is).
     let resolved = resolve_fabric(fabric).map_err(AdjacencyCacheError::Data)?;
@@ -143,7 +161,7 @@ pub fn resolve_or_build(
     // --- 1. Compute the content key -----------------------------------------
     let fabric_fp = file_fingerprint(&resolved_path)?;
     let gages_fp = gages_fingerprint(gages_csv)?;
-    let key = content_key(&fabric_fp, &gages_fp, fabric_layer);
+    let key = content_key(&fabric_fp, &gages_fp, fabric_layer, subdivision);
 
     // --- 2. Cache hit? -------------------------------------------------------
     let cache_dir = adjacency_cache_dir(workspace_root, &key);
@@ -187,15 +205,43 @@ pub fn resolve_or_build(
     let conus = build_conus_adjacency(&records)
         .map_err(AdjacencyCacheError::Build)?;
 
-    let n = conus.order.len();
-    let nnz = conus.rows.len();
+    let n_parent = conus.order.len();
+    // `subdivide` intentionally drops `dropped_comids` (it is parent-space
+    // provenance, not graph state), so capture it before the expansion.
     let dropped_comids = conus.dropped_comids.clone();
 
+    // Subdivision runs BEFORE the gauge subgraphs so those are cut from the
+    // expanded graph. With `enabled: false` the plan is all-ones and `subdivide`
+    // is an exact identity, so this is a true no-op on the default path.
+    let expanded = expand(&conus, subdivision, attributes)?;
+    let n = expanded.order.len();
+    let nnz = expanded.rows.len();
+    if subdivision.enabled {
+        println!(
+            "  subdivision: {n_parent} reaches → {n} sub-reaches ({:.2}x), \
+             {} edges",
+            n as f64 / n_parent as f64,
+            nnz
+        );
+    }
+
     let conus_dest = tmp_dir.join(format!("{fabric_stem}_adjacency.zarr"));
-    write_conus_store(&conus, &conus_dest)
+    write_conus_store_subdivided(&expanded, &conus_dest)
         .map_err(AdjacencyCacheError::Data)?;
 
-    let subgraphs = build_gauge_subgraphs(&conus, gages_csv)
+    // Gauge subgraphs are built in SUB-REACH position space. `position_lookup`
+    // is COMID → last matching row, and a parent's rows are contiguous and
+    // ordered upstream→downstream, so a gauge resolves to its parent's OUTLET
+    // piece — the only row carrying the whole reach's lateral inflow.
+    let expanded_view = ConusAdjacency {
+        order: expanded.order.clone(),
+        rows: expanded.rows.clone(),
+        cols: expanded.cols.clone(),
+        length_m: expanded.length_m.clone(),
+        slope: expanded.slope.clone(),
+        dropped_comids: dropped_comids.clone(),
+    };
+    let subgraphs = build_gauge_subgraphs(&expanded_view, gages_csv)
         .map_err(AdjacencyCacheError::Data)?;
     let n_gauges = subgraphs.len();
 
@@ -216,6 +262,7 @@ pub fn resolve_or_build(
         gages_path: gages_csv.to_path_buf(),
         gages_fingerprint: gages_fp,
         n,
+        n_parent,
         nnz,
         n_gauges,
         dropped_comids,
@@ -297,6 +344,84 @@ fn store_paths(cache_dir: &Path, fabric_stem: &str) -> AdjacencyCachePaths {
     }
 }
 
+/// Apply the two-sided reach plan and expand the graph.
+///
+/// Disabled is the fast path: `plan_reaches` returns all-ones with untouched
+/// lengths and `subdivide` is an exact identity, so the attributes NetCDF is
+/// never opened and a machine without one still builds.
+fn expand(
+    conus: &ConusAdjacency,
+    subdivision: &Subdivision,
+    attributes: &[PathBuf],
+) -> Result<SubdividedAdjacency, AdjacencyCacheError> {
+    let uparea = if subdivision.enabled {
+        upstream_area_km2(conus, attributes)?
+    } else {
+        // `plan_reaches` returns early when disabled and never reads this, but a
+        // correctly-sized vector keeps the contract intact if that ever changes.
+        vec![0.0; conus.order.len()]
+    };
+    let plan = plan_reaches(
+        &conus.length_m,
+        &conus.slope,
+        &uparea,
+        DT_SECONDS,
+        subdivision,
+    );
+    Ok(subdivide(conus, &plan))
+}
+
+/// Upstream drainage area (km²) per reach, aligned to `conus.order`.
+///
+/// **`catchsize` is the LOCAL divide area, not drainage area** — median 36.7 km²
+/// on MERIT, capped around 612 km² even for continental rivers. `reference_celerity`
+/// wants the *upstream* area, so the local column is accumulated downstream over
+/// the topological order. Verified against the fabric's own `log10_uparea`
+/// column on real CONUS: the accumulated value reproduces `10^log10_uparea` with
+/// ratio p5/p50/p95 all 1.000 over all 346,321 reaches. (`log10_uparea` itself is
+/// unusable as the source — it is NaN on 88 % of the global attributes file,
+/// finite only over CONUS.)
+///
+/// Non-finite or non-positive `catchsize` falls back to the column mean, matching
+/// how `build_conus_adjacency` fills `length_m`/`slope`.
+fn upstream_area_km2(
+    conus: &ConusAdjacency,
+    attributes: &[PathBuf],
+) -> Result<Vec<f32>, AdjacencyCacheError> {
+    let path = attributes.first().ok_or_else(|| {
+        AdjacencyCacheError::Data(DataError::Malformed {
+            path: PathBuf::from("data_sources.attributes"),
+            message: "params.subdivision.enabled requires data_sources.attributes \
+                      (the `catchsize` column sets the reference celerity)"
+                .to_string(),
+        })
+    })?;
+    let comids: Vec<Comid> = conus.order.iter().map(|&c| Comid(c as i64)).collect();
+    let store = AttributesStore::open_aligned(path, &["catchsize".to_string()], &comids)
+        .map_err(AdjacencyCacheError::Data)?;
+
+    let fallback = store.row_means[0];
+    let mut area: Vec<f32> = store
+        .attrs
+        .row(0)
+        .iter()
+        .map(|&v| if v.is_finite() && v > 0.0 { v } else { fallback })
+        .collect();
+
+    // Accumulate: `order` is topological and the COO is lower-triangular
+    // (`rows[k] > cols[k]`), so visiting upstream positions in ascending order
+    // guarantees each contributor is already complete when it is added.
+    let mut upstream_of: Vec<Vec<usize>> = vec![Vec::new(); area.len()];
+    for (&r, &c) in conus.rows.iter().zip(conus.cols.iter()) {
+        upstream_of[r as usize].push(c as usize);
+    }
+    for p in 0..area.len() {
+        let contrib: f32 = upstream_of[p].iter().map(|&u| area[u]).sum();
+        area[p] += contrib;
+    }
+    Ok(area)
+}
+
 /// A cache hit requires the directory to exist with a manifest.json present.
 /// Mirrors baseline/cache.rs's hit criterion (manifest presence = valid cache).
 fn is_cache_hit(dir: &Path) -> bool {
@@ -304,7 +429,7 @@ fn is_cache_hit(dir: &Path) -> bool {
 }
 
 /// 16-hex-char (64-bit prefix) content key:
-/// blake3(fabric_fp ∥ gages_fp ∥ [layer ∥] version).
+/// blake3(fabric_fp ∥ gages_fp ∥ [layer ∥] version ∥ subdivision).
 ///
 /// Inputs are the full hex fingerprints of the file bytes, not the paths.
 /// Collision-free at our scale; safe for filesystem use.
@@ -313,7 +438,18 @@ fn is_cache_hit(dir: &Path) -> bool {
 /// identical bytes regardless of which layer is selected, so the layer name
 /// must distinguish cache entries. Folding it in only when set keeps every
 /// pre-gpkg cache key (dbf fabrics, layer always `None`) unchanged.
-fn content_key(fabric_fp: &str, gages_fp: &str, layer: Option<&str>) -> String {
+///
+/// **Every field of [`Subdivision`] is hashed, not just `enabled`.** All seven
+/// feed `reference_celerity` → `dx_target` → both the piece count and the
+/// clamped `length_m`, i.e. each one changes the graph that gets built. Hashing
+/// a subset would let a config edit silently reuse a stale adjacency — a failure
+/// that looks like a physics result rather than a bug.
+fn content_key(
+    fabric_fp: &str,
+    gages_fp: &str,
+    layer: Option<&str>,
+    s: &Subdivision,
+) -> String {
     let mut h = blake3::Hasher::new();
     h.update(fabric_fp.as_bytes());
     h.update(b"\n");
@@ -324,8 +460,31 @@ fn content_key(fabric_fp: &str, gages_fp: &str, layer: Option<&str>) -> String {
         h.update(b"\n");
     }
     h.update(BUILDER_VERSION.to_le_bytes().as_ref());
+    h.update(&[s.enabled as u8]);
+    h.update((s.max_pieces as u32).to_le_bytes().as_ref());
+    // `to_bits` gives a stable byte pattern across runs; config validation
+    // rejects non-finite values, so no NaN payload ambiguity arises.
+    h.update(s.reference_n.to_bits().to_le_bytes().as_ref());
+    h.update(s.reference_discharge_coefficient.to_bits().to_le_bytes().as_ref());
+    h.update(s.reference_discharge_exponent.to_bits().to_le_bytes().as_ref());
+    h.update(s.min_length_fraction.to_bits().to_le_bytes().as_ref());
+    h.update(s.max_clamp_factor.to_bits().to_le_bytes().as_ref());
     let hex = h.finalize().to_hex();
     hex.as_str()[..16].to_string()
+}
+
+/// Test hook for [`content_key`]. Integration tests live in their own crate and
+/// cannot reach a private fn; exposing the real function (rather than
+/// reimplementing the hash in the test) is what makes
+/// `cache_key_changes_with_every_subdivision_field` a meaningful guard.
+#[doc(hidden)]
+pub fn content_key_for_test(
+    fabric_fp: &str,
+    gages_fp: &str,
+    layer: Option<&str>,
+    s: &Subdivision,
+) -> String {
+    content_key(fabric_fp, gages_fp, layer, s)
 }
 
 /// blake3 hex over the full contents of a file, using a buffered reader.
@@ -458,6 +617,17 @@ mod tests {
         fs::write(path, csv).expect("write gages csv");
     }
 
+    /// Minimal attributes NetCDF carrying only the `catchsize` column the
+    /// reference celerity needs (km² of LOCAL divide area, per COMID).
+    fn write_catchsize_nc(path: &Path, comids: &[i64], catchsize: &[f64]) {
+        let mut f = netcdf::create(path).expect("create netcdf");
+        f.add_dimension("COMID", comids.len()).unwrap();
+        let mut cv = f.add_variable::<i64>("COMID", &["COMID"]).unwrap();
+        cv.put_values(comids, ..).unwrap();
+        let mut v = f.add_variable::<f64>("catchsize", &["COMID"]).unwrap();
+        v.put_values(catchsize, ..).unwrap();
+    }
+
     fn tmp_workspace(tag: &str) -> PathBuf {
         let p = std::env::temp_dir()
             .join(format!("ddrs_adj_cache_{}_{}", tag, std::process::id()));
@@ -470,31 +640,31 @@ mod tests {
 
     #[test]
     fn content_key_is_16_hex_chars() {
-        let k = content_key("aabbcc", "ddeeff", None);
+        let k = content_key("aabbcc", "ddeeff", None, &Subdivision::default());
         assert_eq!(k.len(), 16, "key must be 16 hex chars, got: {k}");
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()), "key must be hex: {k}");
     }
 
     #[test]
     fn content_key_is_stable() {
-        let k1 = content_key("fp1", "fp2", None);
-        let k2 = content_key("fp1", "fp2", None);
+        let k1 = content_key("fp1", "fp2", None, &Subdivision::default());
+        let k2 = content_key("fp1", "fp2", None, &Subdivision::default());
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn content_key_differs_on_different_inputs() {
-        let k1 = content_key("aaaa", "bbbb", None);
-        let k2 = content_key("aaaa", "cccc", None);
+        let k1 = content_key("aaaa", "bbbb", None, &Subdivision::default());
+        let k2 = content_key("aaaa", "cccc", None, &Subdivision::default());
         assert_ne!(k1, k2);
     }
 
     #[test]
     fn content_key_differs_on_layer() {
         // Same fabric bytes, different gpkg layer → distinct cache entries.
-        let base = content_key("aaaa", "bbbb", None);
-        let l1 = content_key("aaaa", "bbbb", Some("flowlines"));
-        let l2 = content_key("aaaa", "bbbb", Some("catchments"));
+        let base = content_key("aaaa", "bbbb", None, &Subdivision::default());
+        let l1 = content_key("aaaa", "bbbb", Some("flowlines"), &Subdivision::default());
+        let l2 = content_key("aaaa", "bbbb", Some("catchments"), &Subdivision::default());
         assert_ne!(l1, l2);
         assert_ne!(base, l1);
     }
@@ -544,12 +714,12 @@ mod tests {
         write_tiny_dbf(&dbf_path);
         write_tiny_gages(&gages_path);
 
-        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("build");
+        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[]).expect("build");
         let dir = adjacency_cache_dir(&ws, &out1.key);
         fs::rename(&out1.paths.conus, dir.join("merit_conus_adjacency.zarr")).unwrap();
         fs::rename(&out1.paths.gages, dir.join("merit_gages_conus_adjacency.zarr")).unwrap();
 
-        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("hit");
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[]).expect("hit");
         assert!(out2.cache_hit, "legacy-named cache must still hit");
         assert!(out2.paths.conus.ends_with("merit_conus_adjacency.zarr"));
         assert!(out2.paths.gages.ends_with("merit_gages_conus_adjacency.zarr"));
@@ -566,11 +736,11 @@ mod tests {
         write_tiny_dbf(&dbf_path);
         write_tiny_gages(&gages_path);
 
-        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("build");
+        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[]).expect("build");
         fs::remove_dir_all(&out1.paths.conus).unwrap();
         fs::remove_dir_all(&out1.paths.gages).unwrap();
 
-        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("rebuild");
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[]).expect("rebuild");
         assert!(!out2.cache_hit, "stale cache must rebuild, not hit");
         assert!(out2.paths.conus.is_dir() && out2.paths.gages.is_dir());
     }
@@ -586,10 +756,10 @@ mod tests {
         fs::create_dir(&gages_dir).unwrap();
         write_tiny_gages(&gages_dir.join("74_all.csv"));
 
-        let out = resolve_or_build(&ws, &dbf_path, None, &gages_dir)
+        let out = resolve_or_build(&ws, &dbf_path, None, &gages_dir, &Subdivision::default(), &[])
             .expect("build with gages directory");
         assert!(!out.cache_hit);
-        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_dir)
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_dir, &Subdivision::default(), &[])
             .expect("second call");
         assert!(out2.cache_hit, "same dir contents → cache hit");
         assert_eq!(out.key, out2.key);
@@ -606,7 +776,7 @@ mod tests {
         write_tiny_gages(&gages_path);
 
         // First call: cache miss → build.
-        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path)
+        let out1 = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[])
             .expect("first build");
         assert!(!out1.cache_hit, "first call should be a cache miss");
         assert_eq!(out1.key.len(), 16);
@@ -635,7 +805,7 @@ mod tests {
         assert!(m.fabric_layer.is_none(), "dbf fabric has no layer");
 
         // Second call: cache hit.
-        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path)
+        let out2 = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[])
             .expect("second call");
         assert!(out2.cache_hit, "second call should be a cache hit");
         assert_eq!(out2.key, out1.key, "same key on hit");
@@ -664,8 +834,8 @@ mod tests {
         );
         write_tiny_gages(&gages_path);
 
-        let out1 = resolve_or_build(&ws, &dbf_v1, None, &gages_path).expect("build v1");
-        let out2 = resolve_or_build(&ws, &dbf_v2, None, &gages_path).expect("build v2");
+        let out1 = resolve_or_build(&ws, &dbf_v1, None, &gages_path, &Subdivision::default(), &[]).expect("build v1");
+        let out2 = resolve_or_build(&ws, &dbf_v2, None, &gages_path, &Subdivision::default(), &[]).expect("build v2");
 
         assert_ne!(out1.key, out2.key, "keys must differ for different dbf content");
         assert!(!out1.cache_hit);
@@ -687,16 +857,96 @@ mod tests {
         // content_key output against a manual hash that includes the version.
         let dbf_fp = "deadbeef";
         let gages_fp = "cafebabe";
-        let k = content_key(dbf_fp, gages_fp, None);
+        let k = content_key(dbf_fp, gages_fp, None, &Subdivision::default());
 
+        let s = Subdivision::default();
         let mut h = blake3::Hasher::new();
         h.update(dbf_fp.as_bytes());
         h.update(b"\n");
         h.update(gages_fp.as_bytes());
         h.update(b"\n");
         h.update(BUILDER_VERSION.to_le_bytes().as_ref());
+        h.update(&[s.enabled as u8]);
+        h.update((s.max_pieces as u32).to_le_bytes().as_ref());
+        h.update(s.reference_n.to_bits().to_le_bytes().as_ref());
+        h.update(s.reference_discharge_coefficient.to_bits().to_le_bytes().as_ref());
+        h.update(s.reference_discharge_exponent.to_bits().to_le_bytes().as_ref());
+        h.update(s.min_length_fraction.to_bits().to_le_bytes().as_ref());
+        h.update(s.max_clamp_factor.to_bits().to_le_bytes().as_ref());
         let expected = &h.finalize().to_hex().as_str()[..16].to_string();
         assert_eq!(&k, expected, "content_key must include BUILDER_VERSION");
+    }
+
+    /// End-to-end on the ENABLED path: long reaches must split, the store must
+    /// carry a non-trivial parent map, and the gauge must land on its parent's
+    /// outlet row. Without this the enabled branch is only ever type-checked.
+    #[test]
+    fn subdivided_build_expands_the_graph_and_persists_the_parent_map() {
+        use crate::data::ids::Staid;
+        use crate::data::store::zarr::{ConusAdjacencyStore, GagesAdjacencyStore};
+
+        let ws = tmp_workspace("subdiv");
+        let dbf_path = ws.join("fabric.dbf");
+        let gages_path = ws.join("gages.csv");
+        let attrs_path = ws.join("attrs.nc");
+        // 20 km and 30 km reaches: both far longer than dx_target, so both split.
+        write_dbf(
+            &dbf_path,
+            &[
+                (1.0, 20.0, 0.001, 2.0, 0.0),
+                (2.0, 30.0, 0.002, 0.0, 1.0),
+            ],
+        );
+        write_tiny_gages(&gages_path);
+        write_catchsize_nc(&attrs_path, &[1, 2], &[50.0, 60.0]);
+
+        let on = Subdivision {
+            enabled: true,
+            max_pieces: 8,
+            ..Default::default()
+        };
+        let attrs = [attrs_path.clone()];
+        let out = resolve_or_build(&ws, &dbf_path, None, &gages_path, &on, &attrs)
+            .expect("subdivided build");
+        assert!(!out.cache_hit);
+        // Enabling must not collide with the disabled cache entry.
+        let off = resolve_or_build(&ws, &dbf_path, None, &gages_path,
+                                   &Subdivision::default(), &[])
+            .expect("disabled build");
+        assert_ne!(out.key, off.key, "subdivision must change the cache key");
+
+        let conus = ConusAdjacencyStore::open(&out.paths.conus).expect("open conus");
+        assert_eq!(conus.n_parent(), 2, "two MERIT reaches");
+        assert!(conus.n > 2, "20 km / 30 km reaches must split, got n = {}", conus.n);
+        assert_eq!(conus.parent_order, vec![Comid(1), Comid(2)]);
+        assert_eq!(conus.parent_offset[0], 0);
+        assert_eq!(*conus.parent_offset.last().unwrap(), conus.n as i32);
+        // COMID lookups resolve in PARENT space even though `order` has dupes.
+        assert_eq!(conus.index.position(&Comid(2)), Some(1));
+        assert_eq!(conus.order.len(), conus.n);
+        // Every sub-reach row carries its parent's COMID.
+        for p in 0..conus.n_parent() {
+            for row in conus.parent_offset[p] as usize..conus.parent_offset[p + 1] as usize {
+                assert_eq!(conus.order[row], conus.parent_order[p]);
+            }
+        }
+        // Length is conserved per parent (30 km reach, split m ways).
+        let lo = conus.parent_offset[1] as usize;
+        let hi = conus.parent_offset[2] as usize;
+        let total: f32 = conus.length_m.as_slice().unwrap()[lo..hi].iter().sum();
+        assert!((total - 30_000.0).abs() < 1.0, "parent 1 length {total} != 30 km");
+
+        // The gauge on COMID 2 must read the OUTLET piece of parent 1.
+        let staids = vec![Staid::new("2")];
+        let gages = GagesAdjacencyStore::open(&out.paths.gages, &staids).expect("open gages");
+        let g = gages.get(&Staid::new("2")).expect("gauge 2");
+        assert_eq!(
+            g.gage_idx,
+            conus.outlet_row(1),
+            "gauge must sit on its parent's outlet, not an interior piece"
+        );
+
+        let _ = fs::remove_dir_all(&ws);
     }
 
     #[test]
@@ -710,7 +960,7 @@ mod tests {
         write_tiny_dbf(&dbf_path);
         write_tiny_gages(&gages_path);
 
-        let out = resolve_or_build(&ws, &dbf_path, None, &gages_path).expect("build");
+        let out = resolve_or_build(&ws, &dbf_path, None, &gages_path, &Subdivision::default(), &[]).expect("build");
         assert!(!out.cache_hit);
 
         // Verify the conus store round-trips.

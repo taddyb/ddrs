@@ -3,8 +3,11 @@
 //! Defaults to disabled so every existing config keeps its current behaviour.
 use ddrs::adjacency::build::ConusAdjacency;
 use ddrs::adjacency::subdivide::{plan_reaches, reference_celerity, subdivide, ReachPlan};
+use ddrs::adjacency::zarr_write::{write_conus_store, write_conus_store_subdivided};
 use ddrs::config::{Config, Subdivision};
+use ddrs::data::{Comid, ConusAdjacencyStore};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tempfile::TempDir;
 
 /// A minimal valid training config, with `extra` spliced into `params:`.
 /// `extra` must already be indented two spaces (it sits at `params:` depth).
@@ -444,4 +447,194 @@ fn every_subreach_row_carries_its_parents_comid() {
         assert_eq!(s.outlet(p), s.parent_offset[p + 1] as usize - 1);
         assert_eq!(s.pieces(p), s.outlet(p) - s.inlet(p) + 1);
     }
+}
+
+// ─────────────────────────── Task 4: persist + cache key ──────────────────────
+
+/// Build → subdivide → write zarr into a `TempDir` → reload through the real
+/// reader. Uses `write_conus_store_subdivided`, the same writer the managed
+/// cache calls, so the test exercises the production path rather than a mock.
+fn round_trip_store(adj: &ConusAdjacency, pieces: &[u32]) -> (ConusAdjacencyStore, TempDir) {
+    let s = subdivide(adj, &plan(pieces.to_vec(), adj.length_m.clone()));
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_conus_store_subdivided(&s, dir.path()).expect("write");
+    let store = ConusAdjacencyStore::open(dir.path()).expect("open");
+    // The TempDir must outlive the store's use; returning it keeps it alive.
+    (store, dir)
+}
+
+#[test]
+fn cache_key_changes_with_every_subdivision_field() {
+    use ddrs::adjacency::cache::content_key_for_test as key;
+
+    let on = Subdivision {
+        enabled: true,
+        ..Default::default()
+    };
+    let base = key("fab", "gag", None, &Subdivision::default());
+    assert_ne!(base, key("fab", "gag", None, &on), "enabling must invalidate");
+
+    // Every field that feeds `plan_reaches` must invalidate, or a config edit
+    // silently reuses a graph built with different geometry — a failure that
+    // reads as a physics result rather than as a bug.
+    for (name, modified) in [
+        (
+            "max_pieces",
+            Subdivision {
+                max_pieces: 4,
+                ..on.clone()
+            },
+        ),
+        (
+            "reference_n",
+            Subdivision {
+                reference_n: 0.03,
+                ..on.clone()
+            },
+        ),
+        (
+            "q_coeff",
+            Subdivision {
+                reference_discharge_coefficient: 0.02,
+                ..on.clone()
+            },
+        ),
+        (
+            "q_exp",
+            Subdivision {
+                reference_discharge_exponent: 0.8,
+                ..on.clone()
+            },
+        ),
+        (
+            "min_len_fr",
+            Subdivision {
+                min_length_fraction: 0.5,
+                ..on.clone()
+            },
+        ),
+        (
+            "max_clamp_factor",
+            Subdivision {
+                max_clamp_factor: 3.0,
+                ..on.clone()
+            },
+        ),
+    ] {
+        assert_ne!(
+            key("fab", "gag", None, &on),
+            key("fab", "gag", None, &modified),
+            "changing {name} must invalidate the cache"
+        );
+    }
+}
+
+#[test]
+fn cache_key_is_stable_for_identical_subdivision() {
+    use ddrs::adjacency::cache::content_key_for_test as key;
+    let s = Subdivision {
+        enabled: true,
+        max_pieces: 4,
+        ..Default::default()
+    };
+    assert_eq!(key("fab", "gag", None, &s), key("fab", "gag", None, &s));
+}
+
+#[test]
+fn store_index_maps_comid_to_parent_not_subreach() {
+    // Built with pieces [3, 2, 1]; COMID 200 is parent 1.
+    let (store, _dir) = round_trip_store(&chain3(), &[3, 2, 1]);
+    assert_eq!(store.parent_offset, vec![0, 3, 5, 6]);
+    assert_eq!(store.n, 6, "sub-reach count");
+    assert_eq!(store.n_parent(), 3, "parent count");
+    assert_eq!(
+        store.parent_order,
+        vec![Comid(100), Comid(200), Comid(300)],
+        "parent space must hold each COMID exactly once"
+    );
+    // `order` carries duplicates — this is why the index cannot come from it.
+    assert_eq!(store.order.len(), 6);
+    assert_eq!(store.order[0], store.order[1]);
+
+    let p = store.index.position(&Comid(200)).expect("COMID 200 must resolve");
+    assert_eq!(
+        p, 1,
+        "index must return the PARENT position, not a sub-reach row"
+    );
+    // A gauge on COMID 200 reads row 4, the parent's outlet.
+    assert_eq!(store.outlet_row(p), 4);
+}
+
+#[test]
+fn round_tripped_store_matches_the_expansion_element_for_element() {
+    let a = chain3();
+    let s = subdivide(&a, &plan(vec![3, 2, 1], a.length_m.clone()));
+    let (store, _dir) = round_trip_store(&a, &[3, 2, 1]);
+    assert_eq!(store.indices_0, s.rows);
+    assert_eq!(store.indices_1, s.cols);
+    assert_eq!(store.length_m.to_vec(), s.length_m);
+    assert_eq!(store.slope.to_vec(), s.slope);
+    assert_eq!(store.parent_offset, s.parent_offset);
+    assert_eq!(store.nnz, s.rows.len());
+}
+
+/// Subdivision off must be indistinguishable from the pre-subdivision store:
+/// the parent map degenerates to the identity and `index` still resolves every
+/// COMID to its own row.
+#[test]
+fn disabled_subdivision_round_trips_to_the_identity_parent_map() {
+    let a = chain3();
+    let (store, _dir) = round_trip_store(&a, &[1, 1, 1]);
+    assert_eq!(store.n, 3);
+    assert_eq!(store.parent_offset, vec![0, 1, 2, 3]);
+    assert_eq!(store.parent_order, store.order);
+    for (i, c) in [Comid(100), Comid(200), Comid(300)].iter().enumerate() {
+        assert_eq!(store.index.position(c), Some(i));
+        assert_eq!(store.outlet_row(i), i);
+    }
+}
+
+/// A store written WITHOUT the parent map — i.e. every pre-existing cache and
+/// every engine export — must keep loading, with the identity synthesized.
+#[test]
+fn store_without_parent_arrays_synthesizes_the_identity() {
+    let a = chain3();
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `write_conus_store` is the pre-subdivision writer: no parent arrays.
+    write_conus_store(&a, dir.path()).expect("write legacy");
+    assert!(
+        !dir.path().join("parent_order").exists(),
+        "fixture must genuinely lack the parent map"
+    );
+
+    let store = ConusAdjacencyStore::open(dir.path()).expect("open legacy store");
+    assert_eq!(store.n, 3);
+    assert_eq!(store.n_parent(), 3);
+    assert_eq!(store.parent_order, store.order);
+    assert_eq!(store.parent_offset, vec![0, 1, 2, 3]);
+    assert_eq!(store.index.position(&Comid(300)), Some(2));
+    assert_eq!(store.outlet_row(2), 2);
+}
+
+/// The real pre-subdivision CONUS store on disk. Read-only; skipped when the
+/// path is absent so a clean checkout still passes.
+#[test]
+fn real_pre_subdivision_conus_store_still_loads() {
+    const REAL: &str = "/home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr";
+    if !std::path::Path::new(REAL).exists() {
+        eprintln!("skipping: {REAL} not present");
+        return;
+    }
+    let store = ConusAdjacencyStore::open(REAL).expect("real store must still open");
+    assert_eq!(store.n, 346_321);
+    assert_eq!(store.nnz, 338_814);
+    assert_eq!(store.n_parent(), store.n, "no parent map on disk → identity");
+    assert_eq!(store.parent_order, store.order);
+    assert_eq!(store.parent_offset.len(), store.n + 1);
+    assert_eq!(store.parent_offset[0], 0);
+    assert_eq!(*store.parent_offset.last().unwrap(), store.n as i32);
+    // The identity map must leave COMID lookups exactly where they were.
+    let probe = store.order[12_345];
+    assert_eq!(store.index.position(&probe), Some(12_345));
+    assert_eq!(store.outlet_row(12_345), 12_345);
 }

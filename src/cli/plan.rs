@@ -336,6 +336,11 @@ pub(crate) fn resolve_adjacency(
                 fabric,
                 ds.geospatial_fabric_layer.as_deref(),
                 &ds.gages,
+                // Subdivision changes the built graph, so it is part of the
+                // cache key and of the build itself; `attributes` supplies the
+                // `catchsize` column the reference celerity needs.
+                &config.params.subdivision,
+                &ds.attributes,
             )
             .map_err(|e| CliError::ConfigInvalid {
                 path: config_path.into(),

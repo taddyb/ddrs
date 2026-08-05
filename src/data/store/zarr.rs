@@ -26,12 +26,38 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, IdIndex, Staid};
 
 /// Static CONUS-wide network state. Loaded once at dataset construction.
+///
+/// ## Two index spaces (reach subdivision)
+///
+/// When the store was built with `params.subdivision.enabled`, one MERIT reach
+/// occupies several consecutive rows. `order` then carries **duplicate** COMIDs
+/// (one per sub-reach), so a COMID→row lookup on it would be ambiguous.
+///
+/// - **Parent space** (`parent_order`, length `n_parent`): one entry per MERIT
+///   reach. `index` is built from THIS, so `index.position(comid)` always
+///   returns a *parent* position.
+/// - **Sub-reach space** (`order`, `length_m`, `slope`, `indices_*`, length `n`):
+///   what the solver sees. Parent `p` owns rows
+///   `parent_offset[p]..parent_offset[p + 1]`, ordered upstream→downstream, so
+///   its outlet — the row a gauge must be read at — is `parent_offset[p+1] - 1`.
+///
+/// Stores written before subdivision existed carry neither array; `open`
+/// synthesizes the identity (`parent_order == order`, `parent_offset == 0..=n`)
+/// so they keep loading unchanged and every consumer sees one uniform contract.
 pub struct ConusAdjacencyStore {
     pub path: PathBuf,
     /// COMIDs in topological order — element `i` is the COMID at zarr position `i`.
+    /// Contains duplicates when the store is subdivided.
     pub order: Vec<Comid>,
-    /// `IdIndex` mapping COMID → topological position (for cross-store lookups).
+    /// `IdIndex` mapping COMID → **parent** position. Built from `parent_order`,
+    /// never from `order` (see the type-level note on the two index spaces).
     pub index: IdIndex<Comid>,
+    /// One COMID per MERIT reach, in topological order. Identical to `order`
+    /// when the store is not subdivided.
+    pub parent_order: Vec<Comid>,
+    /// Length `parent_order.len() + 1`. Rows `[parent_offset[p], parent_offset[p+1])`
+    /// of the sub-reach arrays belong to parent `p`. `0..=n` when not subdivided.
+    pub parent_offset: Vec<i32>,
     /// Per-reach channel length in metres, aligned to `order`.
     pub length_m: Array1<f32>,
     /// Per-reach channel slope (dimensionless), aligned to `order`.
@@ -56,7 +82,44 @@ impl ConusAdjacencyStore {
         let order_i32 = read_array_i32(&storage, &path, "/order")?;
         let order: Vec<Comid> = order_i32.into_iter().map(|c| Comid(c as i64)).collect();
         let n = order.len();
-        let index = IdIndex::new(order.clone());
+
+        // Parent map. Absent in every store written before reach subdivision
+        // (including the engine's own exports), so a missing array is NOT an
+        // error — it means "one row per reach", and the identity below makes
+        // such a store indistinguishable from a subdivided one with all m = 1.
+        let parent_order: Vec<Comid> =
+            match try_read_array_i32(&storage, "/parent_order") {
+                Some(v) => v.into_iter().map(|c| Comid(c as i64)).collect(),
+                None => order.clone(),
+            };
+        let parent_offset: Vec<i32> = match try_read_array_i32(&storage, "/parent_offset") {
+            Some(v) => v,
+            None => (0..=n as i32).collect(),
+        };
+        if parent_offset.len() != parent_order.len() + 1 {
+            return Err(DataError::Malformed {
+                path: path.clone(),
+                message: format!(
+                    "parent_offset must have parent_order.len() + 1 entries: {} vs {}",
+                    parent_offset.len(),
+                    parent_order.len() + 1
+                ),
+            });
+        }
+        // The offsets must partition the sub-reach rows exactly; a truncated or
+        // stale parent map would silently mis-address every gauge.
+        if parent_offset.first() != Some(&0) || parent_offset.last() != Some(&(n as i32)) {
+            return Err(DataError::Malformed {
+                path: path.clone(),
+                message: format!(
+                    "parent_offset must run 0..{n}, got {:?}..{:?}",
+                    parent_offset.first(),
+                    parent_offset.last()
+                ),
+            });
+        }
+        // Built from `parent_order`: `order` has duplicates once subdivided.
+        let index = IdIndex::new(parent_order.clone());
 
         let length_m = Array1::from(read_array_f32(&storage, &path, "/length_m")?);
         let slope = Array1::from(read_array_f32(&storage, &path, "/slope")?);
@@ -89,6 +152,8 @@ impl ConusAdjacencyStore {
             path,
             order,
             index,
+            parent_order,
+            parent_offset,
             length_m,
             slope,
             indices_0,
@@ -96,6 +161,21 @@ impl ConusAdjacencyStore {
             n,
             nnz,
         })
+    }
+
+    /// Number of MERIT reaches (parent rows). Equals [`Self::n`] when the store
+    /// is not subdivided.
+    #[inline]
+    pub fn n_parent(&self) -> usize {
+        self.parent_order.len()
+    }
+
+    /// Last (most downstream) sub-reach row owned by `parent`. A gauge on that
+    /// reach must be read here: any earlier piece omits the downstream fraction
+    /// of the reach's own lateral inflow.
+    #[inline]
+    pub fn outlet_row(&self, parent: usize) -> usize {
+        self.parent_offset[parent + 1] as usize - 1
     }
 }
 
@@ -230,6 +310,19 @@ fn read_array_i32(storage: &ReadableStorage, store_path: &Path, array_path: &str
         .map_err(|e| zarr_err(store_path, e))
 }
 
+/// Read an optional int32 array: `None` when the array is absent OR unreadable.
+///
+/// Used for the subdivision parent map, which pre-subdivision stores (every
+/// engine export, and every ddrs cache built before BUILDER_VERSION 2) simply
+/// do not have. Collapsing "missing" and "corrupt" is acceptable here only
+/// because the caller's fallback — the identity map — is itself a valid,
+/// fully-consistent answer that `open` then range-checks against `n`.
+fn try_read_array_i32(storage: &ReadableStorage, array_path: &str) -> Option<Vec<i32>> {
+    let arr = ZarrArray::open(storage.clone(), array_path).ok()?;
+    let subset = arr.subset_all();
+    arr.retrieve_array_subset::<Vec<i32>>(&subset).ok()
+}
+
 fn read_array_f32(storage: &ReadableStorage, store_path: &Path, array_path: &str) -> Result<Vec<f32>> {
     let arr = ZarrArray::open(storage.clone(), array_path).map_err(|e| zarr_err(store_path, e))?;
     let subset = arr.subset_all();
@@ -254,6 +347,8 @@ mod tests {
         let index = IdIndex::new(order.clone());
         ConusAdjacencyStore {
             path: PathBuf::from("/dev/null"),
+            parent_order: order.clone(),
+            parent_offset: (0..=n as i32).collect(),
             order,
             index,
             length_m: Array1::zeros(n),
