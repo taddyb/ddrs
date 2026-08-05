@@ -33,5 +33,6 @@ pub mod dbf;
 pub mod fabric;
 pub mod gauges;
 pub mod gpkg;
+pub mod subdivide;
 pub mod validate;
 pub mod zarr_write;
