@@ -252,6 +252,31 @@ pub fn evaluate<I: Backend>(
         chunk_idx += 1;
     }
 
+    // DIAGNOSTIC (opt-in, off by default): dump the PRE-TRIM hourly series so
+    // `params.tau` can be swept EXACTLY offline instead of re-running eval once
+    // per tau. Raw row-major f32 (n_gauges, n_hours) + a `.json` dims sidecar.
+    // An env var rather than a new parameter because `evaluate` has several
+    // call sites and this is a throwaway probe.
+    if let Ok(dump_path) = std::env::var("DDRS_HOURLY_DUMP") {
+        use std::io::Write;
+        let raw: Vec<f32> = predictions_full.iter().copied().collect();
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(raw.as_ptr() as *const u8, std::mem::size_of_val(&raw[..]))
+        };
+        std::fs::File::create(&dump_path)
+            .and_then(|mut f| f.write_all(bytes))
+            .unwrap_or_else(|e| panic!("DDRS_HOURLY_DUMP write to {dump_path} failed: {e}"));
+        let meta = format!(
+            r#"{{"n_gauges":{n_all_gauges},"n_hours":{n_hours_full},"dtype":"f32","order":"C","tau_shipped":{}}}"#,
+            cfg.params.tau
+        );
+        std::fs::write(format!("{dump_path}.json"), meta).ok();
+        eprintln!(
+            "  hourly dump -> {dump_path} ({n_all_gauges} x {n_hours_full} f32, {:.2} GB)",
+            (n_all_gauges * n_hours_full * 4) as f64 / 1e9
+        );
+    }
+
     // End-of-pipeline tau-trim + daily downsample. Lift the f32 accumulator
     // into a BURN tensor for the existing tau_trim_and_downsample helper.
     let pred_full_vec: Vec<f32> = predictions_full.iter().copied().collect();
