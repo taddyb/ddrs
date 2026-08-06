@@ -276,6 +276,7 @@ impl GlobalStreamflowStore {
     /// `(n_hourly, N)` read for a training rho-window — daily values
     /// repeated 24× and trimmed, identical to the icechunk store.
     pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
+        Self::reject_interp_env();
         let daily = self.read_window_daily(window.window_start, window.rho_days, comids)?;
         Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
     }
@@ -286,8 +287,20 @@ impl GlobalStreamflowStore {
         window: &crate::data::TestWindow,
         comids: &[Comid],
     ) -> Result<Array2<f32>> {
+        Self::reject_interp_env();
         let daily = self.read_window_daily(window.window_start, window.n_days, comids)?;
         Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+    }
+
+    /// `DDRS_QPRIME_INTERP` is only implemented for the icechunk daily store;
+    /// fail loudly rather than silently running nearest under a set env var.
+    fn reject_interp_env() {
+        use crate::data::store::icechunk::{qprime_interp, QPrimeInterp};
+        assert!(
+            qprime_interp() == QPrimeInterp::Nearest,
+            "DDRS_QPRIME_INTERP is set but the global zarr-v2 q' reader only \
+             supports nearest (repeat-24); unset it or use an icechunk store"
+        );
     }
 }
 

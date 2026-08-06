@@ -122,11 +122,16 @@ def main() -> None:
     bpred = np.fromfile(bdir / "predictions.f32", dtype=np.float32).reshape(bg, bd)
     bobs = np.fromfile(bdir / "observations.f32", dtype=np.float32).reshape(bg, bd)
     border = pd.Index(bman["gage_ids"]).get_indexer(gage_ids)
-    assert (border >= 0).all(), "baseline gauge set does not cover eval gauges"
+    covered = border >= 0
+    if not covered.all():
+        print(f"WARNING: baseline covers {covered.sum()}/{g_n} eval gauges; rest -> NaN")
     bmask = np.asarray(
         (btime >= pd.Timestamp(args.pilot_start)) & (btime <= pd.Timestamp(args.pilot_end))
     )
-    nse_base = nse(bpred[border][:, bmask], bobs[border][:, bmask])
+    nse_base = np.full(g_n, np.nan)
+    nse_base[covered] = nse(
+        bpred[border[covered]][:, bmask], bobs[border[covered]][:, bmask]
+    )
 
     # --- Covariates + summary table. ---
     gcsv = pd.read_csv(args.gages_csv, dtype={"STAID": str})
@@ -141,6 +146,7 @@ def main() -> None:
             "gage_id": gage_ids,
             "drain_sqkm": cov["DRAIN_SQKM"].to_numpy(),
             "lng_gage": cov["LNG_GAGE"].to_numpy(),
+            "has_curve": has_curve,
             "best_tau": best_tau,
             "nse_tau_shipped": nse_by_tau[:, tau_ship],
             "nse_tau_best": nse_by_tau[np.arange(g_n), best_tau],
@@ -173,7 +179,8 @@ def main() -> None:
         "",
         f"- gauges improved > 0.01 by best tau: {improved.sum()} / {g_n}",
         f"- spearman(best_tau, longitude) on improved gauges: {rho:.3f}",
-        f"- best-tau distribution: {np.bincount(best_tau, minlength=24).tolist()}",
+        f"- best-tau distribution (has_curve only): "
+        f"{np.bincount(best_tau[has_curve], minlength=24).tolist()}",
     ]
     (out_dir / "summary_wy1996.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))

@@ -141,6 +141,37 @@ trained 30 epochs against a ~half-day-early target and has plausibly learned
 compensating lag), and re-run the sweep on a disagg-ON or hourly-native run to
 test whether any hour-scale tau signal exists at all.
 
+## 5b. External mechanistic prior (2026-08-06, `/tmp/handoff-aorc-usgs-recording-times.md`)
+
+Independent of the sweep, the recording conventions predict the offset a priori:
+
+- **USGS daily values are local-STANDARD-time midnight-to-midnight, year-round
+  (no DST)** — authoritative per
+  https://waterdata.usgs.gov/statistics-documentation/.
+- **AORC forcing is UTC-hourly**, and the AORC-driven Q' stores (incl. this
+  run's `daily_dhbv2_distributed_aorc2f`) define "day t" as UTC 24-hour blocks.
+- Predicted misalignment: +5 h (EST) to +8 h (PST). In tau units
+  (window offset = tau − 11 h) that predicts **optimal tau ∈ [16, 19]** —
+  exactly the measured plateau. What the review demoted to
+  "consistent-with" now has a documented mechanism.
+- Pipeline verification (this session): `src/data/` contains **no timezone
+  logic anywhere**; all stores are indexed positionally on their native axes.
+  `params.tau` is the only alignment knob in the system.
+- Because USGS uses LST year-round, the correct per-gauge correction is a
+  **fixed deterministic offset from the gauge's standard-time zone** — no DST
+  seasonality to model.
+- Open tension with §5a: the mechanism predicts western gauges (more negative
+  longitude) prefer LARGER tau, i.e. a negative lng correlation; the
+  uncensored pilot showed +0.174. Candidate explanations: half-day sweep
+  resolution blurring a 3-h span, the area confound, or geographic structure
+  in the censored tau=23 tail. Unresolved; the interpolation arms (sharper
+  curves) are the discriminating instrument.
+- Open question inherited from the handoff: whether every Q' store shares the
+  UTC-day convention (dHBV2-UH, daily-LSTM, hourly-LSTM vs the AORC2F pair).
+  If they differ, tau is per-STORE as well as per-gauge, and cross-store
+  parameter comparisons (the AGU H069 framing) inherit the bias. Check each
+  store's CF axis + forcing provenance before the next cross-store run.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),
