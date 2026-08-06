@@ -220,6 +220,42 @@ mapping is.**
    routing and timezone differences"). Discriminating test: repeat the sweep on
    a UH-free vs UH-embedded store pair.
 
+## 5d. Sample calculation: tau_g = 11 + tz(gauge) + c·A^b (2026-08-06)
+
+Fitted on the nearest-arm WY1996 curves (2,365 gauges), tz from longitude
+(midpoints of standard meridians → 5/6/7/8 h), objective = median NSE over the
+per-gauge integer tau_g, grid over (c, b). In-sample (2 free params).
+
+| scheme | median NSE | note |
+|---|---|---|
+| tau=3 (shipped) | 0.5780 | |
+| tau=18 / 19 / 20 constant | 0.6990 / 0.6992 / 0.6997 | |
+| tz only (tau = 11+tz) | 0.6966 | WORSE than constant 19 |
+| **formula b=0.30, c=0.28** | **0.7018** | joint grid (b=0.40, c=0.12) ties at 0.7019 — b unidentified |
+| per-gauge best (ceiling) | 0.7228 | in-sample selection |
+
+Per-bin: formula ties constants below 5,000 km² (0.6728 vs 0.6736 at tau=19),
+gains +0.005 in 10,000–30,000 km² (0.7257 vs 0.7203). Fitted lag term:
+1.1 h @ 100 km², 2.2 h @ 1,000, 4.4 h @ 10,000, 6.2 h @ 30,000 — magnitudes
+consistent with Allen et al. (2018) celerity-based travel times. Median
+predicted tau_g: 19 (p10 18, p90 22), 1% clip at 23.
+
+Diagnostics: the area term DOES absorb the area signal (residual-vs-log-area
+Spearman drops +0.16 → −0.10), but residual-vs-tz is **−0.452** — per-gauge
+optima do not track the timezone term at this resolution (echoes §5c's
+wrong-sign longitude), and tz-only underperforms a flat constant. Vs constant
+tau=19 the formula moves 76% of gauges and improves 922 vs worsens 872
+(median Δ +0.0001) — a coin flip per gauge, small net win from the mid-size
+bins.
+
+**Reading:** the half-day blend resolution (§5a/§5c) leaves hour-scale
+refinements below the instrument's discrimination; a constant tau ≈ 19–20
+captures essentially all recoverable skill on this population (0.6997 vs
+0.7018 formula vs 0.7228 unreachable ceiling). The formula is physically
+defensible and never hurts materially — a fine choice for the retrain — but
+the decision between it and a constant should be made split-sample in
+Phase 2, not on these in-sample numbers.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),
