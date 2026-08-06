@@ -172,6 +172,54 @@ Independent of the sweep, the recording conventions predict the offset a priori:
   parameter comparisons (the AGU H069 framing) inherit the bias. Check each
   store's CF axis + forcing provenance before the next cross-store run.
 
+## 5c. Interpolation arms (2026-08-06): nearest vs linear vs quadratic, gages_3000
+
+Three evals of the same epoch-30 checkpoint on the standard **2,365-gauge**
+population (gages_3000 after filters), full window, differing ONLY in
+`DDRS_QPRIME_INTERP` (commit `e4fb66d`); WY1996 sweep per arm, all method
+gates PASS (99.9% curve coverage). Driver: `scripts/run_tau_interp_arms.sh`;
+overlay plot `output/tau_sweep/interp_arms_nse_vs_tau.png`.
+
+**Verdict: the tau mis-set is confirmed on the benchmark population and is
+NOT an artifact of step-function upsampling — smoother q' input neither
+sharpens nor shifts the optimum. Interpolation is not the fix; the day
+mapping is.**
+
+| arm | full-window median NSE @ tau=3 | WY1996 median @ tau=3 | WY1996 argmax | WY1996 max | curve range (median) |
+|---|---|---|---|---|---|
+| nearest | 0.6426 | 0.578 | tau=20 | 0.6997 | 0.104 |
+| linear | 0.6496 | 0.589 | tau=19 | 0.6983 | 0.094 |
+| quadratic | 0.6347 | 0.573 | tau=18 | 0.6943 | 0.104 |
+
+1. **Interpolation buys almost nothing, and nothing at the optimum.** Linear
+   gains +0.011 at the mis-set tau=3 (smearing partially absorbs the
+   misalignment) but at each arm's own optimum the three arms converge within
+   0.005, ordered nearest ≥ linear ≥ quadratic — consistent with the predicted
+   peak attenuation of the smoothing kernels. Quadratic is strictly worse than
+   nearest at tau=3.
+2. **Curves do not sharpen** (linear is slightly FLATTER), so the half-day
+   resolution limit of §5a is a property of the daily-information content, not
+   of the step discontinuities. Sub-daily structure cannot be conjured by
+   interpolation; only a disagg-ON or hourly-native store can supply it.
+3. **The optimum sits at tau=18–20 on this population, at/beyond the PT edge
+   of the LST band [16,19], with 707–728 gauges (~30%) still pinned at
+   tau=23** (real optima beyond +12 h; only ~60 at tau=0). The timezone
+   convention alone under-predicts the shift.
+4. **Correlations replicate across all arms:** best_tau vs log10(area)
+   +0.16 to +0.19 (uncensored), vs longitude +0.13 to +0.19 (uncensored —
+   still the WRONG sign for the timezone mechanism, in every arm).
+5. **Small basins (<1,000 km², n=1,267): single global tau=19 scores 0.674 vs
+   baseline 0.645** (WY1996) — the "beat the baseline" bar is cleared on this
+   population too, again with zero per-gauge freedom.
+6. **Emerging synthesis:** optimal shift ≈ (LST-vs-UTC convention offset,
+   +5..8 h) + (an area-growing lag term). The area correlation, the beyond-band
+   optimum, and the late-side censored tail all point at extra model lag on top
+   of the convention offset — the leading candidate being **double routing**
+   (MC travel time stacked on whatever routing/UH the Q' store already embeds
+   to place flow at its outlet; DDR's own tau docstring says "handle double
+   routing and timezone differences"). Discriminating test: repeat the sweep on
+   a UH-free vs UH-embedded store pair.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),

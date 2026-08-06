@@ -232,6 +232,17 @@ was invalidated by a stale binary and the manifest did not reveal it.
   test (freeze the tau protocol first). Instrument: `DDRS_HOURLY_DUMP` env var
   on `evaluate` + `scripts/tau_sweep.py`. Authority:
   `docs/2026-08-06-tau-sweep-pilot-findings.md` incl. §5a corrections.
+  **Interpolation arms (§5c, same day):** replicated on the standard 2,365-gauge
+  population — argmax tau=18–20, small-basin global tau=19 beats baseline
+  0.674 vs 0.645 (WY1996). Linear/quadratic q' upsampling
+  (`DDRS_QPRIME_INTERP`, commit e4fb66d) neither sharpens nor shifts the
+  curves ⇒ the mis-set is not a step-function artifact, and interpolation is
+  NOT the fix (nearest ≥ linear ≥ quadratic at each optimum). ~30% of gauges
+  pin at tau=23 (optima beyond +12 h) and best_tau correlates with area, not
+  longitude ⇒ likely convention offset + area-growing lag ("double routing" —
+  DDR's own tau docstring). Mechanistic prior: USGS obs are LST
+  midnight-to-midnight (no DST), AORC/Q' stores are UTC; `src/data/` has no
+  timezone logic anywhere (§5b).
 
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward
