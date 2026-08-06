@@ -97,6 +97,50 @@ Key observations:
 4. Retrain at corrected tau and re-run the area-balanced eval — tests the
    training-misalignment mechanism.
 
+## 5a. Adversarial review corrections (2026-08-06, Fable subagent — verdict: sound-with-corrections)
+
+The arithmetic and the +0.114 selection-free gain reproduce exactly. Three
+interpretive claims are corrected in place:
+
+1. **§3 obs 1 "precisely the CONUS local-midnight band" — RETRACTED as
+   over-claimed.** This run had `disaggregation.enabled: false` (verified in
+   the config snapshot), so the hourly signal was flat repeat-24: UTC-day means
+   capture a median **97.6%** of hourly variance, and the pooled series at any
+   tau is reproduced by a two-point blend of adjacent UTC-day means with median
+   R² 0.994–0.997. The sweep therefore measures a **day pairing plus blend
+   weight (~half-day resolution), not sub-daily phase**. Hour-scale readings
+   (tau=16 "Eastern midnight" vs tau=19 "Pacific midnight") are below the
+   method's effective resolution. Corrected headline: *the shipped
+   (tau=3, obs day i+1) mapping pools a window ~half a local day early; any
+   tau in 14–19 fixes the day-boundary blend.*
+2. **Phase semantics / sign convention.** Window-start offset relative to the
+   scored day's UTC midnight is **(tau − 11) h**: tau=3 → −8 h (13/24 of the
+   pooled mass from the wrong local day); tau=16 → +5 h (= ET midnight);
+   tau=19 → +8 h (= PT midnight); tau=23 → +12 h. **Larger optimal tau ⇒ the
+   model hydrograph is LATE relative to observations.**
+3. **§3 obs 3 (longitude) — the timezone fingerprint is absent-to-contradicted,
+   not merely "weak".** The −0.129 Spearman was computed on a 48%-edge-pinned
+   set; with censored gauges excluded the sign FLIPS to +0.174. The **robust
+   covariate is drainage area**: Spearman(best_tau, log10 area) = +0.164
+   (uncensored, p=1e-5) to +0.341 (censored incl.), surviving partialling on
+   longitude (+0.208). Larger basins prefer later windows — an accumulated-lag
+   / travel-time signature. So "not a routing-physics failure" (§4) is too
+   strong: phase error is the dominant term, not the only term.
+4. **Censoring is asymmetric and real:** of 661 tau=23 pins, 596 are genuinely
+   improved (optima beyond +12 h, needing the day-(i+2) mapping); of 232 tau=0
+   pins only 56 are improved (flat-curve noise). The ±1-day extension is
+   necessary and predominantly on the late side. Curve sharpness tracks
+   sub-daily structure (Spearman +0.701), as the blend mechanism predicts.
+5. Minor script defect: no-curve gauges are back-filled with `best_tau =
+   tau_shipped` in the CSV, slightly contaminating the histogram/correlations.
+
+Phase-2 design implication: select a **day-mapping × blend-weight** per gauge
+(split-sample), do NOT commit to an hour-precision "local-midnight" fix tier on
+this evidence, freeze the selection protocol before any retrain (the head has
+trained 30 epochs against a ~half-day-early target and has plausibly learned
+compensating lag), and re-run the sweep on a disagg-ON or hourly-native run to
+test whether any hour-scale tau signal exists at all.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),

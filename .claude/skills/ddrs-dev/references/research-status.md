@@ -213,17 +213,25 @@ was invalidated by a stale binary and the manifest did not reveal it.
 ## Open, not closed
 
 - **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30
-  area-balanced checkpoint: NSE(tau) plateaus at tau ≈ 14–19 (local-midnight
-  pooling) in every bin < 30,000 km²; a single global tau=19 gains +0.114
-  median NSE (0.546 → 0.660, 1,841 gauges, WY1996) and tau=16 ties the
-  summed-Q' baseline in the < 1,000 km² bin (0.677 vs 0.674). Shipped tau=3
-  pools from 16:00 UTC, ~11–16 h out of phase with the local obs day. Training
-  also runs at tau=3, so gradients have always been misaligned — retrain at
-  corrected tau is the open test. Instrument: `DDRS_HOURLY_DUMP` env var on
-  `evaluate` + `scripts/tau_sweep.py` (one eval run, then exact offline sweep).
-  Caveats: single year; per-gauge best is in-sample; best-tau histogram pinned
-  at the {0,23} edges ⇒ Phase 2 needs a ±1-day mapping extension. Authority:
-  `docs/2026-08-06-tau-sweep-pilot-findings.md`.
+  area-balanced checkpoint: NSE(tau) plateaus at tau ≈ 14–19 in every bin
+  < 30,000 km²; a single global tau=19 gains +0.114 median NSE (0.546 → 0.660,
+  1,841 gauges, WY1996) and tau=16 ties the summed-Q' baseline in the
+  < 1,000 km² bin (0.677 vs 0.674). Sign convention: window offset vs the
+  scored day's UTC midnight is (tau − 11) h; larger optimal tau ⇒ model LATE
+  vs obs. **Adversarial-review correction (same day): this run had the disagg
+  head OFF (flat repeat-24), so the hourly signal is 97.6% UTC-day-constant and
+  the sweep resolves only a day-pairing + blend weight (~half-day), NOT
+  sub-daily phase — do not read tau=16/19 as Eastern/Pacific midnight.** The
+  robust covariate is drainage area (Spearman +0.16 uncensored, an
+  accumulated-lag signature); the longitude/timezone fingerprint is
+  absent-to-contradicted (sign flips uncensored). 596 of 661 tau=23 pins are
+  real optima beyond the sweep edge ⇒ Phase 2 needs the ±1-day mapping
+  extension, split-sample selection, and a re-sweep on a disagg-ON run to test
+  for any hour-scale signal. Training also runs at tau=3, so gradients have
+  always been ~half a day misaligned — retrain at corrected tau is the open
+  test (freeze the tau protocol first). Instrument: `DDRS_HOURLY_DUMP` env var
+  on `evaluate` + `scripts/tau_sweep.py`. Authority:
+  `docs/2026-08-06-tau-sweep-pilot-findings.md` incl. §5a corrections.
 
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward
