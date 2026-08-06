@@ -148,7 +148,7 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 | `use_leakance` | false | |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
-| `tau` | 3 | **Not** a routing sub-step count. It is the hourly→daily trim phase offset in `tau_trim_and_downsample`: DDR's slice `[13 + tau : -11 + tau]`, then area-pool to days (`src/training/loss.rs:17-45`). Nothing in `src/routing/` reads it |
+| `tau` | 3 | **Not** a routing sub-step count. It is the hourly→daily trim phase offset in `tau_trim_and_downsample`: DDR's slice `[13 + tau : -11 + tau]`, then area-pool to days (`src/training/loss.rs:17-45`). Nothing in `src/routing/` reads it. The slice arithmetic caps usable tau at 11 (end index exceeds the array beyond that). **The default 3 is mis-set at pilot strength** — the WY1996 sweep optimum is tau ≈ 14–19 (local-midnight pooling), see `research-status.md` §Open |
 | `log_space_parameters` | `["p_spatial"]` | |
 | `defaults` | `{p_spatial: 21.0}` | Value used when a parameter is not in `learnable_parameters` |
 

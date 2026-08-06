@@ -132,7 +132,10 @@ def main() -> None:
     gcsv = pd.read_csv(args.gages_csv, dtype={"STAID": str})
     gcsv["STAID"] = gcsv["STAID"].str.zfill(8)
     cov = gcsv.set_index("STAID").reindex(gage_ids)
-    best_tau = np.nanargmax(nse_by_tau, axis=1)
+    has_curve = np.isfinite(nse_by_tau).any(axis=1)
+    best_tau = np.zeros(g_n, dtype=int)
+    best_tau[has_curve] = np.nanargmax(nse_by_tau[has_curve], axis=1)
+    best_tau = np.where(has_curve, best_tau, tau_ship)
     df = pd.DataFrame(
         {
             "gage_id": gage_ids,

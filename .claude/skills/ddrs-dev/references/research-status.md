@@ -212,6 +212,19 @@ was invalidated by a stale binary and the manifest did not reveal it.
 
 ## Open, not closed
 
+- **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30
+  area-balanced checkpoint: NSE(tau) plateaus at tau ≈ 14–19 (local-midnight
+  pooling) in every bin < 30,000 km²; a single global tau=19 gains +0.114
+  median NSE (0.546 → 0.660, 1,841 gauges, WY1996) and tau=16 ties the
+  summed-Q' baseline in the < 1,000 km² bin (0.677 vs 0.674). Shipped tau=3
+  pools from 16:00 UTC, ~11–16 h out of phase with the local obs day. Training
+  also runs at tau=3, so gradients have always been misaligned — retrain at
+  corrected tau is the open test. Instrument: `DDRS_HOURLY_DUMP` env var on
+  `evaluate` + `scripts/tau_sweep.py` (one eval run, then exact offline sweep).
+  Caveats: single year; per-gauge best is in-sample; best-tau histogram pinned
+  at the {0,23} edges ⇒ Phase 2 needs a ±1-day mapping extension. Authority:
+  `docs/2026-08-06-tau-sweep-pilot-findings.md`.
+
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward
   kernels → capture. Blocked for leakance configs (the leakance kernel has no capture
