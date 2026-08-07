@@ -256,6 +256,62 @@ defensible and never hurts materially — a fine choice for the retrain — but
 the decision between it and a constant should be made split-sample in
 Phase 2, not on these in-sample numbers.
 
+## 5e. Cross-source arms (2026-08-07): is the lag a property of the store?
+
+Same epoch-30 checkpoint, same 2,365-gauge network, only
+`data_sources.streamflow` swapped (`config/experiments/tau_src_*.yaml`,
+`scripts/run_tau_source_arms.sh`; this set ran on cuda, before the CPU
+policy). All three method gates PASS on every arm (recon match, NSE match,
+99.9% curve coverage). WY1996 sweep, median over 2,365 gauges:
+
+| store | resolution | full-window med NSE @ tau=3 | best const tau | med @ best | per-gauge best-tau median | % optima at tau=0 / 23 |
+|---|---|---|---|---|---|---|
+| aorc2f distributed (ref) | Daily | 0.6426 | 20 | 0.6997 | 18 | 11 / 33 |
+| UH retrospective | Daily | 0.6375 | 21 | 0.7011 | 18 | 12 / 34 |
+| daily LSTM | Daily | 0.5562 | 17 | 0.6135 | 18 | 15 / 32 |
+| hourly LSTM (native) | Hourly | 0.5316 | 19 | 0.5515 | 19 | 15 / 34 |
+| **aorc2f lumped** | Daily | 0.5103 | **3** | 0.4588* | **1** | **47 / 6** |
+
+\* pilot-window median at its own optimum; levels are not comparable across
+stores (the head was trained on aorc2f distributed only), but optimum
+LOCATIONS and curve shapes are.
+
+**Four of five stores replicate the tau 17–21 optimum.** UH retrospective,
+daily LSTM, and hourly LSTM all peak within 2 h of the reference despite
+being entirely different models of runoff generation. The per-gauge best-tau
+median is 18–19 on all four, and the censored-tail fractions (pile-ups at
+tau=0 and tau=23) are near-identical. Whatever produces the lag, it is not a
+quirk of the aorc2f-distributed store: it is shared by every store that uses
+the standard daily convention, which is exactly what the UTC-vs-local-
+standard-time recording mismatch predicts (the convention lives in the
+forcing/obs alignment, not in any one runoff model).
+
+**The aorc2f lumped store is the outlier and the exception that probes the
+rule.** Its median curve is flat over tau 0–3 and then falls monotonically;
+47% of per-gauge optima sit at the tau=0 edge (left-censored), so its true
+optimum is at or below tau=0, roughly 16–20 h earlier than the other four.
+Its shipped-tau full-window median (0.5103) is already near its own optimum.
+The store's hydrographs are therefore aligned about one day differently from
+every other store. Candidate explanations, unresolved: a different CF day
+convention (day-begin vs day-end labeling) in that icechunk store, or the
+lumped dHBV2 pipeline already embedding a day shift. Action: inspect the
+store's time axis metadata before using it in any timing-sensitive
+comparison (this was already queued as "check per-store CF day conventions"
+for the AGU framing).
+
+**Hourly-native arm: no sharpening.** The hourly LSTM curve is the flattest
+of the four lagged stores (gain from tau=3 to optimum +0.073 vs +0.122 for
+the reference), not sharper, so real sub-daily structure did not turn the
+sweep into an hour-resolution instrument. Its longitude correlation is the
+strongest of any arm (Spearman −0.220 on improved gauges, vs −0.074
+reference, −0.077 UH retro, −0.176 daily LSTM), which is the sign the
+timezone mechanism predicts (western gauges need larger tau), but §5a's
+caution stands: these are censored subsets and the uncensored pilot analysis
+flipped sign, so this is suggestive, not confirmatory.
+
+Plot: `output/tau_sweep/cross_source_nse_vs_tau.png`. Raw per-arm outputs in
+`output/tau_sweep/src_{uh_retro,daily_lstm,hourly_lstm,aorc2f_lumped}/`.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),
