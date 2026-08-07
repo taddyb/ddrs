@@ -243,18 +243,25 @@ was invalidated by a stale binary and the manifest did not reveal it.
   DDR's own tau docstring). Mechanistic prior: USGS obs are LST
   midnight-to-midnight (no DST), AORC/Q' stores are UTC; `src/data/` has no
   timezone logic anywhere (§5b).
-  **Cross-source arms (§5e, 2026-08-07):** same checkpoint/network, streamflow
-  store swapped (`config/experiments/tau_src_*.yaml`). Four of five stores
-  replicate the tau 17–21 optimum (aorc2f distributed 20, UH retro 21, daily
-  LSTM 17, hourly-native LSTM 19; per-gauge best-tau median 18–19 on all
-  four) ⇒ the lag is a property of the shared forcing/obs day convention, not
-  any one runoff model. **Exception: `aorc2f_lumped`** peaks at tau≈0–3 with
-  47% of optima left-censored at tau=0 — that store is aligned ~1 day
-  differently; inspect its CF day convention before any timing-sensitive use.
-  The hourly-native arm does NOT sharpen the curve (flattest of the four) but
-  shows the strongest correct-sign longitude correlation (−0.220, censored
-  subset — suggestive only). Plot:
-  `output/tau_sweep/cross_source_nse_vs_tau.png`.
+  **Cross-source arms (§5e/§5f, 2026-08-07):** same checkpoint/network,
+  streamflow store swapped (`config/experiments/tau_src_*.yaml`). Four of
+  five stores replicate the tau 17–21 optimum (aorc2f distributed 20, UH
+  retro 21, daily LSTM 17, hourly-native LSTM 19; per-gauge best-tau median
+  18–19 on all four) ⇒ the lag is shared upstream of store choice,
+  consistent with the UTC-vs-LST convention as the dominant term — but the
+  design cannot apportion it vs the common MC routing (double-routing term
+  still unattributed; discriminator = tau sweep on routing-free summed q').
+  **Exception: `aorc2f_lumped`** — obs-free cross-correlation shows its
+  routed hydrographs LEAD the reference by ~23 h; CF metadata are
+  byte-identical to the distributed store (convention candidate REFUTED), so
+  the shift is in the data the lumped pipeline wrote. Do not use it for
+  timing-sensitive comparisons. The hourly-native arm does NOT sharpen the
+  curve (not a floor effect) and its longitude correlation is a censoring
+  artifact (interior sign +0.075, wrong sign) — timezone fingerprint remains
+  absent-to-contradicted even with native sub-daily data. Fable review
+  (§5f): claims sound-with-corrections; extended sweep −13..47 shows the
+  constant-tau optimum is interior (20) but 33% of per-gauge optima lie
+  beyond tau=23. Plot: `output/tau_sweep/cross_source_nse_vs_tau.png`.
 
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward

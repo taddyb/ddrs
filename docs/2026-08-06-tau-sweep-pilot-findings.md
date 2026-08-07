@@ -277,40 +277,96 @@ stores (the head was trained on aorc2f distributed only), but optimum
 LOCATIONS and curve shapes are.
 
 **Four of five stores replicate the tau 17–21 optimum.** UH retrospective,
-daily LSTM, and hourly LSTM all peak within 2 h of the reference despite
+daily LSTM, and hourly LSTM all peak within 3 h of the reference despite
 being entirely different models of runoff generation. The per-gauge best-tau
 median is 18–19 on all four, and the censored-tail fractions (pile-ups at
 tau=0 and tau=23) are near-identical. Whatever produces the lag, it is not a
 quirk of the aorc2f-distributed store: it is shared by every store that uses
-the standard daily convention, which is exactly what the UTC-vs-local-
-standard-time recording mismatch predicts (the convention lives in the
-forcing/obs alignment, not in any one runoff model).
+the standard daily convention, consistent with the UTC-vs-local-standard-time
+mismatch as the dominant term. The replication cannot, however, apportion the
+shared lag between the day convention and the common MC routing (the
+double-routing candidate): the routing head, parameters, and network are
+common-mode across all five arms, and the optima sit at or beyond the
+predicted LST band [16, 19]. The residual beyond-band lag remains
+unattributed (see §5f for the discriminating measurement).
 
 **The aorc2f lumped store is the outlier and the exception that probes the
 rule.** Its median curve is flat over tau 0–3 and then falls monotonically;
-47% of per-gauge optima sit at the tau=0 edge (left-censored), so its true
-optimum is at or below tau=0, roughly 16–20 h earlier than the other four.
-Its shipped-tau full-window median (0.5103) is already near its own optimum.
-The store's hydrographs are therefore aligned about one day differently from
-every other store. Candidate explanations, unresolved: a different CF day
-convention (day-begin vs day-end labeling) in that icechunk store, or the
-lumped dHBV2 pipeline already embedding a day shift. Action: inspect the
-store's time axis metadata before using it in any timing-sensitive
-comparison (this was already queued as "check per-store CF day conventions"
-for the AGU framing).
+47% of per-gauge optima sit at the tau=0 edge (left-censored). Extended
+sweep (§5f): the median curve peaks at tau=+3 with the per-gauge median at
+−1 (50.1% below 0). Its shipped-tau full-window median (0.5103) is already
+near its own optimum. Obs-free cross-correlation of routed hydrographs
+(§5f) shows the lumped arm LEADS the reference by ~23 h (median), so the
+store's data are aligned about one day differently from every other store.
+The CF-day-convention candidate is REFUTED: both aorc2f stores' icechunk
+time metadata are byte-identical (`days since 1980-01-01`,
+proleptic_gregorian, 14,976 steps). The shift is in the data the lumped
+pipeline wrote (day-indexing off-by-one or different event-day assignment),
+and the ~6 h residual between the waveform shift (~23 h) and the NSE-optimum
+shift (~17 h) implies the lumped timing content also differs beyond a pure
+relabeling. Do not use this store in timing-sensitive comparisons until the
+pipeline-side indexing is resolved.
 
-**Hourly-native arm: no sharpening.** The hourly LSTM curve is the flattest
-of the four lagged stores (gain from tau=3 to optimum +0.073 vs +0.122 for
-the reference), not sharper, so real sub-daily structure did not turn the
-sweep into an hour-resolution instrument. Its longitude correlation is the
-strongest of any arm (Spearman −0.220 on improved gauges, vs −0.074
-reference, −0.077 UH retro, −0.176 daily LSTM), which is the sign the
-timezone mechanism predicts (western gauges need larger tau), but §5a's
-caution stands: these are censored subsets and the uncensored pilot analysis
-flipped sign, so this is suggestive, not confirmatory.
+**Hourly-native arm: no sharpening, and no timezone fingerprint either.**
+The hourly LSTM curve is the flattest of the four lagged stores (gain from
+tau=3 to optimum +0.073 vs +0.122 for the reference), not sharper, so real
+sub-daily structure did not turn the sweep into an hour-resolution
+instrument. The flatness is not a skill-floor artifact: at matched skill
+levels the hourly arm is still flatter (§5f). The improved-subset longitude
+correlation (−0.220) initially looked like the timezone-predicted sign, but
+§5f shows it is a censoring artifact: on uncensored interior optima the
+sign flips to +0.075 (wrong sign, weakest of the four lagged arms), and the
+lumped arm, where the timezone mechanism has no standing, shows −0.197 on
+its own improved subset. The timezone fingerprint remains
+absent-to-contradicted even with native sub-daily structure, an informative
+negative result.
 
 Plot: `output/tau_sweep/cross_source_nse_vs_tau.png`. Raw per-arm outputs in
 `output/tau_sweep/src_{uh_retro,daily_lstm,hourly_lstm,aorc2f_lumped}/`.
+
+## 5f. Adversarial review of §5e (2026-08-07, Fable subagent — verdict: sound-with-corrections)
+
+Independent read-only review; all §5e corrections above were folded in from
+it. Verdicts: claim "4/5 replicate ⇒ shared convention" SOUND-WITH-
+CORRECTIONS (replication real, attribution overreached); lumped-outlier
+claim SOUND-WITH-CORRECTIONS (strengthened, CF candidate refuted); "no
+sharpening" SOUND; the longitude half UNSUPPORTED (cut); levels-not-
+comparable SOUND. New measurements it contributed:
+
+- **Obs-free cross-correlation of routed hydrographs** (500-gauge sample,
+  WY1996, lags ±48 h; observations never enter): median lag vs reference is
+  UH retro +0 h (79% within 6 h), daily LSTM −1 h, hourly LSTM −2 h,
+  **lumped −23 h** (IQR −31 to −19, 84% at or below −12 h). This refutes the
+  checkpoint-mismatch explanation for the lumped outlier twice over: the two
+  LSTM arms are at least as mismatched to the trained head yet show zero
+  shift, and the −23 h appears with no observations involved.
+- **Extended sweep tau −13..47** (recomputed from raw dumps): the reference
+  constant-tau curve peaks interior at 20 (0.6997, declining to 0.6853 at 24
+  and 0.6373 at 30), so the constant-tau conclusion does not depend on the
+  missing ±1-day extension. Per gauge, though, 32.6% of reference optima are
+  genuinely beyond tau=23 and 11.2% below 0 (median 18, p10 −5, p90 40) —
+  the per-gauge tail structure is real, not an artifact of the 0..23 window.
+- **Censoring asymmetry supports the lumped reading:** the reference's
+  tau=0 pile is 78% flat-curve noise (only 22% improved) while the lumped
+  tau=0 pile is 64% genuine improvement — the left pile is signal for the
+  lumped arm, unlike its mirror image in the reference.
+- **Flatness is not a floor effect:** within-arm Spearman(curve range, curve
+  max) ≈ 0 to +0.13 in every arm; level-matched gauges (|Δmax NSE| < 0.05,
+  n=409) still leave the hourly arm flatter (median range 0.074 vs 0.091).
+- **Mechanical comparability PASS:** identical gauge ID vectors, identical
+  `nse_baseline`, identical obs arrays, has_curve 2362/2365 with the same 3
+  NaN gauges in every arm. The known no-curve backfill defect
+  (`scripts/tau_sweep.py:143`) touches only those 3 gauges here.
+- Interior-optima area correlation is unstable across source arms (+0.089
+  reference, −0.118 hourly-native) — weaker than the §5c interp-arm numbers.
+
+**Single most informative next measurement (proposed):** sweep tau on the
+routing-free summed upstream q' (the baseline construction, repeat-24, same
+gauges and obs, fully offline from existing stores). All five arms share the
+MC routing, so its lag contribution is invisible to the cross-source design.
+If the no-routing optimum also sits at 19–21, the entire lag is the
+store/obs day convention and the double-routing candidate dies; if it sits
+near 14–16, the gap directly quantifies the MC network's added travel time.
 
 ## 6. Raw output
 
