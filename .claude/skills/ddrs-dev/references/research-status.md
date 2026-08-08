@@ -247,10 +247,9 @@ was invalidated by a stale binary and the manifest did not reveal it.
   streamflow store swapped (`config/experiments/tau_src_*.yaml`). Four of
   five stores replicate the tau 17–21 optimum (aorc2f distributed 20, UH
   retro 21, daily LSTM 17, hourly-native LSTM 19; per-gauge best-tau median
-  18–19 on all four) ⇒ the lag is shared upstream of store choice,
-  consistent with the UTC-vs-LST convention as the dominant term — but the
-  design cannot apportion it vs the common MC routing (double-routing term
-  still unattributed; discriminator = tau sweep on routing-free summed q').
+  18–19 on all four) ⇒ the lag is shared upstream of store choice — and the
+  routing-free discriminator (§5g) resolved the attribution: it is the
+  common MC routing, NOT the day convention.
   **Exception: `aorc2f_lumped`** — obs-free cross-correlation shows its
   routed hydrographs LEAD the reference by ~23 h; CF metadata are
   byte-identical to the distributed store (convention candidate REFUTED), so
@@ -262,6 +261,21 @@ was invalidated by a stale binary and the manifest did not reveal it.
   (§5f): claims sound-with-corrections; extended sweep −13..47 shows the
   constant-tau optimum is interior (20) but 33% of per-gauge optima lie
   beyond tau=23. Plot: `output/tau_sweep/cross_source_nse_vs_tau.png`.
+  **Routing-free summed-q' sweep (§5g, 2026-08-07) — the attribution
+  answer.** Summed daily q' repeat-24'd in the arms' phase, same sweep
+  machinery (tau=11 reproduces the cached baseline NSE, median |diff|
+  0.0003). Optimum tau=6 global; per-bin 9 / 3 / −3 / −8 with area ⇒
+  (1) **UTC-vs-LST convention REFUTED as dominant** (zero-area intercept
+  ≈ tau 10–11 ⇒ convention offset ≈ 0–2 h; explains every failed longitude
+  fingerprint); (2) summed q' LEADS the gauge by area-growing travel time
+  (2→19 h), so day-aligned scoring understates baseline skill in large
+  basins; (3) **MC routing over-delays by ≈2× the required travel time**
+  (routed lateness = summed earliness bin-by-bin; added delay 10→38 h) —
+  the measured "double routing" of DDR's tau docstring; tau≈19–20 is
+  compensation, root cause is routing timing (double-carried travel time
+  and/or slow trained celerity, median n 0.130 vs reference 0.05).
+  Routed-at-optimum still beats summed-at-optimum in every bin (+0.013 to
+  +0.051). Plot: `output/tau_sweep/summed_qprime_vs_routed_tau.png`.
 
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward

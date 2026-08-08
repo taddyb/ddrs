@@ -368,6 +368,77 @@ If the no-routing optimum also sits at 19–21, the entire lag is the
 store/obs day convention and the double-routing candidate dies; if it sits
 near 14–16, the gap directly quantifies the MC network's added travel time.
 
+## 5g. The discriminator: tau sweep on routing-free summed q' (2026-08-07)
+
+The §5f-proposed measurement, run entirely offline from existing data: the
+baseline's summed upstream daily q' (cache
+`.ddrs/runs/2026-07-30T00-24-24Z-train-and-test/baseline`, full coverage of
+all 2,365 eval gauges) repeat-24'd into a synthetic hourly dump in the SAME
+phase as the routed arms' disaggregation input, then swept with the
+identical `scripts/tau_sweep.py` (all gates PASS) plus an extended sweep
+tau −13..47. Construction validated: sweep tau=11 is algebraically the
+standard day-aligned baseline scoring, and its per-gauge NSE reproduces the
+cached baseline NSE (median |diff| 0.0003). WY1996, medians:
+
+| area bin (km²) | summed-q' opt tau | routed opt tau (uncensored) | summed early by | routed late by | routing-added delay |
+|---|---|---|---|---|---|
+| 0–1,000 | 9 | 19 | 2 h | 8 h | 10 h |
+| 1,000–5,000 | 3 | 19 | 8 h | 8 h | 16 h |
+| 5,000–10,000 | −3 | 25 | 14 h | 14 h | 28 h |
+| 10,000–30,000 | −8 | 30 | 19 h | 19 h | 38 h |
+| global median | 6 (0.6731) | 20 (0.6997) | 5 h | 9 h | 14 h |
+
+("early/late by" = |tau_opt − 11|; the 30,000–50,000 bin, n=12, is too
+noisy to read. Per-gauge uncensored summed-q' best tau: median 6, p10 −10,
+p90 20, only 6.5% at the −13 edge.)
+
+**Neither §5f-anticipated outcome occurred, and the measurement is the more
+decisive for it.** The no-routing optimum is not 19–21 (all convention) and
+not 14–16 (convention plus routing residual): it is **6**, below the
+day-aligned point. Three conclusions follow:
+
+1. **The UTC-vs-LST convention story (§5b) is REFUTED as the dominant
+   term.** A timing-correct hydrograph scored against LST-labeled daily obs
+   should show optimum tau ≈ 16–19 even without routing. The smallest
+   basins, where travel time is minimal, sit at tau=9, and the area trend
+   extrapolates to ≈ 10–11 at zero area: the convention offset is ≈ 0–2 h,
+   not 5–8. This finally explains why the longitude fingerprint failed in
+   every arm and subset (§5a, §5c, §5f): there was no timezone signal to
+   find. Whatever conventions the stores and obs use, they net out to
+   near-UTC-day alignment.
+2. **The summed q' leads the gauges by an area-growing travel time** (2 h
+   at <1,000 km² to ~19 h at 10,000–30,000 km²), exactly the unmodeled
+   network travel time the routing exists to supply. Corollary: day-aligned
+   scoring understates the baseline's skill in large basins (5,000–10,000:
+   0.636 day-aligned → 0.755 at its optimum). Baseline comparisons at
+   large basins should keep this in mind.
+3. **The MC routing over-delays by almost exactly 2× the required travel
+   time.** Bin by bin (≥1,000 km²), routed lateness equals summed-q'
+   earliness: the routing added twice the delay the gap required. This is
+   the "double routing" of DDR's own tau docstring, now measured: the q'
+   stores already route runoff to the unit-catchment outlet (dHBV2's UH),
+   and the MC network then adds what amounts to the full travel time again.
+   The tau 18–20 optimum of every routed arm is COMPENSATION for this
+   over-delay, not a data-convention fix.
+
+**Routing still earns its keep once both sides are timing-corrected:** at
+per-bin optima the routed model beats the summed q' everywhere that
+matters: +0.022 (<1,000 km²), +0.013, +0.019, +0.051 (10,000–30,000 km²).
+The value added is real; it is currently masked at shipped tau=3 and
+partially masked at any constant tau by the over-delay.
+
+**Reframing for the fix tier:** a constant tau ≈ 19–20 remains the correct
+empirical patch for the current checkpoint, but the root cause is now in
+the routing timing (double-carried travel time, and possibly the slow
+trained celerity: median Manning's n 0.130 vs reference 0.05), not in the
+data pipeline. A retrain at corrected tau tests the patch; the deeper fix
+candidates (injection geometry, celerity prior) are a separate experiment.
+
+Artifacts: `output/tau_sweep/summed_qprime/` (synthetic dump, sweep
+outputs, `extended_curves.npy`),
+`output/tau_sweep/g3000_nearest/extended_curves.npy`,
+`output/tau_sweep/summed_qprime_vs_routed_tau.png`.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),
