@@ -276,6 +276,16 @@ was invalidated by a stale binary and the manifest did not reveal it.
   and/or slow trained celerity, median n 0.130 vs reference 0.05).
   Routed-at-optimum still beats summed-at-optimum in every bin (+0.013 to
   +0.051). Plot: `output/tau_sweep/summed_qprime_vs_routed_tau.png`.
+  **Gamma-UH params pulled (§5h):** the distributed aorc2f store's q' was
+  exported (2026-07-29, water_loss) with each divide routed through its own
+  learned gamma UH; `scripts/dump_gamma_uh_params.py` (water_loss venv)
+  reads the v3_gradaccum ep100 Ann head: median kernel mean 1.50 days per
+  divide (IQR 0.87–4.22), spearman +0.383 with log uparea ⇒ the per-divide
+  q' carries area-dependent NETWORK travel time before MC routes at all —
+  double routing is structural in the store. Clean fix target: sub-grid-only
+  UH on lateral inflows; col-7 (unrouted) is not it (0.29 routed,
+  water_loss 2026-07-29 finding). Dump:
+  `output/tau_sweep/gamma_uh_params.csv`.
 
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward

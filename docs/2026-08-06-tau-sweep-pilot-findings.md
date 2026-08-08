@@ -439,6 +439,50 @@ outputs, `extended_curves.npy`),
 `output/tau_sweep/g3000_nearest/extended_curves.npy`,
 `output/tau_sweep/summed_qprime_vs_routed_tau.png`.
 
+## 5h. The trained gamma-UH parameters: double routing confirmed at the parameter level (2026-08-07)
+
+`scripts/dump_gamma_uh_params.py` (runs under the water_loss venv) pulls
+routa/routb from the Ann head of the checkpoint that generated the
+distributed aorc2f store (CONUS2717_AORC2F_v3_gradaccum ep100 — the store
+was re-exported 2026-07-29 with each divide's runoff routed through its own
+learned gamma UH; see water_loss
+`docs/findings/2026-07-29-uh-missing-from-export.md`). Scaling chain
+verified against waterlossv18_1.py:57,179-183 and UH_gamma's floors:
+a_eff = 2.9·r0 + 0.1 ∈ [0.1, 3.0], theta_eff = 6.5·r1 + 0.5 ∈ [0.5, 7.0],
+kernel mean = a_eff·theta_eff days. All 197,088 exported divides:
+
+- **tau_uh median 1.50 days** (IQR 0.87–4.22; mean 5.23). 71.6% of divides
+  carry more than 1 day of UH delay, 25.5% more than 4 days.
+- Distribution is range-saturated at both ends: ~5% at the 0.05-day floor
+  (delta kernel) and p95 at the 21.0-day ceiling (a and theta both maxed).
+  routa median 2.511 (near its 2.9 ceiling), routb median 0.072 (near its
+  0 floor → theta_eff ≈ 0.57 d).
+- **spearman(tau_uh, log10 uparea) = +0.383**: the per-divide UH delay
+  GROWS with upstream area. A hillslope-scale delay would not; a
+  network-travel-scale delay does.
+
+Reading: the q' entering ddrs already carries a median 1.5 days of learned
+routing delay per divide, area-dependent, because the UH was trained at
+gage scale (applied after divide summation) and therefore absorbed the
+basin's channel travel time — then the 2026-07-29 export baked that same
+kernel into every divide's lateral inflow. MC routes the network on top.
+This is §5g's measured 2× over-delay, now visible in the parameters
+themselves: double routing is structural in the current store, not a
+celerity artifact alone. (The two mechanisms still superpose: the trained
+Manning's n 0.130 vs 0.05 reference makes MC's own leg slow as well.)
+
+Implication for the fix tier: the col-7 (unrouted) export fixes double
+routing but loses the multi-day hillslope delay and scored 0.29 routed
+(the 2026-07-29 finding, in reverse). Neither existing column is right for
+MC: the clean target is a SUB-GRID-ONLY UH (hillslope + small-channel
+delay, no network component) on the lateral inflows, with MC supplying all
+network travel. Short of retraining water_loss with routing inside the
+graph, a pragmatic middle is capping/shrinking the exported kernel (e.g.
+theta_eff floor-scale) — but any such surgery needs its own gate.
+
+Artifact: `output/tau_sweep/gamma_uh_params.csv` (divide_id, routa, routb,
+a_eff, theta_eff, tau_uh_days, uparea_km2).
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),
