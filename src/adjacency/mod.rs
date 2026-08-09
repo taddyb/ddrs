@@ -25,7 +25,10 @@
 
 /// Bump on any algorithm change that would invalidate previously-cached
 /// adjacency zarr outputs.
-pub const BUILDER_VERSION: u32 = 1;
+///
+/// - `1` → `2`: reach subdivision. The builder now emits `/parent_order` and
+///   `/parent_offset`, and `params.subdivision` participates in the content key.
+pub const BUILDER_VERSION: u32 = 2;
 
 pub mod build;
 pub mod cache;
@@ -33,5 +36,6 @@ pub mod dbf;
 pub mod fabric;
 pub mod gauges;
 pub mod gpkg;
+pub mod subdivide;
 pub mod validate;
 pub mod zarr_write;

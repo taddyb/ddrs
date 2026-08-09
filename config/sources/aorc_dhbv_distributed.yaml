@@ -1,0 +1,14 @@
+data_sources:
+  # CONUS MERIT with dHBV2 distributed AORC2f forcing (precip-driven disaggregation)
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  # Daily dHBV2 distributed AORC2f-forced streamflow
+  streamflow: /mnt/ssd1/data/icechunk/daily_dhbv2_distributed_aorc2f_merit_unit_catchments.ic
+  # USGS daily observations
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  # 2000-area-balanced gage population
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_2000_area_balanced.csv
+  # Hourly AORC precip (zarr v3, CONUS) — drives the precip-conditioned
+  # mass-preserving disaggregation head
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr

@@ -4,9 +4,9 @@ Struct: `src/config.rs::Config`. Loaded via
 `Config::from_yaml_file_with_mode(path, ConfigMode::Training|Testing)`.
 Six top-level sections. Verified against source 2026-07-30.
 
-**No `deny_unknown_fields` anywhere** — a typo'd key silently takes its default
-instead of erroring. This is the single most common cause of "my config change did
-nothing".
+**No `deny_unknown_fields` except `DisaggregationSection`** (added 2026-08-03) —
+everywhere else a typo'd key silently takes its default instead of erroring. This
+is the single most common cause of "my config change did nothing".
 
 ## Contents
 
@@ -119,9 +119,17 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 > **Current contract:** presence of the `disaggregation:` block ⇒ the head always
 > consumes precip ⇒ `data_sources.aorc_precip` is mandatory, else
 > `MeritGagesDataset::open` errors. It cannot silently degrade to flat repeat-24.
+> **Exception (2026-08-03):** `disaggregation.enabled: false` strips the block at
+> load time, making it inert — the sanctioned way to A/B the head vs nearest
+> (repeat-24) without deleting the block. (This replaced the short-lived
+> `experiment.use_frozen_kan_head`, which never ran an experiment.)
+> The section is `#[serde(deny_unknown_fields)]` (2026-08-03): phantom keys like
+> `use_precip` now FAIL LOAD with "unknown field" instead of silently taking
+> defaults — the one section where a typo'd key cannot silently no-op.
 
 | Key | Default | Notes |
 |---|---|---|
+| `enabled` | **true** | `false` ⇒ block stripped at load ⇒ flat repeat-24 (nearest) upsampling; the one-line ablation switch. `tests/disagg_enabled.rs` |
 | `hidden_size` | 16 | |
 | `num_hidden_layers` | 1 | |
 | `grid` | 3 | |
@@ -140,7 +148,7 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 | `use_leakance` | false | |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
-| `tau` | 3 | **Not** a routing sub-step count. It is the hourly→daily trim phase offset in `tau_trim_and_downsample`: DDR's slice `[13 + tau : -11 + tau]`, then area-pool to days (`src/training/loss.rs:17-45`). Nothing in `src/routing/` reads it |
+| `tau` | 9 | **Not** a routing sub-step count. Since 2026-08-08: hours the routed output is ADVANCED before daily scoring (translation-only inverse routing, dMC-Juniata's sign). Slice `[tau : -(24-tau)]`, pooled day i ↔ obs day i, valid range [0, 24) (`src/training/loss.rs`). Nothing in `src/routing/` reads it. Default 9 = the measured CONUS optimum (findings §5g). **Legacy scale (pre-2026-08-08): old = new + 11**, slice `[13+tau : -11+tau]`, day i ↔ obs day i+1; DDR-Python still uses it, all older configs/checkpoints carry it (old shipped 3 ≡ new −8, wrong direction). Never copy a `tau:` value across the convention boundary. |
 | `log_space_parameters` | `["p_spatial"]` | |
 | `defaults` | `{p_spatial: 21.0}` | Value used when a parameter is not in `learnable_parameters` |
 

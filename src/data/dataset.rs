@@ -10,7 +10,7 @@ use std::sync::Arc;
 use ndarray::{Array1, Array2};
 
 use crate::config::Config;
-use crate::data::collate::{build_flow_scale, compress, union_subgraphs};
+use crate::data::collate::{build_flow_scale, compress, union_subgraphs, CompressedAdj};
 use crate::data::dates::{Frequency, RhoWindow, TimeAxis};
 use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
@@ -28,8 +28,13 @@ use crate::sparse::SparseAdjacency;
 #[derive(Debug)]
 pub struct RoutingBatch {
     pub adjacency: SparseAdjacency,
-    /// Normalized attributes, shape `(N, F)`. Caller-major to match the
+    /// Normalized attributes, shape `(N_parent, F)`. Caller-major to match the
     /// KAN head input contract (`src/nn/kan_head.rs::KanHead::forward`).
+    ///
+    /// **Parent, not sub-reach, resolution.** Equal to `N` unless the adjacency
+    /// was built with `params.subdivision.enabled`, in which case the KAN runs
+    /// once per MERIT reach and `training::forward::gather_params_to_subreaches`
+    /// expands its outputs to the `N` routing rows.
     pub spatial_attributes_normalized: Array2<f32>,
     /// q' streamflow forcing, shape `(T_hours, N)`. Already multiplied by
     /// `flow_scale` per column. The flat `repeat-24` upsampling of
@@ -90,7 +95,8 @@ struct StaticNetworkCache {
     adjacency: SparseAdjacency,
     outflow_idx: Vec<Vec<usize>>,
     flow_scale: Vec<f32>,
-    /// Normalized attributes, shape `(N_active, F)`.
+    /// Normalized attributes, shape `(N_parent_active, F)` — parent resolution
+    /// (see `RoutingBatch::spatial_attributes_normalized`).
     spatial_attributes_normalized: Array2<f32>,
     /// Full-period observations `(n_days_full, G)`. Sliced per `collate_window` call.
     full_observations: Array2<f32>,
@@ -114,7 +120,9 @@ use burn::tensor::{backend::Backend, Int, Tensor, TensorData};
 /// used for masking + comparison at loss time.
 pub struct RoutingTensors<B: Backend> {
     pub adjacency: SparseAdjacency,
-    /// Normalized attributes, shape `(N, F)`.
+    /// Normalized attributes, shape `(N_parent, F)` — parent resolution, which
+    /// equals `N` unless the adjacency is subdivided. The KAN head consumes
+    /// this directly; its outputs are then gathered onto the `N` routing rows.
     pub spatial_attributes: Tensor<B, 2>,
     /// q' streamflow, shape `(T_hours, N)`. Not yet Autodiff-wrapped.
     pub q_prime: Tensor<B, 2>,
@@ -160,7 +168,7 @@ impl RoutingBatch {
             group.extend(std::iter::repeat_n(g_idx as i32, segs.len()));
         }
 
-        // 2. Lift spatial_attributes (N, F) — already owned + contiguous after reversed_axes().into_owned().
+        // 2. Lift spatial_attributes (N_parent, F) — already owned + contiguous after reversed_axes().into_owned().
         let (rows, cols) = (
             self.spatial_attributes_normalized.shape()[0],
             self.spatial_attributes_normalized.shape()[1],
@@ -253,6 +261,38 @@ impl RoutingBatch {
 }
 
 // ---------------------------------------------------------------------------
+// Per-row channel geometry
+// ---------------------------------------------------------------------------
+
+/// Slice `(length_m, slope)` out of the CONUS store for every compressed row.
+///
+/// **Index space matters here.** `conus.length_m` / `conus.slope` are
+/// SUB-REACH arrays, so they must be indexed with `CompressedAdj::conus_positions`
+/// — the CONUS sub-reach position each compressed row came from.
+/// `conus.index.position(comid)` returns a PARENT position (`ConusAdjacencyStore`'s
+/// two-index-spaces note) and is *not* interchangeable: under subdivision it
+/// would give every piece of a parent the same geometry, read off an unrelated
+/// row — the parent's undivided length instead of `L/m`, and a foreign slope.
+/// Without subdivision the two agree, which is exactly what makes the wrong one
+/// silent.
+///
+/// Pinned by `tests/subdivision_integration.rs::subdivided_rows_get_their_own_length_and_slope`.
+#[doc(hidden)]
+pub fn slice_reach_geometry(
+    conus: &ConusAdjacencyStore,
+    compressed: &CompressedAdj,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = compressed.conus_positions.len();
+    let mut length_m: Vec<f32> = Vec::with_capacity(n);
+    let mut slope: Vec<f32> = Vec::with_capacity(n);
+    for &pos in &compressed.conus_positions {
+        length_m.push(conus.length_m[pos]);
+        slope.push(conus.slope[pos]);
+    }
+    (length_m, slope)
+}
+
+// ---------------------------------------------------------------------------
 // MeritGagesDataset
 // ---------------------------------------------------------------------------
 
@@ -292,6 +332,10 @@ pub struct MeritGagesDataset {
     gauge_std: OnceCell<std::collections::HashMap<Staid, f32>>,
     /// Whether the configured loss needs `gauge_std` (`loss.kind: nse-batch`).
     want_gauge_std: bool,
+    /// `params.ddr_match`, captured at open. Selects the `outflow_idx`
+    /// convention in `collate::compress`: `true` (default) reproduces DDR's
+    /// upstream-cols behaviour, `false` reads the gauge's own reach.
+    ddr_match: bool,
     /// Optional day-boundary discharge state cache. `None` ⇒ every code path
     /// byte-identical to no-cache behavior (`RoutingBatch::initial_state = None`).
     state_cache: Option<crate::data::store::StateCache>,
@@ -399,10 +443,15 @@ impl MeritGagesDataset {
         );
 
         // ---------- 2. Attributes + statistics ----------
+        // Requested in PARENT space: attributes are per-COMID, and `conus.order`
+        // repeats a COMID once per sub-reach when the store is subdivided —
+        // which would materialize up to `max_pieces` identical columns of the
+        // (F, N) matrix and leave the store's COMID index ambiguous.
+        // `parent_order` is `order` when the store is not subdivided.
         let attr_names: Vec<String> = head_cfg.input_var_names.clone();
         let (attrs, stats, means, stds) = if ds.attributes.len() == 1 {
             // Single-path: byte-identical to the pre-C0 behavior.
-            let attrs = AttributesStore::open(&ds.attributes[0], &attr_names, &conus.order)?;
+            let attrs = AttributesStore::open(&ds.attributes[0], &attr_names, &conus.parent_order)?;
             let stats_path = stats_path_from_attrs(&ds.attributes[0]);
             let stats = AttrStats::open(&stats_path)?;
             let means = stats.means_f32(&attr_names);
@@ -410,7 +459,7 @@ impl MeritGagesDataset {
             (Arc::new(attrs), Arc::new(stats), means, stds)
         } else {
             // Multi-path: COMID-aligned merge across stores; NaN-fill per-store gaps.
-            let attrs = AttributesStore::open_multi(&ds.attributes, &attr_names, &conus.order)?;
+            let attrs = AttributesStore::open_multi(&ds.attributes, &attr_names, &conus.parent_order)?;
             let (means, stds) = load_merged_stats(&ds.attributes, &attr_names)?;
             // stats field is diagnostics-only (dead_code); use an empty placeholder.
             let placeholder_stats = AttrStats {
@@ -519,6 +568,7 @@ impl MeritGagesDataset {
                 .as_ref()
                 .map(|e| e.loss.kind == crate::config::LossKind::NseBatch)
                 .unwrap_or(false),
+            ddr_match: cfg.params.ddr_match,
             state_cache,
             leakance_impervious_threshold,
         })
@@ -618,20 +668,16 @@ impl MeritGagesDataset {
         let gauge_staids: Vec<Staid> =
             unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
 
-        let compressed = compress(&unioned, &self.conus.order)?;
+        let compressed = compress(
+            &unioned,
+            &self.conus.order,
+            self.ddr_match,
+            Some(&self.conus.parent_offset),
+        )?;
         let n = compressed.divide_comids.len();
 
         // ----- 2. SparseAdjacency: rows/cols + length/slope sliced -----
-        let mut length_m: Vec<f32> = Vec::with_capacity(n);
-        let mut slope: Vec<f32> = Vec::with_capacity(n);
-        for c in &compressed.divide_comids {
-            let pos = self.conus.index.position(c).ok_or_else(|| DataError::Malformed {
-                path: self.conus.path.clone(),
-                message: format!("compressed COMID {c:?} not found in CONUS order"),
-            })?;
-            length_m.push(self.conus.length_m[pos]);
-            slope.push(self.conus.slope[pos]);
-        }
+        let (length_m, slope) = slice_reach_geometry(&self.conus, &compressed);
         let values: Vec<f32> = vec![1.0; compressed.rows.len()];
         let adjacency = SparseAdjacency {
             n,
@@ -640,6 +686,10 @@ impl MeritGagesDataset {
             values,
             length_m,
             slope,
+            // Reach-subdivision map in compressed space. Identity (hence a
+            // no-op split) unless the store was built with
+            // `params.subdivision.enabled`.
+            parent_offset: compressed.parent_offset.clone(),
         };
 
         // ----- 3. flow_scale + q_prime read & fuse -----
@@ -687,7 +737,13 @@ impl MeritGagesDataset {
         let temp_hourly = self.read_temp_window(window, &compressed.divide_comids, n)?;
 
         // ----- 4. Attributes: slice + fill_nans + normalize + transpose -----
-        let spatial_attributes_normalized = self.finalize_attrs(&compressed.divide_comids, n);
+        // PARENT resolution: attributes are per-COMID and sub-reaches inherit
+        // their parent's hydraulics, so the KAN runs once per MERIT reach and
+        // `training::forward` gathers its outputs onto the pieces. Slicing at
+        // sub-reach resolution would build ~5x identical rows at `max_pieces: 8`.
+        let parent_comids = compressed.parent_comids();
+        let spatial_attributes_normalized =
+            self.finalize_attrs(&parent_comids, parent_comids.len());
 
         // ----- 5. Observations (present-in-adjacency STAIDs; missing→error) -----
         let observations = self.observations.read_window(window, &gauge_staids)?;
@@ -1001,20 +1057,16 @@ impl MeritGagesDataset {
         }
         let gauge_staids: Vec<Staid> =
             unioned.gauges.iter().map(|(s, _, _)| s.clone()).collect();
-        let compressed = compress(&unioned, &self.conus.order)?;
+        let compressed = compress(
+            &unioned,
+            &self.conus.order,
+            self.ddr_match,
+            Some(&self.conus.parent_offset),
+        )?;
         let n = compressed.divide_comids.len();
 
         // 2. SparseAdjacency.
-        let mut length_m: Vec<f32> = Vec::with_capacity(n);
-        let mut slope: Vec<f32> = Vec::with_capacity(n);
-        for c in &compressed.divide_comids {
-            let pos = self.conus.index.position(c).ok_or_else(|| DataError::Malformed {
-                path: self.conus.path.clone(),
-                message: format!("compressed COMID {c:?} not found in CONUS order"),
-            })?;
-            length_m.push(self.conus.length_m[pos]);
-            slope.push(self.conus.slope[pos]);
-        }
+        let (length_m, slope) = slice_reach_geometry(&self.conus, &compressed);
         let values: Vec<f32> = vec![1.0; compressed.rows.len()];
         let adjacency = SparseAdjacency {
             n,
@@ -1023,6 +1075,10 @@ impl MeritGagesDataset {
             values,
             length_m,
             slope,
+            // Reach-subdivision map in compressed space. Identity (hence a
+            // no-op split) unless the store was built with
+            // `params.subdivision.enabled`.
+            parent_offset: compressed.parent_offset.clone(),
         };
 
         // 3. flow_scale.
@@ -1033,8 +1089,11 @@ impl MeritGagesDataset {
             n,
         );
 
-        // 4. Normalized attributes (N, F).
-        let spatial_attributes_normalized = self.finalize_attrs(&compressed.divide_comids, n);
+        // 4. Normalized attributes (N_parent, F) — see the note in `collate`:
+        // the KAN runs at parent resolution and is gathered onto sub-reaches.
+        let parent_comids = compressed.parent_comids();
+        let spatial_attributes_normalized =
+            self.finalize_attrs(&parent_comids, parent_comids.len());
 
         // 5. Full-period observations: read the entire time axis at once.
         let full_rho = RhoWindow {

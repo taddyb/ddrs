@@ -32,6 +32,34 @@ use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAd
 /// Hardcoded routing timestep in seconds. Matches `self.t` in `mmc.py:192`.
 pub const DT_SECONDS: f32 = 3600.0;
 
+/// Per-row lateral-inflow divisor from a `parent_offset` map: every row owned
+/// by parent `p` gets `m_p = parent_offset[p + 1] - parent_offset[p]`, the
+/// number of sub-reach pieces the parent was split into.
+///
+/// Returns `None` when no parent owns more than one row — the network is not
+/// subdivided, every divisor would be `1.0`, and the caller can skip the
+/// division entirely instead of emitting a no-op tensor op.
+fn pieces_per_row_divisor(parent_offset: &[i32], n: usize) -> Option<Vec<f32>> {
+    let mut divisor = Vec::with_capacity(n);
+    let mut subdivided = false;
+    for w in parent_offset.windows(2) {
+        let m = w[1] - w[0];
+        assert!(
+            m >= 1,
+            "parent_offset must be strictly increasing; parent owns {m} rows"
+        );
+        subdivided |= m > 1;
+        divisor.extend(std::iter::repeat_n(m as f32, m as usize));
+    }
+    assert_eq!(
+        divisor.len(),
+        n,
+        "parent_offset covers {} sub-reach rows but the network has {n}",
+        divisor.len()
+    );
+    subdivided.then_some(divisor)
+}
+
 /// Static channel attributes and topology for a network.
 ///
 /// Adjacency, channel length, and slope come bundled inside `SparseAdjacency`
@@ -93,12 +121,40 @@ pub struct MuskingumCunge<I: Backend> {
     assembler: Option<AValuesAssembler<I>>,
 
     q_prime: Option<Tensor<Autodiff<I>, 2>>,
+    /// Per-row lateral-inflow divisor `[n]`: the piece count of each row's
+    /// parent reach, from `SparseAdjacency::parent_offset`. Built once at
+    /// `setup_inputs`; `None` when the network is not subdivided (every
+    /// divisor would be `1.0`), so the un-subdivided path skips the op and
+    /// stays byte-identical.
+    pieces_per_row: Option<Tensor<Autodiff<I>, 1>>,
+    /// Whether the cold-start solve `(I − N)·Q_0 = q'_0` sees the SAME divided
+    /// forcing `forward` routes. **Default `true`.** On an un-subdivided network
+    /// there is no divisor, so this is an exact no-op there; under subdivision
+    /// the undivided `q'_0` makes parent `p`'s outlet start at `m_p ×` its true
+    /// steady state.
+    ///
+    /// Measured (2026-08-05, 1,841 CONUS gauges / 184,676 sub-reach rows,
+    /// `max_pieces: 8`): the undivided cold start put 2.94× the correct total
+    /// discharge into the network, and the A/B difference took **221 hourly
+    /// steps to fall below 10 %** and 282 to fall below 5 % — against a
+    /// configured `warmup` of 5 days = 120 steps, at which point it was still
+    /// 41.7 %. The inflated state therefore leaks into the scored window, so it
+    /// is divided by default. `false` reproduces the un-divided behaviour for
+    /// `probe_courant --divide-hotstart` A/B runs.
+    pub divide_hotstart_by_pieces: bool,
     discharge_t: Option<Tensor<Autodiff<I>, 1>>,
 
     /// Eval-time zeta accumulation (leakance diagnostics). Off by default;
     /// `enable_zeta_accumulation` turns it on. Sums live on the inner backend
     /// (no autograd tape) and grow by one elementwise add per timestep.
     collect_zeta: bool,
+
+    /// Per-timestep negative-discharge tracking. Off by default;
+    /// `enable_negative_discharge_tracking` turns it on. When off, the host
+    /// sync in `forward_chain_inner` is skipped entirely — zero added cost.
+    /// Enable in the training forward path; leave off in eval (the diagnostic
+    /// is only meaningful during training where we want to observe the rate).
+    track_negative_discharge: bool,
     zeta_abs_sum: Option<Tensor<I, 1>>,
     zeta_net_sum: Option<Tensor<I, 1>>,
     depth_sum: Option<Tensor<I, 1>>,
@@ -154,8 +210,11 @@ impl<I: Backend> MuskingumCunge<I> {
             pattern: None,
             assembler: None,
             q_prime: None,
+            pieces_per_row: None,
+            divide_hotstart_by_pieces: true,
             discharge_t: None,
             collect_zeta: false,
+            track_negative_discharge: false,
             zeta_abs_sum: None,
             zeta_net_sum: None,
             depth_sum: None,
@@ -203,6 +262,16 @@ impl<I: Backend> MuskingumCunge<I> {
             &self.device,
         )
         .clamp_min(slope_min);
+
+        // Per-row lateral-inflow divisor, built once here rather than per
+        // timestep. A reach split into `m` pieces of length `L/m` gives each
+        // piece `q'/m` (see `forward`).
+        self.pieces_per_row = inputs
+            .adjacency
+            .parent_offset
+            .as_deref()
+            .and_then(|off| pieces_per_row_divisor(off, n))
+            .map(|d| Tensor::<Autodiff<I>, 1>::from_floats(d.as_slice(), &self.device));
 
         // Build CSR pattern + assembler constants directly from COO (O(nnz)).
         let pattern = Arc::new(CsrPattern::from_sparse(&inputs.adjacency));
@@ -262,6 +331,18 @@ impl<I: Backend> MuskingumCunge<I> {
                         .clone()
                         .slice([0..1, 0..n])
                         .reshape([n]);
+                    // Give the cold start the same `q'/m` lateral inflow
+                    // `forward` routes. Without it a subdivided network starts
+                    // ~m× too wet at every parent outlet and drains that
+                    // surplus for ~220 hourly steps — far past `warmup`.
+                    // `None` divisor (un-subdivided) ⇒ exact no-op.
+                    let q_prime_0 = match (
+                        self.divide_hotstart_by_pieces,
+                        self.pieces_per_row.as_ref(),
+                    ) {
+                        (true, Some(d)) => q_prime_0 / d.clone(),
+                        _ => q_prime_0,
+                    };
                     // Hotstart: solve (I − N) · Q_0 = q'_0 via the same CSR solver
                     // with c = 1 (all-ones vector), then clamp.
                     let device = self.device.clone();
@@ -388,6 +469,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 k_d, d_gw, leakance_factor,
                 self.impervious_mask.as_ref().cloned(),
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
+                self.track_negative_discharge,
             );
             if let Some(diag) = zeta_step {
                 fn add<I: Backend>(slot: &mut Option<Tensor<I, 1>>, v: Tensor<I, 1>) {
@@ -428,6 +510,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 n, q_spatial, p_spatial,
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
+                self.track_negative_discharge,
             )
         }
     }
@@ -441,6 +524,22 @@ impl<I: Backend> MuskingumCunge<I> {
         let discharge_lb = self.cfg.params.attribute_minimums.discharge;
         // Clamp once (single op + single tape node) instead of T times in-loop.
         let q_prime_clamped = q_prime.clamp_min(discharge_lb);
+        // Split lateral inflow evenly along a subdivided reach: a piece of
+        // length `L/m` receives `q'/m`. This is HEC-HMS's own treatment — its
+        // lateral term is `C4·(q_L·Δx)` with `q_L` an inflow per unit length —
+        // and it conserves each parent reach's total `q'` exactly, because the
+        // pieces chain in series so the outlet piece still carries the whole
+        // reach's runoff.
+        //
+        // MUST stay AFTER the clamp above. Clamping first applies the
+        // `discharge_lb` floor once, to the parent's inflow; dividing first
+        // would floor each of the `m` pieces independently, so a dry reach
+        // would inject `m · discharge_lb` instead of `discharge_lb` — mass
+        // created in proportion to the piece count.
+        let q_prime_clamped = match self.pieces_per_row.as_ref() {
+            Some(d) => q_prime_clamped / d.clone().unsqueeze_dim::<2>(0),
+            None => q_prime_clamped,
+        };
         let initial = self
             .discharge_t
             .as_ref()
@@ -479,6 +578,8 @@ impl<I: Backend> MuskingumCunge<I> {
         let mut columns: Vec<Tensor<Autodiff<I>, 2>> = Vec::with_capacity(num_timesteps);
         columns.push(initial.unsqueeze_dim::<2>(1));
 
+        crate::routing::mmc_op::reset_negative_solve_stats();
+
         for t in 1..num_timesteps {
             let q_prime_t: Tensor<Autodiff<I>, 1> = q_prime_clamped
                 .clone()
@@ -489,6 +590,45 @@ impl<I: Backend> MuskingumCunge<I> {
             self.discharge_t = Some(q_next);
         }
 
+        // Fix 1: distinguish three cases after the timestep loop.
+        //
+        // When `use_cuda_graphs` is true, `route_timestep` dispatches to
+        // `timestep_forward_via_graph`, which replays an on-device CUDA graph
+        // and never enters `forward_chain_inner`. Both counters stay at zero,
+        // which is *indistinguishable* from "measured, found zero negatives" —
+        // the silence would be a lie. Print an UNAVAILABLE notice so the
+        // output can never be misread as a zero-negative measurement.
+        //
+        // The fallback inside `timestep_forward_via_graph` (capture failed →
+        // direct launch) also carries this notice, because the user requested
+        // graphs and we cannot distinguish "all replays succeeded" from "some
+        // fell back silently". A config-based check is acceptable here because
+        // the leakance guard already rejects `use_cuda_graphs + leakance` at
+        // load time, so reaching this point with graphs on means the non-
+        // leakance graph path was requested.
+        let graphs_requested = self.cfg.params.use_cuda_graphs
+            && self.sparse_solver == SparseSolver::Cuda
+            && crate::sparse::dispatch::backend_is_cuda::<I>();
+
+        if graphs_requested {
+            if self.track_negative_discharge {
+                eprintln!(
+                    "  negative solves: UNAVAILABLE — use_cuda_graphs is true; \
+                     the CUDA-graph path does not enter forward_chain_inner, so \
+                     no count was taken. Disable use_cuda_graphs to measure."
+                );
+            }
+        } else {
+            let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
+            if total > 0 && neg > 0 {
+                eprintln!(
+                    "  negative solves before clamp: {neg}/{total} ({:.3}%) — Muskingum \
+                     coefficient sign violation (see .claude/PHYSICS-CORRECTIONS.md)",
+                    100.0 * neg as f64 / total as f64
+                );
+            }
+        }
+
         Tensor::cat(columns, 1)
     }
 
@@ -497,6 +637,18 @@ impl<I: Backend> MuskingumCunge<I> {
     /// stays `None`. Eval-time use — the training path never enables this.
     pub fn enable_zeta_accumulation(&mut self) {
         self.collect_zeta = true;
+    }
+
+    /// Turn on per-timestep negative-discharge tracking. When off (the
+    /// default), the host sync in `forward_chain_inner` is skipped entirely
+    /// — zero added cost on the forward. Enable in the training driver path
+    /// (per-micro-batch) so the negative-solve rate is visible. The CUDA-graph
+    /// path (`use_cuda_graphs: true`) never enters `forward_chain_inner`, so
+    /// enabling this flag there has no effect; `forward` will print an
+    /// UNAVAILABLE notice instead of a count. Training use only — the eval
+    /// path never enables this.
+    pub fn enable_negative_discharge_tracking(&mut self) {
+        self.track_negative_discharge = true;
     }
 
     /// Eval-time leakance diagnostic sums accumulated across `route_timestep`
@@ -535,6 +687,27 @@ impl<I: Backend> MuskingumCunge<I> {
     }
     pub fn pattern(&self) -> Option<&Arc<CsrPattern>> {
         self.pattern.as_ref()
+    }
+
+    /// Inner-backend snapshot of every input `forward_chain_inner` consumes,
+    /// for the S18'/S19' Courant diagnostic in
+    /// [`crate::routing::courant_probe`]. Diagnostic only: strips the tape,
+    /// changes nothing. Call after `setup_inputs`.
+    pub fn probe_inputs(&self) -> crate::routing::courant_probe::ProbeInputs<I> {
+        let n_seg = self.n_segments.expect("setup_inputs not called");
+        crate::routing::courant_probe::ProbeInputs {
+            pattern: self.pattern.as_ref().expect("pattern").clone(),
+            n: self.n.as_ref().expect("n").clone().inner(),
+            q_spatial: self.q_spatial.as_ref().expect("q_spatial").clone().inner(),
+            p_spatial: self.p_spatial_broadcast(n_seg).inner(),
+            length: self.length.as_ref().expect("length").clone().inner(),
+            slope: self.slope.as_ref().expect("slope").clone().inner(),
+            x_storage: self.x_storage.as_ref().expect("x_storage").clone().inner(),
+            q_prime: self.q_prime.as_ref().expect("q_prime").clone().inner(),
+            pieces_per_row: self.pieces_per_row.as_ref().map(|d| d.clone().inner()),
+            q0: self.discharge_t.as_ref().expect("discharge_t").clone().inner(),
+            n_segments: n_seg,
+        }
     }
 
     fn p_spatial_broadcast(&self, n: usize) -> Tensor<Autodiff<I>, 1> {

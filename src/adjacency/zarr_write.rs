@@ -62,6 +62,7 @@ use zarrs::group::GroupBuilder;
 
 use crate::adjacency::build::ConusAdjacency;
 use crate::adjacency::gauges::GaugeSubgraph;
+use crate::adjacency::subdivide::SubdividedAdjacency;
 use crate::data::error::{DataError, Result};
 
 /// Write the CONUS adjacency store at `dest` (a directory path).
@@ -89,6 +90,44 @@ pub fn write_conus_store(adj: &ConusAdjacency, dest: &Path) -> Result<()> {
     // Port addition: per-reach length_m / slope (float32), aligned to `order`.
     write_f32(&storage, dest, "/length_m", &adj.length_m)?;
     write_f32(&storage, dest, "/slope", &adj.slope)?;
+
+    Ok(())
+}
+
+/// Write a **subdivided** CONUS store at `dest`: the same array set as
+/// [`write_conus_store`] over the sub-reach rows, plus the parent map
+/// `/parent_order` (int32, `[n_parent]`) and `/parent_offset` (int32,
+/// `[n_parent + 1]`).
+///
+/// The root `shape` attr is `[n_sub, n_sub]` — the COO the reader indexes is in
+/// sub-reach space. `parent_order` is the only place the un-duplicated COMID
+/// list survives, and `ConusAdjacencyStore::open` builds its `IdIndex` from it.
+///
+/// A store written from an all-`m = 1` plan is byte-identical to
+/// [`write_conus_store`] plus the two identity arrays, which the reader would
+/// have synthesized anyway — so the disabled path stays a true no-op.
+pub fn write_conus_store_subdivided(sub: &SubdividedAdjacency, dest: &Path) -> Result<()> {
+    let storage = Arc::new(FilesystemStore::new(dest).map_err(|e| zarr_err(dest, e))?);
+
+    let n_sub = sub.order.len();
+    let nnz = sub.rows.len();
+
+    let root = GroupBuilder::new()
+        .attributes(coo_root_attrs(n_sub))
+        .build(storage.clone(), "/")
+        .map_err(|e| zarr_err(dest, e))?;
+    root.store_metadata().map_err(|e| zarr_err(dest, e))?;
+
+    write_i32(&storage, dest, "/indices_0", &sub.rows)?;
+    write_i32(&storage, dest, "/indices_1", &sub.cols)?;
+    write_u8_ones(&storage, dest, "/values", nnz)?;
+    write_i32(&storage, dest, "/order", &sub.order)?;
+    write_f32(&storage, dest, "/length_m", &sub.length_m)?;
+    write_f32(&storage, dest, "/slope", &sub.slope)?;
+    // Subdivision addition: the parent map. Absent from pre-subdivision stores,
+    // which the reader handles by synthesizing the identity.
+    write_i32(&storage, dest, "/parent_order", &sub.parent_order)?;
+    write_i32(&storage, dest, "/parent_offset", &sub.parent_offset)?;
 
     Ok(())
 }

@@ -127,19 +127,25 @@ where
     eprintln!("opening CONUS adjacency: {}", conus_path.display());
     let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
-    let n_reaches = conus.order.len();
+    // PARENT space throughout: this dump is per-COMID (the netCDF's COMID
+    // dimension is a coordinate, so duplicates would be malformed), and the KAN
+    // itself runs once per MERIT reach. `parent_order` == `order` and
+    // `n_parent()` == `n` unless the store was built with
+    // `params.subdivision.enabled`.
+    let n_reaches = conus.n_parent();
     eprintln!("CONUS reaches: {n_reaches}");
 
     // ---------- 2. Attributes + z-score stats ----------
     eprintln!("opening attributes: {} file(s)", ds.attributes.len());
-    let (attrs, means, stds) = open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.order)
-        .map_err(|e| CliError::Other(Box::new(e)))?;
+    let (attrs, means, stds) =
+        open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.parent_order)
+            .map_err(|e| CliError::Other(Box::new(e)))?;
 
     // ---------- 3. Build normalized (N, F) attribute tensor ----------
     // Mirrors `MeritGagesDataset::finalize_attrs` (`src/data/dataset.rs:403`).
     let f = head_cfg.input_var_names.len();
     let mut a: Array2<f32> = Array2::zeros((f, n_reaches));
-    for (out_col, comid) in conus.order.iter().enumerate() {
+    for (out_col, comid) in conus.parent_order.iter().enumerate() {
         if let Some(src_col) = attrs.index.position(comid) {
             for fi in 0..f {
                 a[(fi, out_col)] = attrs.attrs[(fi, src_col)];
@@ -293,8 +299,12 @@ where
 
     // ---------- 6. Write NetCDF4 ----------
     let slope_lb = cfg.params.attribute_minimums.slope;
-    let comids_i64: Vec<i64> = conus.order.iter().map(|c| c.0).collect();
-    let slope_clamped: Vec<f32> = conus.slope.iter().map(|&s| s.max(slope_lb)).collect();
+    let comids_i64: Vec<i64> = conus.parent_order.iter().map(|c| c.0).collect();
+    // Slope is inherited unchanged by every piece (`adjacency::subdivide`), so
+    // a parent's slope is its first piece's row.
+    let slope_clamped: Vec<f32> = (0..n_reaches)
+        .map(|p| conus.slope[conus.parent_offset[p] as usize].max(slope_lb))
+        .collect();
 
     write_netcdf(
         output_path,
@@ -349,18 +359,24 @@ where
     eprintln!("opening CONUS adjacency: {}", conus_path.display());
     let conus = ConusAdjacencyStore::open(conus_path)
         .map_err(|e| CliError::Other(Box::new(e)))?;
-    let n_reaches = conus.order.len();
+    // PARENT space throughout: this dump is per-COMID (the netCDF's COMID
+    // dimension is a coordinate, so duplicates would be malformed), and the KAN
+    // itself runs once per MERIT reach. `parent_order` == `order` and
+    // `n_parent()` == `n` unless the store was built with
+    // `params.subdivision.enabled`.
+    let n_reaches = conus.n_parent();
     eprintln!("CONUS reaches: {n_reaches}");
 
     // ---------- 2. Attributes + z-score stats ----------
     eprintln!("opening attributes: {} file(s)", ds.attributes.len());
-    let (attrs, means, stds) = open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.order)
-        .map_err(|e| CliError::Other(Box::new(e)))?;
+    let (attrs, means, stds) =
+        open_attrs_and_stats(ds, &head_cfg.input_var_names, &conus.parent_order)
+            .map_err(|e| CliError::Other(Box::new(e)))?;
 
     // ---------- 3. Build normalized (N, F) attribute tensor ----------
     let f = head_cfg.input_var_names.len();
     let mut a: Array2<f32> = Array2::zeros((f, n_reaches));
-    for (out_col, comid) in conus.order.iter().enumerate() {
+    for (out_col, comid) in conus.parent_order.iter().enumerate() {
         if let Some(src_col) = attrs.index.position(comid) {
             for fi in 0..f {
                 a[(fi, out_col)] = attrs.attrs[(fi, src_col)];
@@ -520,8 +536,12 @@ where
 
     // ---------- 6. Write NetCDF4 ----------
     let slope_lb = cfg.params.attribute_minimums.slope;
-    let comids_i64: Vec<i64> = conus.order.iter().map(|c| c.0).collect();
-    let slope_clamped: Vec<f32> = conus.slope.iter().map(|&s| s.max(slope_lb)).collect();
+    let comids_i64: Vec<i64> = conus.parent_order.iter().map(|c| c.0).collect();
+    // Slope is inherited unchanged by every piece (`adjacency::subdivide`), so
+    // a parent's slope is its first piece's row.
+    let slope_clamped: Vec<f32> = (0..n_reaches)
+        .map(|p| conus.slope[conus.parent_offset[p] as usize].max(slope_lb))
+        .collect();
 
     write_netcdf(
         output_path,

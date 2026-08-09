@@ -12,24 +12,33 @@ use crate::config::{LossConfig, LossKind};
 
 /// Tau-trim then daily downsample via area-mode adaptive average pooling.
 ///
-/// Mirrors DDR's `~/projects/ddr/src/ddr/io/functions.py:22`:
+/// Pooling mirrors DDR's `~/projects/ddr/src/ddr/io/functions.py:22`:
 /// `F.interpolate(data.unsqueeze(1), size=(rho,), mode="area").squeeze(1)`.
 ///
-/// Input shape `(G, T_hours)`. Slicing convention from DDR
-/// `compute_daily_runoff`: `[13 + tau : -11 + tau]`. The trimmed length
-/// does NOT need to be a multiple of 24 — fractional boundary hours are
-/// handled by area-mode pooling.
+/// Input shape `(G, T_hours)`. Slicing convention (since 2026-08-08):
+/// `[tau : -(24 - tau)]` — pooled day `i` covers hours
+/// `[tau + 24i, tau + 24(i+1))` and is scored against OBSERVATION DAY `i`.
+/// `tau` is the number of hours the routed output is advanced before
+/// scoring (a translation-only inverse-routing shift, same sign and
+/// magnitude as dMC-Juniata's tau): `tau = 0` is exactly day-aligned,
+/// `tau = 9` pairs obs day `i` with routed hours `[24i + 9, 24i + 33)`.
 ///
-/// Returns `(G, T_days)` where `T_days = T_hours_trimmed // 24` (matching
-/// DDR's `num_days` computation at `scripts/train.py:78`).
+/// Legacy mapping: the pre-2026-08-08 slice was `[13+tau : -11+tau]` with
+/// pooled day `i` scored against obs day `i+1`; `tau_new = tau_old - 11`
+/// (so old shipped 3 ≡ new −8, old optimum 20 ≡ new 9). DDR-Python's
+/// `compute_daily_runoff` still uses the legacy form. The total trim is
+/// 24 h under both conventions, so `T_days = T_hours/24 - 1` is unchanged.
+///
+/// Returns `(G, T_days)` where `T_days = T_hours_trimmed // 24`.
 pub fn tau_trim_and_downsample<B: Backend>(
     predictions_hourly: Tensor<B, 2>,
     tau: u32,
 ) -> Tensor<B, 2> {
     let dims = predictions_hourly.dims();
     let (g, t_hours) = (dims[0], dims[1]);
-    let start = 13 + tau as usize;
-    let end = t_hours - 11 + tau as usize;
+    assert!(tau < 24, "tau must be in [0, 24) hours; got {tau}");
+    let start = tau as usize;
+    let end = t_hours - (24 - tau as usize);
     assert!(start < end, "tau-trim window degenerate: [{start}, {end})");
     let t_trimmed = end - start;
     let t_days = t_trimmed / 24;
@@ -665,9 +674,9 @@ mod tests {
 
     #[test]
     fn tau_trim_matches_old_block_mean_on_divisible_input() {
-        // Verify the new area-pool body reduces to block-mean whenever
-        // the trimmed window IS a multiple of 24. tau=11, T=72 →
-        // trimmed window is hours [24..72] (length 48 = 2 days exactly).
+        // Verify the area-pool body reduces to block-mean whenever the
+        // trimmed window IS a multiple of 24. tau=0, T=72 → trimmed window
+        // is hours [0..48) (length 48 = 2 days exactly, day-aligned).
         let device = Default::default();
         let v: Vec<f32> = (0..72).map(|x| x as f32).collect();
         let input: Tensor<Bp, 2> = Tensor::<Bp, 1>::from_data(
@@ -675,12 +684,47 @@ mod tests {
             &device,
         )
         .reshape([1, 72]);
-        let out = tau_trim_and_downsample(input, 11);
+        let out = tau_trim_and_downsample(input, 0);
         let got: Vec<f32> = out.into_data().to_vec().unwrap();
-        // Sliced = hours 24..72 (48 values: 24..=71).
+        // Sliced = hours 0..48.
+        // Day 0 = mean(0..=23) = 11.5
         // Day 1 = mean(24..=47) = 35.5
-        // Day 2 = mean(48..=71) = 59.5
-        assert!((got[0] - 35.5).abs() < 1e-4, "got {}", got[0]);
-        assert!((got[1] - 59.5).abs() < 1e-4, "got {}", got[1]);
+        assert!((got[0] - 11.5).abs() < 1e-4, "got {}", got[0]);
+        assert!((got[1] - 35.5).abs() < 1e-4, "got {}", got[1]);
+    }
+
+    #[test]
+    fn new_tau_equals_legacy_tau_plus_eleven_shifted_one_day() {
+        // Convention-change equivalence: new tau=t reproduces the legacy
+        // slice [13+(t+11) : -11+(t+11)] exactly, offset by one pooled day
+        // (legacy day i was scored against obs day i+1; new day i against
+        // obs day i). new[:, j+1] == legacy[:, j] for all j.
+        let device = Default::default();
+        let t_hours = 24 * 10;
+        let v: Vec<f32> = (0..t_hours).map(|x| ((x * 37) % 101) as f32).collect();
+        let input: Tensor<Bp, 2> = Tensor::<Bp, 1>::from_data(
+            burn::tensor::TensorData::new(v.clone(), [t_hours]),
+            &device,
+        )
+        .reshape([1, t_hours]);
+        let tau_new: u32 = 9; // ≡ legacy tau 20
+        let new_out: Vec<f32> = tau_trim_and_downsample(input, tau_new)
+            .into_data()
+            .to_vec()
+            .unwrap();
+        // Legacy formula, computed by hand: start 13+20=33, end T-11+20=T+9… the
+        // legacy end offset (-11+tau) only stays in-bounds for tau<=11, so build
+        // the expected bins directly from the window definition instead: legacy
+        // day j covered hours [33 + 24j, 33 + 24(j+1)).
+        let n_days = new_out.len();
+        for j in 0..n_days - 1 {
+            let s = 33 + 24 * j;
+            let expect: f32 = v[s..s + 24].iter().sum::<f32>() / 24.0;
+            assert!(
+                (new_out[j + 1] - expect).abs() < 1e-4,
+                "day {j}: legacy {expect} vs new[j+1] {}",
+                new_out[j + 1]
+            );
+        }
     }
 }

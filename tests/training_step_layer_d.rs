@@ -190,6 +190,7 @@ fn adjacency_from_fixture(conus: &ConusAdjacencyStore) -> SparseAdjacency {
         values,
         length_m,
         slope,
+        parent_offset: None,
     }
 }
 
@@ -308,8 +309,10 @@ fn full_forward(
     (head, gauge_q)
 }
 
-/// Apply DDRS's tau-trim + daily downsample + warmup slice to hourly gauge Q.
-/// Mirrors the same helper from `training_step_layer_c.rs`.
+/// Apply the LEGACY tau-trim + daily downsample + warmup slice to hourly
+/// gauge Q. Mirrors the same helper from `training_step_layer_c.rs`; kept on
+/// the legacy `[13+tau : -11+tau]` slice because the DDR fixtures pin it
+/// (see that file's note on the 2026-08-08 convention change).
 fn ddrs_pred_post_warmup(hourly_q: Tensor<B, 2>, tau: u32, warmup: usize) -> Tensor<B, 2> {
     let dims = hourly_q.dims();
     let (g, t_hours) = (dims[0], dims[1]);

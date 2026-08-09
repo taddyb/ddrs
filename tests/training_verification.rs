@@ -153,7 +153,13 @@ fn v1_loss_matches_ddr_for_frozen_constant_params_small_batch() {
         forward_with_frozen_params::<NdArray<f32>>(&cfg, &tensors, &frozen, &device, false);
 
     // 10. Tau-trim + daily downsample → (num_gauges, T_days).
-    let pred_daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
+    //     The DDR fixture was generated under the LEGACY tau convention at
+    //     tau=3 (window [16 : T-8], pooled day i ↔ obs day i+1). Under the
+    //     2026-08-08 convention the identical window is tau=16, and this
+    //     test's obs slice [1..-1] keeps the legacy day pairing — so the
+    //     fixture comparison is unchanged bit-for-bit. Do NOT switch this
+    //     to cfg.params.tau: the config default is now on the new scale.
+    let pred_daily = tau_trim_and_downsample(pred_hourly, 16);
     let [_g, t_days] = pred_daily.dims();
 
     // 11. Convert BURN tensor → ndarray::Array2 (row-major, shape (G, T_days)).
@@ -288,7 +294,13 @@ fn v2_loss_matches_ddr_for_frozen_constant_params_all_gauges() {
         forward_with_frozen_params::<NdArray<f32>>(&cfg, &tensors, &frozen, &device, false);
 
     // 10. Tau-trim + daily downsample → (num_gauges, T_days).
-    let pred_daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
+    //     The DDR fixture was generated under the LEGACY tau convention at
+    //     tau=3 (window [16 : T-8], pooled day i ↔ obs day i+1). Under the
+    //     2026-08-08 convention the identical window is tau=16, and this
+    //     test's obs slice [1..-1] keeps the legacy day pairing — so the
+    //     fixture comparison is unchanged bit-for-bit. Do NOT switch this
+    //     to cfg.params.tau: the config default is now on the new scale.
+    let pred_daily = tau_trim_and_downsample(pred_hourly, 16);
     let [_g, t_days] = pred_daily.dims();
 
     // 11. Convert BURN tensor → ndarray::Array2 (row-major, shape (G, T_days)).

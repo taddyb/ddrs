@@ -29,6 +29,7 @@ Most wrong numbers in this repo are population confusions, not arithmetic errors
 | **Training / eval set** | **2,365** | after the `gages_adjacency` filter (dropped 494 headwater). **Every trained median is on this set** |
 | Post-fix baseline population | 2,698 | 3,211 − 513 headwater. `ddrs plan` baselines from 2026-07-29 onward |
 | Global matched set | 5,224 | a **different network** (global MERIT). Only in `6_19_26_journal.md` (repo root, not `docs/`) |
+| Area-balanced set (2026-08-02) | 1,841 | `~/projects/ddr/references/gage_info/gages_2000_area_balanced.csv`, built by `scripts/build_gages_2000_area_balanced.py` (seed 42) from GAGES-II with `DA_VALID` recomputed as **relative** `ABS_DIFF/DRAIN_SQKM ≤ 10%`, ≥80% obs coverage in both the 1981-10→1995-09 and 1995-10→2010-09 windows, non-headwater subgraph required. All 582 basins ≥5,000 km² kept + 418 random from [1k,5k) + 841 (all available) <1,000 km² → 45.7%/54.3% either side of 1,000 km². **Metrics on this set are incomparable to every 2,365/2,698-gauge number**; switching `data_sources.gages` to it invalidates the cached summed-Q′ baseline (`ddrs plan` recomputes) |
 
 ## Benchmarks — CONUS, eval 1995-10-01 → 2010-09-30, 2,365 gauges
 
@@ -210,6 +211,86 @@ Always document the **binary provenance** in a methods section — the 2026-07-0
 was invalidated by a stale binary and the manifest did not reveal it.
 
 ## Open, not closed
+
+- **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30
+  area-balanced checkpoint: NSE(tau) plateaus at tau ≈ 14–19 in every bin
+  < 30,000 km²; a single global tau=19 gains +0.114 median NSE (0.546 → 0.660,
+  1,841 gauges, WY1996) and tau=16 ties the summed-Q' baseline in the
+  < 1,000 km² bin (0.677 vs 0.674). Sign convention: window offset vs the
+  scored day's UTC midnight is (tau − 11) h; larger optimal tau ⇒ model LATE
+  vs obs. **Adversarial-review correction (same day): this run had the disagg
+  head OFF (flat repeat-24), so the hourly signal is 97.6% UTC-day-constant and
+  the sweep resolves only a day-pairing + blend weight (~half-day), NOT
+  sub-daily phase — do not read tau=16/19 as Eastern/Pacific midnight.** The
+  robust covariate is drainage area (Spearman +0.16 uncensored, an
+  accumulated-lag signature); the longitude/timezone fingerprint is
+  absent-to-contradicted (sign flips uncensored). 596 of 661 tau=23 pins are
+  real optima beyond the sweep edge ⇒ Phase 2 needs the ±1-day mapping
+  extension, split-sample selection, and a re-sweep on a disagg-ON run to test
+  for any hour-scale signal. Training also runs at tau=3, so gradients have
+  always been ~half a day misaligned — retrain at corrected tau is the open
+  test (freeze the tau protocol first). Instrument: `DDRS_HOURLY_DUMP` env var
+  on `evaluate` + `scripts/tau_sweep.py`. Authority:
+  `docs/2026-08-06-tau-sweep-pilot-findings.md` incl. §5a corrections.
+  **Interpolation arms (§5c, same day):** replicated on the standard 2,365-gauge
+  population — argmax tau=18–20, small-basin global tau=19 beats baseline
+  0.674 vs 0.645 (WY1996). Linear/quadratic q' upsampling
+  (`DDRS_QPRIME_INTERP`, commit e4fb66d) neither sharpens nor shifts the
+  curves ⇒ the mis-set is not a step-function artifact, and interpolation is
+  NOT the fix (nearest ≥ linear ≥ quadratic at each optimum). ~30% of gauges
+  pin at tau=23 (optima beyond +12 h) and best_tau correlates with area, not
+  longitude ⇒ likely convention offset + area-growing lag ("double routing" —
+  DDR's own tau docstring). Mechanistic prior: USGS obs are LST
+  midnight-to-midnight (no DST), AORC/Q' stores are UTC; `src/data/` has no
+  timezone logic anywhere (§5b).
+  **Cross-source arms (§5e/§5f, 2026-08-07):** same checkpoint/network,
+  streamflow store swapped (`config/experiments/tau_src_*.yaml`). Four of
+  five stores replicate the tau 17–21 optimum (aorc2f distributed 20, UH
+  retro 21, daily LSTM 17, hourly-native LSTM 19; per-gauge best-tau median
+  18–19 on all four) ⇒ the lag is shared upstream of store choice — and the
+  routing-free discriminator (§5g) resolved the attribution: it is the
+  common MC routing, NOT the day convention.
+  **Exception: `aorc2f_lumped`** — obs-free cross-correlation shows its
+  routed hydrographs LEAD the reference by ~23 h; CF metadata are
+  byte-identical to the distributed store (convention candidate REFUTED), so
+  the shift is in the data the lumped pipeline wrote. Do not use it for
+  timing-sensitive comparisons. The hourly-native arm does NOT sharpen the
+  curve (not a floor effect) and its longitude correlation is a censoring
+  artifact (interior sign +0.075, wrong sign) — timezone fingerprint remains
+  absent-to-contradicted even with native sub-daily data. Fable review
+  (§5f): claims sound-with-corrections; extended sweep −13..47 shows the
+  constant-tau optimum is interior (20) but 33% of per-gauge optima lie
+  beyond tau=23. Plot: `output/tau_sweep/cross_source_nse_vs_tau.png`.
+  **Routing-free summed-q' sweep (§5g, 2026-08-07) — the attribution
+  answer.** Summed daily q' repeat-24'd in the arms' phase, same sweep
+  machinery (tau=11 reproduces the cached baseline NSE, median |diff|
+  0.0003). Optimum tau=6 global; per-bin 9 / 3 / −3 / −8 with area ⇒
+  (1) **UTC-vs-LST convention REFUTED as dominant** (zero-area intercept
+  ≈ tau 10–11 ⇒ convention offset ≈ 0–2 h; explains every failed longitude
+  fingerprint); (2) summed q' LEADS the gauge by area-growing travel time
+  (2→19 h), so day-aligned scoring understates baseline skill in large
+  basins; (3) **MC routing over-delays by ≈2× the required travel time**
+  (routed lateness = summed earliness bin-by-bin; added delay 10→38 h) —
+  the measured "double routing" of DDR's tau docstring; tau≈19–20 is
+  compensation, root cause is routing timing (double-carried travel time
+  and/or slow trained celerity, median n 0.130 vs reference 0.05).
+  Routed-at-optimum still beats summed-at-optimum in every bin (+0.013 to
+  +0.051). Plot: `output/tau_sweep/summed_qprime_vs_routed_tau.png`.
+  **Convention change SHIPPED (2026-08-08, findings §5i):** tau is now
+  signed-at-zero hours of advance (`[tau : -(24-tau)]`, day i ↔ obs day i,
+  default 9 ≡ old 20); old scale = new + 11. Old checkpoints trained at
+  old-3 ≡ new −8. tau=9 CPU retrain across all five stores launched same
+  day (`scripts/run_tau9_source_trains.sh`).
+  **Gamma-UH params pulled (§5h):** the distributed aorc2f store's q' was
+  exported (2026-07-29, water_loss) with each divide routed through its own
+  learned gamma UH; `scripts/dump_gamma_uh_params.py` (water_loss venv)
+  reads the v3_gradaccum ep100 Ann head: median kernel mean 1.50 days per
+  divide (IQR 0.87–4.22), spearman +0.383 with log uparea ⇒ the per-divide
+  q' carries area-dependent NETWORK travel time before MC routes at all —
+  double routing is structural in the store. Clean fix target: sub-grid-only
+  UH on lateral inflows; col-7 (unrouted) is not it (0.29 routed,
+  water_loss 2026-07-29 finding). Dump:
+  `output/tau_sweep/gamma_uh_params.csv`.
 
 - **Backward CUDA graphs (SP-11).** Forward capture landed (V7a 0.385, V10 29.2%
   launch reduction); the backward pass is not captured. Path: profile → fuse backward

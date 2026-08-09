@@ -345,6 +345,84 @@ pub(crate) fn daily_to_hourly_trim(daily: &Array2<f32>, n_hourly: usize) -> Arra
     hourly
 }
 
+/// Daily→hourly upsampling mode for DAILY Q' stores, selected once per process
+/// from the `DDRS_QPRIME_INTERP` env var (diagnostic knob, mirrors
+/// `DDRS_HOURLY_DUMP`). Absent/`nearest` keeps the flat repeat-24 path
+/// byte-identical. `linear`/`quadratic` interpolate through day-CENTER values
+/// (day d anchors at hour 24d+12), reading ±1 context day where the store
+/// allows so 15-day eval chunks tile without edge clamps.
+/// Scope: the icechunk daily store only — the global zarr-v2 reader REJECTS a
+/// non-nearest setting rather than silently ignoring it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum QPrimeInterp {
+    Nearest,
+    Linear,
+    Quadratic,
+}
+
+pub(crate) fn qprime_interp() -> QPrimeInterp {
+    static MODE: std::sync::OnceLock<QPrimeInterp> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let mode = match std::env::var("DDRS_QPRIME_INTERP").as_deref() {
+            Err(_) | Ok("nearest") => QPrimeInterp::Nearest,
+            Ok("linear") => QPrimeInterp::Linear,
+            Ok("quadratic") => QPrimeInterp::Quadratic,
+            Ok(other) => {
+                panic!("DDRS_QPRIME_INTERP={other} not one of nearest|linear|quadratic")
+            }
+        };
+        if mode != QPrimeInterp::Nearest {
+            eprintln!("  q' upsampling: {mode:?} (DDRS_QPRIME_INTERP)");
+        }
+        mode
+    })
+}
+
+/// Interpolating daily→hourly. `daily_ext` carries `left_pad` (0 or 1) context
+/// rows before window day 0 and possibly one after the window; neighbors
+/// outside the slab clamp to the slab edge. Hour h (window coordinates)
+/// evaluates at t = (h + 0.5)/24 days; day d's value anchors at t = d + 0.5.
+/// Both interpolants are clamped at 0 (the quadratic can undershoot); neither
+/// conserves the daily mean exactly — linear applies a [1,6,1]/8 kernel to
+/// interior day means, quadratic shifts them by curvature/24. Diagnostic only.
+pub(crate) fn daily_to_hourly_interp(
+    daily_ext: &Array2<f32>,
+    n_hourly: usize,
+    left_pad: usize,
+    mode: QPrimeInterp,
+) -> Array2<f32> {
+    let (n_ext, n_div) = daily_ext.dim();
+    let c = |k: isize, j: usize| -> f32 {
+        let idx = (k + left_pad as isize).clamp(0, n_ext as isize - 1) as usize;
+        daily_ext[(idx, j)]
+    };
+    let mut hourly = Array2::<f32>::zeros((n_hourly, n_div));
+    for h in 0..n_hourly {
+        let d = (h / 24) as isize;
+        // Position within day d relative to its center, in [-0.5, 0.5).
+        let x = (h as f32 + 0.5) / 24.0 - (d as f32 + 0.5);
+        for j in 0..n_div {
+            let v = match mode {
+                QPrimeInterp::Nearest => c(d, j),
+                QPrimeInterp::Linear => {
+                    if x < 0.0 {
+                        (1.0 + x) * c(d, j) + (-x) * c(d - 1, j)
+                    } else {
+                        (1.0 - x) * c(d, j) + x * c(d + 1, j)
+                    }
+                }
+                QPrimeInterp::Quadratic => {
+                    // Lagrange parabola through centers d-1, d, d+1.
+                    let (vm, v0, vp) = (c(d - 1, j), c(d, j), c(d + 1, j));
+                    v0 + 0.5 * (vp - vm) * x + 0.5 * (vm - 2.0 * v0 + vp) * x * x
+                }
+            };
+            hourly[(h, j)] = v.max(0.0);
+        }
+    }
+    hourly
+}
+
 /// Collapse a `(n_days * 24, N)` hourly slab to `(n_days, N)` by averaging
 /// each 24-hour block. Q' is a rate (m³/s): the daily value is the day's
 /// mean flow, so total daily volume is preserved.
@@ -506,15 +584,52 @@ impl StreamflowStore {
         }
     }
 
+    /// Read `n_days` daily rows from `start` plus up to one context day on
+    /// each side (for the interpolating upsamplers). Returns the extended slab
+    /// and `left_pad` (1 iff the store has a day before `start`). Only called
+    /// on `Frequency::Daily` stores, where `n_time` counts days.
+    fn read_daily_with_context(
+        &self,
+        start: NaiveDate,
+        n_days: usize,
+        comids: &[Comid],
+    ) -> Result<(Array2<f32>, usize)> {
+        debug_assert!(matches!(self.resolution, Frequency::Daily));
+        let offset = (start - self.time_start).num_days();
+        let left = usize::from(offset >= 1);
+        let right = usize::from(offset + n_days as i64 + 1 <= self.n_time as i64);
+        let ext_start = start - chrono::Duration::days(left as i64);
+        let daily = self.read_window_daily(ext_start, n_days + left + right, comids)?;
+        Ok((daily, left))
+    }
+
+    /// Daily-store upsampling shared by `read_window` / `read_test_window`:
+    /// repeat-24 (unchanged default) or, under `DDRS_QPRIME_INTERP`,
+    /// day-center interpolation with ±1-day context.
+    fn upsample_daily(
+        &self,
+        start: NaiveDate,
+        n_days: usize,
+        n_hourly: usize,
+        comids: &[Comid],
+    ) -> Result<Array2<f32>> {
+        let mode = qprime_interp();
+        if mode == QPrimeInterp::Nearest {
+            let daily = self.read_window_daily(start, n_days, comids)?;
+            Ok(daily_to_hourly_trim(&daily, n_hourly))
+        } else {
+            let (daily_ext, left_pad) = self.read_daily_with_context(start, n_days, comids)?;
+            Ok(daily_to_hourly_interp(&daily_ext, n_hourly, left_pad, mode))
+        }
+    }
+
     /// Read `Qr` for `window` and `comids`. Returns `(n_hourly, N)` f32.
     /// Daily stores upsample via repeat-24 + trailing-day trim (unchanged);
     /// hourly stores slice the native axis directly — no upsampling.
     pub fn read_window(&self, window: &RhoWindow, comids: &[Comid]) -> Result<Array2<f32>> {
         match self.resolution {
             Frequency::Daily => {
-                let daily =
-                    self.read_window_daily(window.window_start, window.rho_days, comids)?;
-                Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+                self.upsample_daily(window.window_start, window.rho_days, window.n_hourly(), comids)
             }
             Frequency::Hourly => {
                 let start = self.native_start_index(window.window_start)?;
@@ -532,9 +647,7 @@ impl StreamflowStore {
     ) -> Result<Array2<f32>> {
         match self.resolution {
             Frequency::Daily => {
-                let daily =
-                    self.read_window_daily(window.window_start, window.n_days, comids)?;
-                Ok(daily_to_hourly_trim(&daily, window.n_hourly()))
+                self.upsample_daily(window.window_start, window.n_days, window.n_hourly(), comids)
             }
             Frequency::Hourly => {
                 let start = self.native_start_index(window.window_start)?;
@@ -822,6 +935,62 @@ mod tests {
         for h in 24..47 {
             assert_eq!(hourly[(h, 0)], 2.0);
             assert_eq!(hourly[(h, 1)], 20.0);
+        }
+    }
+
+    #[test]
+    fn daily_to_hourly_interp_nearest_matches_trim() {
+        use ndarray::Array2;
+        let daily =
+            Array2::from_shape_vec((3, 2), vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]).unwrap();
+        let trim = daily_to_hourly_trim(&daily, 47);
+        let interp = daily_to_hourly_interp(&daily, 47, 0, QPrimeInterp::Nearest);
+        assert_eq!(trim, interp);
+    }
+
+    #[test]
+    fn daily_to_hourly_interp_constant_is_exact_all_modes() {
+        use ndarray::Array2;
+        let daily = Array2::from_elem((4, 1), 5.0f32);
+        for mode in [QPrimeInterp::Nearest, QPrimeInterp::Linear, QPrimeInterp::Quadratic] {
+            let hourly = daily_to_hourly_interp(&daily, 96, 1, mode);
+            for h in 0..96 {
+                assert!((hourly[(h, 0)] - 5.0).abs() < 1e-6, "{mode:?} h={h}");
+            }
+        }
+    }
+
+    #[test]
+    fn daily_to_hourly_interp_linear_ramp_conserves_interior_day_means() {
+        use ndarray::Array2;
+        // Daily ramp 1..=5 with 1 context day each side of a 3-day window.
+        // Linear AND quadratic interpolation reproduce a linear trend exactly,
+        // so each interior window day's 24-hour mean equals its daily value.
+        let daily_ext =
+            Array2::from_shape_vec((5, 1), vec![1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        for mode in [QPrimeInterp::Linear, QPrimeInterp::Quadratic] {
+            let hourly = daily_to_hourly_interp(&daily_ext, 72, 1, mode);
+            for d in 0..3 {
+                let mean: f32 =
+                    (0..24).map(|h| hourly[(24 * d + h, 0)]).sum::<f32>() / 24.0;
+                let expect = daily_ext[(d + 1, 0)];
+                assert!(
+                    (mean - expect).abs() < 1e-5,
+                    "{mode:?} day {d}: mean {mean} vs {expect}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn daily_to_hourly_interp_quadratic_clamps_at_zero() {
+        use ndarray::Array2;
+        // Sharp peak: the parabola through (0, 12, 0) undershoots next to the
+        // peak day; outputs must clamp at 0 (Q' is nonnegative).
+        let daily_ext = Array2::from_shape_vec((3, 1), vec![0.0, 12.0, 0.0]).unwrap();
+        let hourly = daily_to_hourly_interp(&daily_ext, 72, 0, QPrimeInterp::Quadratic);
+        for h in 0..72 {
+            assert!(hourly[(h, 0)] >= 0.0, "h={h} went negative");
         }
     }
 

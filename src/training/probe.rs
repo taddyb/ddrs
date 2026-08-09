@@ -21,7 +21,7 @@ use crate::data::dataset::RoutingTensors;
 use crate::nn::kan_head::KanHead;
 use crate::routing::utils::denormalize;
 use crate::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
-use crate::training::forward::scatter_add_by_group;
+use crate::training::forward::{gather_params_to_subreaches, scatter_add_by_group};
 
 /// Detach `t` from its autograd graph and re-lift it as a `require_grad`
 /// leaf. Values are bit-identical; only the tape topology changes.
@@ -70,9 +70,16 @@ pub fn probe_forward<I: Backend>(
         "probing leakance params requires params.use_leakance: true"
     );
 
-    let params_map = head.forward(tensors.spatial_attributes.clone());
-
     let n_active = tensors.adjacency.n;
+    // The head runs at PARENT resolution; expand to routing rows so the lifted
+    // leaves below are per-reach-row, as every consumer here assumes. No-op
+    // unless the adjacency was built with `params.subdivision.enabled`.
+    let params_map = gather_params_to_subreaches(
+        head.forward(tensors.spatial_attributes.clone()),
+        tensors.adjacency.parent_offset.as_ref(),
+        n_active,
+        device,
+    );
 
     // Build lifted leaves from the params_map for every name in `lift`.
     // Must come before x_storage so the lifted-or-fallback pattern below

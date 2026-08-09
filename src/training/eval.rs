@@ -252,6 +252,31 @@ pub fn evaluate<I: Backend>(
         chunk_idx += 1;
     }
 
+    // DIAGNOSTIC (opt-in, off by default): dump the PRE-TRIM hourly series so
+    // `params.tau` can be swept EXACTLY offline instead of re-running eval once
+    // per tau. Raw row-major f32 (n_gauges, n_hours) + a `.json` dims sidecar.
+    // An env var rather than a new parameter because `evaluate` has several
+    // call sites and this is a throwaway probe.
+    if let Ok(dump_path) = std::env::var("DDRS_HOURLY_DUMP") {
+        use std::io::Write;
+        let raw: Vec<f32> = predictions_full.iter().copied().collect();
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(raw.as_ptr() as *const u8, std::mem::size_of_val(&raw[..]))
+        };
+        std::fs::File::create(&dump_path)
+            .and_then(|mut f| f.write_all(bytes))
+            .unwrap_or_else(|e| panic!("DDRS_HOURLY_DUMP write to {dump_path} failed: {e}"));
+        let meta = format!(
+            r#"{{"n_gauges":{n_all_gauges},"n_hours":{n_hours_full},"dtype":"f32","order":"C","tau_shipped":{}}}"#,
+            cfg.params.tau
+        );
+        std::fs::write(format!("{dump_path}.json"), meta).ok();
+        eprintln!(
+            "  hourly dump -> {dump_path} ({n_all_gauges} x {n_hours_full} f32, {:.2} GB)",
+            (n_all_gauges * n_hours_full * 4) as f64 / 1e9
+        );
+    }
+
     // End-of-pipeline tau-trim + daily downsample. Lift the f32 accumulator
     // into a BURN tensor for the existing tau_trim_and_downsample helper.
     let pred_full_vec: Vec<f32> = predictions_full.iter().copied().collect();
@@ -276,14 +301,17 @@ pub fn evaluate<I: Backend>(
         .as_standard_layout()
         .to_owned();
 
-    // Predictions after tau_trim_and_downsample: shape (G, n_days_full - 1).
-    // (Math: T_hours = n_days_full * 24; trim drops 24 hours total; /24 = n_days_full - 1.)
-    // To match observations_daily's (G, n_days_full - 2), drop the LAST day
-    // of predictions. (This SAFE CONSERVATIVE alignment is documented in the
-    // SP-5 plan Task 6 design note; Task 11 V4 will surface any drift.)
+    // Predictions after tau_trim_and_downsample: shape (G, n_days_full - 1),
+    // pooled day i ↔ store day i (2026-08-08 tau convention; T_hours =
+    // n_days_full * 24, trim drops 24 hours total). Observations above are
+    // sliced [1..-1] (store days 1..n_days_full-2), so drop the FIRST
+    // prediction day to pair store day 1..n_days_full-2 on both sides.
+    // (Under the legacy convention pooled day i ↔ store day i+1 and the
+    // LAST prediction day was dropped instead; the zarr time axis is
+    // unchanged by the convention switch.)
     let pd_dims = predictions_daily.dim();
     let predictions_daily = predictions_daily
-        .slice(s![.., 0..pd_dims.1 - 1])
+        .slice(s![.., 1..pd_dims.1])
         .to_owned();
 
     debug_assert_eq!(

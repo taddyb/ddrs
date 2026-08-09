@@ -56,6 +56,16 @@ pub struct SparseAdjacency {
     /// Channel slope per reach (dimensionless), length `n`, aligned to
     /// topological order. Engine clamps to `attribute_minimums.slope`.
     pub slope: Vec<f32>,
+    /// Reach-subdivision parent map, length `n_parent + 1`: rows
+    /// `[parent_offset[p], parent_offset[p + 1])` are the sub-reach pieces of
+    /// parent reach `p`, contiguous and ordered upstream→downstream (so the
+    /// parent's outlet is `parent_offset[p + 1] - 1`). Mirrors the
+    /// `/parent_offset` array on `ConusAdjacencyStore`.
+    ///
+    /// `None` — and equally an identity map `0..=n` — means the network is not
+    /// subdivided; the engine then skips the lateral-inflow split entirely.
+    /// The last element must equal `n`.
+    pub parent_offset: Option<Vec<i32>>,
 }
 
 impl SparseAdjacency {
@@ -86,7 +96,7 @@ impl SparseAdjacency {
                 }
             }
         }
-        Self { n, rows, cols, values, length_m, slope }
+        Self { n, rows, cols, values, length_m, slope, parent_offset: None }
     }
 
     pub fn nnz(&self) -> usize {

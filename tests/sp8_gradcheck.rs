@@ -116,6 +116,7 @@ fn run_forward_loss(
         length_t,
         slope_t,
         xst_t,
+        false,
     );
 
     (

@@ -109,9 +109,9 @@ pub struct DataSources {
     pub observations: std::path::PathBuf,
     pub gages: std::path::PathBuf,
     /// Optional hourly AORC precipitation store (`merit_unit_catchments.zarr`,
-    /// zarr v3). CONUS-only; drives the precip-conditioned disaggregation head
-    /// (`kan_head.disaggregation.use_precip`). Absent ⇒ the head conditions on
-    /// daily Q' only (or, with disaggregation off, flat repeat-24).
+    /// zarr v3). CONUS-only; drives the precip-conditioned disaggregation head.
+    /// Mandatory whenever `kan_head.disaggregation:` is present and enabled
+    /// (the head always consumes precip); unused otherwise.
     #[serde(default)]
     pub aorc_precip: Option<std::path::PathBuf>,
     /// Path to the MERIT flowlines fabric: `.shp` (sibling `.dbf` read),
@@ -306,11 +306,23 @@ pub struct KanHeadConfigSection {
     pub disaggregation: Option<DisaggregationSection>,
 }
 
-/// YAML `kan_head.disaggregation:` block (presence enables the head).
-/// The head always consumes `(daily Q', that day's 24h precip)` — requires
-/// `data_sources.aorc_precip` to be set. See `src/nn/disagg_head.rs`.
+/// YAML `kan_head.disaggregation:` block (presence enables the head, unless
+/// `enabled: false`). The head always consumes `(daily Q', that day's 24h
+/// precip)` — requires `data_sources.aorc_precip` to be set. See
+/// `src/nn/disagg_head.rs`. `deny_unknown_fields` because phantom keys here
+/// (e.g. the removed `use_precip`) silently produced a different head than
+/// intended.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisaggregationSection {
+    /// On/off switch. Default `true` — a bare block enables the head,
+    /// preserving the historical presence-only contract. `false` strips the
+    /// whole block at config load, so the loader falls back to flat
+    /// repeat-24 (nearest) daily→hourly upsampling and the block stays in
+    /// the YAML inert (the ablation switch: flip one line, change nothing
+    /// else).
+    #[serde(default = "default_disagg_enabled")]
+    pub enabled: bool,
     #[serde(default = "default_disagg_hidden")]
     pub hidden_size: usize,
     #[serde(default = "default_disagg_num_hidden_layers")]
@@ -385,6 +397,9 @@ fn default_grid() -> usize {
 }
 fn default_k() -> usize {
     3
+}
+fn default_disagg_enabled() -> bool {
+    true
 }
 fn default_disagg_hidden() -> usize {
     16
@@ -473,6 +488,93 @@ pub enum SparseSolver {
     Cuda,
 }
 
+/// YAML `params.subdivision:` block — static reach subdivision so
+/// `Cr = c·Δt/Δx` lands near 1 network-wide.
+///
+/// Off by default; `enabled: false` reproduces current behaviour exactly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subdivision {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hard cap on pieces per reach. Uncapped subdivision is infeasible:
+    /// 13.2x reaches and 9.2x solver critical path, and Sum(m) cannot be
+    /// pinned down (2.3M-10.5M across defensible reference-flow choices).
+    /// Capping bounds the cost AND makes it estimable (+/-12% at M=8).
+    #[serde(default = "default_max_pieces")]
+    pub max_pieces: usize,
+    /// Manning's n used ONLY to compute the reference celerity that sets m.
+    /// Deliberately NOT taken from a checkpoint: the graph must not depend on
+    /// training state. 0.05 is the trained CONUS median.
+    #[serde(default = "default_reference_n")]
+    pub reference_n: f32,
+    /// Reference discharge Q_ref = coefficient * uparea_km2^exponent (m3/s).
+    #[serde(default = "default_ref_q_coeff")]
+    pub reference_discharge_coefficient: f32,
+    #[serde(default = "default_ref_q_exp")]
+    pub reference_discharge_exponent: f32,
+    /// Short reaches get their length clamped UP to
+    /// `min_length_fraction * c_ref * dt`, giving `Cr <= 1/min_length_fraction`
+    /// at the reference flow. 1.0 targets Cr = 1; 0.5 targets Cr <= 2 (the
+    /// non-negativity bound) with half the length distortion; 0.0 disables the
+    /// clamp entirely, leaving short reaches over-Courant.
+    ///
+    /// This is a BUILD-TIME constant, unlike the runtime K floor in
+    /// `enforce_positivity`. It therefore has no gradient path and cannot
+    /// create the `X ~ Cr ~ 1/n` coupling that drove n to its floor.
+    #[serde(default = "default_min_length_fraction")]
+    pub min_length_fraction: f32,
+    /// Hard bound on how far the short-reach clamp may stretch a reach:
+    /// `length <= original_length * max_clamp_factor`.
+    ///
+    /// Without this the clamp is unbounded, because `reference_celerity` uses a
+    /// depth relation `r = Q_ref^0.4` with no slope dependence while `v` scales
+    /// as `sqrt(S)`. Steep small catchments therefore get big-river depth AND
+    /// steep-slope velocity, reaching ~8.9 m/s at slope 1e-2 — a `dx_target` of
+    /// 32 km that would stretch every short steep headwater to 32 km. Measured
+    /// unbounded clamp factors ran to p99 = 36x and max = 48,597x.
+    ///
+    /// Bounding the distortion means the worst reaches stay over-Courant rather
+    /// than being silently rewritten into 30 km channels. That residual is a
+    /// reported number, not a hidden one.
+    #[serde(default = "default_max_clamp_factor")]
+    pub max_clamp_factor: f32,
+}
+
+fn default_max_pieces() -> usize {
+    8
+}
+fn default_reference_n() -> f32 {
+    0.05
+}
+fn default_ref_q_coeff() -> f32 {
+    0.01
+}
+fn default_ref_q_exp() -> f32 {
+    0.9
+}
+fn default_max_clamp_factor() -> f32 {
+    4.0
+}
+
+fn default_min_length_fraction() -> f32 {
+    1.0
+}
+
+impl Default for Subdivision {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_pieces: default_max_pieces(),
+            reference_n: default_reference_n(),
+            reference_discharge_coefficient: default_ref_q_coeff(),
+            reference_discharge_exponent: default_ref_q_exp(),
+            min_length_fraction: default_min_length_fraction(),
+            max_clamp_factor: default_max_clamp_factor(),
+        }
+    }
+}
+
 /// Routing parameter configuration.
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -501,6 +603,42 @@ pub struct Params {
     /// supplied at routing setup (the mask is precomputed by the caller).
     /// Default 0.7 (70% impervious surface ≈ concrete-lined channel).
     pub leakance_impervious_threshold: f32,
+    /// When `true` (default) the routing core reproduces DDR's formulation
+    /// bit-for-bit, including three known defects:
+    ///   * celerity `c = v · 5/3` (the wide-rectangular Kleitz-Seddon limit,
+    ///     ~22-27% high for the trapezoid this code actually builds),
+    ///   * Muskingum `X ≡ 0.3` (constant, NOT Cunge-derived, giving a median
+    ///     10-30x excess numerical diffusion), and
+    ///   * `outflow_idx` = the gauge's UPSTREAM neighbours rather than the
+    ///     gauge's own reach, which drops that reach's local drainage from
+    ///     every prediction (`src/data/collate.rs` step 5).
+    ///
+    /// Set `false` to enable the corrected physics. The first two CHANGE
+    /// FORWARD OUTPUT and will break `examples/compare_ddr_sandbox`'s ABSOLUTE
+    /// MATCH (invariant 1) — which is why the default preserves DDR behaviour.
+    /// The `outflow_idx` correction is downstream of the solver and does NOT
+    /// affect the sandbox. See `.claude/PHYSICS-CORRECTIONS.md`.
+    pub ddr_match: bool,
+    /// Enforce the Muskingum non-negativity window `2X <= Cr <= 2(1-X)`
+    /// (`Cr = dt/K`) on every reach-timestep, so the S27 solve can never
+    /// produce a negative discharge for S28's `clamp_min` to rewrite to
+    /// `+1e-4` (which silently creates mass).
+    ///
+    /// Implemented by clamping the *inputs* — `K >= dt(1+d)/2` and
+    /// `X <= min(0.5·Cr, 1 - 0.5·Cr)·(1-d)` with `d = 1e-2` — never the
+    /// coefficients: `c1+c2+c3 = 1` holds for any `(K, X)`, so clamping inputs
+    /// preserves mass exactly while clamping `c3` would not.
+    ///
+    /// Off by default. Requires `ddr_match: false` — the clamp changes K and X,
+    /// which would break `examples/compare_ddr_sandbox`'s ABSOLUTE MATCH
+    /// (invariant 1). See `.claude/PHYSICS-CORRECTIONS.md`.
+    pub enforce_positivity: bool,
+    /// Static reach subdivision (variable Δx). Off by default.
+    pub subdivision: Subdivision,
+}
+
+fn default_ddr_match() -> bool {
+    true
 }
 
 impl Default for Params {
@@ -518,6 +656,9 @@ impl Default for Params {
             use_leakance: false,
             leakance_losing_only: true,
             leakance_impervious_threshold: 0.7,
+            ddr_match: default_ddr_match(),
+            enforce_positivity: false,
+            subdivision: Subdivision::default(),
         }
     }
 }
@@ -539,6 +680,10 @@ struct ParamsRaw {
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
     leakance_impervious_threshold: Option<f32>,
+    ddr_match: Option<bool>,
+    enforce_positivity: Option<bool>,
+    #[serde(default)]
+    subdivision: Subdivision,
 }
 
 impl From<ParamsRaw> for Params {
@@ -590,7 +735,13 @@ impl From<ParamsRaw> for Params {
         if !r.log_space_parameters.is_empty() {
             p.log_space_parameters = r.log_space_parameters;
         }
-        p.tau = r.tau.unwrap_or(3);
+        // 2026-08-08 convention: tau = hours the routed output is advanced
+        // before daily scoring (0 = day-aligned; dMC-Juniata sign). Default 9
+        // = the measured CONUS optimum (old-convention 20; findings §5g).
+        // Pre-2026-08-08 configs' tau values are on the OLD scale (old = new
+        // + 11) and must not be reused verbatim.
+        p.tau = r.tau.unwrap_or(9);
+        assert!(p.tau < 24, "params.tau must be in [0, 24) hours; got {}", p.tau);
         p.sparse_solver = match r.sparse_solver.as_deref() {
             Some("cuda") | Some("CUDA") => SparseSolver::Cuda,
             Some("cpu") | Some("CPU") | None => SparseSolver::Cpu,
@@ -608,6 +759,16 @@ impl From<ParamsRaw> for Params {
         if let Some(v) = r.leakance_impervious_threshold {
             p.leakance_impervious_threshold = v;
         }
+        if let Some(b) = r.ddr_match {
+            p.ddr_match = b;
+        }
+        if let Some(b) = r.enforce_positivity {
+            p.enforce_positivity = b;
+        }
+        // Non-Option: `ParamsRaw`'s struct-level `#[serde(default)]` already
+        // yields `Subdivision::default()` when the block is absent, which is
+        // exactly what `Params::default()` carries.
+        p.subdivision = r.subdivision;
         p
     }
 }
@@ -720,6 +881,16 @@ impl Config {
         })?;
         let testing_raw = raw.testing.clone();
         let mut cfg: Self = raw.into();
+        // `kan_head.disaggregation.enabled: false` disables the head by
+        // stripping its block before validation — every downstream consumer
+        // (dataset precip gating, head construction, the hourly-resolution
+        // guard) keys off `disaggregation.is_some()`, so the stripped config
+        // behaves exactly like one without the block.
+        if let Some(head) = &mut cfg.kan_head {
+            if head.disaggregation.as_ref().is_some_and(|d| !d.enabled) {
+                head.disaggregation = None;
+            }
+        }
         validate_mode_workflow(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -729,6 +900,18 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_leakance(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_enforce_positivity(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_subdivision(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -818,6 +1001,104 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
         );
     }
     Ok(())
+}
+
+fn validate_ddr_match(cfg: &Config) -> std::result::Result<(), String> {
+    if !cfg.params.ddr_match && cfg.params.use_cuda_graphs {
+        return Err(
+            "params: `ddr_match: false` requires `use_cuda_graphs: false` — the \
+             CUDA-graph kernel hardcodes DDR's `5/3` celerity, so the corrected \
+             forward would not be captured while the backward would use the corrected \
+             chain rule, producing a silent forward/backward mismatch. \
+             Set `use_cuda_graphs: false` to use `ddr_match: false`."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The positivity clamp raises K and lowers X, so it CHANGES FORWARD OUTPUT.
+/// Under `ddr_match: true` that would break `examples/compare_ddr_sandbox`'s
+/// ABSOLUTE MATCH (invariant 1), so the combination is rejected at load rather
+/// than silently producing a non-DDR forward on the DDR-faithful path.
+fn validate_enforce_positivity(cfg: &Config) -> std::result::Result<(), String> {
+    if cfg.params.enforce_positivity && cfg.params.ddr_match {
+        return Err(
+            "params: `enforce_positivity: true` requires `ddr_match: false` — the \
+             positivity clamp floors K at dt(1+d)/2 and caps X at the stability \
+             window, changing forward output and breaking the DDR sandbox \
+             ABSOLUTE MATCH. Set `ddr_match: false` to use `enforce_positivity`."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Subdivision expands the reach count, so a CUDA graph captured for the
+/// un-split network is the wrong size; and `max_pieces: 0` would ask for a
+/// network with zero rows. Both are rejected at load.
+fn validate_subdivision(cfg: &Config) -> std::result::Result<(), String> {
+    let s = &cfg.params.subdivision;
+    if s.enabled && s.max_pieces < 1 {
+        return Err("params.subdivision: `max_pieces` must be >= 1".to_string());
+    }
+    if s.enabled && cfg.params.use_cuda_graphs {
+        return Err(
+            "params.subdivision: `enabled: true` requires `use_cuda_graphs: false` \
+             — the captured graph is sized to a fixed reach count."
+                .to_string(),
+        );
+    }
+    if s.enabled {
+        validate_subdivision_reaches_the_builder(cfg)?;
+    }
+    Ok(())
+}
+
+/// Subdivision runs *inside* the managed adjacency builder
+/// (`adjacency::cache::resolve_or_build`), and `cli::plan::resolve_adjacency`
+/// only reaches that builder when `data_sources` supplies **no** explicit
+/// adjacency paths. With `conus_adjacency`/`gages_adjacency` set, the flag would
+/// be **silently inert**: no subdivision, no warning, and a run whose manifest
+/// says `subdivision.enabled: true` while the routed network is the un-split
+/// one. This repo has been bitten by that class of silent no-op before (the
+/// 2026-07-01 stale-binary disaggregation 2×2), so it is rejected at load.
+///
+/// The one legitimate combination is an explicit path to a store that was
+/// *already* built with subdivision — that graph really is split, and rebuilding
+/// it would be wasted work. `adjacency::validate::store_is_subdivided`
+/// distinguishes the two from the store's zarr metadata (`n_parent < n`) without
+/// reading any array data.
+fn validate_subdivision_reaches_the_builder(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(ds) = cfg.data_sources.as_ref() else {
+        return Ok(()); // no data_sources at all — unit-test / default configs
+    };
+    let (Some(conus), Some(_gages)) = (&ds.conus_adjacency, &ds.gages_adjacency) else {
+        return Ok(()); // managed build: the builder is reached, subdivision runs
+    };
+    match crate::adjacency::validate::store_is_subdivided(conus) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "params.subdivision: `enabled: true` conflicts with the explicit \
+             adjacency paths in `data_sources`. Subdivision only runs inside the \
+             managed adjacency builder, which is bypassed when `conus_adjacency` \
+             and `gages_adjacency` are set — so the flag would be SILENTLY INERT \
+             and the run would route the un-split network. The store at {} \
+             carries no subdivision map (n_parent == n). Fix: remove \
+             `conus_adjacency` and `gages_adjacency` and set `geospatial_fabric` \
+             instead, so ddrs builds (and caches) the subdivided graph.",
+            conus.display()
+        )),
+        None => Err(format!(
+            "params.subdivision: `enabled: true` with explicit adjacency paths, \
+             and the store at {} could not be inspected (missing or unreadable \
+             `order`/`parent_order` metadata) — so ddrs cannot confirm it is a \
+             subdivided graph. Subdivision only runs inside the managed adjacency \
+             builder, which these keys bypass. Fix: remove `conus_adjacency` and \
+             `gages_adjacency` and set `geospatial_fabric` instead.",
+            conus.display()
+        )),
+    }
 }
 
 /// `freeze: true` without a `pretrained_checkpoint` would permanently pin the
@@ -923,8 +1204,9 @@ mod tests {
         let kan_head = cfg.kan_head.as_ref().unwrap();
         assert_eq!(kan_head.hidden_size, 21);
         assert_eq!(kan_head.input_var_names.len(), 10);
-        // tau defaults to 3 when not set in YAML.
-        assert_eq!(cfg.params.tau, 3);
+        // tau defaults to 9 when not set in YAML (2026-08-08 convention:
+        // hours of advance; ≡ old-convention 20).
+        assert_eq!(cfg.params.tau, 9);
         // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
         assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
         // SP-10: merit_training.yaml now sets use_cuda_graphs: true
@@ -1513,6 +1795,63 @@ params:
             msg.contains("use_leakance") && msg.contains("use_cuda_graphs"),
             "expected leakance/graphs conflict, got: {msg}"
         );
+    }
+
+    #[test]
+    fn ddr_match_false_rejects_cuda_graphs() {
+        // ddr_match: false + use_cuda_graphs: true must fail at load: the
+        // CUDA-graph kernel hardcodes DDR's 5/3 celerity, so the corrected
+        // forward would never be captured while the backward would use the
+        // corrected chain rule — a silent forward/backward mismatch.
+        let yaml_reject = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  ddr_match: false
+  use_cuda_graphs: true
+"#;
+        let path = std::env::temp_dir().join("ddrs_ddr_match_graphs_reject.yaml");
+        std::fs::write(&path, yaml_reject).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ddr_match") && msg.contains("use_cuda_graphs"),
+            "expected ddr_match/cuda_graphs conflict, got: {msg}"
+        );
+
+        // ddr_match: true + use_cuda_graphs: true must still load (default path).
+        let yaml_ok_true = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  ddr_match: true
+  use_cuda_graphs: true
+"#;
+        let path2 = std::env::temp_dir().join("ddrs_ddr_match_true_graphs.yaml");
+        std::fs::write(&path2, yaml_ok_true).unwrap();
+        let cfg2 = Config::from_yaml_file(&path2).expect("ddr_match:true + cuda_graphs:true must load");
+        assert!(cfg2.params.ddr_match);
+        assert!(cfg2.params.use_cuda_graphs);
+
+        // ddr_match: false + use_cuda_graphs: false must also load.
+        let yaml_ok_false = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+params:
+  ddr_match: false
+  use_cuda_graphs: false
+"#;
+        let path3 = std::env::temp_dir().join("ddrs_ddr_match_false_no_graphs.yaml");
+        std::fs::write(&path3, yaml_ok_false).unwrap();
+        let cfg3 = Config::from_yaml_file(&path3).expect("ddr_match:false + cuda_graphs:false must load");
+        assert!(!cfg3.params.ddr_match);
+        assert!(!cfg3.params.use_cuda_graphs);
     }
 
     #[test]

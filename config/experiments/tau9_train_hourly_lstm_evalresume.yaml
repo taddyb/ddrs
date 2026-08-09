@@ -1,0 +1,248 @@
+# tau=9 cross-source retrain arm: hourly_lstm
+# Derived from the 2026-08-05T04-58-58Z epoch-30 run's config snapshot with
+# exactly three changes: (1) streamflow store swapped per arm, (2)
+# sparse_solver cpu (CPU train-and-test set, 2026-08-08), (3) params.tau
+# left UNSET so the 2026-08-08 default applies: tau=9 on the NEW convention
+# (hours of advance; == old-convention 20, the measured optimum). The
+# epoch-30 baseline trained at old tau=3 (== new -8, wrong direction).
+# ddrs MERIT training config.
+#
+# Hyperparameters are pulled verbatim from
+# ~/projects/ddr/config/merit_training_config.yaml.
+# Forcing is daily; the loader interpolates to hourly (repeat × 24, trim to
+# n_hourly) before feeding the Muskingum-Cunge engine — same pattern as
+# DDR's StreamflowReader.
+
+mode: training
+workflow: train-and-test    # ddrs plan/run picks this up; override with --workflow X
+geodataset: merit
+seed: 42
+np_seed: 42
+
+# Source paths — read in place by ddrs's Rust loaders (zarrs + icechunk + netcdf).
+# No export/materialization step; the harness reads DDR's live data sources
+# straight from disk.
+data_sources:
+  attributes: /home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc
+  conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  streamflow: /mnt/ssd1/data/icechunk/hourly_lstm_merit_unit_catchments.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/gages_2000_area_balanced.csv
+  # Hourly AORC precip (zarr v3, CONUS) — drives the precip-conditioned
+  # mass-preserving disaggregation head below.
+  aorc_precip: /mnt/ssd1/data/aorc/merit_unit_catchments.zarr
+
+experiment:
+  # Eval-resume (2026-08-09): the original run's phase 2 died mid-eval when
+  # its parent task was killed; resuming from the FINAL checkpoint with
+  # epochs == 30 trains zero batches and proceeds straight to eval, writing
+  # a complete manifest without repeating the 2.4 h training phase.
+  checkpoint: .ddrs/runs/2026-08-09T14-55-05Z-train-and-test/checkpoints/epoch_30_mb_1
+  batch_size: 64
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 30
+  rho: 90
+  shuffle: true
+  warmup: 5
+  # Gradient accumulation ON. `batch_size` is now the MICRO-batch; the optimizer
+  # steps once per `grad_accum_steps` micro-batches, so the effective batch is
+  # 64 * 4 = 256 gauges and the gradient is averaged over ~4x more basins.
+  #
+  # THE ARITHMETIC — read this before trusting a run:
+  #   1,841 gauges / 64 = 28 full + 1 partial = 29 micro-batches per epoch
+  #     (accumulation sets `drop_last = false`, driver.rs:268-275, so the
+  #      49-gauge tail is KEPT — unlike the non-accumulating path)
+  #   29 / 20 = one group of 20 + one partial group of 9.
+  #     A partial group STILL STEPS: only `micros_drawn == 0` breaks the loop
+  #     (driver.rs:415), and the 1/Σn renormalization makes unequal group sizes
+  #     exact. So this is 2 optimizer steps per epoch, not 1.
+  #   x 30 epochs = 60 TOTAL UPDATES
+  #
+  # Effective batch is 20*64 = 1,280 of 1,841 gauges — 70% of the training set
+  # in a single gradient, i.e. near full-batch. Very low variance, very few steps.
+  #
+  # THAT IS THE RISK. Calibration: the run that beat the summed-Q' baseline
+  # (2026-07-30T00-24, median NSE 0.6799) took 180 updates at lr 1e-3 and moved
+  # the head L2(dw) = 9.75. The 2026-08-04 run that hit NSE 0.6782 took 280.
+  # Adam's per-weight displacement is bounded by ~lr per step, so the budget
+  # here is 40*0.001 + 20*0.0005 = 0.050 — about 38% of the 0.132 that the
+  # 180-step run realized. Expect under-training.
+  #
+  # If it under-trains, prefer more STEPS over a hotter lr:
+  #   * `grad_accum_steps: 20` -> 7   (5 steps/epoch, 150 updates, eff batch 448)
+  #   * `grad_accum_steps: 20` -> 4   (8 steps/epoch, 240 updates, eff batch 256)
+  # Wall clock is forward-pass bound (~27.5 s/micro-batch), so all of these cost
+  # the SAME time — 29 forwards per epoch regardless. Lowering accum_steps buys
+  # optimizer steps for free; it only trades gradient variance for step count.
+  #
+  # The historical `grad_accum_steps: 37` was WORSE than either: with 28-37
+  # micro-batches per epoch it collapsed a whole epoch into ONE update, so 50
+  # epochs bought 50 updates for 1,850 forward passes. Wall clock here is
+  # forward-pass bound (~27.5 s/micro-batch), not step bound, so accumulating
+  # costs nothing in time — it only trades update count for gradient quality.
+  #
+  # ALWAYS verify the head actually moved (L2(dw)) before believing a result:
+  # the 2026-07-31 AdaDelta run reported plausible losses while L2(dw) = 1.9e-4,
+  # i.e. it never left initialization.
+  use_grad_accum: true
+  grad_accum_steps: 20
+  # Adam, reverting the 2026-07-31 AdaDelta run. That run's head moved
+  # L2(dw) = 1.9e-4 (0.0004% of ||w||) across all 30 epochs — it never left
+  # initialization. Cause: `experiment.learning_rate` IS applied to AdaDelta
+  # (driver.rs:404 passes lr to optimizer.step; adadelta.rs:123 multiplies
+  # delta by it) despite config.rs:211-213 documenting the key as inert, so
+  # every update ran 1000x scaled down. dHBV intends AdaDelta at lr=1.0.
+  optimizer: adam
+  loss:
+    kind: nse-batch
+  # Step schedule. Keys are the FIRST epoch at which the lr applies
+  # (`resolve_lr` takes the largest key <= epoch, 1-indexed). At 2 optimizer
+  # steps per epoch (see the accumulation note above):
+  #   epochs  1-20 @ 0.001   (40 updates)
+  #   epochs 21-30 @ 0.0005  (20 updates)
+  # Total displacement budget ~0.050. The decay lands 2/3 of the way through,
+  # which is the right shape — the concern is the step COUNT, not the schedule.
+  #
+  # Watch `n_at_floor` in the log: the lr=0.01 run pinned 47.3% of CONUS at the
+  # 0.015 floor, and both 2026-08-04 runs collapsed from 0% to 25-36% between
+  # epochs 3 and 5 at lr 2e-3. Starting at 1e-3 is deliberately cooler than that.
+  # Near-full-batch gradients (1,280 gauges) should also damp the collapse, since
+  # it looked like a high-variance small-batch effect — but that is a hypothesis,
+  # not an established result. If `n_at_floor` climbs past a few percent, the lr
+  # is still too hot.
+  learning_rate:
+    1: 0.005
+    11: 0.001
+    21: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  # B-spline grid intervals (`num` in pykan). Matches DDR's
+  # ~/projects/ddr/config/merit_training_config.yaml::kan.grid.
+  grid: 50
+  # B-spline order. Matches DDR's ::kan.k. (pykan's KANLayer default is 3,
+  # but DDR overrides to 2 for production.)
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+  # Precip-conditioned mass-preserving daily->hourly disaggregation head.
+  # The within-day shape is driven by the hourly AORC precip window
+  # [d-1,d,d+1] (+ daily-Q taps + static attrs); the daily mean is conserved
+  # exactly. Loss stays the historical L1 (no experiment.loss block).
+  # Warm-started FROZEN from the standalone capacity pretrain (chunk_days=1);
+  # architecture fields must match that checkpoint or load_record fails.
+  # `enabled: false` makes this whole block inert — the loader uses flat
+  # repeat-24 (nearest) upsampling instead. Flip to true for the head-on
+  # arm of the ablation; nothing else needs to change.
+  disaggregation:
+    enabled: false
+    hidden_size: 16
+    num_hidden_layers: 2
+    grid: 20
+    k: 3
+    boundary_blend: 0.0
+    chunk_days: 1
+    pretrained_checkpoint: /home/tbindas/projects/ddrs/output/disagg_pretrain/capacity_chunk1.mpk
+    freeze: true
+
+# Routing-engine knobs — DDR's MERIT defaults (matches mock_config in tests).
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  # Corrected physics instead of DDR's formulation. With `false` the routing
+  # core uses:
+  #   * exact trapezoidal celerity  c = v·β,  β = 5/3 − (4/3)·A·√(1+z²)/(T·P)
+  #     instead of the wide-rectangular 5/3 limit (which is 22-27% high for the
+  #     channels this code builds — κ = b/y ≈ 0.7-1.8, so β ≈ 1.31-1.36), and
+  #   * Cunge-derived Muskingum X = clamp(0.5(1 − Q/(T·S·c·L)), 0, 0.5) instead
+  #     of the constant 0.3, which was injecting a median 28× excess numerical
+  #     diffusion.
+  # Negative-discharge counting before the S28 clamp is reported in BOTH modes.
+  # This breaks `compare_ddr_sandbox`'s ABSOLUTE MATCH by design — that example
+  # must be run with the default `ddr_match: true`.
+  # See `.claude/PHYSICS-CORRECTIONS.md`.
+  ddr_match: false
+  # Provably zero negative discharges. Clamps the Muskingum INPUTS (K, X) into
+  # the non-negative-coefficient window `2X <= Cr <= 2(1-X)`, Cr = dt/K:
+  #   K <- max(K, dt*(1+d)/2)                     => Cr <= 2/(1+d)
+  #   X <- min(X_cunge, (1-d)*Cr/2, (1-d)*(1-Cr/2))
+  # with d = POSITIVITY_DELTA = 1e-2. Clamping K and X (not the coefficients)
+  # keeps `c1+c2+c3 = 1` exact, so mass is conserved; clamping c3 would not.
+  # With c1,c3 >= 0 and q_t,q' > 0, induction over the topological order of the
+  # forward substitution proves the whole solve is non-negative.
+  #
+  # Measured: 0 / 197,461,880 solves on 1,841 gauges (was 55,181, 0.0279%),
+  # replicated across two windows, two backends, and two trained heads.
+  #
+  # COST — this is not free. The X cap binds on 95.3% of reach-timesteps and
+  # median X falls 0.4976 -> 0.0794 (6.3x), so it largely REPLACES the Cunge X
+  # rather than shading it: numerical diffusion becomes stability-set instead of
+  # matched to hydraulic diffusivity. NSE/KGE impact is UNMEASURED, and this is
+  # the first training run to use the flag. Compare against a matched
+  # `enforce_positivity: false` control before trusting the result.
+  #
+  # Root-cause alternative: median Cr is 0.226, i.e. the typical MERIT reach is
+  # ~4.4x too LONG for an hourly step. Subdividing reaches ~4x brings Cr to ~1,
+  # where X_max -> 0.5 and the cap stops biting. See .claude/PHYSICS-CORRECTIONS.md.
+  #
+  # Requires ddr_match: false (rejected at load otherwise).
+  # OFF. It delivered provably zero negative solves (0 / 197,461,880), but the
+  # cure was worse than the disease: capping X collapsed the median from 0.4976
+  # to 0.0794 on 95.3% of reach-timesteps, and because the cap is applied at
+  # RUNTIME to a learned celerity it made X ~ Cr ~ 1/n — handing the optimizer a
+  # lever it rode straight to the roughness floor. Same lr, flag on vs off:
+  # n_at_floor 35% -> 97.9%. Superseded by reach subdivision (a BUILD-TIME fix
+  # with no gradient path): see docs/superpowers/plans/2026-08-05-reach-subdivision.md
+  enforce_positivity: false
+  # cuSPARSE triangular solve. Pair with `ddrs run --backend cuda`; it is inert
+  # under `--backend cpu`. This is a DIFFERENT `Backward` impl from the host
+  # solve, sitting directly downstream of the ddr_match/enforce_positivity
+  # terms — gradient-checked on GPU by `tests/cuda_backward_parity.rs`.
+  # CPU set (2026-08-08): host triangular solve.
+  sparse_solver: cpu
+  # MUST be false when ddr_match is false: the fused CUDA-graph kernel
+  # (cuda_graph/geometry_kernel.rs) hardcodes DDR's 5/3 celerity, so a captured
+  # graph would replay the DDR forward while the backward used the corrected
+  # chain rule — a silent gradient mismatch. Config load rejects the pair.
+  use_cuda_graphs: false
+
+# Test-mode overlay. When the binary is run with --mode testing, these keys
+# replace the corresponding ones in `experiment:`. Absent keys inherit.
+#
+# IMPORTANT: batch_size SEMANTIC SHIFTS between modes:
+#   - experiment.batch_size (training) = number of GAUGES per mini-batch
+#   - testing.batch_size              = number of DAYS per chunk
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15      # DAYS, not gauges
+  rho: null           # disabled in test mode

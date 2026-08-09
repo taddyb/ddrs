@@ -64,6 +64,40 @@ pub fn validate_gages_store_layout(store: &Path) -> Result<(), StoreLayoutError>
     Ok(())
 }
 
+/// Whether an already-built CONUS store holds a genuine subdivision map.
+///
+/// Cheap: reads the declared `shape` out of `<store>/order/zarr.json` and
+/// `<store>/parent_order/zarr.json` — two small metadata files. The 346K-element
+/// arrays themselves are never opened.
+///
+/// - `Some(true)`  — `n_parent < n`, i.e. the store was built by the managed
+///   builder with `params.subdivision.enabled: true`.
+/// - `Some(false)` — the store is readable but un-subdivided: either it predates
+///   subdivision (no `/parent_order` at all) or it carries the identity map
+///   (`n_parent == n`).
+/// - `None`        — the shapes could not be read (missing/corrupt store), so
+///   the question cannot be answered.
+///
+/// Used by `config::validate_subdivision` to tell "explicit path to an
+/// already-subdivided store" (legitimate) from "explicit path to an
+/// un-subdivided store while asking for subdivision" (silently inert, rejected).
+pub fn store_is_subdivided(store: &Path) -> Option<bool> {
+    let n = declared_len(&store.join("order").join("zarr.json"))?;
+    match declared_len(&store.join("parent_order").join("zarr.json")) {
+        // Pre-subdivision store: no parent map at all.
+        None if !store.join("parent_order").join("zarr.json").is_file() => Some(false),
+        None => None,
+        Some(n_parent) => Some(n_parent < n),
+    }
+}
+
+/// First entry of a zarr v3 array's declared `shape`, from its `zarr.json`.
+fn declared_len(zarr_json: &Path) -> Option<usize> {
+    let text = std::fs::read_to_string(zarr_json).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&text).ok()?;
+    meta.get("shape")?.get(0)?.as_u64().map(|v| v as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
