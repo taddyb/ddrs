@@ -528,7 +528,10 @@ fn layer_b_step3_mc_forward_matches_ddr() {
 /// Note on tau-slicing divergence (spec C7):
 ///   DDR uses `[13:-11+tau]` → for tau=3: [13:2128], 2115 hours → truncated
 ///   to 88 days (3 hours dropped from the end by downsample).
-///   DDRS uses `[13+tau:-11+tau]` → [16:2128], 2112 hours → exactly 88 days.
+///   DDRS (LEGACY convention, inlined below for fixture parity) used
+///   `[13+tau:-11+tau]` → [16:2128], 2112 hours → exactly 88 days. Since
+///   2026-08-08 `tau_trim_and_downsample` uses `[tau : -(24-tau)]` with
+///   day i ↔ obs day i; the identical window is reproduced at tau=16.
 ///
 /// Both produce 88 daily samples, but DDRS's day 1 = DDR's hours 16-39
 /// while DDR's day 1 = hours 13-36. The 3-hour offset gives a small but

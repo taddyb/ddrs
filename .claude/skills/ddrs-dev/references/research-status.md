@@ -276,6 +276,11 @@ was invalidated by a stale binary and the manifest did not reveal it.
   and/or slow trained celerity, median n 0.130 vs reference 0.05).
   Routed-at-optimum still beats summed-at-optimum in every bin (+0.013 to
   +0.051). Plot: `output/tau_sweep/summed_qprime_vs_routed_tau.png`.
+  **Convention change SHIPPED (2026-08-08, findings §5i):** tau is now
+  signed-at-zero hours of advance (`[tau : -(24-tau)]`, day i ↔ obs day i,
+  default 9 ≡ old 20); old scale = new + 11. Old checkpoints trained at
+  old-3 ≡ new −8. tau=9 CPU retrain across all five stores launched same
+  day (`scripts/run_tau9_source_trains.sh`).
   **Gamma-UH params pulled (§5h):** the distributed aorc2f store's q' was
   exported (2026-07-29, water_loss) with each divide routed through its own
   learned gamma UH; `scripts/dump_gamma_uh_params.py` (water_loss venv)

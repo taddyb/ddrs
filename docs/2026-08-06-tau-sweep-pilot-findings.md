@@ -483,6 +483,32 @@ theta_eff floor-scale) — but any such surgery needs its own gate.
 Artifact: `output/tau_sweep/gamma_uh_params.csv` (divide_id, routa, routb,
 a_eff, theta_eff, tau_uh_days, uparea_km2).
 
+## 5i. Fix implemented: signed tau convention, default 9 (2026-08-08)
+
+`tau_trim_and_downsample` now slices `[tau : -(24-tau)]` with pooled day i
+scored against OBS DAY i: tau = hours the routed output is advanced before
+daily scoring (dMC-Juniata's sign; tau=0 is day-aligned). Legacy mapping:
+old = new + 11 (shipped 3 ≡ new −8, wrong direction; optimum 20 ≡ new 9).
+`params.tau` defaults to 9 and rejects ≥24. Callers updated (driver obs
+pairing i+1→i; eval drops the FIRST pooled day instead of the last, so the
+output zarr day axis is unchanged; probe binary likewise).
+`scripts/tau_sweep.py` moved to the new axis (window start 24+tau vs the
+zarr day axis, TAUS −12..23); pre-2026-08-08 dumps carry legacy
+`tau_shipped` and need the pre-change script from git history. DDR-parity
+fixture tests pin the LEGACY window explicitly (legacy tau=3 cuts the same
+hours as new tau=16); DDR-Python's `compute_daily_runoff` still uses the
+legacy form — port the convention there before comparing configs across
+repos. **Every pre-2026-08-08 checkpoint trained at old tau=3 (new −8);
+config `tau:` values do not carry across the change.**
+
+Retrain experiment (launched 2026-08-08): five CPU train-and-test runs,
+one per streamflow store (`config/experiments/tau9_train_*.yaml`,
+`scripts/run_tau9_source_trains.sh`) — the epoch-30 config with only
+{streamflow, sparse_solver: cpu} changed and tau at the new default 9.
+Caveat noted at launch: the aorc2f_lumped store's measured optimum is
+new-convention ≈ −8 (§5e), so tau=9 is expected to HURT that arm; it runs
+anyway as the consistency control.
+
 ## 6. Raw output
 
 `output/tau_sweep/`: `summary_wy1996.md`, `nse_by_tau_wy1996.csv` (1841×24),

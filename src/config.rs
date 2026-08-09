@@ -735,7 +735,13 @@ impl From<ParamsRaw> for Params {
         if !r.log_space_parameters.is_empty() {
             p.log_space_parameters = r.log_space_parameters;
         }
-        p.tau = r.tau.unwrap_or(3);
+        // 2026-08-08 convention: tau = hours the routed output is advanced
+        // before daily scoring (0 = day-aligned; dMC-Juniata sign). Default 9
+        // = the measured CONUS optimum (old-convention 20; findings §5g).
+        // Pre-2026-08-08 configs' tau values are on the OLD scale (old = new
+        // + 11) and must not be reused verbatim.
+        p.tau = r.tau.unwrap_or(9);
+        assert!(p.tau < 24, "params.tau must be in [0, 24) hours; got {}", p.tau);
         p.sparse_solver = match r.sparse_solver.as_deref() {
             Some("cuda") | Some("CUDA") => SparseSolver::Cuda,
             Some("cpu") | Some("CPU") | None => SparseSolver::Cpu,
@@ -1198,8 +1204,9 @@ mod tests {
         let kan_head = cfg.kan_head.as_ref().unwrap();
         assert_eq!(kan_head.hidden_size, 21);
         assert_eq!(kan_head.input_var_names.len(), 10);
-        // tau defaults to 3 when not set in YAML.
-        assert_eq!(cfg.params.tau, 3);
+        // tau defaults to 9 when not set in YAML (2026-08-08 convention:
+        // hours of advance; ≡ old-convention 20).
+        assert_eq!(cfg.params.tau, 9);
         // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
         assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
         // SP-10: merit_training.yaml now sets use_cuda_graphs: true

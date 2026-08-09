@@ -559,7 +559,8 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
         let mut obs_buf: Vec<f32> = Vec::with_capacity(g * t_days);
         for gi in 0..g {
             for ti in 0..t_days {
-                obs_buf.push(obs_arr[(ti + 1, gi)]);
+                // pooled day i ↔ obs day i (2026-08-08 tau convention)
+                obs_buf.push(obs_arr[(ti, gi)]);
             }
         }
         let obs_t: Tensor<Autodiff<I>, 2> =
@@ -1583,10 +1584,11 @@ fn run_floor<I: Backend>(
         );
 
         // |pred - obs| with the SAME obs alignment as training (grad mode's
-        // obs_arr[(ti + 1, gi)]); NaN obs propagates to NaN residual.
+        // obs_arr[(ti, gi)], 2026-08-08 tau convention); NaN obs propagates
+        // to NaN residual.
         for gi in 0..g {
             for ti in 0..t_days {
-                let o = obs_arr[(ti + 1, gi)];
+                let o = obs_arr[(ti, gi)];
                 all_resid.push((pred[gi * t_days + ti] - o).abs());
             }
         }
@@ -1743,8 +1745,8 @@ fn gather_by_comid(donor: &HashMap<i64, f32>, comids: &[i64]) -> Result<Vec<f32>
 /// forward pass.
 fn trimmed_days(rho: usize, tau: u32) -> usize {
     let n_hourly = (rho - 1) * 24;
-    let start = 13 + tau as usize;
-    let end = n_hourly - 11 + tau as usize;
+    let start = tau as usize;
+    let end = n_hourly - (24 - tau as usize);
     (end - start) / 24
 }
 
@@ -1861,7 +1863,7 @@ fn sample_window_plan(
             batch.observations.nrows()
         );
         let surviving = (0..batch.gauge_staids.len()).any(|gi| {
-            (warmup..t_days).all(|ti| !batch.observations[(ti + 1, gi)].is_nan())
+            (warmup..t_days).all(|ti| !batch.observations[(ti, gi)].is_nan())
         });
         if !surviving {
             eprintln!("  window skipped: all gauges have NaN in post-warmup window");
@@ -1907,7 +1909,7 @@ fn eval_window_filtered<I: Backend>(
     let mut obs_post = Array2::<f32>::zeros((t_days - warmup, g));
     for gi in 0..g {
         for ti in warmup..t_days {
-            obs_post[(ti - warmup, gi)] = obs_arr[(ti + 1, gi)];
+            obs_post[(ti - warmup, gi)] = obs_arr[(ti, gi)];
         }
     }
 
@@ -2892,9 +2894,10 @@ mod tests {
 
     #[test]
     fn trimmed_days_matches_tau_trim_and_downsample_arithmetic() {
-        // rho=90 -> n_hourly=(90-1)*24=2136; tau=0 -> start=13,end=2125,
-        // trimmed=2112, days=2112/24=88.
+        // rho=90 -> n_hourly=(90-1)*24=2136; tau=0 -> start=0,end=2112,
+        // trimmed=2112, days=2112/24=88 (total trim is 24 h at any tau).
         assert_eq!(trimmed_days(90, 0), 88);
+        assert_eq!(trimmed_days(90, 9), 88);
     }
 
     // -----------------------------------------------------------------------

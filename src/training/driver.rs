@@ -129,9 +129,11 @@ fn run_micro_batch<I: Backend>(
     debug_assert_eq!(g, num_gauges);
 
     // Build obs tensor preserving NaN so the filter can detect them.
-    // Shape: obs_arr is (rho_days, G); trim first/last day → (t_days, G).
+    // Shape: obs_arr is (rho_days, G). Under the 2026-08-08 tau convention
+    // pooled day i is scored against obs day i (see tau_trim_and_downsample;
+    // the legacy pairing was obs day i+1).
     assert!(
-        t_days_full >= 2 + t_days,
+        t_days_full >= t_days,
         "obs/pred shape mismatch: obs rows={} pred t_days={}",
         t_days_full,
         t_days
@@ -139,8 +141,7 @@ fn run_micro_batch<I: Backend>(
     let mut obs_buf: Vec<f32> = Vec::with_capacity(g * t_days);
     for gi in 0..g {
         for ti in 0..t_days {
-            // obs row index after trim = ti + 1; column = gi.
-            obs_buf.push(obs_arr[(ti + 1, gi)]);
+            obs_buf.push(obs_arr[(ti, gi)]);
         }
     }
     let obs_t: Tensor<Autodiff<I>, 2> =

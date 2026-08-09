@@ -301,14 +301,17 @@ pub fn evaluate<I: Backend>(
         .as_standard_layout()
         .to_owned();
 
-    // Predictions after tau_trim_and_downsample: shape (G, n_days_full - 1).
-    // (Math: T_hours = n_days_full * 24; trim drops 24 hours total; /24 = n_days_full - 1.)
-    // To match observations_daily's (G, n_days_full - 2), drop the LAST day
-    // of predictions. (This SAFE CONSERVATIVE alignment is documented in the
-    // SP-5 plan Task 6 design note; Task 11 V4 will surface any drift.)
+    // Predictions after tau_trim_and_downsample: shape (G, n_days_full - 1),
+    // pooled day i ↔ store day i (2026-08-08 tau convention; T_hours =
+    // n_days_full * 24, trim drops 24 hours total). Observations above are
+    // sliced [1..-1] (store days 1..n_days_full-2), so drop the FIRST
+    // prediction day to pair store day 1..n_days_full-2 on both sides.
+    // (Under the legacy convention pooled day i ↔ store day i+1 and the
+    // LAST prediction day was dropped instead; the zarr time axis is
+    // unchanged by the convention switch.)
     let pd_dims = predictions_daily.dim();
     let predictions_daily = predictions_daily
-        .slice(s![.., 0..pd_dims.1 - 1])
+        .slice(s![.., 1..pd_dims.1])
         .to_owned();
 
     debug_assert_eq!(

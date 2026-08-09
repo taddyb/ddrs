@@ -338,7 +338,10 @@ fn full_forward(
 /// Note: avoids calling `tau_trim_and_downsample` directly because it calls
 /// `squeeze::<2>()` which collapses BOTH size-1 dims when n_gauges=1,
 /// producing a 1D tensor instead of 2D. Inlined here to preserve the 2D
-/// shape. See Layer B sub-test 4 for the same workaround.
+/// shape. See Layer B sub-test 4 for the same workaround. This inlines the
+/// LEGACY slice `[13+tau : -11+tau]` (DDR-fixture convention; legacy tau=3
+/// cuts the same hourly window as the 2026-08-08 convention's tau=16) —
+/// do not "modernize" it, the DDR fixtures pin it.
 fn ddrs_pred_post_warmup(hourly_q: Tensor<B, 2>, tau: u32, warmup: usize) -> Tensor<B, 2> {
     let dims = hourly_q.dims();
     let (g, t_hours) = (dims[0], dims[1]);

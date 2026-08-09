@@ -4,9 +4,16 @@ Spec: docs/superpowers/specs/2026-08-05-per-gauge-tau-sweep-design.md
 
 Reads the DDRS_HOURLY_DUMP raw f32 (n_gauges, n_hours) + `.json` sidecar and
 the eval run's predictions.zarr, reconstructs daily predictions for each
-tau in 0..23 (block mean of hours [13+tau+24i, 13+tau+24(i+1)), scored
-against obs day i+1 -- reproduces `tau_trim_and_downsample` exactly at the
-shipped tau), and reports per-gauge NSE(tau) restricted to a pilot window.
+tau in -12..23 and reports per-gauge NSE(tau) restricted to a pilot window.
+
+Convention (2026-08-08, matches `tau_trim_and_downsample`): tau = hours the
+routed output is advanced before daily scoring; pooled store day d covers
+hours [tau + 24d, tau + 24(d+1)). The eval zarr's day axis starts at store
+day 1 (day 0 is never scored), so zarr day i = store day i+1 and its window
+is hours [24 + tau + 24i, ...). tau=0 is day-aligned. Dumps produced BEFORE
+2026-08-08 carry a legacy tau_shipped (old = new + 11, window [13+tau ...],
+zarr day i also = store day i+1); analyze those with the pre-change script
+from git history.
 
 Run:
     uv run --with "zarr>=3" --with numpy --with pandas --with matplotlib \
@@ -31,7 +38,7 @@ import numpy as np
 import pandas as pd
 import zarr
 
-TAUS = np.arange(24)
+TAUS = np.arange(-12, 24)
 AREA_BINS = [0, 1000, 5000, 10000, 30000, 50000]
 AREA_LABELS = ["0~1000", "1000~5000", "5000~10000", "10000~30000", "30000~50000"]
 MIN_VALID_DAYS = 100
@@ -77,7 +84,7 @@ def main() -> None:
     assert zpred.shape[0] == g_n, f"gauge mismatch: dump {g_n} vs zarr {zpred.shape[0]}"
 
     # --- Method-validation gate item 1: reproduce shipped tau exactly. ---
-    start = 13 + tau_ship
+    start = 24 + tau_ship
     recon = np.asarray(hourly[:, start : start + 24 * d_n], dtype=np.float64)
     recon = recon.reshape(g_n, d_n, 24).mean(axis=2)
     denom = np.maximum(np.abs(zpred), 1e-6)
@@ -95,8 +102,8 @@ def main() -> None:
     gate2 = d_med < 0.001
 
     # --- Sweep: common day count so every tau scores the same days. ---
-    # Highest start is 13+23; need 13+23+24*D <= h_n.
-    d_common = min(d_n, (h_n - (13 + int(TAUS.max()))) // 24)
+    # Highest start is 24+23; need 24+23+24*D <= h_n (lowest start 24-12=12 >= 0).
+    d_common = min(d_n, (h_n - (24 + int(TAUS.max()))) // 24)
     pilot = (ztime[:d_common] >= pd.Timestamp(args.pilot_start)) & (
         ztime[:d_common] <= pd.Timestamp(args.pilot_end)
     )
@@ -105,11 +112,11 @@ def main() -> None:
     obs_pilot = zobs[:, :d_common][:, pilot]
 
     nse_by_tau = np.full((g_n, len(TAUS)), np.nan)
-    for tau in TAUS:
-        s = 13 + int(tau)
+    for k, tau in enumerate(TAUS):
+        s = 24 + int(tau)
         daily = np.asarray(hourly[:, s : s + 24 * d_common], dtype=np.float64)
         daily = daily.reshape(g_n, d_common, 24).mean(axis=2)
-        nse_by_tau[:, tau] = nse(daily[:, pilot], obs_pilot)
+        nse_by_tau[:, k] = nse(daily[:, pilot], obs_pilot)
     gate3_frac = np.isfinite(nse_by_tau).all(axis=1).mean()
     print(f"[gate 3] gauges with full NSE(tau) curves: {gate3_frac:.1%} (PASS if >= 95%)")
     gate3 = gate3_frac >= 0.95
@@ -138,9 +145,10 @@ def main() -> None:
     gcsv["STAID"] = gcsv["STAID"].str.zfill(8)
     cov = gcsv.set_index("STAID").reindex(gage_ids)
     has_curve = np.isfinite(nse_by_tau).any(axis=1)
-    best_tau = np.zeros(g_n, dtype=int)
-    best_tau[has_curve] = np.nanargmax(nse_by_tau[has_curve], axis=1)
-    best_tau = np.where(has_curve, best_tau, tau_ship)
+    k_ship = int(np.where(TAUS == tau_ship)[0][0])
+    best_k = np.full(g_n, k_ship, dtype=int)
+    best_k[has_curve] = np.nanargmax(nse_by_tau[has_curve], axis=1)
+    best_tau = TAUS[best_k]
     df = pd.DataFrame(
         {
             "gage_id": gage_ids,
@@ -148,8 +156,8 @@ def main() -> None:
             "lng_gage": cov["LNG_GAGE"].to_numpy(),
             "has_curve": has_curve,
             "best_tau": best_tau,
-            "nse_tau_shipped": nse_by_tau[:, tau_ship],
-            "nse_tau_best": nse_by_tau[np.arange(g_n), best_tau],
+            "nse_tau_shipped": nse_by_tau[:, k_ship],
+            "nse_tau_best": nse_by_tau[np.arange(g_n), best_k],
             "nse_baseline": nse_base,
         }
     )
@@ -179,8 +187,8 @@ def main() -> None:
         "",
         f"- gauges improved > 0.01 by best tau: {improved.sum()} / {g_n}",
         f"- spearman(best_tau, longitude) on improved gauges: {rho:.3f}",
-        f"- best-tau distribution (has_curve only): "
-        f"{np.bincount(best_tau[has_curve], minlength=24).tolist()}",
+        f"- best-tau distribution (has_curve only, tau {TAUS[0]}..{TAUS[-1]}): "
+        f"{np.histogram(best_tau[has_curve], bins=np.arange(TAUS[0], TAUS[-1] + 2) - 0.5)[0].tolist()}",
     ]
     (out_dir / "summary_wy1996.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
@@ -197,7 +205,7 @@ def main() -> None:
     fig.savefig(out_dir / "nse_vs_tau_by_area.png", dpi=150, bbox_inches="tight")
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    ax.hist(df.loc[improved, "best_tau"], bins=np.arange(25) - 0.5)
+    ax.hist(df.loc[improved, "best_tau"], bins=np.arange(TAUS[0], TAUS[-1] + 2) - 0.5)
     ax.set_xlabel("best tau (h)"), ax.set_ylabel("gauges (improved > 0.01)")
     fig.savefig(out_dir / "best_tau_hist.png", dpi=150, bbox_inches="tight")
 
