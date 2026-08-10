@@ -279,8 +279,15 @@ was invalidated by a stale binary and the manifest did not reveal it.
   **Convention change SHIPPED (2026-08-08, findings §5i):** tau is now
   signed-at-zero hours of advance (`[tau : -(24-tau)]`, day i ↔ obs day i,
   default 9 ≡ old 20); old scale = new + 11. Old checkpoints trained at
-  old-3 ≡ new −8. tau=9 CPU retrain across all five stores launched same
-  day (`scripts/run_tau9_source_trains.sh`).
+  old-3 ≡ new −8. **Retrain COMPLETE (2026-08-10, all five stores, 30
+  epochs, CPU, 1,841 gauges, full test window): aorc2f distributed
+  0.620 → 0.706 median NSE (+0.086 from timing alone; now beats the
+  summed-q' baseline 0.642 by +0.064), UH retro 0.707, daily LSTM 0.578,
+  hourly LSTM 0.564, aorc2f lumped 0.483 (WORSE, as pre-registered — its
+  optimum is ≈ −8; the negative control behaved).** Merged to master in
+  PR #33. Gotcha: a train-and-test resume from a final checkpoint cannot
+  re-enter Phase 2 (needs checkpoints from its own Phase 1) — finish a
+  killed eval with the legacy eval binary instead.
   **Gamma-UH params pulled (§5h):** the distributed aorc2f store's q' was
   exported (2026-07-29, water_loss) with each divide routed through its own
   learned gamma UH; `scripts/dump_gamma_uh_params.py` (water_loss venv)
