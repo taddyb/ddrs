@@ -29,6 +29,19 @@ use crate::config::{LossConfig, LossKind};
 /// `compute_daily_runoff` still uses the legacy form. The total trim is
 /// 24 h under both conventions, so `T_days = T_hours/24 - 1` is unchanged.
 ///
+/// Why the last day is excluded: a window advanced by `tau` needs `tau`
+/// hours of routed output past the final store day, which were never
+/// routed (the q' feeding them is outside the window). Dropping exactly
+/// one day — front trim `tau` + back trim `24 - tau` — makes the SAME
+/// `T_days` days part of the training/testing set at every tau: tensor
+/// shapes, the obs pairing, and NSE(tau) sweeps all score an identical
+/// day sample regardless of the shift, and the trimmed length stays a
+/// multiple of 24 so pooling is an exact block mean. The alternative
+/// (score all days by routing one extra day of q' per window) is ~1% more
+/// training signal and needs +1-day window plumbing; deliberately not
+/// done — see the 2026-08-09 discussion in
+/// `docs/2026-08-06-tau-sweep-pilot-findings.md` §5i.
+///
 /// Returns `(G, T_days)` where `T_days = T_hours_trimmed // 24`.
 pub fn tau_trim_and_downsample<B: Backend>(
     predictions_hourly: Tensor<B, 2>,
