@@ -622,8 +622,7 @@ impl<I: Backend> MuskingumCunge<I> {
             let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
             if total > 0 && neg > 0 {
                 eprintln!(
-                    "  negative solves before clamp: {neg}/{total} ({:.3}%) — Muskingum \
-                     coefficient sign violation (see .claude/PHYSICS-CORRECTIONS.md)",
+                    "  reaches with negative discharges pre clamp: {neg}/{total} ({:.3}%)",
                     100.0 * neg as f64 / total as f64
                 );
             }
