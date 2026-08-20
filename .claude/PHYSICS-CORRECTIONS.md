@@ -1,8 +1,17 @@
 # `ddr_match` — the two physics paths
 
-`params.ddr_match: bool` (default **true**) selects which forward chain runs.
-`true` reproduces DDR bit-for-bit and keeps `compare_ddr_sandbox` an ABSOLUTE
-MATCH (invariant 1). `false` enables the corrected physics.
+**DEPRECATED (2026-08-19): default flipped to `false`.** DDR ported these
+corrections in DeepGroundwater/ddr#192 as a clean break (no flag), so the
+corrected physics is now what BOTH implementations run by default, the sandbox
+fixture is regenerated from post-#192 DDR, and `compare_ddr_sandbox` holds its
+ABSOLUTE MATCH on the corrected path (verified 2026-08-19: max abs 1.5e-5 m³/s,
+f32 floor). Setting `ddr_match: true` emits a deprecation WARN; the legacy path
+remains only to reproduce pre-#192 results and for `use_cuda_graphs: true`
+(whose captured kernel hardcodes the legacy 5/3 celerity), and will be removed.
+
+`params.ddr_match: bool` selects which forward chain runs.
+`true` reproduces PRE-#192 DDR bit-for-bit. `false` (default) enables the
+corrected physics.
 
 ```
                        forward_chain_inner  (src/routing/mmc_op.rs)

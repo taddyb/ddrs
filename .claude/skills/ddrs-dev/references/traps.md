@@ -60,9 +60,11 @@ worktree, silently replacing the worktree build.
 4. `cargo test --test sparse_gradcheck`. **Also failing ⇒ the algorithm changed.
    V1-only ⇒ kernel ordering or arithmetic fusion.**
 
-**Wrong-reference failure mode:** a fixture regenerated from a clean DDR clone
-diverges ~1% (max abs ≈ 0.55 m³/s) at *every* ddrs commit. Only the desktop's
-`~/projects/ddr` working tree is valid — see `build-and-env.md`.
+**Wrong-reference failure mode:** a fixture regenerated from a PRE-#192 DDR
+clone diverges ~1% (max abs ≈ 0.55 m³/s) at *every* ddrs commit. Since
+2026-08-19 any DDR checkout at or past DeepGroundwater/ddr#192 is a valid
+reference (fixture + comparison both on corrected physics) — see
+`build-and-env.md`.
 
 ## T3 — CUDA graphs mask NaN
 

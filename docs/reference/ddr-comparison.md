@@ -152,7 +152,16 @@ If you regenerate fixtures, V1 must still pass. If it suddenly fails
 after regeneration, DDR's solver moved — investigate the DDR diff before
 touching ddrs.
 
-### The desktop-only DDR reference (2026-06-06)
+### The desktop-only DDR reference (2026-06-06) — OBSOLETE since 2026-08-19
+
+> **Update (2026-08-19):** DDR merged the corrected physics
+> (DeepGroundwater/ddr#192, porting ddrs's `ddr_match: false` path as a clean
+> break), so the caveat below no longer binds. The V1 fixture is regenerated
+> from post-#192 DDR master and `compare_ddr_sandbox` — now running the
+> corrected physics, since `ddr_match` is deprecated with default `false` —
+> reports ABSOLUTE MATCH at the f32 floor (max abs 1.5e-5 m³/s, max rel
+> ~2e-7). Any DDR checkout at or past #192 is a valid reference. The section
+> below is kept for interpreting PRE-#192 fixtures.
 
 > **The reference DDR state is NOT a pushed commit (as of 2026-06-06).**
 > The port mirrors the desktop checkout of `~/projects/ddr`, which

@@ -144,7 +144,8 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 | Key | Default | Notes |
 |---|---|---|
 | `sparse_solver` | `cpu` | On a non-CUDA backend, `cuda` **silently WARN-falls-back** to cpu. An unrecognized value **panics** |
-| `use_cuda_graphs` | **false** | `config/merit_training.yaml` *sets* true — that is a YAML value, not the code default |
+| `use_cuda_graphs` | false | Requires the DEPRECATED `ddr_match: true` (the captured kernel hardcodes the legacy 5/3 celerity); rejected alongside the corrected-physics default. `config/merit_training.yaml` set it true until 2026-08-19 |
+| `ddr_match` | **false** (since 2026-08-19) | DEPRECATED. `true` = legacy pre-#192 DDR physics (5/3 celerity, X ≡ 0.3, upstream-cols readout) — parses with a WARN, kept only for pre-#192 reproduction and CUDA graphs. DDR itself runs the corrected physics since DeepGroundwater/ddr#192. See `.claude/PHYSICS-CORRECTIONS.md` |
 | `use_leakance` | false | |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
@@ -177,6 +178,7 @@ Four validators run at `Config::from_yaml_file`, plus one at dataset open.
 | | neither adjacency nor fabric | `"adjacency sources are missing"` |
 | | `geospatial_fabric_layer` on a non-gpkg | `"geospatial_fabric_layer"` + `".gpkg"` |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
+| `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |
 | `validate_grad_accum` | `grad_accum_steps: 0` | `"grad_accum_steps: 0"` |
 | | `use_grad_accum: true` with steps < 2 | `"requires grad_accum_steps: N with N >= 2"` |

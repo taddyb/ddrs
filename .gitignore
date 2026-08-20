@@ -50,3 +50,6 @@ __pycache__/
 .ddrs/
 .ddrs-synthetic-n-*/
 ddrs.yaml
+# …but the Juniata sample's config is a committed example, not a personal
+# workspace config (its .ddrs/ workspace is still ignored by the rule above).
+!examples/juniata/ddrs.yaml

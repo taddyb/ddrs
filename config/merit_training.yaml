@@ -137,8 +137,10 @@ params:
   # backend; remove or set to cpu to fall back to the CPU solver).
   sparse_solver: cuda
   # Capture the routing forward pass as a CUDA graph and replay it each
-  # timestep — faster, CUDA backend only.
-  use_cuda_graphs: true
+  # timestep — faster, CUDA backend only. OFF because the captured kernel
+  # hardcodes the legacy (deprecated `ddr_match: true`) celerity; it cannot
+  # be used with the corrected physics that is now the default.
+  use_cuda_graphs: false
 
 # Testing-mode overlay: when mode: testing (workflow: eval), these keys
 # REPLACE the matching experiment: keys; absent keys inherit.

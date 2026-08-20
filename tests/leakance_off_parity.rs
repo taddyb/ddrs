@@ -113,7 +113,12 @@ fn leakance_none_matches_baseline_chain() {
     let device = TestDevice::default();
     let n = 5usize;
     let t = 24usize;
-    let cfg = mock_config();
+    // EXPECTED was captured under the legacy physics (then the default; since
+    // 2026-08-19 `ddr_match` defaults to false) — pin the legacy path so the
+    // fixture keeps guarding the exact chain it was captured from. Recapture
+    // under corrected physics when the legacy path is removed.
+    let mut cfg = mock_config();
+    cfg.params.ddr_match = true;
     let mut mc = MuskingumCunge::<InnerBackend>::new(cfg, device.clone());
 
     mc.setup_inputs(
