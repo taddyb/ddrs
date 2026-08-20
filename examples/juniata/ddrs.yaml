@@ -1,0 +1,112 @@
+# Juniata single-catchment sample — the ddrs mirror of DDR's
+# examples/juniata (DeepGroundwater/ddr PR #193).
+#
+# One gauge: Juniata River at Newport, PA (USGS 01567000, 8,657 km²,
+# 213 MERIT reaches). The 8.9 MB bundle under examples/juniata/data/ is
+# self-contained — no CONUS store, S3, or HPC access required.
+#
+# Run FROM THE REPO ROOT (data paths below are repo-root-relative):
+#
+#   ddrs --config examples/juniata/ddrs.yaml plan
+#   ddrs --config examples/juniata/ddrs.yaml run --workflow train-and-test --backend cpu
+#
+# The workspace (.ddrs/) is created beside this file: examples/juniata/.ddrs/.
+#
+# Hyperparameters mirror DDR's examples/juniata/train_and_test.py::make_config
+# — keep them in sync when comparing against the Python implementation.
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+device: 0
+seed: 42
+np_seed: 42
+
+data_sources:
+  # Per-reach catchment attributes (NetCDF), subset to the 213 Juniata
+  # reaches. Normalization statistics live at
+  # data/statistics/merit_attribute_statistics_juniata_attributes.nc.json
+  # (found automatically; ddrs never recomputes statistics).
+  attributes: examples/juniata/data/juniata_attributes.nc
+  # Pre-built adjacency stores (COO zarr v3), re-indexed to a compact
+  # 0..212 space. Topologically ordered, lower-triangular.
+  conus_adjacency: examples/juniata/data/juniata_conus_adjacency.zarr
+  gages_adjacency: examples/juniata/data/juniata_gages_adjacency.zarr
+  # Daily lateral inflow (Q') per reach from the dHBV2 UH retrospective
+  # (icechunk store, 1980-01-01 origin). Interpolated to hourly internally.
+  streamflow: examples/juniata/data/juniata_qprime.ic
+  # USGS daily observed discharge at 01567000 (icechunk store).
+  observations: examples/juniata/data/juniata_obs.ic
+  # One-row gauge table: station ID + the MERIT COMID it sits on.
+  gages: examples/juniata/data/juniata_gage.csv
+
+experiment:
+  # Single gauge → one mini-batch (one random rho-day window) per epoch,
+  # so `epochs` is the optimizer-step count. 30 steps demonstrates
+  # learning; it is not a converged model.
+  batch_size: 1
+  # Training window (water years 1982–1995).
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 30
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    15: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  # Hours the routed output is advanced before daily scoring (signed-at-zero
+  # convention; matches DDR's tau: 9).
+  tau: 9
+  # Corrected physics (trapezoid-exact celerity β, Cunge-matched X, own-reach
+  # gauge readout) is the default — the same physics as DDR's Juniata example
+  # since DDR PR #192.
+  # CPU-friendly: no CUDA requirement anywhere in the sample.
+  sparse_solver: cpu
+  use_cuda_graphs: false
+
+# Evaluation overlay (water years 1996–2010).
+# CAUTION — batch_size changes meaning: GAUGES in training, DAYS here.
+testing:
+  start_time: 1995/10/01
+  end_time: 2010/09/30
+  batch_size: 15
+  rho: null
