@@ -46,10 +46,12 @@ Regenerate with:
 ```bash
 cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 ```
-> **Only the desktop's `~/projects/ddr` working tree is a valid reference.** It
-> carries unpushed `geometry/trapezoidal.py` work. A fixture regenerated from a
-> clean DDR clone diverges ~1% (max abs ≈ 0.55 m³/s) at *every* ddrs commit —
-> that is a wrong reference, not a port bug. Details:
+> **Any DDR checkout at or past DeepGroundwater/ddr#192 is a valid reference**
+> (2026-08-19: fixture regenerated from post-#192 master; comparison matches at
+> the f32 floor on the corrected physics, which is now ddrs's default —
+> `ddr_match` is deprecated). The old rule — only the desktop's working tree
+> with unpushed `geometry/trapezoidal.py` work — applied before #192 landed;
+> a PRE-#192 clean clone still diverges ~1% (max abs ≈ 0.55 m³/s). Details:
 > `docs/reference/ddr-comparison.md` §Regenerating fixtures.
 
 **KAN parity** — `tests/fixtures/` (tracked, unlike `/fixtures/`), loaded behind

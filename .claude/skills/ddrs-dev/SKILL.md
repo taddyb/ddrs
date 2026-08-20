@@ -112,6 +112,7 @@ Full commands and rationale in `references/testing.md`.
 | `src/nn/`, `Cargo.toml` rskan tag | **B** | 4-test KAN fixture sweep, then Tier A |
 | `src/config.rs`, `src/training/`, other `src/` | **C** | `cargo test --lib`, `cargo test`, `compare_ddr_sandbox` |
 | `config/**/*.yaml` only | **D** | `ddrs plan --config … --workspace …` exits 0, no drift |
+| `examples/juniata/**` (bundle, config, README) | — | `cargo test --test juniata_bundle` (never skips — bundle is committed), and `ddrs --config examples/juniata/ddrs.yaml plan` exits 0 from the repo root |
 | Plotting / analysis scripts only | — | no gate |
 | `epochs`, `learning_rate`, `batch_size`, loss weights within documented ranges | — | no gate |
 
@@ -150,6 +151,34 @@ warm start: no <path>.mpk — Adam starts cold
 ```
 
 There is no `"precip loading"` string — two retired skills told you to grep for it.
+
+## Juniata single-catchment sample (`examples/juniata/`)
+
+The fastest full end-to-end exercise of the CLI, and the mirror of DDR's
+`examples/juniata` (DeepGroundwater/ddr PR #193): one gauge (USGS 01567000,
+8,657 km², 213 reaches), 8.9 MB committed bundle, no external stores or CUDA.
+Run **from the repo root** (data paths in the config are repo-root-relative);
+the workspace intentionally lands beside the config at `examples/juniata/.ddrs/`
+(gitignored) — the one sanctioned exception to fact 2 above.
+
+```bash
+target/release/ddrs --config examples/juniata/ddrs.yaml plan
+target/release/ddrs --config examples/juniata/ddrs.yaml run --workflow train-and-test --backend cpu
+```
+
+Verified 2026-08-19: `plan` baseline NSE 0.695 / KGE 0.819 (matches DDR's
+Python readers to rounding — a live cross-implementation check); 30-epoch CPU
+train-and-test finishes in ~21 s at routed NSE 0.790 / KGE 0.881 vs DDR-Python's
+0.784 / 0.877 (residual = window-sampling RNG streams only; exact match is
+impossible by construction; ddrs 4-seed spread NSE 0.790–0.800). Both examples
+run the corrected physics — since 2026-08-19 `ddr_match` is DEPRECATED and
+defaults to `false`, matching DDR post-#192. (Historical: with legacy physics
+this gauge scored 0.840 / 0.913 — *better* here, but not the same model.)
+Two deviations from DDR's bundle: `data/statistics/*.json` is **committed**
+(ddrs never recomputes statistics), and `.gitignore` carries
+`!examples/juniata/ddrs.yaml` so the example config survives the global
+`ddrs.yaml` ignore. Regenerate the bundle in the ddr repo
+(`extract_bundle.py`), then re-copy `data/` plus the generated statistics JSON.
 
 ## Maintenance
 

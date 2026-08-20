@@ -603,7 +603,13 @@ pub struct Params {
     /// supplied at routing setup (the mask is precomputed by the caller).
     /// Default 0.7 (70% impervious surface ≈ concrete-lined channel).
     pub leakance_impervious_threshold: f32,
-    /// When `true` (default) the routing core reproduces DDR's formulation
+    /// **DEPRECATED — default `false` since 2026-08-19; the legacy path will
+    /// be removed.** DDR ported the corrected physics in
+    /// DeepGroundwater/ddr#192 (a clean break, no flag), so `false` — the
+    /// corrected physics — is now the behaviour BOTH implementations share
+    /// and the DDR sandbox fixture is regenerated from post-#192 DDR.
+    ///
+    /// When `true`, the routing core reproduces DDR's PRE-#192 formulation
     /// bit-for-bit, including three known defects:
     ///   * celerity `c = v · 5/3` (the wide-rectangular Kleitz-Seddon limit,
     ///     ~22-27% high for the trapezoid this code actually builds),
@@ -613,11 +619,10 @@ pub struct Params {
     ///     gauge's own reach, which drops that reach's local drainage from
     ///     every prediction (`src/data/collate.rs` step 5).
     ///
-    /// Set `false` to enable the corrected physics. The first two CHANGE
-    /// FORWARD OUTPUT and will break `examples/compare_ddr_sandbox`'s ABSOLUTE
-    /// MATCH (invariant 1) — which is why the default preserves DDR behaviour.
-    /// The `outflow_idx` correction is downstream of the solver and does NOT
-    /// affect the sandbox. See `.claude/PHYSICS-CORRECTIONS.md`.
+    /// The only remaining reasons to set `true`: reproducing a pre-#192
+    /// result, or `use_cuda_graphs: true` (the captured kernel hardcodes the
+    /// legacy `5/3` celerity — see `validate_ddr_match`). Setting it emits a
+    /// deprecation WARN. See `.claude/PHYSICS-CORRECTIONS.md`.
     pub ddr_match: bool,
     /// Enforce the Muskingum non-negativity window `2X <= Cr <= 2(1-X)`
     /// (`Cr = dt/K`) on every reach-timestep, so the S27 solve can never
@@ -638,7 +643,10 @@ pub struct Params {
 }
 
 fn default_ddr_match() -> bool {
-    true
+    // Corrected physics. Flipped from `true` on 2026-08-19 after
+    // DeepGroundwater/ddr#192 removed DDR's legacy path — both
+    // implementations now default to the same (corrected) formulation.
+    false
 }
 
 impl Default for Params {
@@ -760,6 +768,14 @@ impl From<ParamsRaw> for Params {
             p.leakance_impervious_threshold = v;
         }
         if let Some(b) = r.ddr_match {
+            if b {
+                eprintln!(
+                    "WARN(config): `ddr_match: true` is DEPRECATED (legacy pre-#192 DDR \
+                     physics; DDR itself now runs the corrected formulation). It remains \
+                     only for reproducing old results and for `use_cuda_graphs: true`, \
+                     and will be removed in a future release."
+                );
+            }
             p.ddr_match = b;
         }
         if let Some(b) = r.enforce_positivity {
@@ -1006,11 +1022,13 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
 fn validate_ddr_match(cfg: &Config) -> std::result::Result<(), String> {
     if !cfg.params.ddr_match && cfg.params.use_cuda_graphs {
         return Err(
-            "params: `ddr_match: false` requires `use_cuda_graphs: false` — the \
-             CUDA-graph kernel hardcodes DDR's `5/3` celerity, so the corrected \
-             forward would not be captured while the backward would use the corrected \
-             chain rule, producing a silent forward/backward mismatch. \
-             Set `use_cuda_graphs: false` to use `ddr_match: false`."
+            "params: `use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true` \
+             (legacy physics) — the CUDA-graph kernel hardcodes DDR's `5/3` celerity, so \
+             the corrected forward would not be captured while the backward would use the \
+             corrected chain rule, producing a silent forward/backward mismatch. \
+             `ddr_match` now defaults to false (corrected physics). Set \
+             `use_cuda_graphs: false` (recommended), or explicitly set the deprecated \
+             `ddr_match: true`."
                 .to_string(),
         );
     }
@@ -1209,9 +1227,13 @@ mod tests {
         assert_eq!(cfg.params.tau, 9);
         // sparse_solver is set to Cuda by merit_training.yaml (since SP-9).
         assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
-        // SP-10: merit_training.yaml now sets use_cuda_graphs: true
-        // (flipped by commit e35af29 after V7a=0.385 landed).
-        assert!(cfg.params.use_cuda_graphs);
+        // 2026-08-19: back to use_cuda_graphs: false — the captured kernel
+        // hardcodes the legacy (deprecated ddr_match: true) celerity, and the
+        // template runs the corrected-physics default. (SP-10 had flipped it
+        // true in e35af29 when legacy physics was the default.)
+        assert!(!cfg.params.use_cuda_graphs);
+        // ddr_match deprecated 2026-08-19: absent key ⇒ corrected physics.
+        assert!(!cfg.params.ddr_match);
         // top-level scalars.
         assert_eq!(cfg.seed, 42);
         assert_eq!(cfg.mode, "training");
