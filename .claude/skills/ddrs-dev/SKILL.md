@@ -108,11 +108,11 @@ Full commands and rationale in `references/testing.md`.
 
 | You touched | Tier | Must pass |
 |---|---|---|
-| `src/routing/`, `src/geometry.rs`, `src/sparse/` | **A** | `compare_ddr_sandbox` = ABSOLUTE MATCH, `cargo test --lib`, `--test mmc`, `--test sparse_gradcheck`, all three leakance tests |
+| `src/routing/`, `src/geometry.rs`, `src/sparse/` | **A** | `--test ddr_sandbox_match` (machine-enforced invariant 1), `compare_ddr_sandbox` = ABSOLUTE MATCH (exits 1 on mismatch since 2026-09-02), `cargo test --lib`, `--test mmc`, `--test sparse_gradcheck`, all three leakance tests |
 | `src/nn/`, `Cargo.toml` rskan tag | **B** | 4-test KAN fixture sweep, then Tier A |
 | `src/config.rs`, `src/training/`, other `src/` | **C** | `cargo test --lib`, `cargo test`, `compare_ddr_sandbox` |
 | `config/**/*.yaml` only | **D** | `ddrs plan --config … --workspace …` exits 0, no drift |
-| `examples/juniata/**` (bundle, config, README) | — | `cargo test --test juniata_bundle` (never skips — bundle is committed), and `ddrs --config examples/juniata/ddrs.yaml plan` exits 0 from the repo root |
+| `examples/juniata/**` (bundle, config, README) | — | `cargo test --test juniata_bundle` (never skips — bundle is committed), `cargo test --release --test juniata_acceptance` (end-to-end metric floors), and `ddrs --config examples/juniata/ddrs.yaml plan` exits 0 from the repo root |
 | Plotting / analysis scripts only | — | no gate |
 | `epochs`, `learning_rate`, `batch_size`, loss weights within documented ranges | — | no gate |
 
@@ -125,6 +125,7 @@ Full commands and rationale in `references/testing.md`.
 cargo install --path .                              # refresh the PATH binary — after every src/ change
 mkdir -p output && cargo run --release --example compare_ddr_sandbox   # V1 gate
 cargo test                                          # full suite, 2–5 min
+cargo test --release --test juniata_acceptance      # end-to-end metric-floor acceptance (~20 s; skips in debug)
 ddrs plan                                           # GPU probe + smoke + baseline (cached)
 ddrs run --workflow train-and-test --backend cpu    # train then eval
 ddrs run --workflow train --backend cpu --max-mini-batches 2   # mechanics smoke

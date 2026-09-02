@@ -13,6 +13,7 @@ pass" instead.
 `src/routing/`, `src/geometry.rs`, `src/sparse/`
 
 ```bash
+cargo test --test ddr_sandbox_match     # machine-enforced invariant 1 (added 2026-09-02)
 mkdir -p output && cargo run --release --example compare_ddr_sandbox  # must print ABSOLUTE MATCH
 cargo test --lib
 cargo test --test mmc
@@ -21,6 +22,31 @@ cargo test --test leakance_gradcheck    # run even if you did not touch leakance
 cargo test --test leakance_off_parity   # any routing change can disturb OFF-parity
 cargo test --test zeta_accum
 ```
+
+Since 2026-09-02 the sandbox gate is machine-enforced twice over:
+`tests/ddr_sandbox_match.rs` asserts max abs < 1e-3 in-process (CPU NdArray,
+part of plain `cargo test`), and the example itself **exits 1** on anything
+short of ABSOLUTE MATCH (after writing its CSV/PNG diagnostics), so scripted
+callers no longer need to read stdout. The example remains the diagnostic
+form (per-reach table, PNG, `DDRS_FORCE_GRAPHS` GPU path).
+
+### Acceptance — end-to-end metric floors (Juniata)
+
+```bash
+cargo test --release --test juniata_acceptance -- --nocapture   # ~20 s after build
+```
+
+The only test covering the full data → train → route → eval → metric chain.
+Runs `train-and-test` on the committed Juniata bundle (CPU, tempdir
+workspace), then asserts against the run manifest: routed median NSE ≥ 0.75
+and KGE ≥ 0.80 (seed-42 reference 0.790 / 0.881; floors are loose on purpose
+so legitimate op-reordering noise doesn't trip them), routed NSE beats the
+summed-Q' baseline, and baseline NSE ∈ [0.67, 0.72] (deterministic, 0.6947
+measured — doubles as a data-reader regression check). **Silently skips under
+debug_assertions** (a debug train takes minutes), so it only runs with
+`--release`; run it for any change to routing, training, eval, or the data
+readers when you want end-to-end confirmation. Verified 2026-09-02:
+NSE 0.7903 / KGE 0.8810 / baseline 0.6947 in 18.3 s.
 
 ### Tier B — KAN head
 `src/nn/`, `Cargo.toml` rskan tag
@@ -52,6 +78,8 @@ Exit 0, no drift warnings.
 | Area | Tests |
 |---|---|
 | Routing | `mmc`, `routing_utils`, `geometry` |
+| DDR parity (invariant 1) | `ddr_sandbox_match` (in-process, plain `cargo test`) + `compare_ddr_sandbox` example (diagnostics, exits 1 on mismatch) |
+| End-to-end acceptance | `juniata_acceptance` (release-only; metric floors + beats-baseline on the committed bundle) |
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
 | Leakance | `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` |

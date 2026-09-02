@@ -232,6 +232,12 @@ fn main() -> std::io::Result<()> {
     println!("  csv diff:  output/ddrs_vs_ddr.csv");
     println!("  png:       {}", png_path.display());
 
+    // Anything short of ABSOLUTE MATCH is a broken invariant 1 — exit nonzero
+    // so scripted callers fail. Diagnostics above are written first.
+    if !absolute_match {
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 

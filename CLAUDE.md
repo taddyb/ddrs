@@ -64,7 +64,14 @@ cargo test --test mmc forward_reproducible      # one specific test
 
 # The regression test that must never break:
 cargo run --release --example compare_ddr_sandbox
-# → reports "ABSOLUTE MATCH" if max abs diff < 1e-3 m³/s
+# → reports "ABSOLUTE MATCH" if max abs diff < 1e-3 m³/s; exits 1 otherwise.
+# Same gate as an ordinary test (part of plain `cargo test`):
+cargo test --test ddr_sandbox_match
+
+# End-to-end acceptance: train-and-test on the committed Juniata bundle,
+# assert routed NSE/KGE floors + beats the summed-Q' baseline. Release-only
+# (silently skips in debug builds — a debug train takes minutes):
+cargo test --release --test juniata_acceptance
 
 # Hydrograph plot for visual sanity-check:
 cargo run --release --example benchmark_hydrograph
