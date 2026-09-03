@@ -43,12 +43,17 @@ jobs:
       # burn-cuda/cudarc are non-optional COMPILE-time deps (see
       # .claude/skills/ddrs-dev/references/build-and-env.md). No GPU is
       # needed — nothing GPU-gated runs in CI.
-      # Jimver/cuda-toolkit@v0.2.36 (both pinned sub-packages and the full
-      # cuda-12-4 metapackage) 404s against this runner's NVIDIA apt mirror;
-      # fall back to the distro's nvidia-cuda-toolkit, which puts nvcc on
-      # PATH with no extra env needed.
-      - name: CUDA toolkit
-        run: sudo apt-get install -y nvidia-cuda-toolkit
+      # NVIDIA's ubuntu2404 apt repo never shipped CUDA 12.4 (it targeted
+      # jammy/22.04) — only 12.5+ exists for noble, so "12.4.1" 404s on both
+      # the pinned sub-packages and the full cuda-12-4 metapackage. The
+      # distro's nvidia-cuda-toolkit package only offers CUDA 12.0, which
+      # lacks cusparseSpSV_updateMatrix/cusparseSpSVUpdate_t (added in
+      # cuSPARSE 12.4, used by src/sparse/cusparse.rs). Use the nearest
+      # available version with that API instead of 12.4.1.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.6.3"
+          method: network
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-debug
@@ -64,8 +69,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      - name: CUDA toolkit
-        run: sudo apt-get install -y nvidia-cuda-toolkit
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.6.3"
+          method: network
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-release
