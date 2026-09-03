@@ -66,6 +66,20 @@ jobs:
           cuda: "12.6.3"
           method: network
           sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
+      # None of the nvcc/cudart-dev/nvrtc-dev sub-packages ships libcuda.so
+      # (the driver's userspace library) — only the full CUDA metapackage's
+      # nvidia-driver-560/nvidia-dkms-560 deps provide it, and those fail to
+      # build their DKMS kernel module here (see above). libnvidia-compute-560
+      # is the driver's userspace library split out with NO DKMS/kernel-module
+      # dependency (its own Depends: line is just libc6/libgcc-s1/
+      # libnvidia-decode-560) — installing it makes libcuda.so present, so
+      # cudarc's cuInit() fails gracefully with "no device" (a Result the
+      # code already handles) instead of dlopen panicking outright with
+      # "Unable to dynamically load the 'cuda' shared library", which every
+      # CLI/probe/spike test hit. 560 matches CUDA 12.6.3's driver branch,
+      # confirmed from the full-toolkit dependency list above.
+      - name: CUDA driver userspace library (no GPU, no DKMS)
+        run: sudo apt-get install -y libnvidia-compute-560
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-debug
@@ -88,6 +102,20 @@ jobs:
           cuda: "12.6.3"
           method: network
           sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
+      # None of the nvcc/cudart-dev/nvrtc-dev sub-packages ships libcuda.so
+      # (the driver's userspace library) — only the full CUDA metapackage's
+      # nvidia-driver-560/nvidia-dkms-560 deps provide it, and those fail to
+      # build their DKMS kernel module here (see above). libnvidia-compute-560
+      # is the driver's userspace library split out with NO DKMS/kernel-module
+      # dependency (its own Depends: line is just libc6/libgcc-s1/
+      # libnvidia-decode-560) — installing it makes libcuda.so present, so
+      # cudarc's cuInit() fails gracefully with "no device" (a Result the
+      # code already handles) instead of dlopen panicking outright with
+      # "Unable to dynamically load the 'cuda' shared library", which every
+      # CLI/probe/spike test hit. 560 matches CUDA 12.6.3's driver branch,
+      # confirmed from the full-toolkit dependency list above.
+      - name: CUDA driver userspace library (no GPU, no DKMS)
+        run: sudo apt-get install -y libnvidia-compute-560
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-release

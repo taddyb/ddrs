@@ -40,6 +40,10 @@ fn read_i32_csv(path: &Path) -> Vec<i32> {
 #[test]
 fn gradcheck_against_ddr_triangular_sparse_solver() {
     let dir = fixtures_dir();
+    if !dir.join("a_values.csv").exists() {
+        eprintln!("skipping: {dir:?} not present — run scripts/dump_solver_gradcheck.py");
+        return;
+    }
     let a_values_data = read_f32_csv(&dir.join("a_values.csv"));
     let crow = read_i32_csv(&dir.join("crow.csv"));
     let col = read_i32_csv(&dir.join("col.csv"));
