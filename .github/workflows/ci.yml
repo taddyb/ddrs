@@ -48,12 +48,18 @@ jobs:
       # the pinned sub-packages and the full cuda-12-4 metapackage. The
       # distro's nvidia-cuda-toolkit package only offers CUDA 12.0, which
       # lacks cusparseSpSV_updateMatrix/cusparseSpSVUpdate_t (added in
-      # cuSPARSE 12.4, used by src/sparse/cusparse.rs). Use the nearest
-      # available version with that API instead of 12.4.1.
+      # cuSPARSE 12.4, used by src/sparse/cusparse.rs) — so bump to the
+      # nearest available version, 12.6.3. A *full* toolkit install (no
+      # sub-packages) additionally pulls in the nvidia-driver-560 /
+      # nvidia-dkms-560 metapackages, whose DKMS kernel-module build fails
+      # on this runner (no matching kernel headers/GPU) — that's why the
+      # original config scoped sub-packages to compile-only components.
+      # Keep that scoping, just at a version that exists for noble.
       - uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: "12.6.3"
           method: network
+          sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-debug
@@ -73,6 +79,7 @@ jobs:
         with:
           cuda: "12.6.3"
           method: network
+          sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-release
