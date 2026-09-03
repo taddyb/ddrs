@@ -1,0 +1,137 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# No path filters: a required check skipped by a path filter leaves PRs
+# stuck on "expected — waiting for status". Doc-only runs are cheap warm.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Branch protection (applied once, after the first green master run):
+#   gh api -X PUT repos/taddyb/ddrs/branches/master/protection --input - <<'EOF'
+#   {
+#     "required_status_checks": {
+#       "strict": false,
+#       "checks": [{"context": "test"}, {"context": "acceptance"}]
+#     },
+#     "enforce_admins": false,
+#     "required_pull_request_reviews": null,
+#     "restrictions": null
+#   }
+#   EOF
+
+jobs:
+  # Full default suite, debug. Data-dependent tests self-skip on missing
+  # paths; --features cuda tests are compiled out; juniata_acceptance
+  # self-skips under debug_assertions. `fixtures` enables the KAN parity
+  # sweep (tests/fixtures/ is tracked).
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # ubuntu-latest's default free space (~14 GB usable) is exhausted by
+      # the burn/cubecl/netcdf-static debug build plus every example binary
+      # (cargo test compiles examples too) — observed "No space left on
+      # device" mid-build. Preinstalled SDKs this repo never uses.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # plotters (examples) needs fontconfig headers on Linux; cargo test
+      # compiles examples even though it does not run them.
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      # burn-cuda/cudarc are non-optional COMPILE-time deps (see
+      # .claude/skills/ddrs-dev/references/build-and-env.md). No GPU is
+      # needed — nothing GPU-gated runs in CI.
+      # NVIDIA's ubuntu2404 apt repo never shipped CUDA 12.4 (it targeted
+      # jammy/22.04) — only 12.5+ exists for noble, so "12.4.1" 404s on both
+      # the pinned sub-packages and the full cuda-12-4 metapackage. The
+      # distro's nvidia-cuda-toolkit package only offers CUDA 12.0, which
+      # lacks cusparseSpSV_updateMatrix/cusparseSpSVUpdate_t (added in
+      # cuSPARSE 12.4, used by src/sparse/cusparse.rs) — so bump to the
+      # nearest available version, 12.6.3. A *full* toolkit install (no
+      # sub-packages) additionally pulls in the nvidia-driver-560 /
+      # nvidia-dkms-560 metapackages, whose DKMS kernel-module build fails
+      # on this runner (no matching kernel headers/GPU) — that's why the
+      # original config scoped sub-packages to compile-only components.
+      # Keep that scoping, just at a version that exists for noble.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.6.3"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
+      # None of the nvcc/cudart-dev/nvrtc-dev sub-packages ships libcuda.so
+      # (the driver's userspace library) — only the full CUDA metapackage's
+      # nvidia-driver-560/nvidia-dkms-560 deps provide it, and those fail to
+      # build their DKMS kernel module here (see above). libnvidia-compute-560
+      # is the driver's userspace library split out with NO DKMS/kernel-module
+      # dependency (its own Depends: line is just libc6/libgcc-s1/
+      # libnvidia-decode-560) — installing it makes libcuda.so present, so
+      # cudarc's cuInit() fails gracefully with "no device" (a Result the
+      # code already handles) instead of dlopen panicking outright with
+      # "Unable to dynamically load the 'cuda' shared library", which every
+      # CLI/probe/spike test hit. 560 matches CUDA 12.6.3's driver branch,
+      # confirmed from the full-toolkit dependency list above.
+      - name: CUDA driver userspace library (no GPU, no DKMS)
+        run: sudo apt-get install -y libnvidia-compute-560
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-debug
+      - run: cargo test --features fixtures --no-fail-fast
+
+  # Release routing-acceptance gates: DDR sandbox parity (example exits 1
+  # unless ABSOLUTE MATCH) + Juniata end-to-end metric floors.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Cargo.toml's release profile uses lto = "thin", and the thin-LTO link
+    # of the juniata_acceptance test binary took 30 of the job's 40 minutes
+    # on the 2-core runner (run 33755052570: the build step "Finished in
+    # 30m 12s" with a single `Compiling ddrs` line, then the test itself ran
+    # in 26.72 s — all 30 training epochs took ~13 s). lto=false is cargo's
+    # default crate-local thin LTO: opt-level stays 3, debug_assertions stay
+    # off (so juniata_acceptance still runs), and FP semantics are unchanged
+    # (no fast-math in Rust), so the sandbox 1e-3 gate and the metric floors
+    # still verify the same numerics. Env-only override: local builds and
+    # published binaries keep full thin LTO.
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.6.3"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
+      # None of the nvcc/cudart-dev/nvrtc-dev sub-packages ships libcuda.so
+      # (the driver's userspace library) — only the full CUDA metapackage's
+      # nvidia-driver-560/nvidia-dkms-560 deps provide it, and those fail to
+      # build their DKMS kernel module here (see above). libnvidia-compute-560
+      # is the driver's userspace library split out with NO DKMS/kernel-module
+      # dependency (its own Depends: line is just libc6/libgcc-s1/
+      # libnvidia-decode-560) — installing it makes libcuda.so present, so
+      # cudarc's cuInit() fails gracefully with "no device" (a Result the
+      # code already handles) instead of dlopen panicking outright with
+      # "Unable to dynamically load the 'cuda' shared library", which every
+      # CLI/probe/spike test hit. 560 matches CUDA 12.6.3's driver branch,
+      # confirmed from the full-toolkit dependency list above.
+      - name: CUDA driver userspace library (no GPU, no DKMS)
+        run: sudo apt-get install -y libnvidia-compute-560
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-release
+      - name: DDR sandbox parity (invariant 1)
+        run: mkdir -p output && cargo run --release --example compare_ddr_sandbox
+      - name: Juniata end-to-end acceptance
+        run: cargo test --release --test juniata_acceptance -- --nocapture

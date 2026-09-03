@@ -12,11 +12,16 @@ fn round_trip_via_pointer() {
     type B = burn_cuda::Cuda<f32, i32>;
     type Dev = <B as BackendTypes>::Device;
 
-    // CudaDevice::default() panics on hosts without CUDA; gate the test on a probe.
-    let cuda_available = std::panic::catch_unwind(|| {
-        let _device: Dev = Default::default();
-    })
-    .is_ok();
+    // CudaDevice::default() spawns a background cubecl worker thread that
+    // panics asynchronously (as a channel RecvError on this thread) rather
+    // than synchronously on hosts without CUDA — catch_unwind around
+    // Default::default() alone does not observe that. Gate on the same
+    // safe probe() used by src/cli/system.rs and tests/cli_run_preflight.rs.
+    let cuda_available = ddrs::cli::system::probe()
+        .ok()
+        .flatten()
+        .map(|p| !p.gpu.is_empty())
+        .unwrap_or(false);
     if !cuda_available {
         eprintln!("skipping: no CUDA device");
         return;
@@ -44,10 +49,13 @@ fn round_trip_via_pointer() {
 fn cubecl_active_stream_is_non_null() {
     type B = burn_cuda::Cuda<f32, i32>;
     type Dev = <B as BackendTypes>::Device;
-    let cuda_available = std::panic::catch_unwind(|| {
-        let _d: Dev = Default::default();
-    })
-    .is_ok();
+    // See round_trip_via_pointer's comment on why probe() is used instead of
+    // catch_unwind around Default::default().
+    let cuda_available = ddrs::cli::system::probe()
+        .ok()
+        .flatten()
+        .map(|p| !p.gpu.is_empty())
+        .unwrap_or(false);
     if !cuda_available {
         eprintln!("skipping: no CUDA device");
         return;
@@ -70,10 +78,13 @@ fn cubecl_active_stream_is_non_null() {
 fn cube_tensor_round_trip_to_primitive() {
     type B = burn_cuda::Cuda<f32, i32>;
     type Dev = <B as BackendTypes>::Device;
-    let cuda_available = std::panic::catch_unwind(|| {
-        let _d: Dev = Default::default();
-    })
-    .is_ok();
+    // See round_trip_via_pointer's comment on why probe() is used instead of
+    // catch_unwind around Default::default().
+    let cuda_available = ddrs::cli::system::probe()
+        .ok()
+        .flatten()
+        .map(|p| !p.gpu.is_empty())
+        .unwrap_or(false);
     if !cuda_available {
         eprintln!("skipping: no CUDA device");
         return;

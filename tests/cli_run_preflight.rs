@@ -29,6 +29,12 @@ geodataset: merit
 seed: 1
 np_seed: 1
 workflow: train
+experiment:
+  batch_size: 4
+  start_time: 1981/10/01
+  end_time: 1982/09/30
+  epochs: 1
+  warmup: 5
 data_sources:
   attributes: /dev/null
   conus_adjacency: {conus}
@@ -90,6 +96,12 @@ geodataset: merit
 seed: 1
 np_seed: 1
 workflow: train
+experiment:
+  batch_size: 4
+  start_time: 1981/10/01
+  end_time: 1982/09/30
+  epochs: 1
+  warmup: 5
 data_sources:
   attributes: /dev/null
   conus_adjacency: {conus}
