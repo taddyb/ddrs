@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# No path filters: a required check skipped by a path filter leaves PRs
+# stuck on "expected — waiting for status". Doc-only runs are cheap warm.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Branch protection (applied once, after the first green master run):
+#   gh api -X PUT repos/taddyb/ddrs/branches/master/protection --input - <<'EOF'
+#   {
+#     "required_status_checks": {
+#       "strict": false,
+#       "checks": [{"context": "test"}, {"context": "acceptance"}]
+#     },
+#     "enforce_admins": false,
+#     "required_pull_request_reviews": null,
+#     "restrictions": null
+#   }
+#   EOF
+
+jobs:
+  # Full default suite, debug. Data-dependent tests self-skip on missing
+  # paths; --features cuda tests are compiled out; juniata_acceptance
+  # self-skips under debug_assertions. `fixtures` enables the KAN parity
+  # sweep (tests/fixtures/ is tracked).
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # plotters (examples) needs fontconfig headers on Linux; cargo test
+      # compiles examples even though it does not run them.
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      # burn-cuda/cudarc are non-optional COMPILE-time deps (see
+      # .claude/skills/ddrs-dev/references/build-and-env.md). No GPU is
+      # needed — nothing GPU-gated runs in CI.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.4.1"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-debug
+      - run: cargo test --features fixtures --no-fail-fast
+
+  # Release routing-acceptance gates: DDR sandbox parity (example exits 1
+  # unless ABSOLUTE MATCH) + Juniata end-to-end metric floors.
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.4.1"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "nvrtc-dev"]'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-release
+      - name: DDR sandbox parity (invariant 1)
+        run: mkdir -p output && cargo run --release --example compare_ddr_sandbox
+      - name: Juniata end-to-end acceptance
+        run: cargo test --release --test juniata_acceptance -- --nocapture
