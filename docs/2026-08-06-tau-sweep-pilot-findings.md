@@ -509,8 +509,8 @@ Caveat noted at launch: the aorc2f_lumped store's measured optimum is
 new-convention ≈ −8 (§5e), so tau=9 is expected to HURT that arm; it runs
 anyway as the consistency control.
 
-**Retrain results (2026-08-09, full test window 1995-10..2010-09, 1,841
-gauges, 30 epochs each):**
+**Retrain results — FINAL, all five arms (2026-08-09/10, full test window
+1995-10..2010-09, 1,841 gauges, 30 epochs each, CPU):**
 
 | arm | median NSE | median KGE |
 |---|---|---|
@@ -519,17 +519,26 @@ gauges, 30 epochs each):**
 | **tau=9 aorc2f distributed** | **0.706** | **0.730** |
 | **tau=9 UH retrospective** | **0.707** | **0.738** |
 | tau=9 daily LSTM | 0.578 | 0.616 |
+| tau=9 hourly LSTM (native hourly) | 0.564 | 0.500 |
+| tau=9 aorc2f lumped (consistency control) | 0.483 | 0.504 |
 
 The timing fix alone is worth **+0.086 median NSE** on the flagship arm
 and flips routing from LOSING to the summed-q' baseline (0.620 vs 0.642)
-to beating it by +0.064. Run IDs: `2026-08-09T{03-05-54,09-30-39,12-05-08}Z-
-train-and-test`. Operational note: the hourly_lstm arm finished training
-(run `2026-08-09T14-55-05Z`, 60 checkpoints) but its eval phase was killed
-with the parent driver at chunk 49/366; a train-and-test resume from the
-final checkpoint cannot re-enter Phase 2 (it requires checkpoints written
-by its own Phase 1 — `tau9_train_hourly_lstm_evalresume.yaml` records the
-failed attempt), so the arm completes via the legacy eval binary
-(`scripts/run_tau9_hourly_eval_chain.sh`), chained behind the
+to beating it by +0.064. Every arm ordered exactly as the eval-only
+sweeps predicted (§5e), including the negative control: the lumped store
+(measured optimum ≈ −8 on the new scale) got WORSE at tau=9 (0.510
+eval-only at old tau → 0.483 trained at tau=9) — the one arm the theory
+said the fix should hurt, hurt. Run IDs:
+`2026-08-09T{03-05-54,09-30-39,12-05-08,14-55-05,22-13-43}Z-train-and-test`.
+
+Operational note: the hourly_lstm arm finished training (run
+`2026-08-09T14-55-05Z`, 60 checkpoints) but its eval phase was killed with
+the parent driver at chunk 49/366; a train-and-test resume from the final
+checkpoint cannot re-enter Phase 2 (it requires checkpoints written by its
+own Phase 1 — `tau9_train_hourly_lstm_evalresume.yaml` records the failed
+attempt), so its numbers above come from the legacy eval binary against
+the epoch-30 checkpoint (`scripts/run_tau9_hourly_eval_chain.sh`,
+`output/tau_sweep/train9_hourly_lstm_eval.{log,zarr}`), chained behind the
 aorc2f_lumped run (`scripts/run_tau9_remaining.sh`).
 
 ## 6. Raw output
