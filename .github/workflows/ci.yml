@@ -34,6 +34,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      # ubuntu-latest's default free space (~14 GB usable) is exhausted by
+      # the burn/cubecl/netcdf-static debug build plus every example binary
+      # (cargo test compiles examples too) — observed "No space left on
+      # device" mid-build. Preinstalled SDKs this repo never uses.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       # plotters (examples) needs fontconfig headers on Linux; cargo test
@@ -71,6 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: System deps
