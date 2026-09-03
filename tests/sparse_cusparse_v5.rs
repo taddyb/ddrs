@@ -117,10 +117,16 @@ fn forward_cuda_smoke() {
     type B = Autodiff<CudaB>;
     type Dev = <CudaB as BackendTypes>::Device;
 
-    let cuda_available = std::panic::catch_unwind(|| {
-        let _d: Dev = Default::default();
-    })
-    .is_ok();
+    // CudaDevice::default() spawns a background cubecl worker thread that
+    // panics asynchronously (as a channel RecvError on this thread) rather
+    // than synchronously on hosts without CUDA — catch_unwind around
+    // Default::default() alone does not observe that. Gate on the same
+    // safe probe() used by src/cli/system.rs and tests/cli_run_preflight.rs.
+    let cuda_available = ddrs::cli::system::probe()
+        .ok()
+        .flatten()
+        .map(|p| !p.gpu.is_empty())
+        .unwrap_or(false);
     if !cuda_available {
         eprintln!("forward_cuda_smoke: skipping — no CUDA device available");
         return;
@@ -153,10 +159,13 @@ fn backward_cuda_smoke() {
     type B = Autodiff<CudaB>;
     type Dev = <CudaB as BackendTypes>::Device;
 
-    let cuda_available = std::panic::catch_unwind(|| {
-        let _d: Dev = Default::default();
-    })
-    .is_ok();
+    // See forward_cuda_smoke's comment on why probe() is used instead of
+    // catch_unwind around Default::default().
+    let cuda_available = ddrs::cli::system::probe()
+        .ok()
+        .flatten()
+        .map(|p| !p.gpu.is_empty())
+        .unwrap_or(false);
     if !cuda_available {
         eprintln!("backward_cuda_smoke: skipping — no CUDA device available");
         return;
@@ -255,10 +264,13 @@ fn v5_cpu_and_cuda_forward_backward_bit_match() {
     type Bg = Autodiff<CudaInner>;
     type GpuDev = <CudaInner as BackendTypes>::Device;
 
-    let cuda_ok = std::panic::catch_unwind(|| {
-        let _d: GpuDev = Default::default();
-    })
-    .is_ok();
+    // See forward_cuda_smoke's comment on why probe() is used instead of
+    // catch_unwind around Default::default().
+    let cuda_ok = ddrs::cli::system::probe()
+        .ok()
+        .flatten()
+        .map(|p| !p.gpu.is_empty())
+        .unwrap_or(false);
     if !cuda_ok {
         eprintln!("v5_cpu_and_cuda_forward_backward_bit_match: skipping CUDA branch — no device");
         return;
