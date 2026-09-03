@@ -287,6 +287,7 @@ fn full_forward(
             k_d: None,
             d_gw: None,
             leakance_factor: None,
+            impervious_mask: None,
         },
         false, // carry_state = false
         None,
