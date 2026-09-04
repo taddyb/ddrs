@@ -73,6 +73,30 @@ ddrs plan --config config/experiments/<x>.yaml \
 ```
 Exit 0, no drift warnings.
 
+## CI (added 2026-09-03)
+
+`.github/workflows/ci.yml`, on every PR and master push (no path filters:
+required checks must never be skipped): job `test` = debug
+`cargo test --features fixtures --no-fail-fast` (~12–17 min cold; warm is
+shorter); job `acceptance` = release `compare_ddr_sandbox` +
+`juniata_acceptance` (~25 min cold; warm is shorter). The acceptance job
+builds with `CARGO_PROFILE_RELEASE_LTO=false` (env override in the workflow
+only): the thin-LTO link of the test binary was 30 of 40 minutes on the
+2-core runner while the 30 training epochs took ~13 s, so the training is
+not the cost and the full metric floors are kept. Branch protection requires
+both; `enforce_admins` is off so admin direct pushes remain possible (vetted
+post-hoc by the push run).
+
+**What green CI does NOT prove:** `--features cuda` tests (compiled out),
+data-dependent tests (self-skip: no `/mnt/ssd1`/cluster data on runners),
+and anything in the do-not-use list. A data-touching change still needs the
+local tier gates.
+
+Both jobs install a CUDA toolkit only because compilation requires it
+(build-and-env.md). Local hook: `git config core.hooksPath .githooks`
+enables `.githooks/pre-push` (runs `ddr_sandbox_match`; bypass with
+`git push --no-verify`).
+
 ## What covers what
 
 | Area | Tests |

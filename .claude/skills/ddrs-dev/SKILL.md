@@ -112,6 +112,7 @@ Full commands and rationale in `references/testing.md`.
 | `src/nn/`, `Cargo.toml` rskan tag | **B** | 4-test KAN fixture sweep, then Tier A |
 | `src/config.rs`, `src/training/`, other `src/` | **C** | `cargo test --lib`, `cargo test`, `compare_ddr_sandbox` |
 | `config/**/*.yaml` only | **D** | `ddrs plan --config … --workspace …` exits 0, no drift |
+| `.github/workflows/ci.yml`, `.githooks/**` | — | push to a branch and let the PR run vet it; there is no local gate for workflow changes |
 | `examples/juniata/**` (bundle, config, README) | — | `cargo test --test juniata_bundle` (never skips — bundle is committed), `cargo test --release --test juniata_acceptance` (end-to-end metric floors), and `ddrs --config examples/juniata/ddrs.yaml plan` exits 0 from the repo root |
 | Plotting / analysis scripts only | — | no gate |
 | `epochs`, `learning_rate`, `batch_size`, loss weights within documented ranges | — | no gate |
@@ -130,6 +131,7 @@ ddrs plan                                           # GPU probe + smoke + baseli
 ddrs run --workflow train-and-test --backend cpu    # train then eval
 ddrs run --workflow train --backend cpu --max-mini-batches 2   # mechanics smoke
 ddrs show <run-id>; ddrs status; ddrs gc --keep 5 --keep-successful
+gh pr checks --watch                                # CI status for the current PR
 ```
 
 **`ddrs run --workflow eval` does not work** — it returns
