@@ -210,6 +210,18 @@ that experiment exists, add a datestamped section rather than creating a duplica
 Always document the **binary provenance** in a methods section — the 2026-07-01 2×2
 was invalidated by a stale binary and the manifest did not reveal it.
 
+## Adjoint influence map — PoC only (2026-09-04), one pair, one seed
+
+`docs/2026-09-04-adjoint-influence-poc-findings.md`. Juniata 01563500 → 01567000,
+five tau=9 arms (epoch_30_mb_1). Kernel-weighted mean lag for reaches > 280 km
+upstream at low flow: dhbv2-lumped 17.0 d, daily-lstm 13.6, uh-retro 9.1,
+hourly-lstm 8.5, dhbv2-dist 7.4 (effective celerity 0.21–0.47 m/s) — the arms
+learned different travel times on the same network. Volume sensitivity median
+1.010–1.035 in every arm (transfer of upstream-gauge bias ≈1.00–1.03).
+dhbv2-lumped has a 12-reach tributary cluster with volume sensitivity ≤ 0.35
+(not at the inflow clamp floor) — hypothesis: clamped negative solves, unverified.
+**Do not cite as a population result**; no replicate seed, no GAGES-II selection.
+
 ## Open, not closed
 
 - **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30

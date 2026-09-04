@@ -131,6 +131,7 @@ ddrs plan                                           # GPU probe + smoke + baseli
 ddrs run --workflow train-and-test --backend cpu    # train then eval
 ddrs run --workflow train --backend cpu --max-mini-batches 2   # mechanics smoke
 ddrs show <run-id>; ddrs status; ddrs gc --keep 5 --keep-successful
+ddrs --workspace .ddrs experiment adjoint --backend cpu   # paper study over trained runs (see below)
 gh pr checks --watch                                # CI status for the current PR
 ```
 
@@ -154,6 +155,31 @@ warm start: no <path>.mpk — Adam starts cold
 ```
 
 There is no `"precip loading"` string — two retired skills told you to grep for it.
+
+## `ddrs experiment <name>` — paper studies over trained runs (2026-09-04)
+
+A study is a checked-in bundle `experiments/<name>/experiment.yaml` (arms as
+**run ids** under `.ddrs/runs/`, plus study parameters) and a Rust module under
+`src/experiment/`. Arms resolve to the run's `config.yaml` snapshot and its
+latest `checkpoints/epoch_E_mb_M/` (max by `(E, M)`; flat `.mpk` refused).
+Output: `.ddrs/experiments/<name>/<UTC ts>/` with `manifest.json`, `run.log`,
+per-arm outputs, and `figures/` from the bundle's `plots.py`. Training,
+baselines, and `status`/`gc` are deliberately not integrated. Spec:
+`docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+
+**`adjoint`** (the only study so far): gradient of routed gauge discharge w.r.t.
+hourly lateral inflow at every upstream reach — read from the existing routing
+backward by lifting the inflow tensor as a `require_grad` leaf
+(`src/experiment/adjoint/influence.rs`; no `Backward` impl touched, Tier C).
+Three functionals: kernel `dQ_g(t0)/dq'` at high/low anchors, volume
+`d[ΣQ_g]/dq'` (≈1 by mass conservation, the sanity gate), squared-error
+sensitivity `d[mean(Q̄−obs)²]/dq'` (NOT the signed mean residual — its gradient
+is independent of the observations). A finite-difference gate runs first and
+aborts on > 5 % relative error. PoC on the Juniata pair 01563500 → 01567000:
+gate 0.1–0.9 %, ~15 s per gauge-arm for daily stores (56 s hourly-lstm), 9
+backwards per gauge-arm. Findings: `docs/2026-09-04-adjoint-influence-poc-findings.md`.
+Gates: `cargo test --release --test adjoint_influence`, `cargo test --lib experiment`.
+Figures: `~/projects/ddr/.venv/bin/python experiments/adjoint/plots.py <out dir>`.
 
 ## Juniata single-catchment sample (`examples/juniata/`)
 
