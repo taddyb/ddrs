@@ -11,6 +11,7 @@ pub mod cuda_graph;
 pub mod data;
 pub mod dump_parameters;
 pub mod error;
+pub mod experiment;
 pub mod geometry;
 pub mod nn;
 pub mod pretrain;

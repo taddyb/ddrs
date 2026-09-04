@@ -1,6 +1,8 @@
 # `ddrs experiment adjoint` — Implementation Plan (PoC on the Juniata pair)
 
 **Spec:** `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
+**Status (2026-09-04):** all nine tasks done; findings in `docs/2026-09-04-adjoint-influence-poc-findings.md`.
+
 **Goal:** one `ddrs experiment adjoint` invocation on the pair
 01563500 → 01567000 across the five trained arms, producing the four figure
 families, with the finite-difference gate passing.

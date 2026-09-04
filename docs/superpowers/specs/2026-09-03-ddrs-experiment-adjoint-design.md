@@ -3,7 +3,11 @@
 **Date:** 2026-09-03
 **Status:** Sections 1–2 approved in brainstorming; sections 3–4 drafted for
 review. Proof of concept authorized on the Juniata pair before full review
-(user directive 2026-09-03, overnight).
+(user directive 2026-09-03, overnight) — **implemented**, see
+`docs/2026-09-04-adjoint-influence-poc-findings.md`. One correction from the
+PoC (§2.3): the residual functional is the **squared error**, not the mean
+signed residual — the latter is linear in the prediction, so the observations
+cancel out of its gradient.
 **Paper:** `~/papers/ddr_equifinality/paper.tex` (AGU H069 abstract;
 "Revisiting Beven's Equifinality and Uncertainty Thesis").
 **Related:** `docs/superpowers/specs/2026-08-06-ddr-equifinality-paper-scope-design.md`,
@@ -155,7 +159,7 @@ The gradient parents already exist (`TimestepOp` parent 5 at
 |---|---|---|---|---|
 | **kernel** | `Q_g(t0)`, `t0` = noon of the anchor day | one per anchor: `window_days` ending 7 days after the anchor | `kernel(anchor, reach, lag_day)` = Σ over the 24 source hours at that daily lag, lag 0..`lag_days` | `kernel_hourly(anchor, lag_hour)` = Σ over reaches, lag 0..`24·lag_days`; `anchor_date`, `anchor_obs` |
 | **volume** | `Σ_{t ≥ warmup} Q_g(t)` | 1 fixed (first seasonal window) | `volume_sens(reach)` = mean over source hours in `[warmup·24, T − 7·24)` (tail dropped: truncation) | `volume_profile(hour)` = mean over reaches |
-| **residual** | `mean_{valid days d ≥ warmup} (Q̄_g(d) − obs(d))`, `Q̄` via `tau_trim_and_downsample(cfg.params.tau)`, obs day `d` ↔ pooled day `d` (2026-08-08 convention) | 4 seasonal windows of the configured water year (starts +0, +92, +182, +273 days from Oct 1) | `residual_attr(reach)` = mean over windows of the time-mean signed sensitivity over `[warmup·24, T − 7·24)` | `residual_gauge_mean(window)`, `residual_n_valid(window)` |
+| **residual** | `mean_{valid days d ≥ warmup} (Q̄_g(d) − obs(d))²`, `Q̄` via `tau_trim_and_downsample(cfg.params.tau)`, obs day `d` ↔ pooled day `d` (2026-08-08 convention). Gradient `(2/n)Σ_d (Q̄_d − obs_d)·dQ̄_d/dq'`; positive ⇒ the reach's inflow arrives when the gauge over-predicts | 4 seasonal windows of the configured water year (starts +0, +92, +182, +273 days from Oct 1) | `residual_attr(reach)` = mean over windows of the time-mean sensitivity over `[warmup·24, T − 7·24)` | `residual_gauge_mean(window)`, `residual_gauge_mse(window)`, `residual_n_valid(window)` |
 
 **Anchors** are chosen from the gauge's observed series over the eval axis:
 the `high` highest and `low` lowest strictly-positive valid days, each at

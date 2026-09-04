@@ -121,6 +121,22 @@ enum Cmd {
         /// Print the summary as JSON.
         #[arg(long)] json: bool,
     },
+    /// Run a paper study from a checked-in bundle (experiments/<name>/) over
+    /// already-trained runs. Writes .ddrs/experiments/<name>/<UTC ts>/.
+    Experiment {
+        /// Bundle name under experiments/ (also the study output folder name).
+        name: String,
+        /// Bundle directory override (default: experiments/<name>).
+        #[arg(long)] bundle: Option<PathBuf>,
+        /// Backend: "cpu" (default; NdArray, deterministic) or "cuda".
+        #[arg(long, default_value = "cpu")] backend: String,
+        /// Comma-separated subset of arm names from experiment.yaml.
+        #[arg(long, value_delimiter = ',')] arms: Option<Vec<String>>,
+        /// Stop after this many gauges (smoke runs).
+        #[arg(long)] max_gauges: Option<usize>,
+        /// Skip the finite-difference gate (reruns only).
+        #[arg(long)] skip_validate: bool,
+    },
     /// Delete old run directories from .ddrs/runs/.
     Gc {
         /// Keep the N most recent runs.
@@ -227,6 +243,19 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 backend,
             })?;
             eprintln!("run complete → {}", run_dir.display());
+            Ok(())
+        }
+        Cmd::Experiment { name, bundle, backend, arms, max_gauges, skip_validate } => {
+            let dir = ddrs::cli::experiment::run_experiment(ddrs::cli::experiment::ExperimentInput {
+                workspace: Workspace::with_root(ws.root()),
+                name,
+                bundle,
+                backend,
+                arms,
+                max_gauges,
+                skip_validate,
+            })?;
+            eprintln!("experiment complete → {}", dir.display());
             Ok(())
         }
         Cmd::Show { run_id, json } => ddrs::cli::show::run_show(&ws, &run_id, json),
