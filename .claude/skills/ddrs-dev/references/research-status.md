@@ -210,17 +210,40 @@ that experiment exists, add a datestamped section rather than creating a duplica
 Always document the **binary provenance** in a methods section — the 2026-07-01 2×2
 was invalidated by a stale binary and the manifest did not reveal it.
 
-## Adjoint influence map — PoC only (2026-09-04), one pair, one seed
+## Adjoint influence map — pair PoC (2026-09-04) + 41-gauge nested-reference population (2026-09-05), one seed
 
-`docs/2026-09-04-adjoint-influence-poc-findings.md`. Juniata 01563500 → 01567000,
-five tau=9 arms (epoch_30_mb_1). Kernel-weighted mean lag for reaches > 280 km
-upstream at low flow: dhbv2-lumped 17.0 d, daily-lstm 13.6, uh-retro 9.1,
-hourly-lstm 8.5, dhbv2-dist 7.4 (effective celerity 0.21–0.47 m/s) — the arms
-learned different travel times on the same network. Volume sensitivity median
-1.010–1.035 in every arm (transfer of upstream-gauge bias ≈1.00–1.03).
-dhbv2-lumped has a 12-reach tributary cluster with volume sensitivity ≤ 0.35
-(not at the inflow clamp floor) — hypothesis: clamped negative solves, unverified.
-**Do not cite as a population result**; no replicate seed, no GAGES-II selection.
+Authority: `docs/2026-09-05-adjoint-influence-conus-findings.md` (population) and
+`docs/2026-09-04-adjoint-influence-poc-findings.md` (Juniata pair, with the
+dhbv2-dist correction). Handoff + tables:
+`.ddrs/experiments/adjoint-conus/2026-09-05T16-28-57Z/figures/{HANDOFF,STATS,README}.md`.
+
+Five tau=9 arms (daily-lstm, hourly-lstm, uh-retro, dhbv2-lumped, dhbv2-dist
+= run 2026-08-09T03-05-54Z; all `epoch_30_mb_1`, all trained on
+`gages_2000_area_balanced.csv`), 20 GAGES-II Ref downstream gauges with nested
+training gauges + 21 upstream partners. Finite-difference gate passed in every
+arm (max rel. err 0.02–0.17 %).
+
+- **Celerity is inflow-source dependent, ordered, and scale dependent.** Per-gauge
+  max/min cross-arm celerity ratio: median 2.16 (low flow), 2.32 (high). dhbv2-lumped
+  slowest at 26/38 gauges; dhbv2-dist fastest at 19/38 (low) and 26/38 (high). Ratio
+  1.25 in the 520-reach basin 06452000, > 3.3 in 8–48-reach subgraphs. Within-arm
+  gauge-to-gauge spread (IQR factor 2–3) exceeds the between-arm spread.
+- **Volume bias transfers with coefficient 1.00** (median, every arm). Downstream
+  bias is mostly local: inherited share median 0.27–0.39 (the Juniata LSTM arms'
+  ~0.9 is not typical). Downstream bias sign follows the product: dhbv2-dist
+  over-predicts at 14/20 gauges, dhbv2-lumped under-predicts at 13/20.
+- **Volume-functional truncation.** Most reaches with volume sensitivity < 0.5 are
+  far (median 243–334 km, low-flow lag 15–22 d) — the 90-day / 7-day-tail window
+  truncates them; Spearman(volume_sens, distance) −0.45 to −0.61. Do NOT read low
+  volume sensitivity as mass loss without the T10 truncation check. Genuine
+  unexplained mass loss (lag < 3 d, inflow above floor): 13–69 reaches per arm
+  (~1–2 %), clustered in Northern Plains basins 06354000/06447000/06353000; clamped
+  negative solves are the candidate mechanism, unverified.
+- **Do-not-use:** the PoC's "dhbv2-lumped destroys mass in a 12-reach tributary" as
+  a general claim (the population shows this is rare and regional); the Juniata
+  0.21–0.47 m/s celerity range as a population number (use the ratios above);
+  any of these as established until a replicate seed exists (**INCONCLUSIVE
+  pending seed**).
 
 ## Open, not closed
 
