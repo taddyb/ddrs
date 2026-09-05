@@ -4,6 +4,7 @@
 //! Spec: `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md` §2.
 
 pub mod gauges;
+pub mod hydraulics;
 pub mod influence;
 pub mod output;
 pub mod validate;
@@ -23,7 +24,8 @@ use crate::data::ids::Staid;
 use self::gauges::{gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use self::influence::{column_means, dist_to_gauge, inflow_gradient, InfluenceContext};
 use self::output::{append_summary, write_gauge_netcdf, AnchorRecord, GaugeResult, WindowRecord};
-use self::validate::{finite_difference_gate, GateInputs, ValidationResult};
+use self::hydraulics::{mean_reach_k_hours, path_travel_time_hours, reach_k_hours};
+use self::validate::{finite_difference_gate, full_map_gate, write_full_map_csv, FullMapInputs, FullMapResult, GateInputs, ValidationResult};
 use super::{BoxError, ExperimentManifest, ResolvedArm};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -47,7 +49,39 @@ pub struct AdjointSpec {
     pub fd_perturb_fraction: f32,
     #[serde(default = "d_fd_tol")]
     pub fd_rel_tol: f32,
+    /// Optional full-map finite-difference validation (check 1).
+    #[serde(default)]
+    pub validation: Option<FullMapSpec>,
 }
+
+/// Central-difference check of the kernel at every `reach_stride`-th reach and
+/// each of `lags_hours`, on the first high-flow and first low-flow anchor of
+/// every gauge. Pass: `pass_fraction` of checks within `rel_tol` or `abs_tol`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FullMapSpec {
+    #[serde(default = "d_stride")]
+    pub reach_stride: usize,
+    #[serde(default = "d_lags")]
+    pub lags_hours: Vec<usize>,
+    #[serde(default = "d_fm_frac")]
+    pub perturb_fraction: f32,
+    #[serde(default = "d_fm_rel")]
+    pub rel_tol: f32,
+    #[serde(default = "d_fm_abs")]
+    pub abs_tol: f32,
+    #[serde(default = "d_fm_pass")]
+    pub pass_fraction: f32,
+    /// δ sweep (fractions of mean inflow) applied to failing entries.
+    #[serde(default = "d_fm_sweep")]
+    pub delta_sweep: Vec<f32>,
+}
+fn d_fm_sweep() -> Vec<f32> { vec![0.02, 0.05, 0.1, 0.2, 0.5, 1.0] }
+fn d_stride() -> usize { 10 }
+fn d_lags() -> Vec<usize> { vec![6, 48, 240] }
+fn d_fm_frac() -> f32 { 0.1 }
+fn d_fm_rel() -> f32 { 0.02 }
+fn d_fm_abs() -> f32 { 1e-4 }
+fn d_fm_pass() -> f32 { 0.95 }
 
 fn d_window_days() -> usize { 90 }
 fn d_lag_days() -> usize { 30 }
@@ -186,6 +220,7 @@ struct ArmReport {
     name: String,
     notes: Vec<String>,
     validation: Option<ValidationResult>,
+    full_maps: Vec<FullMapResult>,
     n_done: usize,
     secs: f32,
 }
@@ -306,6 +341,9 @@ where
         if let Some(v) = r.validation {
             validations.push(serde_json::to_value(v)?);
         }
+        for fm in r.full_maps {
+            validations.push(serde_json::to_value(fm)?);
+        }
     }
     if !validations.is_empty() {
         manifest.validation = Some(serde_json::Value::Array(validations));
@@ -333,13 +371,18 @@ where
     let seasonal = seasonal_window_starts(&ctx.axis, adjoint.water_year, adjoint.window_days)?;
     let mut notes = Vec::new();
     let mut validation: Option<ValidationResult> = None;
+    let mut full_maps: Vec<FullMapResult> = Vec::new();
     let mut n_done = 0;
     let mut validate_pending = !opts.skip_validate;
+    if adjoint.validation.is_some() {
+        std::fs::create_dir_all(arm_dir.join("validation"))?;
+    }
     for (gi, g) in gauges.iter().enumerate() {
         let t_g = Instant::now();
         match run_gauge::<I>(&ctx, adjoint, arm, g, &arm_dir, &seasonal, validate_pending) {
-            Ok((vr, gauge_notes)) => {
+            Ok((vr, gauge_notes, fms)) => {
                 notes.extend(gauge_notes);
+                full_maps.extend(fms);
                 if let Some(v) = vr {
                     if !v.passed {
                         return Err(format!(
@@ -372,7 +415,7 @@ where
             }
         }
     }
-    Ok(ArmReport { name: arm.name.clone(), notes, validation, n_done, secs: t_arm.elapsed().as_secs_f32() })
+    Ok(ArmReport { name: arm.name.clone(), notes, validation, full_maps, n_done, secs: t_arm.elapsed().as_secs_f32() })
 }
 
 /// One gauge under one arm: all functionals, netCDF + summary row.
@@ -384,12 +427,14 @@ fn run_gauge<I: Backend + 'static>(
     arm_dir: &Path,
     seasonal: &[(usize, NaiveDate)],
     validate: bool,
-) -> Result<(Option<ValidationResult>, Vec<String>), BoxError>
+) -> Result<(Option<ValidationResult>, Vec<String>, Vec<FullMapResult>), BoxError>
 where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
     let device = &ctx.device;
+    let mut full_maps: Vec<FullMapResult> = Vec::new();
+    let mut full_map_done: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
     let n_hourly = (adjoint.window_days - 1) * 24;
     let anchor_offset = adjoint.window_days - 1 - adjoint.tail_days;
     let t0 = anchor_offset * 24 + 12;
@@ -441,6 +486,51 @@ where
             r.kernel_mass.push(mass);
             r.kernel_mean_lag_days.push(mean_lag);
             r.q_prime_mean_by_anchor.push(column_means(&q_hourly, grad.t, grad.n));
+            // Check 2: hydraulic travel time Σ K = Σ L/c along the path, from
+            // the trained geometry at (a) the anchor hour and (b) the mean over
+            // the lag horizon, in days.
+            {
+                let lag_from = t0.saturating_sub(24 * adjoint.lag_days);
+                let k_mean = mean_reach_k_hours::<I>(&ctx.cfg, &lf.n_phys, &lf.p_phys, &lf.q_phys, &lf.runoff_inner, &lf.slope, &lf.length, lag_from, t0 + 1);
+                let n_reach = grad.n;
+                let q_t0 = lf.runoff_inner.clone().slice([0..n_reach, t0..t0 + 1]).reshape([n_reach]);
+                let k_t0 = reach_k_hours::<I>(&ctx.cfg, &lf.n_phys, &lf.p_phys, &lf.q_phys, q_t0, &lf.slope, &lf.length);
+                let path_mean = path_travel_time_hours(&adjacency, gauge_row, &k_mean);
+                let path_t0 = path_travel_time_hours(&adjacency, gauge_row, &k_t0);
+                r.hydraulic_lag_days.push(path_mean.iter().map(|h| h / 24.0).collect());
+                r.hydraulic_lag_t0_days.push(path_t0.iter().map(|h| h / 24.0).collect());
+            }
+            // Check 1: full-map central finite differences, once per anchor kind.
+            if let Some(fm) = adjoint.validation.as_ref() {
+                if !full_map_done.contains(kind) {
+                    let res = full_map_gate::<I>(
+                        ctx,
+                        &tensors,
+                        FullMapInputs {
+                            arm: &arm.name,
+                            staid: &g.staid,
+                            comids: &comids,
+                            anchor_day_idx: day,
+                            anchor_kind: kind,
+                            t0,
+                            base_q_t0: series[t0],
+                            grad: &grad,
+                            q_hourly: &q_hourly,
+                            dist_to_gauge_m: &dist,
+                            reach_stride: fm.reach_stride,
+                            lags_hours: &fm.lags_hours,
+                            perturb_fraction: fm.perturb_fraction,
+                            rel_tol: fm.rel_tol,
+                            abs_tol: fm.abs_tol,
+                            pass_fraction: fm.pass_fraction,
+                            delta_sweep: &fm.delta_sweep,
+                        },
+                    )?;
+                    write_full_map_csv(&arm_dir.join("validation").join(format!("{}_{}_day{}.csv", g.staid, kind, day)), &res)?;
+                    full_maps.push(res);
+                    full_map_done.insert(kind);
+                }
+            }
             r.anchors.push(AnchorRecord {
                 day_idx: day,
                 date: ctx.axis.start + Duration::days(day as i64),
@@ -561,7 +651,7 @@ where
         }
         None => notes.push(format!("{}/{}: nothing computed", arm.name, g.staid)),
     }
-    Ok((validation, notes))
+    Ok((validation, notes, full_maps))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -595,6 +685,8 @@ fn new_result<I: Backend>(
         kernel_mass: vec![],
         kernel_mean_lag_days: vec![],
         q_prime_mean_by_anchor: vec![],
+        hydraulic_lag_days: vec![],
+        hydraulic_lag_t0_days: vec![],
         volume_window_start_day: None,
         volume_sens: vec![],
         volume_profile: vec![],

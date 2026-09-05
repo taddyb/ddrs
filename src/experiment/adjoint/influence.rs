@@ -151,6 +151,7 @@ where
         let n_param = detach(params_map.get("n").expect("KAN head missing n").clone());
         let q_param = detach(params_map.get("q_spatial").expect("KAN head missing q_spatial").clone());
         let p_param = params_map.get("p_spatial").cloned().map(detach);
+        let (n_param_keep, q_param_keep, p_param_keep) = (n_param.clone(), q_param.clone(), p_param.clone());
         let x_storage: Tensor<AD<I>, 1> = match params_map.get("x_storage") {
             Some(x) => denormalize(
                 detach(x.clone()),
@@ -189,13 +190,30 @@ where
             None,
         );
         let runoff = engine.forward(); // (N, T)
+        let runoff_inner = runoff.clone().inner();
         let gauge_series = scatter_add_by_group(
             runoff,
             tensors.flat_indices.clone(),
             tensors.group_ids.clone(),
             tensors.num_gauges,
         ); // (1, T)
-        LeafForward { q_leaf, gauge_series, q_hourly_inner }
+        // Physical (denormalized) parameters and clamped slope, as the engine
+        // uses them, for hydraulic travel-time checks.
+        let ranges = &self.cfg.params.parameter_ranges;
+        let log = &self.cfg.params.log_space_parameters;
+        let n_phys = denormalize(n_param_keep, ranges.n, log.iter().any(|s| s == "n")).inner();
+        let q_phys = denormalize(q_param_keep, ranges.q_spatial, log.iter().any(|s| s == "q_spatial")).inner();
+        let p_phys = match p_param_keep {
+            Some(p) => denormalize(p, ranges.p_spatial, log.iter().any(|s| s == "p_spatial")).inner(),
+            None => {
+                let d = *self.cfg.params.defaults.get("p_spatial").unwrap_or(&21.0);
+                Tensor::<I, 1>::full([n_active], d, device)
+            }
+        };
+        let slope = Tensor::<I, 1>::from_floats(tensors.adjacency.slope.as_slice(), device)
+            .clamp_min(self.cfg.params.attribute_minimums.slope);
+        let length = Tensor::<I, 1>::from_floats(tensors.adjacency.length_m.as_slice(), device);
+        LeafForward { q_leaf, gauge_series, q_hourly_inner, runoff_inner, n_phys, p_phys, q_phys, slope, length }
     }
 
     /// Daily gauge series under the training convention (`tau` trim + pool).
@@ -211,6 +229,14 @@ pub struct LeafForward<I: Backend> {
     pub gauge_series: Tensor<AD<I>, 2>,
     /// `(T, N)` the inflow actually routed (post-disaggregation), no grad.
     pub q_hourly_inner: Tensor<I, 2>,
+    /// `(N, T)` routed discharge at every reach, no grad.
+    pub runoff_inner: Tensor<I, 2>,
+    /// Denormalized channel parameters and clamped slope / length (`N`).
+    pub n_phys: Tensor<I, 1>,
+    pub p_phys: Tensor<I, 1>,
+    pub q_phys: Tensor<I, 1>,
+    pub slope: Tensor<I, 1>,
+    pub length: Tensor<I, 1>,
 }
 
 /// Gradient of `scalar` (shape `[1]`) w.r.t. the inflow leaf, as a row-major

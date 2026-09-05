@@ -57,6 +57,12 @@ pub struct GaugeResult {
     /// reaches at the `discharge` clamp floor have a zero gradient by
     /// construction, so this is how to tell a dead reach from a dry one.
     pub q_prime_mean_by_anchor: Vec<Vec<f32>>,
+    /// `[anchor][reach]` path-sum of Muskingum K (window-mean over the lag
+    /// horizon) from reach to gauge, in days — the hydraulic travel time the
+    /// kernel mean lag should reproduce.
+    pub hydraulic_lag_days: Vec<Vec<f32>>,
+    /// `[anchor][reach]` same, evaluated at the anchor hour's discharge only.
+    pub hydraulic_lag_t0_days: Vec<Vec<f32>>,
     // volume
     pub volume_window_start_day: Option<usize>,
     pub volume_sens: Vec<f32>,
@@ -141,6 +147,12 @@ pub fn write_gauge_netcdf(path: &Path, r: &GaugeResult) -> Result<(), BoxError> 
         put_f32(&mut f, "kernel_mean_lag_days", &["anchor", "reach"], &flat, "kernel-weighted mean lag", "days")?;
         let flat: Vec<f32> = r.q_prime_mean_by_anchor.iter().flat_map(|a| a.iter().copied()).collect();
         put_f32(&mut f, "q_prime_mean_by_anchor", &["anchor", "reach"], &flat, "window-mean hourly lateral inflow in the anchor's window", "m3 s-1")?;
+        if !r.hydraulic_lag_days.is_empty() {
+            let flat: Vec<f32> = r.hydraulic_lag_days.iter().flat_map(|a| a.iter().copied()).collect();
+            put_f32(&mut f, "hydraulic_lag_days", &["anchor", "reach"], &flat, "path sum of Muskingum K = L/c from reach to gauge, mean over the lag horizon", "days")?;
+            let flat: Vec<f32> = r.hydraulic_lag_t0_days.iter().flat_map(|a| a.iter().copied()).collect();
+            put_f32(&mut f, "hydraulic_lag_t0_days", &["anchor", "reach"], &flat, "path sum of Muskingum K = L/c from reach to gauge at the anchor hour", "days")?;
+        }
         let days: Vec<i32> = r.anchors.iter().map(|a| a.day_idx as i32).collect();
         put_i32(&mut f, "anchor_day_idx", &["anchor"], &days, "anchor day index on the eval axis")?;
         let epoch: Vec<i32> = r
