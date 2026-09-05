@@ -3,12 +3,12 @@
 //!
 //! Spec: `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md` §2.
 
+pub mod gauges;
 pub mod influence;
 pub mod output;
 pub mod validate;
 
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use burn::backend::Autodiff;
@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use crate::data::dates::TimeAxis;
 use crate::data::ids::Staid;
 
+use self::gauges::{gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use self::influence::{column_means, dist_to_gauge, inflow_gradient, InfluenceContext};
 use self::output::{append_summary, write_gauge_netcdf, AnchorRecord, GaugeResult, WindowRecord};
-use self::validate::{finite_difference_gate, GateInputs};
+use self::validate::{finite_difference_gate, GateInputs, ValidationResult};
 use super::{BoxError, ExperimentManifest, ResolvedArm};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -57,11 +58,29 @@ fn d_tail_days() -> usize { 7 }
 fn d_fd_fraction() -> f32 { 0.05 }
 fn d_fd_tol() -> f32 { 0.05 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum GaugeSource {
+    /// `pairs:` lists `[upstream, downstream]` staids explicitly.
+    #[default]
+    Explicit,
+    /// GAGES-II `Ref` downstream gauges with ≥1 nested training gauge
+    /// (spec §2.1); requires `gages_ii_dbf`.
+    NestedReference,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GaugeSpec {
-    /// `[upstream, downstream]` staid pairs. PoC scope; the GAGES-II
-    /// nested-reference selection is a follow-up.
+    #[serde(default)]
+    pub source: GaugeSource,
+    #[serde(default)]
     pub pairs: Vec<[String; 2]>,
+    /// GAGES-II point shapefile dbf (STAID, CLASS columns).
+    #[serde(default)]
+    pub gages_ii_dbf: Option<PathBuf>,
+    /// Cap on downstream gauges (sorted by staid) for smoke runs.
+    #[serde(default)]
+    pub max_downstream: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,46 +107,10 @@ pub struct AdjointOptions {
     pub max_gauges: Option<usize>,
     pub skip_validate: bool,
     pub force_cpu: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct GaugeEntry {
-    pub staid: String,
-    pub role: &'static str,
-    pub pair: usize,
-    pub upstream: Vec<String>,
-}
-
-/// Unique gauges from the pair list, upstream before downstream within a pair.
-pub fn gauge_list(spec: &AdjointSpec) -> Vec<GaugeEntry> {
-    let mut out: Vec<GaugeEntry> = Vec::new();
-    for (pi, [up, down]) in spec.gauges.pairs.iter().enumerate() {
-        if !out.iter().any(|g| &g.staid == up) {
-            out.push(GaugeEntry { staid: up.clone(), role: "upstream", pair: pi, upstream: vec![] });
-        }
-        match out.iter_mut().find(|g| &g.staid == down) {
-            Some(g) => {
-                g.role = "downstream";
-                g.upstream.push(up.clone());
-            }
-            None => out.push(GaugeEntry {
-                staid: down.clone(),
-                role: "downstream",
-                pair: pi,
-                upstream: vec![up.clone()],
-            }),
-        }
-    }
-    out
-}
-
-fn write_gauges_csv(path: &Path, gauges: &[GaugeEntry]) -> Result<(), BoxError> {
-    let mut w = std::fs::File::create(path)?;
-    writeln!(w, "staid,role,pair,upstream_staids")?;
-    for g in gauges {
-        writeln!(w, "{},{},{},{}", g.staid, g.role, g.pair, g.upstream.join(";"))?;
-    }
-    Ok(())
+    /// Arms run concurrently, one thread each, up to this many at a time.
+    pub jobs: usize,
+    /// Select gauges, write `gauges.csv`, and stop.
+    pub dry_run: bool,
 }
 
 /// Anchor days: the `n_high` highest and `n_low` lowest strictly-positive
@@ -198,6 +181,15 @@ pub fn seasonal_window_starts(
     Ok(out)
 }
 
+/// Per-arm report merged into the manifest after the threads join.
+struct ArmReport {
+    name: String,
+    notes: Vec<String>,
+    validation: Option<ValidationResult>,
+    n_done: usize,
+    secs: f32,
+}
+
 pub fn run_adjoint<I: Backend + 'static>(
     adjoint: &AdjointSpec,
     arms: &[ResolvedArm],
@@ -208,248 +200,351 @@ pub fn run_adjoint<I: Backend + 'static>(
 ) -> Result<(), BoxError>
 where
     I::FloatTensorPrimitive: 'static,
-    I::Device: 'static,
+    I::Device: 'static + Send + Sync,
 {
     if adjoint.window_days < adjoint.tail_days + 2 {
         return Err("adjoint.window_days must exceed tail_days + 1".into());
     }
-    if 24 * adjoint.lag_days > (adjoint.window_days - 1 - adjoint.tail_days) * 24 {
+    if adjoint.lag_days > adjoint.window_days - 1 - adjoint.tail_days {
         return Err("adjoint.lag_days must fit before the anchor: lag_days <= window_days - 1 - tail_days".into());
     }
-    let mut gauges = gauge_list(adjoint);
+    if arms.is_empty() {
+        return Err("no arms selected".into());
+    }
+
+    // ---- population (from the first arm's dataset; all arms share the gauge CSV) ----
+    let mut gauges: Vec<GaugeEntry> = match adjoint.gauges.source {
+        GaugeSource::Explicit => {
+            if adjoint.gauges.pairs.is_empty() {
+                return Err("adjoint.gauges.pairs is empty".into());
+            }
+            gauge_list_from_pairs(&adjoint.gauges.pairs)
+        }
+        GaugeSource::NestedReference => {
+            let dbf = adjoint
+                .gauges
+                .gages_ii_dbf
+                .as_ref()
+                .ok_or("gauges.source: nested-reference requires gauges.gages_ii_dbf")?;
+            let class = read_gages_ii_class(dbf)?;
+            println!("GAGES-II classes: {} gauges read from {}", class.len(), dbf.display());
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let list = nested_reference_selection(&ctx.dataset, &class, adjoint.gauges.max_downstream)?;
+            let n_down = list.iter().filter(|g| g.role == "downstream").count();
+            println!(
+                "nested-reference selection: {} downstream Ref gauges with nested training gauges, {} gauges total",
+                n_down,
+                list.len()
+            );
+            list
+        }
+    };
     if let Some(k) = opts.max_gauges {
         gauges.truncate(k);
     }
     write_gauges_csv(&out_dir.join("gauges.csv"), &gauges)?;
     println!(
-        "adjoint: {} arm(s), {} gauge(s), functionals {:?}, window {} d, lag {} d, anchors {}h/{}l",
+        "adjoint: {} arm(s), {} gauge(s), functionals {:?}, window {} d, lag {} d, anchors {}h/{}l, jobs {}",
         arms.len(),
         gauges.len(),
         adjoint.functionals,
         adjoint.window_days,
         adjoint.lag_days,
         adjoint.anchors.high,
-        adjoint.anchors.low
+        adjoint.anchors.low,
+        opts.jobs.max(1)
     );
+    if opts.dry_run {
+        println!("dry run: gauges.csv written, stopping");
+        return Ok(());
+    }
 
+    // ---- arms: one thread each, `jobs` at a time ----
+    let jobs = opts.jobs.max(1);
+    let mut reports: Vec<ArmReport> = Vec::new();
+    for chunk in arms.chunks(jobs) {
+        let chunk_reports: Vec<Result<ArmReport, BoxError>> = std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|arm| {
+                    let gauges = &gauges;
+                    let device = device.clone();
+                    s.spawn(move || run_arm::<I>(adjoint, arm, gauges, out_dir, opts, &device))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err("arm thread panicked".into())))
+                .collect()
+        });
+        for r in chunk_reports {
+            reports.push(r?);
+        }
+    }
+
+    let mut validations = Vec::new();
+    for r in reports {
+        println!("=== arm {} done: {} gauge(s) in {:.1} s ===", r.name, r.n_done, r.secs);
+        manifest.notes.extend(r.notes);
+        if let Some(v) = r.validation {
+            validations.push(serde_json::to_value(v)?);
+        }
+    }
+    if !validations.is_empty() {
+        manifest.validation = Some(serde_json::Value::Array(validations));
+    }
+    Ok(())
+}
+
+fn run_arm<I: Backend + 'static>(
+    adjoint: &AdjointSpec,
+    arm: &ResolvedArm,
+    gauges: &[GaugeEntry],
+    out_dir: &Path,
+    opts: &AdjointOptions,
+    device: &I::Device,
+) -> Result<ArmReport, BoxError>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let t_arm = Instant::now();
+    println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
+    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu)?;
+    let arm_dir = out_dir.join(&arm.name);
+    std::fs::create_dir_all(arm_dir.join("gauges"))?;
+    let seasonal = seasonal_window_starts(&ctx.axis, adjoint.water_year, adjoint.window_days)?;
+    let mut notes = Vec::new();
+    let mut validation: Option<ValidationResult> = None;
+    let mut n_done = 0;
+    let mut validate_pending = !opts.skip_validate;
+    for (gi, g) in gauges.iter().enumerate() {
+        let t_g = Instant::now();
+        match run_gauge::<I>(&ctx, adjoint, arm, g, &arm_dir, &seasonal, validate_pending) {
+            Ok((vr, gauge_notes)) => {
+                notes.extend(gauge_notes);
+                if let Some(v) = vr {
+                    if !v.passed {
+                        return Err(format!(
+                            "finite-difference gate FAILED on {}/{}: max rel_err {:.4} > tol {:.4}",
+                            arm.name,
+                            g.staid,
+                            v.checks.iter().map(|c| c.rel_err).fold(0.0f32, f32::max),
+                            v.tol
+                        )
+                        .into());
+                    }
+                    validation = Some(v);
+                    validate_pending = false;
+                }
+                n_done += 1;
+                println!(
+                    "  [{}] {} {} done in {:.1} s ({} of {})",
+                    arm.name,
+                    g.staid,
+                    g.role,
+                    t_g.elapsed().as_secs_f32(),
+                    gi + 1,
+                    gauges.len()
+                );
+            }
+            Err(e) => {
+                let msg = format!("{}/{}: FAILED — {e}", arm.name, g.staid);
+                eprintln!("  {msg}");
+                notes.push(msg);
+            }
+        }
+    }
+    Ok(ArmReport { name: arm.name.clone(), notes, validation, n_done, secs: t_arm.elapsed().as_secs_f32() })
+}
+
+/// One gauge under one arm: all functionals, netCDF + summary row.
+fn run_gauge<I: Backend + 'static>(
+    ctx: &InfluenceContext<I>,
+    adjoint: &AdjointSpec,
+    arm: &ResolvedArm,
+    g: &GaugeEntry,
+    arm_dir: &Path,
+    seasonal: &[(usize, NaiveDate)],
+    validate: bool,
+) -> Result<(Option<ValidationResult>, Vec<String>), BoxError>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let device = &ctx.device;
     let n_hourly = (adjoint.window_days - 1) * 24;
     let anchor_offset = adjoint.window_days - 1 - adjoint.tail_days;
     let t0 = anchor_offset * 24 + 12;
-    let mut validated = opts.skip_validate;
-
-    for arm in arms {
-        let t_arm = Instant::now();
-        println!("=== arm {} (run {}, checkpoint {}) ===", arm.name, arm.run_id, arm.checkpoint_label);
-        let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu)?;
-        let warm_h = ctx.warmup * 24;
-        let tail_h = adjoint.tail_days * 24;
-        let reduce_to = n_hourly - tail_h;
-        if warm_h >= reduce_to {
-            return Err("warmup + tail leave no source hours to reduce over".into());
-        }
-        let arm_dir = out_dir.join(&arm.name);
-        std::fs::create_dir_all(arm_dir.join("gauges"))?;
-        let seasonal = seasonal_window_starts(&ctx.axis, adjoint.water_year, adjoint.window_days)?;
-
-        for g in &gauges {
-            let t_g = Instant::now();
-            let staid = Staid::new(&g.staid);
-            let obs_full = ctx.gauge_observations(&staid)?;
-            let mut result: Option<GaugeResult> = None;
-
-            // ---------------- kernel ----------------
-            if adjoint.functionals.contains(&Functional::Kernel) {
-                let max_day = ctx.axis.num_days - 1 - adjoint.tail_days;
-                let picks = select_anchors(
-                    &obs_full,
-                    adjoint.anchors.high,
-                    adjoint.anchors.low,
-                    adjoint.anchor_min_gap_days,
-                    anchor_offset,
-                    max_day,
-                );
-                if picks.is_empty() {
-                    manifest.notes.push(format!("{}/{}: no valid anchor days", arm.name, g.staid));
-                }
-                for (day, obs, kind) in picks {
-                    let start = day - anchor_offset;
-                    let batch = ctx.collate_gauge(&staid, start, adjoint.window_days)?;
-                    let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
-                    let gauge_row = batch.outflow_idx[0][0];
-                    let adjacency = batch.adjacency.clone();
-                    let tensors = batch.to_tensors::<Autodiff<I>>(device);
-                    let lf = ctx.forward_with_inflow_leaf(&tensors, None);
-                    let series: Vec<f32> = lf.gauge_series.clone().inner().into_data().to_vec::<f32>().unwrap();
-                    let scalar = lf.gauge_series.clone().slice([0..1, t0..t0 + 1]).reshape([1]);
-                    let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
-                    let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
-                    let dist = dist_to_gauge(&adjacency, gauge_row);
-                    let r = result.get_or_insert_with(|| {
-                        new_result(arm, adjoint, &ctx, &g.staid, comids.clone(), dist.clone(), gauge_row, column_means(&q_hourly, grad.t, grad.n))
-                    });
-                    let (mass, mean_lag) = grad.kernel_moments(t0, adjoint.lag_days);
-                    r.kernel.push(grad.kernel_daily(t0, adjoint.lag_days));
-                    r.kernel_hourly.push(grad.kernel_hourly(t0, adjoint.lag_days));
-                    r.kernel_mass.push(mass);
-                    r.kernel_mean_lag_days.push(mean_lag);
-                    r.q_prime_mean_by_anchor.push(column_means(&q_hourly, grad.t, grad.n));
-                    r.anchors.push(AnchorRecord {
-                        day_idx: day,
-                        date: ctx.axis.start + Duration::days(day as i64),
-                        obs,
-                        kind: kind.to_string(),
-                        window_start_day: start,
-                        t0,
-                    });
-                    println!(
-                        "  {} {} kernel {kind:>4} anchor {} (obs {obs:.1}) Q(t0)={:.2} reaches {} mass@gauge {:.3}",
-                        arm.name,
-                        g.staid,
-                        ctx.axis.start + Duration::days(day as i64),
-                        series[t0],
-                        grad.n,
-                        r.kernel_mass.last().unwrap()[gauge_row]
-                    );
-                    if !validated {
-                        println!("  finite-difference gate on {}/{} anchor day {day} …", arm.name, g.staid);
-                        let vr = finite_difference_gate::<I>(
-                            &ctx,
-                            &tensors,
-                            GateInputs {
-                                arm: &arm.name,
-                                staid: &g.staid,
-                                comids: &comids,
-                                anchor_day_idx: day,
-                                t0,
-                                lag_days: adjoint.lag_days,
-                                grad: &grad,
-                                base_q_t0: series[t0],
-                                q_hourly: &q_hourly,
-                                dist_to_gauge_m: &dist,
-                                gauge_row,
-                                frac: adjoint.fd_perturb_fraction,
-                                tol: adjoint.fd_rel_tol,
-                            },
-                        )?;
-                        manifest.validation = Some(serde_json::to_value(&vr)?);
-                        validated = true;
-                        if !vr.passed {
-                            return Err(format!(
-                                "finite-difference gate FAILED on {}/{}: max rel_err {:.4} > tol {:.4}",
-                                arm.name,
-                                g.staid,
-                                vr.checks.iter().map(|c| c.rel_err).fold(0.0f32, f32::max),
-                                vr.tol
-                            )
-                            .into());
-                        }
-                        println!("  finite-difference gate PASSED");
-                    }
-                }
-            }
-
-            // ---------------- volume ----------------
-            if adjoint.functionals.contains(&Functional::Volume) {
-                let (start, _) = seasonal[0];
-                let batch = ctx.collate_gauge(&staid, start, adjoint.window_days)?;
-                let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
-                let gauge_row = batch.outflow_idx[0][0];
-                let adjacency = batch.adjacency.clone();
-                let tensors = batch.to_tensors::<Autodiff<I>>(device);
-                let lf = ctx.forward_with_inflow_leaf(&tensors, None);
-                let scalar = lf.gauge_series.clone().slice([0..1, warm_h..n_hourly]).sum();
-                let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
-                let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
-                let r = result.get_or_insert_with(|| {
-                    new_result(arm, adjoint, &ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, grad.t, grad.n))
-                });
-                r.volume_window_start_day = Some(start);
-                r.volume_sens = grad.time_mean(warm_h, reduce_to);
-                r.volume_profile = grad.reach_mean();
-                let med = median(&r.volume_sens);
-                println!("  {} {} volume: median sens {med:.4}, at gauge {:.4}", arm.name, g.staid, r.volume_sens[gauge_row]);
-            }
-
-            // ---------------- residual ----------------
-            if adjoint.functionals.contains(&Functional::Residual) {
-                for (start, date) in &seasonal {
-                    let batch = ctx.collate_gauge(&staid, *start, adjoint.window_days)?;
-                    let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
-                    let gauge_row = batch.outflow_idx[0][0];
-                    let adjacency = batch.adjacency.clone();
-                    let obs_win: Vec<f32> = batch.observations.column(0).to_vec();
-                    let tensors = batch.to_tensors::<Autodiff<I>>(device);
-                    let lf = ctx.forward_with_inflow_leaf(&tensors, None);
-                    let daily = ctx.daily(lf.gauge_series.clone());
-                    let n_days = daily.dims()[1];
-                    let daily_vals: Vec<f32> = daily.clone().inner().into_data().to_vec::<f32>().unwrap();
-                    let valid: Vec<usize> = (ctx.warmup..n_days)
-                        .filter(|&d| d < obs_win.len() && obs_win[d].is_finite() && obs_win[d] >= 0.0)
-                        .collect();
-                    let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
-                    let (t_h, n_r) = (lf.q_leaf.dims()[0], lf.q_leaf.dims()[1]);
-                    let r = result.get_or_insert_with(|| {
-                        new_result(arm, adjoint, &ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, t_h, n_r))
-                    });
-                    if valid.is_empty() {
-                        manifest.notes.push(format!("{}/{}: residual window {date} has no valid observations", arm.name, g.staid));
-                        r.residual_windows.push(WindowRecord { start_day: *start, start_date: *date, gauge_mean_residual: f32::NAN, gauge_mse: f32::NAN, n_valid: 0 });
-                        r.residual_attr_by_window.push(vec![f32::NAN; n_r]);
-                        continue;
-                    }
-                    // Squared-error functional: d[mean_valid (Qbar - obs)^2]/dq' =
-                    // (2/n) Σ_d (Qbar_d - obs_d) · dQbar_d/dq'. The observations enter
-                    // through the residual weights, so the gradient points at the
-                    // reaches whose inflow the gauge would "correct" (positive ⇒
-                    // this reach's water arrives when the gauge over-predicts).
-                    let mut w = vec![0.0f32; n_days];
-                    let mut obs_filled = vec![0.0f32; n_days];
-                    for &d in &valid {
-                        w[d] = 1.0 / valid.len() as f32;
-                        obs_filled[d] = obs_win[d];
-                    }
-                    let gauge_mean_residual: f32 =
-                        valid.iter().map(|&d| daily_vals[d] - obs_win[d]).sum::<f32>() / valid.len() as f32;
-                    let gauge_mse: f32 =
-                        valid.iter().map(|&d| (daily_vals[d] - obs_win[d]).powi(2)).sum::<f32>() / valid.len() as f32;
-                    let w_t = Tensor::<Autodiff<I>, 1>::from_floats(w.as_slice(), device).reshape([1, n_days]);
-                    let obs_t = Tensor::<Autodiff<I>, 1>::from_floats(obs_filled.as_slice(), device).reshape([1, n_days]);
-                    let scalar = ((daily - obs_t).powf_scalar(2.0) * w_t).sum();
-                    let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
-                    r.residual_attr_by_window.push(grad.time_mean(warm_h, reduce_to));
-                    r.residual_windows.push(WindowRecord {
-                        start_day: *start,
-                        start_date: *date,
-                        gauge_mean_residual,
-                        gauge_mse,
-                        n_valid: valid.len(),
-                    });
-                    println!(
-                        "  {} {} residual window {date}: mean(pred-obs) {gauge_mean_residual:+.3} m3/s, RMSE {:.3} over {} days",
-                        arm.name,
-                        g.staid,
-                        gauge_mse.sqrt(),
-                        valid.len()
-                    );
-                }
-                if let Some(r) = result.as_mut() {
-                    r.residual_attr = mean_over_windows(&r.residual_attr_by_window);
-                }
-            }
-
-            match result {
-                Some(r) => {
-                    let nc = arm_dir.join("gauges").join(format!("{}.nc", g.staid));
-                    write_gauge_netcdf(&nc, &r)?;
-                    append_summary(&arm_dir.join("summary.csv"), &r)?;
-                    println!("  {} {} done in {:.1} s → {}", arm.name, g.staid, t_g.elapsed().as_secs_f32(), nc.display());
-                }
-                None => manifest.notes.push(format!("{}/{}: nothing computed", arm.name, g.staid)),
-            }
-        }
-        println!("=== arm {} done in {:.1} s ===", arm.name, t_arm.elapsed().as_secs_f32());
+    let warm_h = ctx.warmup * 24;
+    let tail_h = adjoint.tail_days * 24;
+    let reduce_to = n_hourly - tail_h;
+    if warm_h >= reduce_to {
+        return Err("warmup + tail leave no source hours to reduce over".into());
     }
-    Ok(())
+    let staid = Staid::new(&g.staid);
+    let obs_full = ctx.gauge_observations(&staid)?;
+    let mut notes = Vec::new();
+    let mut validation = None;
+    let mut result: Option<GaugeResult> = None;
+
+    // ---------------- kernel ----------------
+    if adjoint.functionals.contains(&Functional::Kernel) {
+        let max_day = ctx.axis.num_days - 1 - adjoint.tail_days;
+        let picks = select_anchors(
+            &obs_full,
+            adjoint.anchors.high,
+            adjoint.anchors.low,
+            adjoint.anchor_min_gap_days,
+            anchor_offset,
+            max_day,
+        );
+        if picks.is_empty() {
+            notes.push(format!("{}/{}: no valid anchor days", arm.name, g.staid));
+        }
+        for (day, obs, kind) in picks {
+            let start = day - anchor_offset;
+            let batch = ctx.collate_gauge(&staid, start, adjoint.window_days)?;
+            let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
+            let gauge_row = batch.outflow_idx[0][0];
+            let adjacency = batch.adjacency.clone();
+            let tensors = batch.to_tensors::<Autodiff<I>>(device);
+            let lf = ctx.forward_with_inflow_leaf(&tensors, None);
+            let series: Vec<f32> = lf.gauge_series.clone().inner().into_data().to_vec::<f32>().unwrap();
+            let scalar = lf.gauge_series.clone().slice([0..1, t0..t0 + 1]).reshape([1]);
+            let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
+            let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
+            let dist = dist_to_gauge(&adjacency, gauge_row);
+            let r = result.get_or_insert_with(|| {
+                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist.clone(), gauge_row, column_means(&q_hourly, grad.t, grad.n))
+            });
+            let (mass, mean_lag) = grad.kernel_moments(t0, adjoint.lag_days);
+            r.kernel.push(grad.kernel_daily(t0, adjoint.lag_days));
+            r.kernel_hourly.push(grad.kernel_hourly(t0, adjoint.lag_days));
+            r.kernel_mass.push(mass);
+            r.kernel_mean_lag_days.push(mean_lag);
+            r.q_prime_mean_by_anchor.push(column_means(&q_hourly, grad.t, grad.n));
+            r.anchors.push(AnchorRecord {
+                day_idx: day,
+                date: ctx.axis.start + Duration::days(day as i64),
+                obs,
+                kind: kind.to_string(),
+                window_start_day: start,
+                t0,
+            });
+            if validate && validation.is_none() {
+                println!("  [{}] finite-difference gate on {} anchor day {day} …", arm.name, g.staid);
+                let vr = finite_difference_gate::<I>(
+                    ctx,
+                    &tensors,
+                    GateInputs {
+                        arm: &arm.name,
+                        staid: &g.staid,
+                        comids: &comids,
+                        anchor_day_idx: day,
+                        t0,
+                        lag_days: adjoint.lag_days,
+                        grad: &grad,
+                        base_q_t0: series[t0],
+                        q_hourly: &q_hourly,
+                        dist_to_gauge_m: &dist,
+                        gauge_row,
+                        frac: adjoint.fd_perturb_fraction,
+                        tol: adjoint.fd_rel_tol,
+                    },
+                )?;
+                println!("  [{}] finite-difference gate {}", arm.name, if vr.passed { "PASSED" } else { "FAILED" });
+                validation = Some(vr);
+            }
+        }
+    }
+
+    // ---------------- volume ----------------
+    if adjoint.functionals.contains(&Functional::Volume) {
+        let (start, _) = seasonal[0];
+        let batch = ctx.collate_gauge(&staid, start, adjoint.window_days)?;
+        let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
+        let gauge_row = batch.outflow_idx[0][0];
+        let adjacency = batch.adjacency.clone();
+        let tensors = batch.to_tensors::<Autodiff<I>>(device);
+        let lf = ctx.forward_with_inflow_leaf(&tensors, None);
+        let scalar = lf.gauge_series.clone().slice([0..1, warm_h..n_hourly]).sum();
+        let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
+        let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
+        let r = result.get_or_insert_with(|| {
+            new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, grad.t, grad.n))
+        });
+        r.volume_window_start_day = Some(start);
+        r.volume_sens = grad.time_mean(warm_h, reduce_to);
+        r.volume_profile = grad.reach_mean();
+    }
+
+    // ---------------- residual (squared error) ----------------
+    if adjoint.functionals.contains(&Functional::Residual) {
+        for (start, date) in seasonal {
+            let batch = ctx.collate_gauge(&staid, *start, adjoint.window_days)?;
+            let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
+            let gauge_row = batch.outflow_idx[0][0];
+            let adjacency = batch.adjacency.clone();
+            let obs_win: Vec<f32> = batch.observations.column(0).to_vec();
+            let tensors = batch.to_tensors::<Autodiff<I>>(device);
+            let lf = ctx.forward_with_inflow_leaf(&tensors, None);
+            let daily = ctx.daily(lf.gauge_series.clone());
+            let n_days = daily.dims()[1];
+            let daily_vals: Vec<f32> = daily.clone().inner().into_data().to_vec::<f32>().unwrap();
+            let valid: Vec<usize> = (ctx.warmup..n_days)
+                .filter(|&d| d < obs_win.len() && obs_win[d].is_finite() && obs_win[d] >= 0.0)
+                .collect();
+            let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
+            let (t_h, n_r) = (lf.q_leaf.dims()[0], lf.q_leaf.dims()[1]);
+            let r = result.get_or_insert_with(|| {
+                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, t_h, n_r))
+            });
+            if valid.is_empty() {
+                notes.push(format!("{}/{}: residual window {date} has no valid observations", arm.name, g.staid));
+                r.residual_windows.push(WindowRecord { start_day: *start, start_date: *date, gauge_mean_residual: f32::NAN, gauge_mse: f32::NAN, n_valid: 0 });
+                r.residual_attr_by_window.push(vec![f32::NAN; n_r]);
+                continue;
+            }
+            // d[mean_valid (Qbar - obs)^2]/dq' = (2/n) Σ_d (Qbar_d - obs_d) · dQbar_d/dq'.
+            // Positive ⇒ this reach's water arrives when the gauge over-predicts.
+            let mut w = vec![0.0f32; n_days];
+            let mut obs_filled = vec![0.0f32; n_days];
+            for &d in &valid {
+                w[d] = 1.0 / valid.len() as f32;
+                obs_filled[d] = obs_win[d];
+            }
+            let gauge_mean_residual: f32 =
+                valid.iter().map(|&d| daily_vals[d] - obs_win[d]).sum::<f32>() / valid.len() as f32;
+            let gauge_mse: f32 =
+                valid.iter().map(|&d| (daily_vals[d] - obs_win[d]).powi(2)).sum::<f32>() / valid.len() as f32;
+            let w_t = Tensor::<Autodiff<I>, 1>::from_floats(w.as_slice(), device).reshape([1, n_days]);
+            let obs_t = Tensor::<Autodiff<I>, 1>::from_floats(obs_filled.as_slice(), device).reshape([1, n_days]);
+            let scalar = ((daily - obs_t).powf_scalar(2.0) * w_t).sum();
+            let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
+            r.residual_attr_by_window.push(grad.time_mean(warm_h, reduce_to));
+            r.residual_windows.push(WindowRecord {
+                start_day: *start,
+                start_date: *date,
+                gauge_mean_residual,
+                gauge_mse,
+                n_valid: valid.len(),
+            });
+        }
+        if let Some(r) = result.as_mut() {
+            r.residual_attr = mean_over_windows(&r.residual_attr_by_window);
+        }
+    }
+
+    match result {
+        Some(r) => {
+            let nc = arm_dir.join("gauges").join(format!("{}.nc", g.staid));
+            write_gauge_netcdf(&nc, &r)?;
+            append_summary(&arm_dir.join("summary.csv"), &r)?;
+        }
+        None => notes.push(format!("{}/{}: nothing computed", arm.name, g.staid)),
+    }
+    Ok((validation, notes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -505,15 +600,6 @@ fn mean_over_windows(rows: &[Vec<f32>]) -> Vec<f32> {
         .collect()
 }
 
-fn median(v: &[f32]) -> f32 {
-    let mut s: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
-    if s.is_empty() {
-        return f32::NAN;
-    }
-    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    s[s.len() / 2]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,29 +617,18 @@ mod tests {
         assert_eq!(a.len(), 3);
         assert_eq!(a[0], (100, 100.0, "high"));
         assert_eq!(a[1], (300, 80.0, "high"));
-        // low: day 50 is below min_day 82 → the next lowest far from 100/300 is any 1.0 day ≥ 82 with gap ≥ 60
         assert_eq!(a[2].2, "low");
         assert!(a[2].0 >= 82 && (a[2].0 as i64 - 100).abs() >= 60 && (a[2].0 as i64 - 300).abs() >= 60);
     }
 
     #[test]
-    fn gauge_list_marks_roles() {
-        let spec = AdjointSpec {
-            gauges: GaugeSpec { pairs: vec![["A".into(), "B".into()], ["B".into(), "C".into()]] },
-            window_days: 90,
-            anchors: AnchorSpec::default(),
-            lag_days: 30,
-            water_year: 2000,
-            functionals: d_functionals(),
-            anchor_min_gap_days: 60,
-            tail_days: 7,
-            fd_perturb_fraction: 0.05,
-            fd_rel_tol: 0.05,
-        };
-        let g = gauge_list(&spec);
-        assert_eq!(g.iter().map(|x| x.staid.as_str()).collect::<Vec<_>>(), vec!["A", "B", "C"]);
-        assert_eq!(g[1].role, "downstream");
-        assert_eq!(g[1].upstream, vec!["A".to_string()]);
-        assert_eq!(g[2].upstream, vec!["B".to_string()]);
+    fn gauge_spec_defaults_to_explicit() {
+        let y = "gauges:\n  pairs: [[\"A\", \"B\"]]\n";
+        let s: AdjointSpec = serde_yaml::from_str(y).unwrap();
+        assert_eq!(s.gauges.source, GaugeSource::Explicit);
+        assert_eq!(s.window_days, 90);
+        let y2 = "gauges:\n  source: nested-reference\n  gages_ii_dbf: /tmp/x.dbf\n";
+        let s2: AdjointSpec = serde_yaml::from_str(y2).unwrap();
+        assert_eq!(s2.gauges.source, GaugeSource::NestedReference);
     }
 }

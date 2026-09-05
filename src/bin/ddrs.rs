@@ -136,6 +136,10 @@ enum Cmd {
         #[arg(long)] max_gauges: Option<usize>,
         /// Skip the finite-difference gate (reruns only).
         #[arg(long)] skip_validate: bool,
+        /// Run this many arms concurrently (default: all selected arms).
+        #[arg(long)] jobs: Option<usize>,
+        /// Select gauges, write gauges.csv, and stop.
+        #[arg(long)] dry_run: bool,
     },
     /// Delete old run directories from .ddrs/runs/.
     Gc {
@@ -245,7 +249,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             eprintln!("run complete → {}", run_dir.display());
             Ok(())
         }
-        Cmd::Experiment { name, bundle, backend, arms, max_gauges, skip_validate } => {
+        Cmd::Experiment { name, bundle, backend, arms, max_gauges, skip_validate, jobs, dry_run } => {
             let dir = ddrs::cli::experiment::run_experiment(ddrs::cli::experiment::ExperimentInput {
                 workspace: Workspace::with_root(ws.root()),
                 name,
@@ -254,6 +258,8 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 arms,
                 max_gauges,
                 skip_validate,
+                jobs,
+                dry_run,
             })?;
             eprintln!("experiment complete → {}", dir.display());
             Ok(())

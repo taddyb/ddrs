@@ -16,6 +16,10 @@ pub struct ExperimentInput {
     pub arms: Option<Vec<String>>,
     pub max_gauges: Option<usize>,
     pub skip_validate: bool,
+    /// Arms run concurrently, one thread each (default: all selected arms).
+    pub jobs: Option<usize>,
+    /// Select gauges, write gauges.csv, and stop.
+    pub dry_run: bool,
 }
 
 pub fn run_experiment(input: ExperimentInput) -> Result<PathBuf, CliError> {
@@ -96,6 +100,8 @@ fn dispatch(
                 max_gauges: input.max_gauges,
                 skip_validate: input.skip_validate,
                 force_cpu: input.backend == "cpu",
+                jobs: input.jobs.unwrap_or(arms.len().max(1)),
+                dry_run: input.dry_run,
             };
             match input.backend.as_str() {
                 "cpu" => {

@@ -116,7 +116,7 @@ Four units.
 
 ### 2.1 `gauges.rs` — population
 
-**Full study (deferred):** a gauge is selected when its GAGES-II CLASS is
+**Full study (implemented 2026-09-05, `gauges.source: nested-reference`; upstream partners are the *maximal* nested gauges so their subgraphs are disjoint):** a gauge is selected when its GAGES-II CLASS is
 `Ref` (read from `/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf`
 via the `dbase` crate) and at least one other training gauge's COMID lies in
 its subgraph. **PoC:** the `pairs:` list is explicit; every listed staid must
