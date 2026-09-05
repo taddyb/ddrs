@@ -17,6 +17,29 @@ inherited part routed from the upstream gauge and a local remainder whose
 split differs by arm. These are one-pair, one-seed numbers: illustrations of
 what the instrument measures, not population results.
 
+## 0. Correction (2026-09-05): dhbv2-dist arm replaced
+
+The dhbv2-dist arm used below (`2026-08-17T02-03-02Z`) was trained on
+`gages_3000.csv` (2,365 gauges after filters), not the
+`gages_2000_area_balanced.csv` (1,841) population the other four arms share.
+The bundle now points at `2026-08-09T03-05-54Z` (same store, same CSV, also
+`epoch_30_mb_1`), and `run_adjoint` refuses arms with differing gauge CSVs.
+Rerun output: `.ddrs/experiments/adjoint/2026-09-05T16-29-39Z/`. Corrected
+dhbv2-dist numbers for Newport (other arms unchanged):
+
+| quantity | 08-17 arm (tables below) | 08-09 arm (corrected) |
+|---|---|---|
+| far-reach mean lag, high / low (d) | 2.9 / 7.4 | 3.5 / 8.9 |
+| effective celerity, low flow (m/s) | 0.47 | 0.40 |
+| kernel mass median, high / low | 1.16 / 0.96 | 1.36 / 0.97 |
+| `volume_sens` median; reaches < 0.5 | 1.010; 0 | 1.006; 0 |
+| Newport mean(pred−obs) by window (m³/s) | +15.9, +20.8, +18.8, +2.4 | +15.2, +20.1, +18.8, +2.5 |
+| inherited / local, inherited share | +7.3,+8.0,+7.2,+2.4 / +8.6,+12.8,+11.6,0.0; 0.43 | +6.8,+7.7,+7.2,+2.4 / +8.4,+12.4,+11.5,+0.1; 0.43 |
+| `residual_attr` median | +0.014 | +0.013 |
+
+The celerity spread across arms becomes 0.21–0.41 m/s (factor ≈ 2.0, was 2.3).
+Every other conclusion stands.
+
 ## 1. What ran
 
 | Item | Value |
