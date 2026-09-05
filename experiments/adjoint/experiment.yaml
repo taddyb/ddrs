@@ -15,7 +15,7 @@ arms:
   - { name: hourly-lstm,  run: 2026-08-09T14-55-05Z-train-and-test }   # hourly_lstm_merit_unit_catchments.ic
   - { name: uh-retro,     run: 2026-08-09T09-30-39Z-train-and-test }   # merit_dhbv2_UH_retrospective.ic
   - { name: dhbv2-lumped, run: 2026-08-09T22-13-43Z-train-and-test }   # daily_dhbv2_lumped_aorc2f_merit_unit_catchments.ic
-  - { name: dhbv2-dist,   run: 2026-08-17T02-03-02Z-train-and-test }   # daily_dhbv2_distributed_aorc2f_merit_unit_catchments.ic
+  - { name: dhbv2-dist,   run: 2026-08-09T03-05-54Z-train-and-test }   # daily_dhbv2_distributed_aorc2f_merit_unit_catchments.ic (NOT 2026-08-17: that run used gages_3000.csv)
 
 adjoint:
   gauges:

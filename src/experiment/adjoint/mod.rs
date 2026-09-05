@@ -212,6 +212,23 @@ where
         return Err("no arms selected".into());
     }
 
+    // ---- all arms must share the gauge CSV (population-matched by construction) ----
+    let mut gages_csv: Vec<(String, PathBuf)> = Vec::new();
+    for arm in arms {
+        let cfg = crate::config::Config::from_yaml_file_with_mode(&arm.config_path, crate::config::ConfigMode::Testing)
+            .map_err(|e| format!("arm `{}`: {e}", arm.name))?;
+        let g = cfg.data_sources.as_ref().map(|d| d.gages.clone()).unwrap_or_default();
+        gages_csv.push((arm.name.clone(), g));
+    }
+    if gages_csv.iter().any(|(_, g)| g != &gages_csv[0].1) {
+        let list: Vec<String> = gages_csv.iter().map(|(a, g)| format!("{a}: {}", g.display())).collect();
+        return Err(format!(
+            "arms were trained on different gauge CSVs — cross-arm comparison would not be population-matched:\n  {}",
+            list.join("\n  ")
+        )
+        .into());
+    }
+
     // ---- population (from the first arm's dataset; all arms share the gauge CSV) ----
     let mut gauges: Vec<GaugeEntry> = match adjoint.gauges.source {
         GaugeSource::Explicit => {
