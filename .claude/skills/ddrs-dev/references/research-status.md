@@ -239,6 +239,19 @@ arm (max rel. err 0.02–0.17 %).
   unexplained mass loss (lag < 3 d, inflow above floor): 13–69 reaches per arm
   (~1–2 %), clustered in Northern Plains basins 06354000/06447000/06353000; clamped
   negative solves are the candidate mechanism, unverified.
+**Method validation on the UH arm (2026-09-06,
+`docs/2026-09-06-adjoint-method-validation-uh-findings.md`):** full-map central
+finite differences at 8 gauges, 1,062 checks — 989 pass (802 below the f32 noise
+floor); the 73 failures are 13 finite-step nonlinearity (converge as δ→0), 33
+inflow-clamp-floor, 20 f32-quantization-limited, 5 kinks (gradient between the
+one-sided slopes), 2 at a 0.11 m³/s gauge; **none an adjoint error**. Kernel mean
+lag = hydraulic travel time Σ L/c (independent geometry computation) to median
+ratio 0.94–1.06 at 7/8 gauges at low flow; at high flow the kernel lies between the
+peak-flow and mean-flow references (static reference cannot adjudicate). Mask
+anchors with Q_g < 1 m³/s. High-flow kernels are linearizations of a non-smooth
+(clamped) operator — say so when quoting them. Tools:
+`experiments/adjoint/validate_plots.py`, `validate_classify.py`; bundle
+`experiments/adjoint-uh-validate`.
 - **Do-not-use:** the PoC's "dhbv2-lumped destroys mass in a 12-reach tributary" as
   a general claim (the population shows this is rare and regional); the Juniata
   0.21–0.47 m/s celerity range as a population number (use the ratios above);
