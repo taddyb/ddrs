@@ -66,6 +66,15 @@ pub struct GaugeResult {
     // volume
     pub volume_window_start_day: Option<usize>,
     pub volume_sens: Vec<f32>,
+    /// Lag-aware volume sensitivity: time-mean over source hours
+    /// `[warmup·24, T − tail − τ_i)` where `τ_i` is the reach's kernel mean lag
+    /// (max over anchors), so only water that can arrive inside the window is
+    /// counted. NaN when fewer than 24 source hours remain or no kernel ran.
+    pub volume_sens_lag_aware: Vec<f32>,
+    /// Fraction of routed timesteps (volume window) at which the reach's
+    /// discharge sat at the `discharge` clamp floor — a negative or
+    /// near-zero solve clamped to 1e-4, or a genuinely dry reach.
+    pub floor_frac: Vec<f32>,
     /// `[hour]`
     pub volume_profile: Vec<f32>,
     // residual
@@ -175,6 +184,12 @@ pub fn write_gauge_netcdf(path: &Path, r: &GaugeResult) -> Result<(), BoxError> 
         f.add_attribute("volume_window_start_day", start as i64)?;
         put_f32(&mut f, "volume_sens", &["reach"], &r.volume_sens, "volume sensitivity (time-mean)", "dimensionless")?;
         put_f32(&mut f, "volume_profile", &["hour"], &r.volume_profile, "volume sensitivity, reach-mean by source hour", "dimensionless")?;
+        if r.volume_sens_lag_aware.len() == n {
+            put_f32(&mut f, "volume_sens_lag_aware", &["reach"], &r.volume_sens_lag_aware, "volume sensitivity over source hours whose kernel lag fits inside the window", "dimensionless")?;
+        }
+        if r.floor_frac.len() == n {
+            put_f32(&mut f, "floor_frac", &["reach"], &r.floor_frac, "fraction of volume-window timesteps with discharge at the clamp floor", "dimensionless")?;
+        }
     }
 
     if n_window > 0 {

@@ -584,6 +584,43 @@ where
         r.volume_window_start_day = Some(start);
         r.volume_sens = grad.time_mean(warm_h, reduce_to);
         r.volume_profile = grad.reach_mean();
+        // Check 3: lag-aware volume sensitivity (per-reach kernel mean lag,
+        // max over anchors, from the kernel functional above).
+        let n_reach = grad.n;
+        r.volume_sens_lag_aware = (0..n_reach)
+            .map(|i| {
+                let lag_h = r
+                    .kernel_mean_lag_days
+                    .iter()
+                    .map(|a| a[i])
+                    .filter(|v| v.is_finite())
+                    .fold(f32::NAN, |m, v| if m.is_nan() { v } else { m.max(v) })
+                    * 24.0;
+                if !lag_h.is_finite() {
+                    return f32::NAN;
+                }
+                let to = (n_hourly as f32 - tail_h as f32 - lag_h).floor() as isize;
+                if to <= warm_h as isize + 24 {
+                    return f32::NAN;
+                }
+                let to = to as usize;
+                let mut acc = 0.0f32;
+                for h in warm_h..to {
+                    acc += grad.at(h, i);
+                }
+                acc / (to - warm_h) as f32
+            })
+            .collect();
+        // Check 4: fraction of timesteps at the discharge clamp floor.
+        let floor = ctx.cfg.params.attribute_minimums.discharge * 1.001;
+        let runoff: Vec<f32> = lf.runoff_inner.clone().into_data().to_vec::<f32>().unwrap(); // (N, T) row-major
+        let t_all = lf.runoff_inner.dims()[1];
+        r.floor_frac = (0..n_reach)
+            .map(|i| {
+                let row = &runoff[i * t_all..(i + 1) * t_all];
+                row[warm_h.min(t_all)..].iter().filter(|q| **q <= floor).count() as f32 / (t_all - warm_h.min(t_all)).max(1) as f32
+            })
+            .collect();
     }
 
     // ---------------- residual (squared error) ----------------
@@ -689,6 +726,8 @@ fn new_result<I: Backend>(
         hydraulic_lag_t0_days: vec![],
         volume_window_start_day: None,
         volume_sens: vec![],
+        volume_sens_lag_aware: vec![],
+        floor_frac: vec![],
         volume_profile: vec![],
         residual_windows: vec![],
         residual_attr_by_window: vec![],

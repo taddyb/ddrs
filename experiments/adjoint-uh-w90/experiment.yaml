@@ -1,0 +1,23 @@
+# Checks 3–4 on the UH arm: 90-day window (no full-map FD), lag-aware volume sensitivity + clamp-floor fraction.
+#   target/release/ddrs --workspace .ddrs experiment adjoint-uh-w90 --backend cpu
+study: adjoint
+arms:
+  - { name: uh-retro, run: 2026-08-09T09-30-39Z-train-and-test }   # merit_dhbv2_UH_retrospective.ic
+
+adjoint:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]   # Juniata: Mapleton Depot -> Newport (127 / 213 reaches)
+      - ["06447000", "06452000"]   # White River, SD: 06452000 is the largest basin (520 reaches, 838 km)
+      - ["06449100", "06452000"]
+      - ["06350000", "06354000"]   # Cannonball River, ND: Northern Plains mass-loss cluster
+      - ["06353000", "06354000"]
+  window_days: 90
+  anchors: { high: 2, low: 2 }
+  anchor_min_gap_days: 60
+  lag_days: 30
+  tail_days: 7
+  water_year: 2000
+  functionals: [kernel, volume, residual]
+  fd_perturb_fraction: 0.05
+  fd_rel_tol: 0.05
