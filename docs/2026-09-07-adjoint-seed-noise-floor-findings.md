@@ -6,6 +6,8 @@
 **Output:** `.ddrs/experiments/adjoint-uh-seeds/2026-09-07T20-48-11Z/` (figures + `SEED_NOISE.md` in `figures/`).
 **Script:** `experiments/adjoint/seed_noise.py <seed-run> <cross-arm-run> --out <dir>` (reuses `plots.py` definitions).
 **Cross-arm reference:** `.ddrs/experiments/adjoint-conus/2026-09-07T18-18-39Z/` (5 arms, same 41 gauges).
+Eval medians on the 1,841-gauge test population: seed 42 NSE 0.7071 / KGE 0.7379, seed 43 NSE 0.7096 / KGE 0.7426
+(the two seeds are indistinguishable on aggregate skill).
 Gate: finite-difference check passed on both arms; 41 of 41 gauges completed per arm; cpu; 203 s per arm.
 
 **Question.** The population study found the five inflow arms disagree on effective channel celerity by a factor
