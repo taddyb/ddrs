@@ -320,6 +320,10 @@ where
         newton_path: path,
         slices,
         clamped_frac_star: e_star.clamped_frac,
+        n0: obj.windows[0].n0.clone().into_data().to_vec::<f32>().unwrap(),
+        p0: obj.windows[0].p0.clone().into_data().to_vec::<f32>().unwrap(),
+        q0: obj.windows[0].q0.clone().into_data().to_vec::<f32>().unwrap(),
+        comid: obj.windows[0].comids.clone(),
     };
     write_landscape_netcdf(&arm_dir.join("gauges").join(format!("{}.nc", g.staid)), &r)?;
     output::append_summary(&arm_dir.join("summary.csv"), &r)?;

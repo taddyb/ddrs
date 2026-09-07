@@ -4,6 +4,7 @@
 study: landscape
 arms:
   - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+  - { name: uh-seed43, run: 2026-09-07T18-45-57Z-train-and-test }   # replicate seed: its trained point read in seed 42's eigenbasis is the tolerance
 landscape:
   gauges:
     pairs:

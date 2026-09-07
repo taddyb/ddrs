@@ -1,9 +1,10 @@
 # Per-gauge loss landscape in (n, p, q) log-multiplier space — sample case (UH arm, Juniata pair) — findings
 
 **Spec:** `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`
-**Bundles:** `experiments/landscape-uh-juniata` (box ±ln 3), `experiments/landscape-uh-juniata-wide` (box ±ln 10)
+**Bundles:** `experiments/landscape-uh-juniata` (box ±ln 3), `experiments/landscape-uh-juniata-wide` (box ±ln 10; arms uh-seed42 + uh-seed43)
 **Outputs:** `.ddrs/experiments/landscape-uh-juniata/2026-09-07T19-04-07Z/`,
-`.ddrs/experiments/landscape-uh-juniata-wide/2026-09-07T19-13-30Z/` (figures + `LANDSCAPE.md` in `figures/`)
+`.ddrs/experiments/landscape-uh-juniata-wide/2026-09-07T19-13-30Z/` (seed 42 only),
+`.ddrs/experiments/landscape-uh-juniata-wide/2026-09-07T21-15-36Z/` (both seeds; `figures/LANDSCAPE.md`, `SEED_COMPARE.md`)
 **Code:** `src/experiment/landscape/` (`97d362b`, `054d47e`), `experiments/landscape/plots.py`
 **Arm:** UH retrospective, seed 42 (`2026-08-09T09-30-39Z`, `epoch_30_mb_1`); objective = NSE-batch training loss
 restricted to the gauge, mean over the four WY2000 seasonal 90-day windows; cpu; ~4–6 min per gauge.
@@ -53,6 +54,40 @@ the "all smaller" direction down to the physically allowed floor: no interior op
 gauge within the parameter ranges. Hydraulic direction (0.95, 0.27, 0.17); ln-3 stiff vector
 (0.82, −0.56, −0.12), |cos| = 0.61; stiff/sloppy anisotropy 100:1 at the ln-3 corner.
 
+## 2b. Seed replicate (seed 43 added as a second arm, run `2026-09-07T21-15-36Z`)
+
+The netCDF now stores the trained per-reach fields (`n0`, `p0`, `q0`, `comid`), so seed 43's trained point can be
+expressed in seed 42's multiplier coordinates as the reach-mean log field ratio Δα, and then in seed 42's eigenbasis
+(`experiments/landscape/seed_compare.py`). Newport, where both seeds have interior optima with nothing clamped:
+
+| | seed 42 | seed 43 |
+|---|---|---|
+| Trained fields relative to seed 42, Δα = (n, p, q), reach-mean ± reach-std | 0 | (−0.05 ± 0.04, −0.46 ± 0.04, −0.00 ± 0.05) |
+| Trained point in seed 42's eigenbasis, c = (stiff, middle, sloppy) | (−0.00, 1.80, 0.04) | (0.20, 1.43, 0.20) |
+| |c_k| / half-width at 5 % of L* | (0.03, 0.86, 0.01) | (1.41, 0.68, 0.05) |
+| Own optimum, NSE | 0.770 | 0.772 |
+| Own optimum relative to seed 42's, multipliers (n, p, q) | 1 | (0.98, 1.24, 0.44) |
+
+Three readings.
+
+1. **The seed difference is almost purely a width shift.** Seed 43's channels are 37 % narrower (p × 0.63) nearly
+   uniformly across the 213 reaches (std 0.04 in log), with n 5 % smaller and q unchanged. The basin-uniform
+   projection is faithful for this pair.
+2. **The seed-defined tolerance is about 10 % of L\*, not 5 %.** Along the stiff axis the two seeds differ by
+   Δc₁ = 0.20 log-units, which at λ₁ = 0.234 is a loss difference of ½λ₁Δc₁² ≈ 0.0047 ≈ 0.10 L\*. With ε_L = 0.10 L\*
+   the half-widths become (0.20, 2.96, 6.2) and both seeds lie inside the behavioural set on every axis
+   (seed 43 at (1.0, 0.48, 0.03) half-widths). Two seeds give one draw of this number; it is the tolerance the spec
+   asked for, and it replaces the placeholder.
+3. **The optimum is a valley, and two searches land at different points along it.** The two seeds' Newport optima
+   agree on n\* to 2 % and on p\* to 24 %, but differ on q\* by a factor 2.3, with NSE 0.770 vs 0.772. In seed 42's
+   eigenbasis the q-dominated direction is the sloppy one (half-width 4.4 log-units), so a factor 2.3 in q\* is
+   0.19 half-widths: no loss consequence. The gauge determines the stiff coordinate of its optimum and nothing else.
+
+Mapleton Depot: the seed-42 reference optimum is the clamped corner (§2), so its eigenbasis is degenerate and the
+comparison is not meaningful there; seed 43 finds an interior optimum (n × 0.31, p × 0.40, q at the floor;
+NSE 0.558 → 0.652) and the two seeds' NSE at optimum agree (0.661 vs 0.652). Range-bounded Newton (follow-up 1)
+is required before this gauge's optima can be compared.
+
 ## 3. What this says, and does not say
 
 - The routing that fits these two Juniata gauges best is about three times faster than the UH arm's
@@ -62,8 +97,8 @@ gauge within the parameter ranges. Hydraulic direction (0.95, 0.27, 0.17); ln-3 
 - The large-scale training is not wrong along the axis the gauge can see; it is displaced along an axis
   the gauge cannot see. Whether that displacement is "wrong" is exactly what an independent geometry
   observation (width, depth, travel time between gauges) would decide; the gauge alone cannot.
-- One arm, one seed, two gauges. The seed-43 replicate (training now) gives the seed-to-seed displacement
-  in the same eigenbasis, which is the tolerance the behavioural set should use instead of 5 % of L.
+- One arm, two seeds, two gauges. The seed-to-seed displacement along Newport's stiff axis sets the behavioural
+  tolerance at about 10 % of L* (§2b); one draw of that number, so treat it as the order of magnitude.
 - The multiplier parametrization is basin-uniform (Phase A); per-reach directions (Phase B) may reveal
   trades the gauge can make between upstream and downstream reaches.
 

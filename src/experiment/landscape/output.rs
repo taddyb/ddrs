@@ -57,6 +57,12 @@ pub struct LandscapeResult {
     pub newton_path: Vec<NewtonStep>,
     pub slices: Vec<Slice>,
     pub clamped_frac_star: f32,
+    /// Trained (alpha = 0) per-reach physical fields, length n_reach.
+    pub n0: Vec<f32>,
+    pub p0: Vec<f32>,
+    pub q0: Vec<f32>,
+    /// Reach COMIDs, same order/length as n0/p0/q0.
+    pub comid: Vec<i64>,
 }
 
 pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> {
@@ -88,6 +94,7 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_dimension("plane", r.slices.len())?;
     f.add_dimension("ga", g)?;
     f.add_dimension("gb", g)?;
+    f.add_dimension("reach", r.n0.len())?;
 
     let mut put = |name: &str, dims: &[&str], vals: &[f32], long: &str| -> Result<(), BoxError> {
         let mut v = f.add_variable::<f32>(name, dims)?;
@@ -128,7 +135,13 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     let bb: Vec<f32> = r.slices.iter().flat_map(|s| s.basis_b.iter().copied()).collect();
     put("basis_a", &["plane", "alpha"], &ba, "unit alpha vector of grid axis a")?;
     put("basis_b", &["plane", "alpha"], &bb, "unit alpha vector of grid axis b")?;
+    put("n0", &["reach"], &r.n0, "trained (alpha = 0) per-reach Manning's n")?;
+    put("p0", &["reach"], &r.p0, "trained (alpha = 0) per-reach Leopold-Maddock p")?;
+    put("q0", &["reach"], &r.q0, "trained (alpha = 0) per-reach Leopold-Maddock q")?;
     f.add_attribute("plane_names", r.slices.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(","))?;
+    let mut comid_var = f.add_variable::<i64>("comid", &["reach"])?;
+    comid_var.put_values(&r.comid, ..)?;
+    comid_var.put_attribute("long_name", "reach COMID, same order as n0/p0/q0")?;
     Ok(())
 }
 
