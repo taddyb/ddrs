@@ -1,0 +1,18 @@
+# Per-gauge loss landscape in (n, p, q) log-multiplier space — sample case.
+# Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-juniata --backend cpu
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 90
+  water_year: 2000
+  n_windows: 4
+  alpha_max: 1.0986123     # ln 3
+  grid: 11
+  fd_step: 0.05
+  newton_iters: 10
+  tolerances: [0.05, 0.10]

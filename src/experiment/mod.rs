@@ -10,6 +10,7 @@
 //! Spec: `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
 pub mod adjoint;
+pub mod landscape;
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +30,9 @@ pub struct ExperimentSpec {
     /// Study-specific block for `study: adjoint`.
     #[serde(default)]
     pub adjoint: Option<adjoint::AdjointSpec>,
+    /// Study-specific block for `study: landscape`.
+    #[serde(default)]
+    pub landscape: Option<landscape::LandscapeSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::workspace::Workspace;
 use crate::cli::{tee, CliError};
-use crate::experiment::{adjoint, resolve_arm, ExperimentManifest, ExperimentRun, ExperimentSpec, ResolvedArm};
+use crate::experiment::{adjoint, landscape, resolve_arm, ExperimentManifest, ExperimentRun, ExperimentSpec, ResolvedArm};
 
 pub struct ExperimentInput {
     pub workspace: Workspace,
@@ -125,9 +125,41 @@ fn dispatch(
             }
             Ok(())
         }
+        "landscape" => {
+            let ls = spec.landscape.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+                path: spec_path.to_path_buf(),
+                source: "study: landscape requires a `landscape:` block".into(),
+            })?;
+            let opts = landscape::LandscapeOptions {
+                max_gauges: input.max_gauges,
+                force_cpu: input.backend == "cpu",
+                jobs: input.jobs.unwrap_or(arms.len().max(1)),
+                dry_run: input.dry_run,
+            };
+            match input.backend.as_str() {
+                "cpu" => {
+                    type I = burn::backend::NdArray<f32>;
+                    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+                    println!("backend: cpu (NdArray, deterministic; sparse_solver forced to cpu)");
+                    landscape::run_landscape::<I>(ls, arms, out_dir, &opts, &device, manifest)?;
+                }
+                "cuda" => {
+                    type I = burn_cuda::Cuda<f32, i32>;
+                    let device = cubecl::cuda::CudaDevice::new(0);
+                    landscape::run_landscape::<I>(ls, arms, out_dir, &opts, &device, manifest)?;
+                }
+                other => {
+                    return Err(CliError::ConfigInvalid {
+                        path: PathBuf::from("--backend"),
+                        source: format!("unknown backend `{other}` (expected cpu or cuda)").into(),
+                    })
+                }
+            }
+            Ok(())
+        }
         other => Err(CliError::ConfigInvalid {
             path: spec_path.to_path_buf(),
-            source: format!("unknown study `{other}` (known: adjoint)").into(),
+            source: format!("unknown study `{other}` (known: adjoint, landscape)").into(),
         }),
     }
 }
