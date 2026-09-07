@@ -599,7 +599,10 @@ where
                 if !lag_h.is_finite() {
                     return f32::NAN;
                 }
-                let to = (n_hourly as f32 - tail_h as f32 - lag_h).floor() as isize;
+                // Negative mean lags occur where the kernel oscillates; treat as 0.
+                // Never average past `reduce_to` (the raw functional's bound).
+                let lag_h = lag_h.max(0.0);
+                let to = ((n_hourly as f32 - tail_h as f32 - lag_h).floor() as isize).min(reduce_to as isize);
                 if to <= warm_h as isize + 24 {
                     return f32::NAN;
                 }
