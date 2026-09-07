@@ -374,6 +374,17 @@ pub fn dist_to_gauge(adj: &crate::sparse::SparseAdjacency, gauge_row: usize) -> 
     dist
 }
 
+/// Next-downstream row per reach (`rows` = downstream, `cols` = upstream), −1 at outlets.
+pub fn downstream_rows(adj: &crate::sparse::SparseAdjacency) -> Vec<i32> {
+    let mut down = vec![-1i32; adj.n];
+    for (r, c) in adj.rows.iter().zip(&adj.cols) {
+        if r != c {
+            down[*c as usize] = *r;
+        }
+    }
+    down
+}
+
 /// Column means of a row-major `(T, N)` buffer.
 pub fn column_means(values: &[f32], t: usize, n: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; n];

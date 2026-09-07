@@ -35,6 +35,9 @@ pub struct GaugeResult {
     pub run_id: String,
     pub checkpoint: String,
     pub comids: Vec<i64>,
+    /// Row index of the next reach downstream (−1 for the gauge reach or an
+    /// outlet), so analyses can walk flow paths without the adjacency store.
+    pub downstream_row: Vec<i32>,
     pub dist_to_gauge_m: Vec<f32>,
     pub q_prime_mean: Vec<f32>,
     pub gauge_row: usize,
@@ -138,6 +141,11 @@ pub fn write_gauge_netcdf(path: &Path, r: &GaugeResult) -> Result<(), BoxError> 
         v.put_attribute("long_name", "MERIT reach identifier (gauge subgraph, topological order)")?;
     }
     put_f32(&mut f, "dist_to_gauge_m", &["reach"], &r.dist_to_gauge_m, "along-channel distance from reach outlet to gauge outlet", "m")?;
+    if r.downstream_row.len() == n {
+        let mut v = f.add_variable::<i32>("downstream_row", &["reach"])?;
+        v.put_values(&r.downstream_row, ..)?;
+        v.put_attribute("long_name", "row index of the next reach downstream; -1 at the gauge/outlet")?;
+    }
     put_f32(&mut f, "q_prime_mean", &["reach"], &r.q_prime_mean, "window-mean hourly lateral inflow (first kernel window)", "m3 s-1")?;
     {
         let is_gauge: Vec<i32> = (0..n).map(|i| (i == r.gauge_row) as i32).collect();
@@ -276,5 +284,53 @@ pub fn append_summary(path: &Path, r: &GaugeResult) -> Result<(), BoxError> {
             mean_over("low", &r.kernel_mean_lag_days, i),
         )?;
     }
+    Ok(())
+}
+
+
+/// Forward pulse trace: `dq` and `base` are row-major `(N, T)`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_trace_netcdf(
+    path: &Path,
+    staid: &str,
+    comid: i64,
+    reach_row: usize,
+    gauge_row: usize,
+    delta_m3s: f32,
+    from_hour: usize,
+    to_hour: usize,
+    comids: &[i64],
+    dist_to_gauge_m: &[f32],
+    downstream_row: &[i32],
+    base_q: &[f32],
+    dq: &[f32],
+    n: usize,
+    t: usize,
+) -> Result<(), BoxError> {
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    let mut f = netcdf::create(path)?;
+    f.add_attribute("staid", staid)?;
+    f.add_attribute("trace_comid", comid)?;
+    f.add_attribute("trace_reach_row", reach_row as i64)?;
+    f.add_attribute("gauge_row", gauge_row as i64)?;
+    f.add_attribute("delta_m3s", delta_m3s as f64)?;
+    f.add_attribute("from_hour", from_hour as i64)?;
+    f.add_attribute("to_hour", to_hour as i64)?;
+    f.add_attribute("definition", "dq = Q(q' + delta at trace reach over [from_hour, to_hour)) - Q(q'), routed discharge at every reach and hour")?;
+    f.add_dimension("reach", n)?;
+    f.add_dimension("hour", t)?;
+    {
+        let mut v = f.add_variable::<i64>("COMID", &["reach"])?;
+        v.put_values(comids, ..)?;
+    }
+    {
+        let mut v = f.add_variable::<i32>("downstream_row", &["reach"])?;
+        v.put_values(downstream_row, ..)?;
+    }
+    put_f32(&mut f, "dist_to_gauge_m", &["reach"], dist_to_gauge_m, "along-channel distance to gauge", "m")?;
+    put_f32(&mut f, "base_q", &["reach", "hour"], base_q, "unperturbed routed discharge", "m3 s-1")?;
+    put_f32(&mut f, "dq", &["reach", "hour"], dq, "perturbed minus unperturbed routed discharge", "m3 s-1")?;
     Ok(())
 }

@@ -22,7 +22,7 @@ use crate::data::dates::TimeAxis;
 use crate::data::ids::Staid;
 
 use self::gauges::{gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
-use self::influence::{column_means, dist_to_gauge, inflow_gradient, InfluenceContext};
+use self::influence::{column_means, dist_to_gauge, downstream_rows, inflow_gradient, InfluenceContext};
 use self::output::{append_summary, write_gauge_netcdf, AnchorRecord, GaugeResult, WindowRecord};
 use self::hydraulics::{mean_reach_k_hours, path_travel_time_hours, reach_k_hours};
 use self::validate::{finite_difference_gate, full_map_gate, write_full_map_csv, FullMapInputs, FullMapResult, GateInputs, ValidationResult};
@@ -52,7 +52,27 @@ pub struct AdjointSpec {
     /// Optional full-map finite-difference validation (check 1).
     #[serde(default)]
     pub validation: Option<FullMapSpec>,
+    /// Optional forward pulse traces (check 4): inject a sustained inflow
+    /// perturbation at one reach and record ΔQ at every reach and hour.
+    #[serde(default)]
+    pub traces: Vec<TraceSpec>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TraceSpec {
+    pub staid: String,
+    pub comid: i64,
+    /// Added inflow, m³/s, sustained over `[from_day, to_day)` of the volume window.
+    #[serde(default = "d_trace_delta")]
+    pub delta_m3s: f32,
+    #[serde(default = "d_trace_from")]
+    pub from_day: usize,
+    #[serde(default = "d_trace_to")]
+    pub to_day: usize,
+}
+fn d_trace_delta() -> f32 { 1.0 }
+fn d_trace_from() -> usize { 10 }
+fn d_trace_to() -> usize { 40 }
 
 /// Central-difference check of the kernel at every `reach_stride`-th reach and
 /// each of `lags_hours`, on the first high-flow and first low-flow anchor of
@@ -478,7 +498,7 @@ where
             let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
             let dist = dist_to_gauge(&adjacency, gauge_row);
             let r = result.get_or_insert_with(|| {
-                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist.clone(), gauge_row, column_means(&q_hourly, grad.t, grad.n))
+                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist.clone(), gauge_row, column_means(&q_hourly, grad.t, grad.n), downstream_rows(&adjacency))
             });
             let (mass, mean_lag) = grad.kernel_moments(t0, adjoint.lag_days);
             r.kernel.push(grad.kernel_daily(t0, adjoint.lag_days));
@@ -579,7 +599,7 @@ where
         let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
         let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
         let r = result.get_or_insert_with(|| {
-            new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, grad.t, grad.n))
+            new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, grad.t, grad.n), downstream_rows(&adjacency))
         });
         r.volume_window_start_day = Some(start);
         r.volume_sens = grad.time_mean(warm_h, reduce_to);
@@ -624,6 +644,35 @@ where
                 row[warm_h.min(t_all)..].iter().filter(|q| **q <= floor).count() as f32 / (t_all - warm_h.min(t_all)).max(1) as f32
             })
             .collect();
+        // Check 4 traces: sustained pulse at one reach, ΔQ everywhere.
+        for tr in adjoint.traces.iter().filter(|t| t.staid == g.staid) {
+            let Some(reach) = comids.iter().position(|c| *c == tr.comid) else {
+                notes.push(format!("{}/{}: trace COMID {} not in subgraph", arm.name, g.staid, tr.comid));
+                continue;
+            };
+            let base_q: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap(); // (T, N)
+            let (t_h, n_r) = (lf.q_leaf.dims()[0], lf.q_leaf.dims()[1]);
+            let mut pert = base_q.clone();
+            let (h0, h1) = (tr.from_day * 24, (tr.to_day * 24).min(t_h));
+            for h in h0..h1 {
+                pert[h * n_r + reach] += tr.delta_m3s;
+            }
+            let q_pert: Tensor<I, 2> = Tensor::<I, 1>::from_floats(pert.as_slice(), device).reshape([t_h, n_r]);
+            let lf2 = ctx.forward_with_inflow_leaf(&tensors, Some(q_pert));
+            let run2: Vec<f32> = lf2.runoff_inner.into_data().to_vec::<f32>().unwrap(); // (N, T)
+            let dq: Vec<f32> = run2.iter().zip(&runoff).map(|(a, b)| a - b).collect();
+            let tdir = arm_dir.join("trace");
+            std::fs::create_dir_all(&tdir)?;
+            let path = tdir.join(format!("{}_{}.nc", g.staid, tr.comid));
+            output::write_trace_netcdf(&path, &g.staid, tr.comid, reach, gauge_row, tr.delta_m3s, h0, h1, &comids, &r.dist_to_gauge_m, &r.downstream_row, &runoff, &dq, n_reach, t_all)?;
+            let injected = tr.delta_m3s * (h1 - h0) as f32;
+            let at_gauge: f32 = (0..t_all).map(|t| dq[gauge_row * t_all + t]).sum();
+            let at_reach: f32 = (0..t_all).map(|t| dq[reach * t_all + t]).sum();
+            println!(
+                "  [{}] trace {} COMID {} row {}: injected {:.1} m3/s·h; ΣΔQ at reach {:.1} ({:.0} %), at gauge {:.1} ({:.0} %)",
+                arm.name, g.staid, tr.comid, reach, injected, at_reach, 100.0 * at_reach / injected, at_gauge, 100.0 * at_gauge / injected
+            );
+        }
     }
 
     // ---------------- residual (squared error) ----------------
@@ -645,7 +694,7 @@ where
             let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
             let (t_h, n_r) = (lf.q_leaf.dims()[0], lf.q_leaf.dims()[1]);
             let r = result.get_or_insert_with(|| {
-                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, t_h, n_r))
+                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, t_h, n_r), downstream_rows(&adjacency))
             });
             if valid.is_empty() {
                 notes.push(format!("{}/{}: residual window {date} has no valid observations", arm.name, g.staid));
@@ -704,6 +753,7 @@ fn new_result<I: Backend>(
     dist_to_gauge_m: Vec<f32>,
     gauge_row: usize,
     q_prime_mean: Vec<f32>,
+    downstream_row: Vec<i32>,
 ) -> GaugeResult {
     GaugeResult {
         staid: staid.to_string(),
@@ -711,6 +761,7 @@ fn new_result<I: Backend>(
         run_id: arm.run_id.clone(),
         checkpoint: arm.checkpoint_dir.display().to_string(),
         comids,
+        downstream_row,
         dist_to_gauge_m,
         q_prime_mean,
         gauge_row,
