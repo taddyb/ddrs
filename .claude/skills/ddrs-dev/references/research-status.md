@@ -252,6 +252,22 @@ arm (max rel. err 0.02–0.17 %).
   any of these as established until a replicate seed exists (**INCONCLUSIVE
   pending seed**).
 
+## Per-gauge loss landscape — UH arm sample case, Newport + Mapleton Depot (2026-09-07), one seed
+
+Authority: `docs/2026-09-07-landscape-uh-juniata-findings.md`, spec
+`docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`. Measures NSE-batch
+loss at one gauge over basin-uniform log-multipliers on (n, p, q), the FD Hessian
+of the adjoint gradient, the damped Newton optimum, and behavioural half-widths
+(5 % of loss) per eigenvector. **Verdict (instrument): PASS**, but the multiplier
+box must be bounded by the parameter ranges, or fields clamp and the landscape
+flattens artificially. Newport (01567000): optimum n×0.36, p×0.26, q×0.56, NSE
+0.692 → 0.770; eigenvalues 2.34e-1 / 1.03e-3 / 2.38e-4; the trained point sits
+0.03 half-widths off the stiff axis, 0.86 off a sloppy one. Mapleton Depot
+(01563500): monotone to the parameter-range floor, no interior optimum.
+Reproduce (findings §5): `target/release/ddrs --workspace .ddrs experiment
+landscape-uh-juniata-wide --backend cpu`. **Status: one arm, one seed, two
+gauges, INCONCLUSIVE** pending the seed-43 replicate and the 8-gauge run.
+
 ## Open, not closed
 
 - **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30
