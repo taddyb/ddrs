@@ -116,3 +116,22 @@ cargo build --release --bin ddrs
 target/release/ddrs --workspace .ddrs experiment adjoint-conus --backend cpu
 ~/projects/ddr/.venv/bin/python experiments/adjoint/plots.py .ddrs/experiments/adjoint-conus/<ts> --maps 6
 ```
+
+## 7. Corrected volume statistics (2026-09-07 rerun, `.ddrs/experiments/adjoint-conus/2026-09-07T18-18-39Z/`)
+
+Rerun of all five arms with `volume_sens_wet` (mean over source hours with inflow above the clamp
+floor; see `docs/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`). 3,146 reaches per arm.
+
+| arm | median raw | median wet-hour | reaches raw < 0.5 | reaches wet < 0.5 | gauges with any wet < 0.5 | reaches with wet-hour fraction < 0.5 |
+|---|---|---|---|---|---|---|
+| daily-lstm | 0.809 | 0.995 | 1230 | 311 | 9 | 1063 |
+| hourly-lstm | 0.931 | 0.999 | 692 | 57 | 9 | 661 |
+| uh-retro | 0.927 | 1.000 | 1002 | 130 | 6 | 879 |
+| dhbv2-lumped | 0.901 | 0.975 | 681 | 263 | 7 | 455 |
+| dhbv2-dist | 0.985 | 0.999 | 413 | 34 | 3 | 373 |
+
+Mass is conserved in every arm (wet-hour median 0.975–1.000). The residue below 0.5 follows arm speed:
+the two slowest arms (daily-lstm, dhbv2-lumped; §3.2) retain the most reaches whose water is still in
+transit at the window end, the fastest (dhbv2-dist) the fewest. The inflow products differ strongly in
+intermittency (373–1063 reaches dry more than half the time), which is what the raw statistic was
+measuring. §3.1's "unexplained mass loss" numbers and the clamped-negative-solve hypothesis are withdrawn.
