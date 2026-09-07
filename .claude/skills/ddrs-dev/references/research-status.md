@@ -281,21 +281,39 @@ target/release/ddrs --workspace .ddrs experiment adjoint-uh-seeds --backend cpu
   --out .ddrs/experiments/adjoint-uh-seeds/<ts>/figures
 ```
 
-## Per-gauge loss landscape — UH arm sample case, Newport + Mapleton Depot (2026-09-07), one seed
+## Per-gauge loss landscape — UH arm sample case, Newport + Mapleton Depot (2026-09-07), two seeds
 
-Authority: `docs/2026-09-07-landscape-uh-juniata-findings.md`, spec
+Authority: `docs/2026-09-07-landscape-uh-juniata-findings.md` (see §2b for the
+seed replicate), spec
 `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`. Measures NSE-batch
 loss at one gauge over basin-uniform log-multipliers on (n, p, q), the FD Hessian
 of the adjoint gradient, the damped Newton optimum, and behavioural half-widths
-(5 % of loss) per eigenvector. **Verdict (instrument): PASS**, but the multiplier
+per eigenvector. **Verdict (instrument): PASS**, but the multiplier
 box must be bounded by the parameter ranges, or fields clamp and the landscape
 flattens artificially. Newport (01567000): optimum n×0.36, p×0.26, q×0.56, NSE
 0.692 → 0.770; eigenvalues 2.34e-1 / 1.03e-3 / 2.38e-4; the trained point sits
 0.03 half-widths off the stiff axis, 0.86 off a sloppy one. Mapleton Depot
 (01563500): monotone to the parameter-range floor, no interior optimum.
+
+**Seed replicate (§2b, run
+`.ddrs/experiments/landscape-uh-juniata-wide/2026-09-07T21-15-36Z`, compare
+script `experiments/landscape/seed_compare.py`).** Seed 43 added as a second
+arm. At Newport, seed 43's trained fields differ from seed 42's by a
+near-uniform width shift: p × 0.63 (reach-std 0.04 in log), n × 0.95, q
+unchanged. In seed 42's eigenbasis, seed 43's trained point sits 0.20
+log-units along the stiff axis, which sets the seed-defined behavioural
+tolerance at about 10 % of L* (replacing the 5 % placeholder above). The two
+seeds' optima agree on n* to 2 % and on p* to 24 %, but differ on q* by a
+factor 2.3 at equal NSE (0.770 vs 0.772): the gauge determines only the stiff
+coordinate of its optimum. At Mapleton Depot, seed 42's optimum is the
+clamped corner, so the seed comparison is not meaningful there; seed 43 finds
+an interior optimum (NSE 0.558 → 0.652), so range-bounded Newton (a
+follow-up) is needed before this gauge's optima can be compared.
+
 Reproduce (findings §5): `target/release/ddrs --workspace .ddrs experiment
-landscape-uh-juniata-wide --backend cpu`. **Status: one arm, one seed, two
-gauges, INCONCLUSIVE** pending the seed-43 replicate and the 8-gauge run.
+landscape-uh-juniata-wide --backend cpu`. **Status: two seeds of one arm, two
+gauges; instrument PASS; tolerance measured; science still sample-scale
+pending the 8-gauge run and cross-arm placement.**
 
 ## Open, not closed
 
