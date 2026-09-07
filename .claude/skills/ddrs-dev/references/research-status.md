@@ -232,26 +232,20 @@ arm (max rel. err 0.02–0.17 %).
   bias is mostly local: inherited share median 0.27–0.39 (the Juniata LSTM arms'
   ~0.9 is not typical). Downstream bias sign follows the product: dhbv2-dist
   over-predicts at 14/20 gauges, dhbv2-lumped under-predicts at 13/20.
-- **Volume-functional truncation.** Most reaches with volume sensitivity < 0.5 are
-  far (median 243–334 km, low-flow lag 15–22 d) — the 90-day / 7-day-tail window
-  truncates them; Spearman(volume_sens, distance) −0.45 to −0.61. Do NOT read low
-  volume sensitivity as mass loss without the T10 truncation check. Genuine
-  unexplained mass loss (lag < 3 d, inflow above floor): 13–69 reaches per arm
-  (~1–2 %), clustered in Northern Plains basins 06354000/06447000/06353000; clamped
-  negative solves are the candidate mechanism, unverified.
-**Method validation on the UH arm (2026-09-06,
-`docs/2026-09-06-adjoint-method-validation-uh-findings.md`):** full-map central
-finite differences at 8 gauges, 1,062 checks — 989 pass (802 below the f32 noise
-floor); the 73 failures are 13 finite-step nonlinearity (converge as δ→0), 33
-inflow-clamp-floor, 20 f32-quantization-limited, 5 kinks (gradient between the
-one-sided slopes), 2 at a 0.11 m³/s gauge; **none an adjoint error**. Kernel mean
-lag = hydraulic travel time Σ L/c (independent geometry computation) to median
-ratio 0.94–1.06 at 7/8 gauges at low flow; at high flow the kernel lies between the
-peak-flow and mean-flow references (static reference cannot adjudicate). Mask
-anchors with Q_g < 1 m³/s. High-flow kernels are linearizations of a non-smooth
-(clamped) operator — say so when quoting them. Tools:
-`experiments/adjoint/validate_plots.py`, `validate_classify.py`; bundle
-`experiments/adjoint-uh-validate`.
+- **"Mass loss" is NOT mass loss (checks 3–4, 2026-09-07,
+  `docs/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`).** The inflow
+  gradient is exactly zero at source hours where lateral inflow sits at the
+  `discharge` clamp floor, so the raw time-mean volume sensitivity of an
+  intermittent reach collapses to its wet-hour fraction (0.13–0.21 at the Cannonball
+  gauges in the UH product). Use `volume_sens_wet` (mean over wet source hours):
+  median 0.88–1.02 at all 8 UH validation gauges, frac < 0.5 falls from 0.39–0.82
+  to ≤ 0.29 (remainder = slow far reaches, ~0.08 m/s, water in transit). Pulse
+  traces: +1 m³/s for 30 d at two "zero-kernel" reaches arrives at the gauge at
+  97–98 %. Clamped-negative-solve mechanism REFUTED for wet reaches (no clamped
+  reach on any losing path). The 180-day window exposes explosive linearised
+  sensitivities (to 600) at the Feb–Mar wet-up in Plains basins — open item; do not
+  aggregate raw 180-d volume sensitivity there. Population numbers with
+  `volume_sens_wet`: rerun 2026-09-07 (see that doc when written).
 - **Do-not-use:** the PoC's "dhbv2-lumped destroys mass in a 12-reach tributary" as
   a general claim (the population shows this is rare and regional); the Juniata
   0.21–0.47 m/s celerity range as a population number (use the ratios above);

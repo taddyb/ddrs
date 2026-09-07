@@ -19,6 +19,15 @@ functional is truncation by the 90-day window in basins > 300 km; genuine
 unexplained mass loss is 13–69 reaches per arm (~1–2 %), clustered in Northern
 Plains basins.
 
+> **Correction (2026-09-07, checks 3–4 on the UH arm,
+> `docs/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`):** the "mass loss" /
+> "unexplained mass loss" / "clamped negative solves" reading of low volume sensitivity below is
+> superseded. Low `volume_sens` is (1) inflow intermittency — the gradient is exactly zero at source
+> hours with inflow at the clamp floor, so the raw time-mean collapses to the wet-hour fraction — and
+> (2) slow low-flow transport in far semi-arid reaches. Pulse traces deliver 97–98 % of injected water
+> from "zero-kernel" reaches; no clamped reach lies on any losing path. Use `volume_sens_wet`.
+> The transfer coefficient (perennial upstream gauge reaches) and all kernel/celerity results stand.
+
 ## 1. Pre-registered hypotheses (spec §0, scope design §2)
 
 | # | Hypothesis | Verdict | Key number |
