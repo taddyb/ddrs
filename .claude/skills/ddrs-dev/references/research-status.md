@@ -248,9 +248,38 @@ arm (max rel. err 0.02–0.17 %).
   `volume_sens_wet`: rerun 2026-09-07 (see that doc when written).
 - **Do-not-use:** the PoC's "dhbv2-lumped destroys mass in a 12-reach tributary" as
   a general claim (the population shows this is rare and regional); the Juniata
-  0.21–0.47 m/s celerity range as a population number (use the ratios above);
-  any of these as established until a replicate seed exists (**INCONCLUSIVE
-  pending seed**).
+  0.21–0.47 m/s celerity range as a population number (use the ratios above).
+  **Correction (2026-09-07, seed-noise entry below): the cross-arm celerity spread
+  (median 2.16 low / 2.32 high) is no longer INCONCLUSIVE pending seed. The UH
+  arm's seed-42/43 replicate gives a seed-to-seed celerity ratio median 1.09 (low
+  anchor) / 1.01 (high), IQR 0.14, against the cross-arm max/min 2.16 / 2.32,
+  IQR 0.69 / 0.87. The two distributions are nearly disjoint, so the cross-arm
+  celerity spread is SUPPORTED at the population level: inflow source, not seed,
+  sets the learned routing speed. Caveat: only the UH arm has a replicate seed, so
+  the other four arms' noise floors are still unmeasured.**
+
+## Adjoint seed-to-seed noise floor — UH arm seeds 42/43 (2026-09-07)
+
+Authority: `docs/2026-09-07-adjoint-seed-noise-floor-findings.md`. Bundle
+`experiments/adjoint-uh-seeds` (arms `uh-seed42`, `uh-seed43`; UH retrospective
+inflow, `gages_2000_area_balanced.csv`, 30 epochs, identical config except
+seed), scored against the 5-arm cross-arm reference above (41 gauges, 38 with a
+celerity fit). Celerity: seed-to-seed ratio median 1.09 (low anchor) / 1.01
+(high), IQR 0.14, versus cross-arm max/min 2.16 / 2.32, IQR 0.69 / 0.87. This
+moves the population celerity result from INCONCLUSIVE to **SUPPORTED at the
+population level**. Mass-type statistics (kernel mass, wet-hour volume
+sensitivity, upstream→downstream transfer, inherited share) are seed-stable at
+the median to 1e-5 or better. Caveats: only the UH arm is replicated (LSTM and
+dHBV2 arms could have a different noise floor); two seeds cannot separate the
+1.09 low-flow systematic shift from noise; a few outlier gauges (intermittent,
+slow-transport) swing more between seeds without moving the medians. Reproduce:
+
+```bash
+target/release/ddrs --workspace .ddrs experiment adjoint-uh-seeds --backend cpu
+~/projects/ddr/.venv/bin/python experiments/adjoint/seed_noise.py \
+  .ddrs/experiments/adjoint-uh-seeds/<ts> .ddrs/experiments/adjoint-conus/2026-09-07T18-18-39Z \
+  --out .ddrs/experiments/adjoint-uh-seeds/<ts>/figures
+```
 
 ## Per-gauge loss landscape — UH arm sample case, Newport + Mapleton Depot (2026-09-07), one seed
 
