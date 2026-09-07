@@ -138,7 +138,8 @@ where
 
     /// Physical fields at `α` (inner backend), for hydraulic checks.
     pub fn fields_at(&self, w: &WindowData<I>, alpha: [f32; 3]) -> (Tensor<I, 1>, Tensor<I, 1>, Tensor<I, 1>) {
-        let f = |x0: &Tensor<I, 1>, a: f32, r: [f32; 2]| x0.clone() * a.exp() .clamp(r[0], r[1]);
+        // NB: clamp the FIELD, not the scalar multiplier (precedence).
+        let f = |x0: &Tensor<I, 1>, a: f32, r: [f32; 2]| (x0.clone() * a.exp()).clamp(r[0], r[1]);
         (f(&w.n0, alpha[0], self.ranges[0]), f(&w.p0, alpha[1], self.ranges[1]), f(&w.q0, alpha[2], self.ranges[2]))
     }
 
