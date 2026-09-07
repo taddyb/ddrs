@@ -42,6 +42,11 @@ def load(out: Path):
     return manifest, arms, gauges, data
 
 
+def vol_var(ds):
+    """Prefer the wet-hour-normalized volume sensitivity (checks 3-4) when present."""
+    return "volume_sens_wet" if "volume_sens_wet" in ds else "volume_sens"
+
+
 def arm_colors(arms):
     cmap = plt.get_cmap("tab10")
     return {a: cmap(i) for i, a in enumerate(arms)}
@@ -109,8 +114,8 @@ def per_gauge_celerity(arms, gauges, data):
                 rows.append(dict(arm=arm, staid=staid, kind=kind, celerity_m_s=1.0 / slope if slope > 0 else np.nan,
                                  n_reach=int(m.sum()), max_dist_km=float(dist[m].max() / 1000.0),
                                  kernel_mass_median=float(np.nanmedian(ds["kernel_mass"].values[sel])),
-                                 volume_sens_median=float(np.nanmedian(ds["volume_sens"].values)) if "volume_sens" in ds else np.nan,
-                                 frac_vol_lt_half=float(np.mean(ds["volume_sens"].values < 0.5)) if "volume_sens" in ds else np.nan))
+                                 volume_sens_median=float(np.nanmedian(ds[vol_var(ds)].values)) if "volume_sens" in ds else np.nan,
+                                 frac_vol_lt_half=float(np.nanmean(ds[vol_var(ds)].values < 0.5)) if "volume_sens" in ds else np.nan))
     return pd.DataFrame(rows)
 
 
@@ -198,7 +203,7 @@ def fig_influence_maps(out, arms, gauges, data, fabric: Path, staids):
         if gdf.empty:
             print(f"  no polygons found for {staid} (outside the pfaf-7 fabric?); skipping map")
             continue
-        fields = [f for f in ["residual_attr", "volume_sens"] if f in any_ds]
+        fields = [f for f in ["residual_attr", vol_var(any_ds)] if f in any_ds]
         fig, axes = plt.subplots(len(fields), len(arms), figsize=(3.6 * len(arms), 3.6 * len(fields)), squeeze=False)
         res_abs = max(
             (np.nanmax(np.abs(data[(a, staid)]["residual_attr"].values)) for a in arms if (a, staid) in data and "residual_attr" in data[(a, staid)]),
@@ -216,6 +221,8 @@ def fig_influence_maps(out, arms, gauges, data, fabric: Path, staids):
                 g = gdf.copy()
                 g["v"] = g["COMID"].astype(int).map(vals)
                 kw = dict(cmap="RdBu_r", vmin=-res_abs, vmax=res_abs) if field == "residual_attr" else dict(cmap="viridis", vmin=0.0, vmax=1.2)
+                if field != "residual_attr" and field not in ds:
+                    ax.set_title(f"{arm}: n/a"); continue
                 g.plot(column="v", ax=ax, legend=(c == len(arms) - 1), edgecolor="none", **kw, legend_kwds={"shrink": 0.6, "label": field})
                 gauge_comid = int(ds["COMID"].values[ds["is_gauge_reach"].values == 1][0])
                 gg = g[g["COMID"].astype(int) == gauge_comid]
@@ -266,9 +273,10 @@ def fig_volume_sens(out, arms, gauges, data, colors):
             ds = data.get((arm, staid))
             if ds is None or "volume_sens" not in ds:
                 continue
-            v = ds["volume_sens"].values
+            v = ds[vol_var(ds)].values
+            v = v[np.isfinite(v)]
             axes[r, 0].hist(v, bins=40, histtype="step", color=colors[arm], label=f"{arm} (median {np.nanmedian(v):.3f})", lw=1.4)
-            axes[r, 1].scatter(ds["dist_to_gauge_m"].values / 1000.0, v, s=8, color=colors[arm], alpha=0.6, label=arm, edgecolor="none")
+            axes[r, 1].scatter(ds["dist_to_gauge_m"].values / 1000.0, ds[vol_var(ds)].values, s=8, color=colors[arm], alpha=0.6, label=arm, edgecolor="none")
         axes[r, 0].axvline(1.0, color="k", lw=0.6, ls="--")
         axes[r, 1].axhline(1.0, color="k", lw=0.6, ls="--")
         axes[r, 0].set_title(f"{staid}: volume sensitivity (expect ≈1)")
@@ -350,8 +358,8 @@ def fig_population(out, arms, gauges, data, colors):
     # 3. volume sensitivity per gauge
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
     vs = cel[cel.kind == "low"] if (cel.kind == "low").any() else cel
-    _box_by_arm(axes[0], vs, "volume_sens_median", arms, colors, "median d[ΣQ_g]/dq'", "Volume sensitivity per gauge (expect ≈1)", hline=1.0)
-    _box_by_arm(axes[1], vs, "frac_vol_lt_half", arms, colors, "fraction of reaches", "Reaches with volume sensitivity < 0.5 (mass lost)")
+    _box_by_arm(axes[0], vs, "volume_sens_median", arms, colors, "median d[ΣQ_g]/dq' (wet source hours)", "Volume sensitivity per gauge, wet-hour mean (expect ≈1)", hline=1.0)
+    _box_by_arm(axes[1], vs, "frac_vol_lt_half", arms, colors, "fraction of reaches", "Reaches with wet-hour volume sensitivity < 0.5 (in transit at window end)")
     fig.tight_layout()
     fig.savefig(out / "figures" / "population_volume_sens.png", dpi=150)
     plt.close(fig)
