@@ -644,6 +644,22 @@ where
                 row[warm_h.min(t_all)..].iter().filter(|q| **q <= floor).count() as f32 / (t_all - warm_h.min(t_all)).max(1) as f32
             })
             .collect();
+        // Intermittency: fraction of source hours with inflow above the floor.
+        {
+            let q: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap(); // (T, N)
+            let (t_h, n_r) = (lf.q_leaf.dims()[0], lf.q_leaf.dims()[1]);
+            let lo = warm_h.min(t_h);
+            let hi = reduce_to.min(t_h);
+            r.q_prime_wet_frac = (0..n_r)
+                .map(|i| (lo..hi).filter(|&h| q[h * n_r + i] > floor).count() as f32 / (hi - lo).max(1) as f32)
+                .collect();
+            r.volume_sens_wet = (0..n_r)
+                .map(|i| {
+                    let wet: Vec<usize> = (lo..hi).filter(|&h| q[h * n_r + i] > floor).collect();
+                    if wet.is_empty() { f32::NAN } else { wet.iter().map(|&h| grad.at(h, i)).sum::<f32>() / wet.len() as f32 }
+                })
+                .collect();
+        }
         // Check 4 traces: sustained pulse at one reach, ΔQ everywhere.
         for tr in adjoint.traces.iter().filter(|t| t.staid == g.staid) {
             let Some(reach) = comids.iter().position(|c| *c == tr.comid) else {
@@ -781,6 +797,8 @@ fn new_result<I: Backend>(
         volume_window_start_day: None,
         volume_sens: vec![],
         volume_sens_lag_aware: vec![],
+        q_prime_wet_frac: vec![],
+        volume_sens_wet: vec![],
         floor_frac: vec![],
         volume_profile: vec![],
         residual_windows: vec![],

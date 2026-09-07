@@ -74,6 +74,15 @@ pub struct GaugeResult {
     /// (max over anchors), so only water that can arrive inside the window is
     /// counted. NaN when fewer than 24 source hours remain or no kernel ran.
     pub volume_sens_lag_aware: Vec<f32>,
+    /// Fraction of source hours (volume window, post-warmup) whose lateral
+    /// inflow is above the `discharge` clamp floor. The inflow gradient is
+    /// exactly zero at floored hours, so the time-mean volume sensitivity of
+    /// an intermittent reach cannot exceed this fraction.
+    pub q_prime_wet_frac: Vec<f32>,
+    /// Volume sensitivity averaged over wet source hours only (inflow above
+    /// the floor), i.e. the transmitted fraction of water that actually
+    /// entered; the correct mass-conservation statistic for intermittent reaches.
+    pub volume_sens_wet: Vec<f32>,
     /// Fraction of routed timesteps (volume window) at which the reach's
     /// discharge sat at the `discharge` clamp floor — a negative or
     /// near-zero solve clamped to 1e-4, or a genuinely dry reach.
@@ -194,6 +203,12 @@ pub fn write_gauge_netcdf(path: &Path, r: &GaugeResult) -> Result<(), BoxError> 
         put_f32(&mut f, "volume_profile", &["hour"], &r.volume_profile, "volume sensitivity, reach-mean by source hour", "dimensionless")?;
         if r.volume_sens_lag_aware.len() == n {
             put_f32(&mut f, "volume_sens_lag_aware", &["reach"], &r.volume_sens_lag_aware, "volume sensitivity over source hours whose kernel lag fits inside the window", "dimensionless")?;
+        }
+        if r.q_prime_wet_frac.len() == n {
+            put_f32(&mut f, "q_prime_wet_frac", &["reach"], &r.q_prime_wet_frac, "fraction of post-warmup source hours with lateral inflow above the clamp floor", "dimensionless")?;
+        }
+        if r.volume_sens_wet.len() == n {
+            put_f32(&mut f, "volume_sens_wet", &["reach"], &r.volume_sens_wet, "volume sensitivity averaged over source hours with inflow above the clamp floor", "dimensionless")?;
         }
         if r.floor_frac.len() == n {
             put_f32(&mut f, "floor_frac", &["reach"], &r.floor_frac, "fraction of volume-window timesteps with discharge at the clamp floor", "dimensionless")?;
