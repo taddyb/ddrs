@@ -49,7 +49,47 @@ inflow error.
 The 41-gauge nested-reference census (Newton and Hessian only) is queued to test whether "faster" is Appalachian or
 general among well-fit gauges. Direction statistics (mean resultant length) are in `figures/CENSUS.md`.
 
-## 2. Training trajectory (§7.2): pending (running)
+## 2. Training trajectory (§7.2): UH seed 42 at init, epochs 1, 5, 10, 20, 30
+
+Run `.ddrs/experiments/landscape-uh-trajectory/2026-09-08T15-04-23Z/` (11 min, cpu, Newton and Hessian only;
+`figures/TRAJECTORY.md`, `trajectory.png`). Every checkpoint's trained point is expressed in the epoch-30 physical
+frame (reach-mean log field ratio) and then in epoch 30's eigenbasis at epoch 30's per-gauge optimum, so c = 0 is that
+optimum and the epoch-30 row equals the census `coord_trained`.
+
+| | init | epoch 5 | epoch 10 | epoch 20 | epoch 30 | epoch-30 half-width (5 %) |
+|---|---|---|---|---|---|---|
+| Newport c₁ (stiff) | 0.05 | 0.01 | −0.02 | −0.00 | −0.02 | 0.14 |
+| Newport c₂ | 2.13 | 2.03 | 1.91 | 1.81 | 1.80 | 1.89 |
+| Newport NSE at trained point | 0.598 | 0.639 | 0.667 | 0.687 | 0.692 | optimum 0.769 |
+| Mapleton c₁ (stiff) | 0.36 | 0.30 | 0.23 | 0.23 | 0.21 | 0.19 |
+| Mapleton c₂, c₃ | 2.88, 1.69 | 2.78, 1.64 | 2.65, 1.51 | 2.54, 1.47 | 2.53, 1.44 | 5.5, 12.7 |
+| Mapleton NSE at trained point | 0.463 | 0.497 | 0.524 | 0.544 | 0.548 | optimum 0.652 |
+| Basin-median fields (n, p, q) | 0.133, 14.0, 0.50 | | | | 0.103, 12.8, 0.35 | |
+
+Readings.
+
+1. **The stiff coordinate converges first and fully at the downstream gauge.** Newport's c₁ is inside the 5 %
+   half-width from epoch 5 on and hovers at 0.1 half-widths thereafter. Along the one direction the gauge constrains,
+   large-batch training is correct and fast.
+2. **The sloppy coordinates move slowly and were still moving at epoch 30, but decelerating.** Newport c₂ fell 0.33
+   in 30 epochs, 0.01 of it in the last 10; Mapleton's coordinates the same. The remaining gain (0.08 to 0.10 NSE)
+   lies along these directions. Part of it is under-training (the batch gradient along a sloppy axis is small), but
+   the deceleration says the asymptote is a compromise, not the gauge optimum: more epochs recover little.
+3. **Mapleton, upstream, loses the compromise.** Its stiff coordinate stalls at 1.1 half-widths out (0.36 → 0.21).
+   The two gauges want nearly the same physical move (both n × 0.3), so the compromise is not between them; it is with
+   the rest of CONUS through the head's attribute mapping, and the downstream gauge with the larger observed variance
+   is the one the batch satisfies.
+4. **The head changes a basin almost uniformly.** The across-reach spread of the per-checkpoint field change falls
+   from 0.07 (init to epoch 30) to 0 monotonically and is nearly identical across the eight gauges (panel d): within
+   a basin, training moves n, p, q by a common factor. This is why the basin-uniform multiplier parametrization
+   (Phase A) captures what training can do, and why "p is effectively a basin constant" (`docs/2026-09-08-fixed-p-assessment.md`).
+5. **Plains gauges do not move in loss space.** NSE at the trained point is flat at −11 to −29 from init to epoch 30;
+   training changed their parameters but not their loss. Consistent with §1: the channel is not where their error is.
+
+**Reading against the hypothesis.** Training is correct along the constrained direction at the gauge that wins the
+compromise, and slow but not wrong along the unconstrained ones. The instrument separates the two. "Are we training
+correctly" gets a graded answer: yes for the stiff coordinate at well-fit downstream gauges; the upstream gauge is
+left 1 half-width short along its stiff axis; the sloppy coordinates are wherever the shared head puts them.
 ## 3. Inputs (§7.3): pending (queued)
 ## 4. Dense terrain (n-p, stiff-sloppy; n-q with p at trained): pending (queued after §3)
 ## 5. Per-reach gradient map: pending (queued)
