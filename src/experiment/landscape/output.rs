@@ -60,6 +60,12 @@ pub struct LandscapeResult {
     /// (default) or "trained". See `LandscapeSpec::slice_center`.
     pub slice_center: String,
     pub clamped_frac_star: f32,
+    /// Per-gauge effective `max_clamped` bound used by `run_gauge`'s Newton
+    /// acceptance test: `max(spec.max_clamped, spec.max_clamped_min_reaches
+    /// / (n_reach * n_active_params))`. Equal to `spec.max_clamped` except
+    /// for small basins where the floor widens it. See
+    /// `LandscapeSpec::max_clamped_min_reaches`.
+    pub max_clamped_effective: f32,
     /// True if the final accepted point has `clamped_frac > max_clamped`, or
     /// the descent stopped because every Newton trial step exceeded it.
     pub hit_range_bound: bool,
@@ -117,6 +123,7 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("half_width_definition", "w_k = sqrt(2 * tol * L(alpha_star) / lambda_k): behavioural half-width along eigenvector k (quadratic approximation)")?;
     f.add_attribute("celerity_dir_definition", "unit alpha direction that most increases the hydraulic mean path travel time (sum L/c) at alpha = 0")?;
     f.add_attribute("clamped_frac_star", r.clamped_frac_star as f64)?;
+    f.add_attribute("max_clamped_effective", r.max_clamped_effective as f64)?;
     f.add_attribute("hit_range_bound", r.hit_range_bound as i32)?;
     f.add_attribute("slice_center", r.slice_center.as_str())?;
     f.add_attribute("gauge_reach_row", r.gauge_reach_row as i64)?;
@@ -244,6 +251,7 @@ mod tests {
             slices,
             slice_center: "optimum".into(),
             clamped_frac_star: 0.0,
+            max_clamped_effective: 0.05,
             hit_range_bound: false,
             n0: vec![0.03, 0.04],
             p0: vec![21.0, 21.0],

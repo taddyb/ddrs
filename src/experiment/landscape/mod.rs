@@ -45,6 +45,15 @@ pub struct LandscapeSpec {
     /// like a non-decrease: halve the step and retry).
     #[serde(default = "d_max_clamped")]
     pub max_clamped: f32,
+    /// Minimum number of clamped (reach, parameter) entries always
+    /// tolerated, regardless of `max_clamped`. For small basins (3-5
+    /// reaches), a single clamped entry can already exceed `max_clamped`
+    /// as a fraction, starving the damped Newton search of any acceptable
+    /// step. `run_gauge` computes the per-gauge effective bound as
+    /// `max(max_clamped, max_clamped_min_reaches / (n_reach *
+    /// n_active_params))`. See `effective_max_clamped`.
+    #[serde(default = "d_max_clamped_min_reaches")]
+    pub max_clamped_min_reaches: usize,
     /// Which landscape slices through α* to compute. Subset of
     /// `VALID_PLANES`: "n-p", "n-q", "p-q" (parameter-plane slices) and
     /// "stiff-sloppy" (the eigen-plane of H(α*)). Checked against
@@ -78,6 +87,17 @@ fn d_h() -> f32 { 0.05 }
 fn d_newton_iters() -> usize { 10 }
 fn d_tols() -> Vec<f32> { vec![0.05, 0.10] }
 fn d_max_clamped() -> f32 { 0.05 }
+fn d_max_clamped_min_reaches() -> usize { 2 }
+
+/// Effective `max_clamped` bound for a gauge: the configured `spec_value`,
+/// widened so at least `min_reaches` clamped (reach, parameter) entries are
+/// always tolerated out of `n_reach * n_active` total entries. Small basins
+/// (few reaches) would otherwise reject every Newton trial point on a
+/// single clamped entry.
+fn effective_max_clamped(spec_value: f32, min_reaches: usize, n_reach: usize, n_active: usize) -> f32 {
+    let total = (n_reach * n_active).max(1) as f32;
+    spec_value.max(min_reaches as f32 / total)
+}
 fn d_planes() -> Vec<String> {
     VALID_PLANES.iter().map(|s| s.to_string()).collect()
 }
@@ -241,6 +261,14 @@ where
     let obj = Objective::<I>::build(ctx, &staid, starts, spec.window_days)?;
     let h = spec.fd_step;
     let active = obj.active();
+    let n_active_params = active.iter().filter(|&&a| a).count();
+    let max_clamped = effective_max_clamped(spec.max_clamped, spec.max_clamped_min_reaches, obj.n_reach(), n_active_params);
+    if max_clamped != spec.max_clamped {
+        println!(
+            "  [{}] {} landscape: effective max_clamped {:.4} (base {:.4}, n_reach {}, n_active {})",
+            arm.name, g.staid, max_clamped, spec.max_clamped, obj.n_reach(), n_active_params
+        );
+    }
 
     // 1. trained point
     let e0 = obj.eval([0.0; 3], true);
@@ -280,7 +308,7 @@ where
                 a[k] = (alpha[k] + t * d[k]).clamp(-spec.alpha_max, spec.alpha_max);
             }
             let e = obj.eval(a, true);
-            if e.clamped_frac > spec.max_clamped {
+            if e.clamped_frac > max_clamped {
                 t *= 0.5;
                 continue;
             }
@@ -313,11 +341,11 @@ where
     let hess_star = hess;
     let (eigval_star, eigvec_star) = eig_active(hess_star, active);
     let grad_star = e_star.grad.unwrap();
-    let hit_range_bound = newton_hit_bound || e_star.clamped_frac > spec.max_clamped;
+    let hit_range_bound = newton_hit_bound || e_star.clamped_frac > max_clamped;
     if hit_range_bound {
         println!(
             "  [{}] {} landscape: hit_range_bound (clamped_frac_star {:.3}, max_clamped {:.3})",
-            arm.name, g.staid, e_star.clamped_frac, spec.max_clamped
+            arm.name, g.staid, e_star.clamped_frac, max_clamped
         );
     }
 
@@ -507,6 +535,7 @@ where
         slices,
         slice_center: spec.slice_center.clone(),
         clamped_frac_star: e_star.clamped_frac,
+        max_clamped_effective: max_clamped,
         hit_range_bound,
         n0: obj.windows[0].n0.clone().into_data().to_vec::<f32>().unwrap(),
         p0: obj.windows[0].p0.clone().into_data().to_vec::<f32>().unwrap(),
@@ -680,6 +709,26 @@ mod tests {
         for name in VALID_PLANES {
             assert_eq!(plane_skip_reason(name, active), None);
         }
+    }
+
+    #[test]
+    fn default_max_clamped_min_reaches_is_two() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.max_clamped_min_reaches, 2);
+    }
+
+    #[test]
+    fn effective_max_clamped_widens_the_bound_for_small_basins() {
+        // 3-reach basin, 2 active params: floor 2 / (3*2) = 0.333... dominates.
+        let eff = effective_max_clamped(0.05, 2, 3, 2);
+        assert!((eff - 2.0 / 6.0).abs() < 1e-6, "eff = {eff}");
+    }
+
+    #[test]
+    fn effective_max_clamped_keeps_base_for_large_basins() {
+        // 213-reach basin, 2 active params: floor 2 / (213*2) << 0.05.
+        let eff = effective_max_clamped(0.05, 2, 213, 2);
+        assert!((eff - 0.05).abs() < 1e-6, "eff = {eff}");
     }
 
     #[test]
