@@ -52,7 +52,7 @@ def axis_labels(plane_name: str) -> tuple[str, str]:
     if plane_name == "stiff-sloppy":
         return "offset along v1 (stiff)", "offset along v3 (sloppy)"
     a_name, b_name = plane_name.split("-")
-    return f"ln multiplier {a_name} (offset from optimum)", f"ln multiplier {b_name} (offset from optimum)"
+    return f"ln multiplier {a_name} (0 = trained)", f"ln multiplier {b_name} (0 = trained)"
 
 
 def marker_points(ds, plane_name: str) -> tuple[tuple[float, float], tuple[float, float]]:
