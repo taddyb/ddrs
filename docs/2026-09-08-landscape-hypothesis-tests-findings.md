@@ -143,5 +143,21 @@ where the parameters cannot matter (Plains).
 
 **Limits.** Basin-uniform multipliers; the eight gauges; the Newton range bound on the LSTM arms; `p` and `q`
 optima are along sloppy directions and their cross-arm spread (× 4 in p) is not informative.
-## 4. Dense terrain (n-p, stiff-sloppy; n-q with p at trained): pending (queued after §3)
-## 5. Per-reach gradient map: pending (queued)
+## 4. Dense terrain, per-reach gradient map, 41-gauge census: NOT RUN (stopped, 2026-09-08 15:45Z)
+
+The 41×41 dense-grid landscape (`landscape-uh-surface`) leaks memory in the slice loop: the process grew from
+31 GB to 39 GB in its first 20 minutes alongside another run, and to 77 GB when re-run alone, at which point it was
+stopped to protect the GPU training. The 13×13 runs (169 cells per plane) complete; the 41×41 runs (1,681 cells per
+plane, two planes, four windows) do not. Suspects: per-cell tensors retained through the window loop in
+`Objective::forward_loss`/`eval` under the ndarray backend, or the per-cell `Eval` values accumulating something
+larger than three floats. Not diagnosed. Under the user's three-strike rule this was the third failed assumption
+of the day (nohup survival, two-process concurrency, serial dense run), so no further runs were launched.
+
+Not run for that reason: `landscape-uh-surface` (dense n-p and stiff-sloppy terrain), `landscape-uh-surface-nq`
+(dense n-q with p at trained), `landscape-uh-reachgrad` (per-reach loss gradients), `landscape-uh-census41`
+(41 gauges, both seeds, Newton and Hessian only; would have been cheap since grid 0 does not enter the leaking loop).
+The fixed-p arm training (`ddrs-train-p21`) was left running; it does not use this code path.
+
+**Next session, in order:** (1) find the leak with a 13×13 vs 25×25 run under `/usr/bin/time -v` and a heap
+profile, or reduce peak memory by evaluating the grid one window at a time; (2) run census41 (safe: grid 0);
+(3) the three dense/gradient bundles; (4) the fixed-p arm's landscape.
