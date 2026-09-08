@@ -107,3 +107,41 @@ with `hydraulics::reach_k_hours`); (iv) `L_g(α*) ≤ L_g(0)`.
 
 Other losses (KGE-based) — later, by user decision. Per-reach (Phase B) — after the sample case.
 Cross-arm population run — after the seed replicate defines the tolerance.
+
+## 7. Tests of the hypothesis (added 2026-09-08)
+
+The hypothesis in §0 makes three claims the sample case (§4, one gauge pair) did not test. Each is one bundle.
+
+**7.1 Displacement census** (`experiments/landscape-uh-census`, UH seeds 42 and 43, the eight validation
+gauges, full slices). For each gauge: the gain available to the gauge from its own optimum, `NSE(α*) − NSE(0)`;
+the trained point's stiff coordinate `c₁/w₁`; the physical optimum `(n*, p*, q*)`. The discriminating
+statistic is the **direction** of `α*` across gauges. If every gauge wants the same move (the sample said
+"everything smaller, n × 0.36" at both Juniata gauges), the batch solution is not a compromise between gauges
+but a systematic offset, which points at training (learning rate, range floors, the σ-normalised batch loss
+weighting some gauges over others) rather than at equifinality. If the directions scatter, the batch solution
+is a genuine compromise and the per-gauge gains are the cost of sharing one head. The seed pair gives the
+noise on each gauge's `α*`.
+
+**7.2 Training trajectory** (`experiments/landscape-uh-trajectory`, UH seed 42 at init, epoch 1, 5, 10, 20,
+30; no slices). "Are we training correctly" in its direct form: at each checkpoint, each gauge's stiff
+coordinate `c₁` and loss `L_g`. With the trained fields stored per checkpoint, all coordinates are expressed
+in the epoch-30 physical frame. Correct training moves `c₁` to zero for every gauge and leaves the sloppy
+coordinates wherever the shared head happens to put them; a gauge whose `c₁` stalls away from zero, or whose
+optimum sits at a range floor, is a gauge the batch cannot fit with this parametrisation.
+
+**7.3 Inputs** (`experiments/landscape-arms`, the five inflow arms, eight gauges, no slices). For each gauge,
+the physical optimum and `NSE(α*)` per arm. If the optimum in physical `(n, p, q)` moves with the input, the
+channel parameters are absorbing inflow bias (the channel compensates for the runoff product), and the
+cross-arm celerity spread measured by the adjoint study is that compensation. If the physical optimum is
+the same across arms and only the batch solution moves, the gauge's constraint is input-independent and the
+arms' disagreement is a training artefact the census (7.1) should also show.
+
+Prerequisites (implemented with this section): Newton bounded by the clamped fraction (`max_clamped`),
+per-arm `checkpoint:` override including `init`, and `grid: 0` to skip slices. Cost on cpu: 7.1 about 2 h,
+7.2 and 7.3 about 1 h each with slices off.
+
+**Concerns.** (i) The basin-uniform multipliers cannot express a per-reach compromise; a gauge that "wants
+everything smaller" may want only its headwaters smaller. Phase B remains the fix. (ii) The eight gauges
+include three Northern Plains gauges with intermittent inflow, where the landscape is state-dependent and
+creased; their `α*` may be unstable between seeds. (iii) `init` is the head at its seed initialisation, not
+a physically meaningful channel; its landscape is a reference for the trajectory only.
