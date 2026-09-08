@@ -5,18 +5,25 @@ Reads a single per-gauge landscape netCDF (src/experiment/landscape/output.rs)
 and, for one plane (or all four), renders the loss surface as a shaded 3-D
 terrain: matplotlib PNG (two viewpoints) + an interactive plotly HTML.
 
-Grid geometry (verified against src/experiment/landscape/mod.rs:311-354, and
+Grid geometry (verified against src/experiment/landscape/mod.rs:311-370, and
 matching experiments/landscape/plots.py's plot_plane, which reads the same
-file):
-  - Planes "n-p", "n-q", "p-q": grid_axis_a/b are ABSOLUTE alpha values for
-    the two swept log-multiplier components (the third component is pinned
-    at alpha_star). The trained point (alpha = 0) therefore sits at (0, 0)
-    on these axes; the optimum (alpha_star) sits at (alpha_star[i],
-    alpha_star[j]).
-  - Plane "stiff-sloppy": grid_axis_a/b are offsets (s, t) from alpha_star
-    along the Hessian eigenvectors v1 (stiff), v3 (sloppy). The optimum
-    therefore sits at (0, 0); the trained point sits at (coord_trained[0],
-    coord_trained[2]).
+file). The `slice_center` global attribute ("optimum", the default, or
+"trained") records which convention centred the slices; absent on files from
+before this attribute existed, in which case it defaults to "optimum":
+  - Planes "n-p", "n-q", "p-q": grid_axis_a/b are always ABSOLUTE alpha
+    values for the two swept log-multiplier components; the third component
+    is pinned at alpha_star ("optimum") or at 0, the trained value
+    ("trained"). Either way the trained point (alpha = 0) sits at (0, 0) on
+    these axes and the optimum (alpha_star) sits at (alpha_star[i],
+    alpha_star[j]) -- the marker math is unaffected by slice_center, only
+    which value the third (unplotted) component is pinned at changes.
+  - Plane "stiff-sloppy": grid_axis_a/b are offsets (s, t) along the Hessian
+    eigenvectors v1 (stiff), v3 (sloppy) of H(alpha_star), from a centre that
+    depends on slice_center. With "optimum" (default) the centre is
+    alpha_star: the optimum sits at (0, 0), the trained point sits at
+    (coord_trained[0], coord_trained[2]). With "trained" the centre is
+    alpha = 0: the trained point sits at (0, 0), the optimum sits at
+    (-coord_trained[0], -coord_trained[2]).
 Note this means the two conventions differ (the axis-aligned planes are NOT
 offsets from alpha_star), even though both are "the grid_axis_a/b variables".
 
@@ -59,6 +66,9 @@ def marker_points(ds, plane_name: str) -> tuple[tuple[float, float], tuple[float
     """Return ((trained_x, trained_y), (star_x, star_y)) for this plane."""
     if plane_name == "stiff-sloppy":
         coord_trained = ds["coord_trained"].values
+        slice_center = ds.attrs.get("slice_center", "optimum")
+        if slice_center == "trained":
+            return (0.0, 0.0), (-float(coord_trained[0]), -float(coord_trained[2]))
         return (float(coord_trained[0]), float(coord_trained[2])), (0.0, 0.0)
     a_name, b_name = plane_name.split("-")
     i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]

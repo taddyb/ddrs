@@ -56,6 +56,9 @@ pub struct LandscapeResult {
     pub celerity_dir: [f32; 3],
     pub newton_path: Vec<NewtonStep>,
     pub slices: Vec<Slice>,
+    /// Slice-centering convention used to compute `slices`: "optimum"
+    /// (default) or "trained". See `LandscapeSpec::slice_center`.
+    pub slice_center: String,
     pub clamped_frac_star: f32,
     /// True if the final accepted point has `clamped_frac > max_clamped`, or
     /// the descent stopped because every Newton trial step exceeded it.
@@ -97,6 +100,7 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("celerity_dir_definition", "unit alpha direction that most increases the hydraulic mean path travel time (sum L/c) at alpha = 0")?;
     f.add_attribute("clamped_frac_star", r.clamped_frac_star as f64)?;
     f.add_attribute("hit_range_bound", r.hit_range_bound as i32)?;
+    f.add_attribute("slice_center", r.slice_center.as_str())?;
 
     f.add_dimension("alpha", 3)?;
     f.add_dimension("k", 3)?;
@@ -207,6 +211,7 @@ mod tests {
             celerity_dir: [1.0, 0.0, 0.0],
             newton_path: vec![NewtonStep { alpha: [0.0; 3], loss: 1.0, grad_norm: 0.0 }],
             slices,
+            slice_center: "optimum".into(),
             clamped_frac_star: 0.0,
             hit_range_bound: false,
             n0: vec![0.03, 0.04],

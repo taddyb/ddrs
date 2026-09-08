@@ -59,6 +59,15 @@ pub struct LandscapeSpec {
     /// variables and costs two extra backward passes.
     #[serde(default)]
     pub reach_grad: bool,
+    /// Where the slice planes are centred. "optimum" (default): axis planes
+    /// hold the third component at alpha_star and sweep absolute alpha in
+    /// ±alpha_max; the stiff-sloppy plane is centred at alpha_star. "trained":
+    /// axis planes hold the third component at 0 (the trained value) instead
+    /// of alpha_star; the stiff-sloppy plane is centred at alpha = 0 instead
+    /// of alpha_star (still spanned by the eigenvectors of H(alpha_star)).
+    /// Checked against `VALID_SLICE_CENTERS` at the top of `run_landscape`.
+    #[serde(default = "d_slice_center")]
+    pub slice_center: String,
 }
 fn d_window_days() -> usize { 90 }
 fn d_water_year() -> i32 { 2000 }
@@ -72,9 +81,14 @@ fn d_max_clamped() -> f32 { 0.05 }
 fn d_planes() -> Vec<String> {
     VALID_PLANES.iter().map(|s| s.to_string()).collect()
 }
+fn d_slice_center() -> String {
+    "optimum".to_string()
+}
 
 /// The four slices `run_gauge` knows how to compute.
 pub const VALID_PLANES: [&str; 4] = ["n-p", "n-q", "p-q", "stiff-sloppy"];
+/// The two slice-centering conventions accepted by `slice_center`.
+pub const VALID_SLICE_CENTERS: [&str; 2] = ["optimum", "trained"];
 
 impl LandscapeSpec {
     /// Reject any `planes` entry that isn't one of `VALID_PLANES`.
@@ -86,6 +100,18 @@ impl LandscapeSpec {
                 )
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    /// Reject a `slice_center` that isn't one of `VALID_SLICE_CENTERS`.
+    pub fn validate_slice_center(&self) -> Result<(), BoxError> {
+        if !VALID_SLICE_CENTERS.contains(&self.slice_center.as_str()) {
+            return Err(format!(
+                "unknown landscape slice_center `{}`; valid values are {VALID_SLICE_CENTERS:?}",
+                self.slice_center
+            )
+            .into());
         }
         Ok(())
     }
@@ -111,6 +137,7 @@ where
     I::Device: 'static + Send + Sync,
 {
     spec.validate_planes()?;
+    spec.validate_slice_center()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -320,6 +347,13 @@ where
         let gsz = spec.grid.max(3);
         let axis: Vec<f32> = (0..gsz).map(|i| -spec.alpha_max + 2.0 * spec.alpha_max * i as f32 / (gsz - 1) as f32).collect();
         let axis_planes: [(&str, [usize; 2]); 3] = [("n-p", [0, 1]), ("n-q", [0, 2]), ("p-q", [1, 2])];
+        // "optimum" (default): axis planes pin the third component at
+        // alpha_star, the eigen plane is centred at alpha_star. "trained":
+        // axis planes pin the third component at 0, the eigen plane is
+        // centred at alpha = 0. Validated in `run_landscape`.
+        let trained_center = spec.slice_center == "trained";
+        let axis_third = if trained_center { [0.0f32; 3] } else { alpha_star };
+        let eigen_center = if trained_center { [0.0f32; 3] } else { alpha_star };
         for name in &spec.planes {
             if let Some(&(_, [i, j])) = axis_planes.iter().find(|(n, _)| *n == name) {
                 let mut loss = vec![f32::NAN; gsz * gsz];
@@ -327,7 +361,7 @@ where
                 let mut clamped = vec![f32::NAN; gsz * gsz];
                 for (a_i, &va) in axis.iter().enumerate() {
                     for (b_i, &vb) in axis.iter().enumerate() {
-                        let mut a = alpha_star;
+                        let mut a = axis_third;
                         a[i] = va;
                         a[j] = vb;
                         let e = obj.eval(a, false);
@@ -338,7 +372,7 @@ where
                 }
                 slices.push(Slice { name: name.clone(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: unit(i), basis_b: unit(j), loss, nse, clamped });
             } else if name == "stiff-sloppy" {
-                // eigen-plane: alpha = alpha* + s*v1 + t*v3, s,t in [-alpha_max, alpha_max]
+                // eigen-plane: alpha = center + s*v1 + t*v3, s,t in [-alpha_max, alpha_max]
                 let v1 = [eigvec_star[0][0], eigvec_star[1][0], eigvec_star[2][0]];
                 let v3 = [eigvec_star[0][2], eigvec_star[1][2], eigvec_star[2][2]];
                 let mut loss = vec![f32::NAN; gsz * gsz];
@@ -346,9 +380,9 @@ where
                 let mut clamped = vec![f32::NAN; gsz * gsz];
                 for (a_i, &s) in axis.iter().enumerate() {
                     for (b_i, &t) in axis.iter().enumerate() {
-                        let mut a = alpha_star;
+                        let mut a = [0.0f32; 3];
                         for k in 0..3 {
-                            a[k] = (alpha_star[k] + s * v1[k] + t * v3[k]).clamp(-2.0 * spec.alpha_max, 2.0 * spec.alpha_max);
+                            a[k] = (eigen_center[k] + s * v1[k] + t * v3[k]).clamp(-2.0 * spec.alpha_max, 2.0 * spec.alpha_max);
                         }
                         let e = obj.eval(a, false);
                         loss[a_i * gsz + b_i] = e.loss;
@@ -417,6 +451,7 @@ where
         celerity_dir,
         newton_path: path,
         slices,
+        slice_center: spec.slice_center.clone(),
         clamped_frac_star: e_star.clamped_frac,
         hit_range_bound,
         n0: obj.windows[0].n0.clone().into_data().to_vec::<f32>().unwrap(),
@@ -520,5 +555,22 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("n-p"));
         assert!(err.to_string().contains("stiff-sloppy"));
+    }
+
+    #[test]
+    fn default_slice_center_is_optimum() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.slice_center, "optimum");
+        assert!(spec.validate_slice_center().is_ok());
+    }
+
+    #[test]
+    fn unknown_slice_center_errors_with_valid_list() {
+        let spec: LandscapeSpec =
+            serde_yaml::from_str("gauges: {}\nslice_center: bogus\n").unwrap();
+        let err = spec.validate_slice_center().unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+        assert!(err.to_string().contains("optimum"));
+        assert!(err.to_string().contains("trained"));
     }
 }

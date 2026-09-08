@@ -73,8 +73,13 @@ def plot_plane(ax, ds, plane_idx, plane_name):
         ax.contourf(axis_a, axis_b, clamped_mask, levels=[0.5, 1.5], colors="none", hatches=["////"])
 
     if plane_name == "stiff-sloppy":
-        trained_xy = (float(coord_trained[0]), float(coord_trained[2]))
-        star_xy = (0.0, 0.0)
+        slice_center = ds.attrs.get("slice_center", "optimum")
+        if slice_center == "trained":
+            trained_xy = (0.0, 0.0)
+            star_xy = (-float(coord_trained[0]), -float(coord_trained[2]))
+        else:
+            trained_xy = (float(coord_trained[0]), float(coord_trained[2]))
+            star_xy = (0.0, 0.0)
         ax.set_xlabel("offset s along v1 (stiff)")
         ax.set_ylabel("offset t along v3 (sloppy)")
     else:
