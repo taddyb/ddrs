@@ -6,8 +6,13 @@ Reads only the study output directory (manifest.json, gauges.csv,
 Gauges whose netCDF has not been written yet (the run is still in progress)
 are skipped.
 
+Axis-aligned planes (n-p, n-q, p-q) are labelled in physical parameter values
+by default: physical = median(x0) * exp(alpha), where x0 is the per-reach
+trained field (n0/p0/q0); pass --alpha-axes to restore the old ln-multiplier
+labelling. The stiff-sloppy plane always keeps its eigen-coordinate axes.
+
 Usage:
-    ~/projects/ddr/.venv/bin/python experiments/landscape/plots.py <run_dir>
+    ~/projects/ddr/.venv/bin/python experiments/landscape/plots.py <run_dir> [--alpha-axes]
 """
 from __future__ import annotations
 
@@ -24,6 +29,57 @@ import pandas as pd  # noqa: E402
 import xarray as xr  # noqa: E402
 
 ALPHA_INDEX = {"n": 0, "p": 1, "q": 2}
+
+# Nice physical-unit tick multipliers per decade, used to label axis-aligned
+# planes (n-p, n-q, p-q) in physical parameter values instead of ln
+# multipliers: physical = median(x0) * exp(alpha). Mirrors surface.py.
+PHYSICAL_TICK_SUBS = {
+    "n": (1.0, 2.0, 5.0),
+    "p": (1.0, 2.0, 5.0),
+    "q": (1.0, 2.0, 3.0, 5.0, 7.0),
+}
+PHYSICAL_AXIS_LABEL = {
+    "n": "Manning n (basin median x multiplier)",
+    "p": "width coefficient p",
+    "q": "width exponent q",
+}
+
+
+def field_medians(ds) -> dict[str, float]:
+    """Per-reach trained-field medians (n0, p0, q0) -> physical alpha=0 value."""
+    return {k: float(np.median(ds[f"{k}0"].values)) for k in ("n", "p", "q")}
+
+
+def _nice_physical_ticks(median: float, alpha_lo: float, alpha_hi: float, param: str) -> tuple[list[float], list[str]]:
+    """Nice physical-value tick locations, expressed as alpha (so callers can
+    place them directly on the alpha grid), plus their labels. physical =
+    median * exp(alpha); ticks are clipped to [alpha_lo, alpha_hi]."""
+    lo, hi = (alpha_lo, alpha_hi) if alpha_lo <= alpha_hi else (alpha_hi, alpha_lo)
+    vmin, vmax = median * np.exp(lo), median * np.exp(hi)
+    if vmin <= 0 or vmax <= vmin:
+        return [], []
+    e_lo = int(np.floor(np.log10(vmin)))
+    e_hi = int(np.ceil(np.log10(vmax)))
+    values = sorted({
+        s * 10.0 ** e
+        for e in range(e_lo, e_hi + 1)
+        for s in PHYSICAL_TICK_SUBS[param]
+        if vmin - 1e-9 <= s * 10.0 ** e <= vmax + 1e-9
+    })
+    locs = [float(np.log(v / median)) for v in values]
+    return locs, [f"{v:g}" for v in values]
+
+
+def title_param_suffix(ds, plane_name: str) -> str:
+    """'n 0.103 -> 0.037, q 0.35 -> 0.22' style physical trained->optimum
+    suffix for the two plotted parameters of an axis-aligned plane."""
+    a_name, b_name = plane_name.split("-")
+    i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
+    medians = field_medians(ds)
+    alpha_star = ds["alpha_star"].values
+    ta, oa = medians[a_name], medians[a_name] * float(np.exp(alpha_star[i]))
+    tb, ob = medians[b_name], medians[b_name] * float(np.exp(alpha_star[j]))
+    return f"{a_name} {ta:.3g} -> {oa:.3g}, {b_name} {tb:.3g} -> {ob:.3g}"
 
 
 # ----------------------------------------------------------------------------- io
@@ -48,7 +104,7 @@ def arm_colors(arms):
 
 
 # --------------------------------------------------------------- per-gauge figure
-def plot_plane(ax, ds, plane_idx, plane_name):
+def plot_plane(ax, ds, plane_idx, plane_name, alpha_axes: bool = False):
     axis_a = ds["grid_axis_a"].values[plane_idx]
     axis_b = ds["grid_axis_b"].values[plane_idx]
     nse = ds["grid_nse"].values[plane_idx]
@@ -82,6 +138,7 @@ def plot_plane(ax, ds, plane_idx, plane_name):
             star_xy = (0.0, 0.0)
         ax.set_xlabel("offset s along v1 (stiff)")
         ax.set_ylabel("offset t along v3 (sloppy)")
+        title = plane_name
     else:
         a_name, b_name = plane_name.split("-")
         i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
@@ -98,16 +155,31 @@ def plot_plane(ax, ds, plane_idx, plane_name):
                     arrowprops=dict(arrowstyle="->", color="k", lw=1.3, linestyle="-"))
         ax.annotate("", xy=(star_xy[0] + v3[i] * w3, star_xy[1] + v3[j] * w3), xytext=star_xy,
                     arrowprops=dict(arrowstyle="->", color="k", lw=1.3, linestyle="--"))
-        ax.set_xlabel(f"ln multiplier {a_name}")
-        ax.set_ylabel(f"ln multiplier {b_name}")
+        if alpha_axes:
+            ax.set_xlabel(f"ln multiplier {a_name}")
+            ax.set_ylabel(f"ln multiplier {b_name}")
+            title = plane_name
+        else:
+            ax.set_xlabel(PHYSICAL_AXIS_LABEL[a_name], fontsize=7)
+            ax.set_ylabel(PHYSICAL_AXIS_LABEL[b_name], fontsize=7)
+            medians = field_medians(ds)
+            xlocs, xlabels = _nice_physical_ticks(medians[a_name], float(axis_a.min()), float(axis_a.max()), a_name)
+            ylocs, ylabels = _nice_physical_ticks(medians[b_name], float(axis_b.min()), float(axis_b.max()), b_name)
+            if xlocs:
+                ax.set_xticks(xlocs)
+                ax.set_xticklabels(xlabels, fontsize=6)
+            if ylocs:
+                ax.set_yticks(ylocs)
+                ax.set_yticklabels(ylabels, fontsize=6)
+            title = f"{plane_name}  {title_param_suffix(ds, plane_name)}"
 
     ax.plot(*trained_xy, marker="x", color="k", ms=8, mew=2, zorder=5)
     ax.plot(*star_xy, marker="*", color="red", ms=13, zorder=5)
-    ax.set_title(plane_name, fontsize=9)
+    ax.set_title(title, fontsize=9 if (alpha_axes or plane_name == "stiff-sloppy") else 6.5)
     return cf
 
 
-def fig_landscape_gauge(out: Path, arms, staid: str, data):
+def fig_landscape_gauge(out: Path, arms, staid: str, data, alpha_axes: bool = False):
     rows = [a for a in arms if (a, staid) in data]
     if not rows:
         return None
@@ -123,7 +195,7 @@ def fig_landscape_gauge(out: Path, arms, staid: str, data):
         n_reach = int(ds.attrs["n_reach"])
         for c, plane_name in enumerate(planes):
             ax = axes[r, c]
-            cf = plot_plane(ax, ds, c, plane_name)
+            cf = plot_plane(ax, ds, c, plane_name, alpha_axes)
             fig.colorbar(cf, ax=ax, shrink=0.85, pad=0.03, label="NSE" if c == 3 else None)
         row_labels.append(f"{staid}  arm={arm}  NSE {nse0:.3f} -> {nse_star:.3f}  n_reach={n_reach}")
     fig.suptitle(
@@ -344,6 +416,7 @@ def write_report(out: Path, df: pd.DataFrame, arms, gauges, input_files):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir", type=Path)
+    ap.add_argument("--alpha-axes", action="store_true", help="label axis-aligned planes in ln multiplier (alpha) space instead of physical parameter values")
     args = ap.parse_args()
     run_dir = args.run_dir
     (run_dir / "figures").mkdir(parents=True, exist_ok=True)
@@ -354,7 +427,7 @@ def main():
     colors = arm_colors(arms)
     written = []
     for staid in gauges["staid"]:
-        p = fig_landscape_gauge(run_dir, arms, staid, data)
+        p = fig_landscape_gauge(run_dir, arms, staid, data, args.alpha_axes)
         if p is not None:
             written.append(p)
 

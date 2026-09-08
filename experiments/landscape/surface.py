@@ -27,9 +27,14 @@ before this attribute existed, in which case it defaults to "optimum":
 Note this means the two conventions differ (the axis-aligned planes are NOT
 offsets from alpha_star), even though both are "the grid_axis_a/b variables".
 
+Axis-aligned planes (n-p, n-q, p-q) are labelled in physical parameter values
+by default: physical = median(x0) * exp(alpha), where x0 is the per-reach
+trained field (n0/p0/q0); pass --alpha-axes to restore the old ln-multiplier
+labelling. The stiff-sloppy plane always keeps its eigen-coordinate axes.
+
 Usage:
     ~/projects/ddr/.venv/bin/python experiments/landscape/surface.py \\
-        <gauge.nc> --plane all --out <dir> [--log] [--zmax <loss>]
+        <gauge.nc> --plane all --out <dir> [--log] [--zmax <loss>] [--alpha-axes]
 """
 from __future__ import annotations
 
@@ -54,12 +59,99 @@ UPSAMPLE_FACTOR = 4
 VERT_EXAG = 2.0
 GREY = np.array([0.55, 0.55, 0.55, 1.0])
 
+# Nice physical-unit tick multipliers per decade, used to label axis-aligned
+# planes (n-p, n-q, p-q) in physical parameter values instead of ln
+# multipliers: physical = median(x0) * exp(alpha). n/p use the standard
+# {1, 2, 5} log-tick pattern; q uses a denser {1, 2, 3, 5, 7} pattern so the
+# axis reads as roughly linear over its narrower physical range.
+PHYSICAL_TICK_SUBS = {
+    "n": (1.0, 2.0, 5.0),
+    "p": (1.0, 2.0, 5.0),
+    "q": (1.0, 2.0, 3.0, 5.0, 7.0),
+}
+PHYSICAL_AXIS_LABEL = {
+    "n": "Manning n (basin median x multiplier)",
+    "p": "width coefficient p",
+    "q": "width exponent q",
+}
+PARAM_DISPLAY_NAME = {"n": "Manning n", "p": "width coefficient p", "q": "width exponent q"}
+
 
 def axis_labels(plane_name: str) -> tuple[str, str]:
     if plane_name == "stiff-sloppy":
         return "offset along v1 (stiff)", "offset along v3 (sloppy)"
     a_name, b_name = plane_name.split("-")
     return f"ln multiplier {a_name} (0 = trained)", f"ln multiplier {b_name} (0 = trained)"
+
+
+def field_medians(ds) -> dict[str, float]:
+    """Per-reach trained-field medians (n0, p0, q0) -> physical alpha=0 value."""
+    return {k: float(np.median(ds[f"{k}0"].values)) for k in ("n", "p", "q")}
+
+
+def _nice_physical_ticks(median: float, alpha_lo: float, alpha_hi: float, param: str) -> tuple[list[float], list[str]]:
+    """Nice physical-value tick locations, expressed as alpha (so callers can
+    place them directly on the alpha grid), plus their labels. physical =
+    median * exp(alpha); ticks are clipped to [alpha_lo, alpha_hi]."""
+    lo, hi = (alpha_lo, alpha_hi) if alpha_lo <= alpha_hi else (alpha_hi, alpha_lo)
+    vmin, vmax = median * np.exp(lo), median * np.exp(hi)
+    if vmin <= 0 or vmax <= vmin:
+        return [], []
+    e_lo = int(np.floor(np.log10(vmin)))
+    e_hi = int(np.ceil(np.log10(vmax)))
+    values = sorted({
+        s * 10.0 ** e
+        for e in range(e_lo, e_hi + 1)
+        for s in PHYSICAL_TICK_SUBS[param]
+        if vmin - 1e-9 <= s * 10.0 ** e <= vmax + 1e-9
+    })
+    locs = [float(np.log(v / median)) for v in values]
+    return locs, [f"{v:g}" for v in values]
+
+
+def axis_ticks(ds, plane_name: str, ga: np.ndarray, gb: np.ndarray, alpha_axes: bool):
+    """Return (xlabel, ylabel, xlocs, xlabels, ylocs, ylabels). The tick lists
+    are None when the old ln-multiplier axes are in effect (--alpha-axes, or
+    the stiff-sloppy plane, which always keeps its eigen-coordinate axes)."""
+    if alpha_axes or plane_name == "stiff-sloppy":
+        xlabel, ylabel = axis_labels(plane_name)
+        return xlabel, ylabel, None, None, None, None
+    a_name, b_name = plane_name.split("-")
+    medians = field_medians(ds)
+    xlocs, xlabels = _nice_physical_ticks(medians[a_name], float(ga.min()), float(ga.max()), a_name)
+    ylocs, ylabels = _nice_physical_ticks(medians[b_name], float(gb.min()), float(gb.max()), b_name)
+    return PHYSICAL_AXIS_LABEL[a_name], PHYSICAL_AXIS_LABEL[b_name], xlocs, xlabels, ylocs, ylabels
+
+
+def title_param_suffix(ds, plane_name: str, alpha_axes: bool) -> str:
+    """'n 0.103 -> 0.037, q 0.35 -> 0.22' style physical trained->optimum
+    suffix for the two plotted parameters, empty for stiff-sloppy or when
+    --alpha-axes is in effect."""
+    if alpha_axes or plane_name == "stiff-sloppy":
+        return ""
+    a_name, b_name = plane_name.split("-")
+    i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
+    medians = field_medians(ds)
+    alpha_star = ds["alpha_star"].values
+    ta, oa = medians[a_name], medians[a_name] * float(np.exp(alpha_star[i]))
+    tb, ob = medians[b_name], medians[b_name] * float(np.exp(alpha_star[j]))
+    return f"  [{a_name} {ta:.3g} -> {oa:.3g}, {b_name} {tb:.3g} -> {ob:.3g}]"
+
+
+def pinned_third_note(ds, plane_name: str, alpha_axes: bool) -> str:
+    """'; third parameter pinned at <name> = <value> (<trained|optimum>)'
+    for the unplotted third parameter of an axis-aligned plane."""
+    if alpha_axes or plane_name == "stiff-sloppy":
+        return ""
+    a_name, b_name = plane_name.split("-")
+    pinned = ({"n", "p", "q"} - {a_name, b_name}).pop()
+    slice_center = ds.attrs.get("slice_center", "optimum")
+    median = field_medians(ds)[pinned]
+    if slice_center == "trained":
+        val = median
+    else:
+        val = median * float(np.exp(ds["alpha_star"].values[ALPHA_INDEX[pinned]]))
+    return f"; third parameter pinned at {PARAM_DISPLAY_NAME[pinned]} = {val:.3g} ({slice_center})"
 
 
 def marker_points(ds, plane_name: str) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -120,7 +212,7 @@ def shaded_facecolors(z_disp: np.ndarray, clamped_disp: np.ndarray) -> np.ndarra
     return facecolors
 
 
-def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool):
+def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool, alpha_axes: bool = False):
     staid = ds.attrs["staid"]
     loss0 = float(ds["loss0"].values)
     loss_star = float(ds["loss_star"].values)
@@ -131,6 +223,7 @@ def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool):
     ga_d, gb_d, z_d, clamped_d, upsampled = upsample_for_display(ga, gb, z, clamped)
     if upsampled:
         note = note + f"; display-interpolated x{UPSAMPLE_FACTOR}"
+    note = note + pinned_third_note(ds, plane_name, alpha_axes)
 
     X, Y = np.meshgrid(ga_d, gb_d, indexing="ij")
     facecolors = shaded_facecolors(z_d, clamped_d)
@@ -140,7 +233,7 @@ def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool):
     sz = nearest_z(ga, gb, z, sx, sy)
     zfloor = float(np.nanmin(z_d))
 
-    xlabel, ylabel = axis_labels(plane_name)
+    xlabel, ylabel, xlocs, xlabels, ylocs, ylabels = axis_ticks(ds, plane_name, ga, gb, alpha_axes)
     zlabel = "log10(loss)" if log else "loss"
 
     fig = plt.figure(figsize=(18, 8))
@@ -159,12 +252,19 @@ def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool):
         ax.set_xlabel(xlabel, fontsize=9)
         ax.set_ylabel(ylabel, fontsize=9)
         ax.set_zlabel(zlabel, fontsize=9)
+        if xlocs:
+            ax.set_xticks(xlocs)
+            ax.set_xticklabels(xlabels, fontsize=7)
+        if ylocs:
+            ax.set_yticks(ylocs)
+            ax.set_yticklabels(ylabels, fontsize=7)
         ax.view_init(elev=elev, azim=azim)
         ax.set_title(f"elev={elev}, azim={azim}", fontsize=9)
 
     fig.suptitle(
         f"{staid}  {plane_name}  loss trained {loss0:.4f}  optimum {loss_star:.4f}  "
-        f"(NSE {nse0:.3f} -> {nse_star:.3f})",
+        f"(NSE {nse0:.3f} -> {nse_star:.3f})"
+        f"{title_param_suffix(ds, plane_name, alpha_axes)}",
         fontsize=12,
     )
     fig.text(0.01, 0.01, note, fontsize=7, ha="left", va="bottom")
@@ -173,7 +273,7 @@ def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool):
     plt.close(fig)
 
 
-def plot_plotly(ds, plane_name: str, plane: dict, out_html: Path, log: bool):
+def plot_plotly(ds, plane_name: str, plane: dict, out_html: Path, log: bool, alpha_axes: bool = False):
     staid = ds.attrs["staid"]
     loss0 = float(ds["loss0"].values)
     loss_star = float(ds["loss_star"].values)
@@ -181,12 +281,13 @@ def plot_plotly(ds, plane_name: str, plane: dict, out_html: Path, log: bool):
     nse_star = float(ds["nse_star"].values)
 
     ga, gb, z, clamped, note = plane["ga"], plane["gb"], plane["z"], plane["clamped"], plane["note"]
+    note = note + pinned_third_note(ds, plane_name, alpha_axes)
     (tx, ty), (sx, sy) = marker_points(ds, plane_name)
     tz = nearest_z(ga, gb, z, tx, ty)
     sz = nearest_z(ga, gb, z, sx, sy)
     zfloor = float(np.nanmin(z))
 
-    xlabel, ylabel = axis_labels(plane_name)
+    xlabel, ylabel, xlocs, xlabels, ylocs, ylabels = axis_ticks(ds, plane_name, ga, gb, alpha_axes)
     zlabel = "log10(loss)" if log else "loss"
 
     fig = go.Figure()
@@ -211,13 +312,21 @@ def plot_plotly(ds, plane_name: str, plane: dict, out_html: Path, log: bool):
             marker=dict(symbol=symbol, size=6, color=color), name=name,
         ))
 
+    xaxis = dict(title=xlabel)
+    if xlocs:
+        xaxis.update(tickvals=xlocs, ticktext=xlabels)
+    yaxis = dict(title=ylabel)
+    if ylocs:
+        yaxis.update(tickvals=ylocs, ticktext=ylabels)
+
     fig.update_layout(
         title=(
             f"{staid}  {plane_name}  loss trained {loss0:.4f}  optimum {loss_star:.4f}  "
-            f"(NSE {nse0:.3f} -> {nse_star:.3f})<br><sup>{note}</sup>"
+            f"(NSE {nse0:.3f} -> {nse_star:.3f})"
+            f"{title_param_suffix(ds, plane_name, alpha_axes)}<br><sup>{note}</sup>"
         ),
         scene=dict(
-            xaxis_title=xlabel, yaxis_title=ylabel, zaxis_title=zlabel,
+            xaxis=xaxis, yaxis=yaxis, zaxis_title=zlabel,
             aspectmode="manual", aspectratio=dict(x=1, y=1, z=0.6),
         ),
     )
@@ -231,6 +340,7 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--log", action="store_true", help="plot z = log10(loss) instead of loss")
     ap.add_argument("--zmax", type=float, default=None, help="clip loss (raw, not log) at this value instead of the 99th percentile")
+    ap.add_argument("--alpha-axes", action="store_true", help="label axis-aligned planes in ln multiplier (alpha) space instead of physical parameter values")
     args = ap.parse_args()
 
     ds = xr.open_dataset(args.gauge_nc, decode_timedelta=False)
@@ -251,9 +361,9 @@ def main():
         plane = load_plane(ds, plane_idx, args.log, args.zmax)
         out_png = args.out / f"surface_{staid}_{plane_name}.png"
         out_html = args.out / f"surface_{staid}_{plane_name}.html"
-        plot_mpl(ds, plane_name, plane, out_png, args.log)
+        plot_mpl(ds, plane_name, plane, out_png, args.log, args.alpha_axes)
         print(f"wrote {out_png}")
-        plot_plotly(ds, plane_name, plane, out_html, args.log)
+        plot_plotly(ds, plane_name, plane, out_html, args.log, args.alpha_axes)
         print(f"wrote {out_html}")
 
 
