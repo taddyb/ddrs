@@ -41,12 +41,24 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import xarray as xr  # noqa: E402
 
 FIELD_VARS = ["n0", "p0", "q0"]
 COMPONENTS = ["n", "p", "q"]
+
+# ---- compact figure (fig_arms_compact) constants ----
+COMPACT_STAIDS = ["01563500", "01567000", "06452000"]
+GAUGE_NAMES = {
+    "01563500": "Mapleton Depot",
+    "01567000": "Newport",
+    "06452000": "White River",
+}
+N_RANGE_BOUNDS = (0.015, 0.25)  # Manning n parameter range
+NSE_FLOOR = -2.5
+NSE_CEIL = 1.0
 
 
 # ----------------------------------------------------------------------------- io
@@ -216,6 +228,111 @@ def fig_arms(out: Path, df: pd.DataFrame, spread_df: pd.DataFrame, ref_arm: str,
     return p
 
 
+# ------------------------------------------------------------------- compact figure
+def fig_arms_compact(out: Path, arms, data: dict, colors: dict) -> Path | None:
+    """Compact companion to fig_arms: 2x3 (gauge x [n, NSE]) instead of the
+    2*n_gauge x 3 wall. Columns are hard-coded to the three gauges with
+    NSE0 > 0 in at least one arm; other gauges are omitted."""
+    staids = [s for s in COMPACT_STAIDS if any((a, s) in data for a in arms)]
+    if not staids:
+        return None
+
+    arm_x = {a: i for i, a in enumerate(arms)}
+    xs = [arm_x[a] for a in arms]
+
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8), dpi=150, sharex=True)
+    if len(staids) < 3:
+        for ci in range(len(staids), 3):
+            axes[0, ci].set_visible(False)
+            axes[1, ci].set_visible(False)
+
+    for ci, staid in enumerate(staids):
+        ax_top, ax_bot = axes[0, ci], axes[1, ci]
+        gname = GAUGE_NAMES.get(staid, staid)
+        ax_top.set_title(f"{staid} ({gname})", fontsize=10)
+
+        for arm in arms:
+            ds = data.get((arm, staid))
+            if ds is None:
+                continue
+            x = arm_x[arm]
+            color = colors[arm]
+            n_med = float(np.median(ds["n0"].values.astype(float)))
+            n_iters = int(ds.sizes["newton"]) - 1
+            hit_bound = bool(ds.attrs.get("hit_range_bound", 0))
+
+            # -- row 1: Manning n --
+            if n_iters == 0:
+                ax_top.scatter([x], [n_med], marker="x", c="0.5", s=70, linewidth=1.6, zorder=3)
+            else:
+                alpha_star_n = float(ds["alpha_star"].values[COMPONENTS.index("n")])
+                n_opt = n_med * np.exp(alpha_star_n)
+                ax_top.plot([x, x], [n_med, n_opt], color=color, lw=1.0, zorder=1)
+                ax_top.scatter([x], [n_med], marker="o", c=[color], s=65, edgecolor="k", linewidth=0.5, zorder=3)
+                if hit_bound:
+                    ax_top.scatter([x], [n_opt], marker="*", facecolors="none", edgecolors=color, s=180,
+                                    linewidth=1.3, zorder=3)
+                else:
+                    ax_top.scatter([x], [n_opt], marker="*", c=[color], s=180, edgecolor="k", linewidth=0.5, zorder=3)
+
+            # -- row 2: NSE at gauge --
+            nse0 = float(ds["nse0"].values)
+            nse_star = float(ds["nse_star"].values)
+            ax_bot.plot([x, x], [max(nse0, NSE_FLOOR), max(nse_star, NSE_FLOOR)], color=color, lw=1.0, zorder=1)
+            trained_marker = "v" if nse0 < NSE_FLOOR else "o"
+            ax_bot.scatter([x], [max(nse0, NSE_FLOOR)], marker=trained_marker, c=[color], s=65,
+                            edgecolor="k", linewidth=0.5, zorder=3)
+            if n_iters > 0:
+                opt_marker = "v" if nse_star < NSE_FLOOR else "*"
+                if hit_bound:
+                    ax_bot.scatter([x], [max(nse_star, NSE_FLOOR)], marker=opt_marker, facecolors="none",
+                                    edgecolors=color, s=180 if opt_marker == "*" else 70, linewidth=1.3, zorder=3)
+                else:
+                    ax_bot.scatter([x], [max(nse_star, NSE_FLOOR)], marker=opt_marker, c=[color],
+                                    s=180 if opt_marker == "*" else 70, edgecolor="k", linewidth=0.5, zorder=3)
+
+        ax_top.set_yscale("log")
+        ax_top.axhline(N_RANGE_BOUNDS[0], color="0.4", ls=":", lw=0.9, zorder=0)
+        ax_top.axhline(N_RANGE_BOUNDS[1], color="0.4", ls=":", lw=0.9, zorder=0)
+        ax_top.set_xticks(xs)
+        ax_bot.set_xticks(xs)
+        ax_bot.set_xticklabels(arms, rotation=30, ha="right", fontsize=8)
+        ax_bot.set_ylim(NSE_FLOOR, NSE_CEIL)
+        ax_bot.axhline(0.0, color="0.85", lw=0.7, zorder=0)
+        if ci == 0:
+            ax_top.set_ylabel("Manning n (basin median)", fontsize=9)
+            ax_bot.set_ylabel("NSE at gauge", fontsize=9)
+
+    legend_handles = [
+        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor=colors[a], markeredgecolor="k",
+               markersize=8, label=a)
+        for a in arms
+    ] + [
+        Line2D([0], [0], marker="o", linestyle="none", markerfacecolor="0.6", markeredgecolor="k",
+               markersize=8, label="trained value"),
+        Line2D([0], [0], marker="*", linestyle="none", markerfacecolor="0.6", markeredgecolor="k",
+               markersize=12, label="gauge-optimal"),
+        Line2D([0], [0], marker="*", linestyle="none", markerfacecolor="none", markeredgecolor="0.4",
+               markersize=12, label="gauge-optimal, range-bound"),
+        Line2D([0], [0], marker="x", linestyle="none", markerfacecolor="0.5", markeredgecolor="0.5",
+               markersize=8, label="no descent (0 Newton iters)"),
+        Line2D([0], [0], marker="v", linestyle="none", markerfacecolor="0.5", markeredgecolor="0.5",
+               markersize=7, label="off-scale, clipped to floor"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=5, fontsize=8, frameon=False,
+               bbox_to_anchor=(0.5, 0.0))
+
+    fig.suptitle(
+        "Every inflow input wants a faster Juniata: gauge-optimal n vs trained n across five arms",
+        fontsize=12,
+    )
+    fig.tight_layout(rect=(0, 0.08, 1, 0.94))
+    p = out / "arms_compact.png"
+    fig.savefig(p, dpi=150)
+    plt.close(fig)
+    return p
+
+
 # -------------------------------------------------------------------------- report
 def md_table(df: pd.DataFrame, cols: list[str]) -> str:
     lines = ["| " + " | ".join(cols) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
@@ -320,6 +437,10 @@ def main():
         df.to_csv(out / "arms_per_gauge.csv", index=False)
         written.append(out / "arms_per_gauge.csv")
         written.append(fig_arms(out, df, spread_df, ref_arm, arms))
+
+    compact_p = fig_arms_compact(out, arms, data, arm_colors(arms))
+    if compact_p is not None:
+        written.append(compact_p)
 
     write_report(out, df, spread_df, ref_arm, arms, gauges, input_files, args.smoke_test)
     written.append(out / "ARMS.md")
