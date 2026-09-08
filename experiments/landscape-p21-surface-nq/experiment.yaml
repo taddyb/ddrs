@@ -15,7 +15,7 @@ landscape:
   water_year: 2000
   n_windows: 4
   alpha_max: 1.5
-  grid: 41
+  grid: 25   # 25x25: about 1 h per gauge with the per-eval backward; 41x41 would be 3 h
   fd_step: 0.05
   newton_iters: 12
   tolerances: [0.05, 0.10]
