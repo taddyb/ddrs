@@ -45,6 +45,12 @@ pub struct LandscapeSpec {
     /// like a non-decrease: halve the step and retry).
     #[serde(default = "d_max_clamped")]
     pub max_clamped: f32,
+    /// Which landscape slices through α* to compute. Subset of
+    /// `VALID_PLANES`: "n-p", "n-q", "p-q" (parameter-plane slices) and
+    /// "stiff-sloppy" (the eigen-plane of H(α*)). Checked against
+    /// `VALID_PLANES` at the top of `run_landscape`.
+    #[serde(default = "d_planes")]
+    pub planes: Vec<String>,
 }
 fn d_window_days() -> usize { 90 }
 fn d_water_year() -> i32 { 2000 }
@@ -55,6 +61,27 @@ fn d_h() -> f32 { 0.05 }
 fn d_newton_iters() -> usize { 10 }
 fn d_tols() -> Vec<f32> { vec![0.05, 0.10] }
 fn d_max_clamped() -> f32 { 0.05 }
+fn d_planes() -> Vec<String> {
+    VALID_PLANES.iter().map(|s| s.to_string()).collect()
+}
+
+/// The four slices `run_gauge` knows how to compute.
+pub const VALID_PLANES: [&str; 4] = ["n-p", "n-q", "p-q", "stiff-sloppy"];
+
+impl LandscapeSpec {
+    /// Reject any `planes` entry that isn't one of `VALID_PLANES`.
+    pub fn validate_planes(&self) -> Result<(), BoxError> {
+        for p in &self.planes {
+            if !VALID_PLANES.contains(&p.as_str()) {
+                return Err(format!(
+                    "unknown landscape plane `{p}`; valid planes are {VALID_PLANES:?}"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
 
 pub struct LandscapeOptions {
     pub max_gauges: Option<usize>,
@@ -75,6 +102,7 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static + Send + Sync,
 {
+    spec.validate_planes()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -273,51 +301,55 @@ where
     // 4. analytic celerity direction: d(mean path travel time)/dα at α = 0 (hydraulic K), for pass criterion (iii)
     let celerity_dir = celerity_direction(&obj, h);
 
-    // 5. landscape slices through α*: (n,p), (n,q), (p,q), and (v1, v3).
-    // `grid: 0` skips all four planes (used for cheap studies over many arms
-    // or checkpoints where only the Newton optimum is needed).
+    // 5. landscape slices through α*, named in `spec.planes` (default all
+    // four: (n,p), (n,q), (p,q), and (v1, v3)). `grid: 0` skips every plane
+    // (used for cheap studies over many arms or checkpoints where only the
+    // Newton optimum is needed). Plane names are validated against
+    // `VALID_PLANES` in `run_landscape`, so an unrecognized name here would
+    // already have errored before any gauge ran.
     let mut slices = Vec::new();
     if spec.grid > 0 {
         let gsz = spec.grid.max(3);
         let axis: Vec<f32> = (0..gsz).map(|i| -spec.alpha_max + 2.0 * spec.alpha_max * i as f32 / (gsz - 1) as f32).collect();
-        let planes: [(&str, [usize; 2]); 3] = [("n-p", [0, 1]), ("n-q", [0, 2]), ("p-q", [1, 2])];
-        for (name, [i, j]) in planes {
-            let mut loss = vec![f32::NAN; gsz * gsz];
-            let mut nse = vec![f32::NAN; gsz * gsz];
-            let mut clamped = vec![f32::NAN; gsz * gsz];
-            for (a_i, &va) in axis.iter().enumerate() {
-                for (b_i, &vb) in axis.iter().enumerate() {
-                    let mut a = alpha_star;
-                    a[i] = va;
-                    a[j] = vb;
-                    let e = obj.eval(a, false);
-                    loss[a_i * gsz + b_i] = e.loss;
-                    nse[a_i * gsz + b_i] = e.nse_mean;
-                    clamped[a_i * gsz + b_i] = e.clamped_frac;
-                }
-            }
-            slices.push(Slice { name: name.into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: unit(i), basis_b: unit(j), loss, nse, clamped });
-        }
-        {
-            // eigen-plane: α = α* + s·v1 + t·v3, s,t ∈ [−alpha_max, alpha_max]
-            let v1 = [eigvec_star[0][0], eigvec_star[1][0], eigvec_star[2][0]];
-            let v3 = [eigvec_star[0][2], eigvec_star[1][2], eigvec_star[2][2]];
-            let mut loss = vec![f32::NAN; gsz * gsz];
-            let mut nse = vec![f32::NAN; gsz * gsz];
-            let mut clamped = vec![f32::NAN; gsz * gsz];
-            for (a_i, &s) in axis.iter().enumerate() {
-                for (b_i, &t) in axis.iter().enumerate() {
-                    let mut a = alpha_star;
-                    for k in 0..3 {
-                        a[k] = (alpha_star[k] + s * v1[k] + t * v3[k]).clamp(-2.0 * spec.alpha_max, 2.0 * spec.alpha_max);
+        let axis_planes: [(&str, [usize; 2]); 3] = [("n-p", [0, 1]), ("n-q", [0, 2]), ("p-q", [1, 2])];
+        for name in &spec.planes {
+            if let Some(&(_, [i, j])) = axis_planes.iter().find(|(n, _)| *n == name) {
+                let mut loss = vec![f32::NAN; gsz * gsz];
+                let mut nse = vec![f32::NAN; gsz * gsz];
+                let mut clamped = vec![f32::NAN; gsz * gsz];
+                for (a_i, &va) in axis.iter().enumerate() {
+                    for (b_i, &vb) in axis.iter().enumerate() {
+                        let mut a = alpha_star;
+                        a[i] = va;
+                        a[j] = vb;
+                        let e = obj.eval(a, false);
+                        loss[a_i * gsz + b_i] = e.loss;
+                        nse[a_i * gsz + b_i] = e.nse_mean;
+                        clamped[a_i * gsz + b_i] = e.clamped_frac;
                     }
-                    let e = obj.eval(a, false);
-                    loss[a_i * gsz + b_i] = e.loss;
-                    nse[a_i * gsz + b_i] = e.nse_mean;
-                    clamped[a_i * gsz + b_i] = e.clamped_frac;
                 }
+                slices.push(Slice { name: name.clone(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: unit(i), basis_b: unit(j), loss, nse, clamped });
+            } else if name == "stiff-sloppy" {
+                // eigen-plane: alpha = alpha* + s*v1 + t*v3, s,t in [-alpha_max, alpha_max]
+                let v1 = [eigvec_star[0][0], eigvec_star[1][0], eigvec_star[2][0]];
+                let v3 = [eigvec_star[0][2], eigvec_star[1][2], eigvec_star[2][2]];
+                let mut loss = vec![f32::NAN; gsz * gsz];
+                let mut nse = vec![f32::NAN; gsz * gsz];
+                let mut clamped = vec![f32::NAN; gsz * gsz];
+                for (a_i, &s) in axis.iter().enumerate() {
+                    for (b_i, &t) in axis.iter().enumerate() {
+                        let mut a = alpha_star;
+                        for k in 0..3 {
+                            a[k] = (alpha_star[k] + s * v1[k] + t * v3[k]).clamp(-2.0 * spec.alpha_max, 2.0 * spec.alpha_max);
+                        }
+                        let e = obj.eval(a, false);
+                        loss[a_i * gsz + b_i] = e.loss;
+                        nse[a_i * gsz + b_i] = e.nse_mean;
+                        clamped[a_i * gsz + b_i] = e.clamped_frac;
+                    }
+                }
+                slices.push(Slice { name: "stiff-sloppy".into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: v1, basis_b: v3, loss, nse, clamped });
             }
-            slices.push(Slice { name: "stiff-sloppy".into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: v1, basis_b: v3, loss, nse, clamped });
         }
     }
 
@@ -427,4 +459,26 @@ where
     }
     let nrm = norm(&gvec).max(1e-12);
     [gvec[0] / nrm, gvec[1] / nrm, gvec[2] / nrm]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_planes_are_the_four_valid_names() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.planes, vec!["n-p", "n-q", "p-q", "stiff-sloppy"]);
+        assert!(spec.validate_planes().is_ok());
+    }
+
+    #[test]
+    fn unknown_plane_name_errors_with_valid_list() {
+        let spec: LandscapeSpec =
+            serde_yaml::from_str("gauges: {}\nplanes: [\"n-p\", \"bogus\"]\n").unwrap();
+        let err = spec.validate_planes().unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+        assert!(err.to_string().contains("n-p"));
+        assert!(err.to_string().contains("stiff-sloppy"));
+    }
 }

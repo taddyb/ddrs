@@ -1,0 +1,21 @@
+# Dense grid for the terrain (Li et al. 2018 style) rendering by
+# experiments/landscape/surface.py. The box is +/-1.5 around the optimum so
+# the trained point (alpha = 0) is inside it at Newport (01567000).
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-surface --backend cpu
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 90
+  water_year: 2000
+  n_windows: 4
+  alpha_max: 1.5
+  grid: 41
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-p", "stiff-sloppy"]
