@@ -150,6 +150,7 @@ paper's R1–R5.
 | "leakance is identifiable" (any phrasing) | Explicitly forbidden by the NO-GO summary §7 |
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
+| Dense-grid landscape runs (grid >= 41, e.g. `landscape-uh-surface`) | Leak memory (process grew to 77 GB); do not launch until diagnosed |
 
 ## Structural constants (stable)
 
@@ -314,6 +315,40 @@ Reproduce (findings §5): `target/release/ddrs --workspace .ddrs experiment
 landscape-uh-juniata-wide --backend cpu`. **Status: two seeds of one arm, two
 gauges; instrument PASS; tolerance measured; science still sample-scale
 pending the 8-gauge run and cross-arm placement.**
+
+## Landscape hypothesis tests (spec §7): census, trajectory, inputs (2026-09-08)
+
+Authority: `docs/2026-09-08-landscape-hypothesis-tests-findings.md`. Runs: census
+`.ddrs/experiments/landscape-uh-census/2026-09-08T13-52-27Z/` (8 gauges, UH seeds 42/43);
+trajectory `.ddrs/experiments/landscape-uh-trajectory/2026-09-08T15-04-23Z/` (seed 42, init
+to epoch 30); inputs `.ddrs/experiments/landscape-arms/2026-09-08T15-15-36Z/` (5 inflow arms).
+**Census:** well-fit Juniata gauges want n × 0.3, p × 0.25 to 0.45, gains 0.07 to 0.10 NSE in
+both seeds; poorly-fit White River optima sit near the trained point, gains at most 0.05;
+Cannonball (NSE −11 to −37) has no descent direction, channel parameters cannot fix an inflow
+error. **Trajectory:** Newport's stiff coordinate is inside the 5 % half-width from epoch 5
+on; sloppy coordinates are still moving at epoch 30 but decelerating; Mapleton's stiff
+coordinate stalls at 1.1 half-widths; the head moves a basin by a near-uniform factor.
+**Inputs:** across five arms every gauge-optimal n at Newport (0.026 to 0.052) sits well
+below trained (0.10 to 0.17), gains 0.04 to 0.20 NSE; the LSTM arms hit the range bound; the
+optimum moves with input only at second order.
+
+**Verdict:** batch compromise confirmed at well-fit gauges, direction set by the batch not
+the input, regional not CONUS-wide; INCONCLUSIVE at population scale pending the 41-gauge
+census. The dense-terrain, per-reach-gradient, and census41 bundles did not run: the 41×41
+slice loop leaks memory (process grew to 77 GB), stopped under the user's three-strike rule.
+
+## Fixed width coefficient p (2026-09-08)
+
+Authority: `docs/2026-09-08-fixed-p-assessment.md`. p = 21 (the DDR default)
+is a dissertation-stage field fit to Juniata gages, not a literature constant.
+In this model n and p enter depth only as the ratio n/p, so a gauge identifies
+that ratio and not n and p separately. The only verified downstream
+coefficients are Moody & Troutman (2002): w = 7.2 Q^0.5, d = 0.27 Q^0.3; the
+candidate spatial function is `p = 7.2 · 0.27^(−q) · Q_ref^(0.5 − 0.3q)`. Arm
+`config/experiments/uh_retro_pfixed21.yaml` (constant p = 21, learn n and q
+only) started training 14:06Z 2026-09-08 (unit `ddrs-train-p21`); the
+landscape objective now supports fixed parameters (commit `b52d966`).
+Decision on the Moody-Troutman p(A) arm is pending the user.
 
 ## Open, not closed
 
