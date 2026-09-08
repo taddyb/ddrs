@@ -232,3 +232,34 @@ iterations: they have 3 to 5 reaches, where a single clamped reach exceeds the 5
 "gain 0" is the instrument refusing to step, not an optimum. The rule needs a per-reach floor (at least one reach
 allowed) for small basins. (iii) The census figure with 84 gauges is dense; the per-gauge CSV is the reference.
 
+## 7. Dense (n, q) terrain on the p = 21 model, 2-D optimum, depth axis (run `landscape-p21-surface-nq/2026-09-08T18-20-07Z`)
+
+25 × 25 grid over n and q with p = 21 pinned, slices centred at the trained point, Newton in 2-D. Figures in
+`figures/` (q axis) and `figures/depth/` (depth at the gauge under mean flow in place of q; `surface.py --depth-axis`).
+
+| Newport | n | q | depth at gauge (m) | width (m) | NSE |
+|---|---|---|---|---|---|
+| trained | 0.040 | 0.10 | 1.8 | 22 | 0.703 |
+| 2-D optimum (q at the box edge) | 0.082 | 0.023 | about 2.8 | 21 | 0.742 |
+
+Geometry at the gauge reach: observed mean flow 97 m³/s over 340 valid days, slope 0.0048, p = 21. Mapleton: n
+0.040 → 0.073, q 0.10 → 0.022, NSE 0.644 → 0.602 (loss fell, window-mean NSE rose then fell: the two metrics weight
+the four windows differently; the loss is the objective).
+
+**Shape.** The trench in n is at 0.04 for q ≥ 0.1, exactly where training put it. Toward small q the trench floor
+keeps dropping and drifts to higher n: the gauge prefers a nearly rectangular channel (q → 0, width fixed at p = 21 m)
+with twice the roughness. n and q trade through depth, and q sits at the box edge, so the true 2-D optimum is at
+even smaller q.
+
+**Why.** With p = 21 the modelled channel at Newport is 21 to 22 m wide at a mean flow of 97 m³/s and about 1.8 m
+deep. The Juniata at Newport is far wider than that by any map. An under-wide channel is too deep and too fast for
+its discharge, and the two levers the gauge has left, n and q, are being used to compensate: more roughness to slow
+it, smaller q to stop width growing with depth. This is the case for p as a function of river size (assessment
+doc §3.2) made by the landscape itself: at a 20 m headwater p = 21 is right, at an 8,700 km² main stem it is not, and
+a constant p pushes the compensation into n and q, which is the same kind of confounding the learned p had, moved
+one parameter over.
+
+**Readability.** The depth-axis surface is a narrow curled ribbon because depth is exponentially sensitive to q; it
+shows the valley floor at 2 to 3 m depth but hides the n structure. The q-axis figure with the depth annotation in
+the corner is the more legible of the two.
+
