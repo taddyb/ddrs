@@ -8,6 +8,13 @@ the seed-43 replicate (`config/experiments/uh_retro_seed43.yaml`) for the tolera
 
 ## 0. Purpose
 
+**Hypothesis (user, 2026-09-07).** Each gauge's loss under large-batch training (256 to 2,000 gauges per
+update) is not at that gauge's own minimum; it is the compromise the batch reaches. Taking a trained model (or an
+untrained one) and mapping, via the adjoint, the loss at each gauge over Manning's `n`, `p`, and `q` as the three
+axes tells us whether we are training the model correctly: how far the batch solution sits from the gauge's own
+optimum, and along which directions. The same maps computed with different inflow inputs (arms) show whether the
+inputs change where the gauge's optimum is or only where the batch solution lands.
+
 For each gauge, determine which combinations of the channel parameters (Manning's `n`, Leopold–Maddock
 `p`, `q`) produce near-optimal routed discharge at that gauge, and locate where the values learned by the
 large-scale (all-gauge, attribute-conditioned KAN) training sit relative to that set. This is GLUE's

@@ -17,10 +17,17 @@ travel-time direction at |cos| = 0.65, the remainder being the width term's effe
 combination. One instrument lesson: when the multiplier box exceeds the parameter ranges the fields clamp
 and the landscape flattens artificially (Mapleton Depot, below); the box must be limited by the ranges.
 
+**Hypothesis under test (user framing).** Each gauge's loss under large-batch training is a batch compromise, not
+the gauge's own minimum. The adjoint landscape over (n, p, q) at a gauge measures how far, and in which directions,
+the batch solution sits from the gauge's optimum, which is the test of whether the model is being trained correctly;
+the same map under different inputs tests whether the inputs move the optimum or only the batch solution.
+
 **Verdict (science, one arm, one seed):** at Newport the large-scale training sits **on the gauge's stiff
 axis** (offset 0.00 half-widths) and **1.8 log-units along a sloppy axis** (0.86 of the 5 % behavioural
 half-width): inside the behavioural set, displaced only along a direction the gauge does not constrain.
-This is selective equifinality measured directly. Both gauges would be routed ~3× faster than the
+In the hypothesis's terms: the batch compromise at Newport costs 0.08 NSE against the gauge's own optimum, and all of
+that cost lies along directions the gauge does not constrain. Along the one direction it does constrain, large-batch
+training reached the gauge's optimum. This is selective equifinality measured directly. Both gauges would be routed ~3× faster than the
 large-scale training does (n × 0.36), gaining NSE 0.69 → 0.77 (Newport) and 0.55 → 0.66 (Mapleton).
 
 ## 1. Newport (01567000, 213 reaches)
