@@ -39,8 +39,8 @@ Three groups, and the grouping is the result.
 
 **Reading against the hypothesis.** The batch compromise is real and directionally consistent where the model fits
 (Juniata: 0.07 to 0.10 NSE left on the table, all in the "faster" direction). It is not a CONUS-wide offset: the
-White River optima sit near the trained point. So the census does not indicate a training defect (which would show
-as the same displacement everywhere); it indicates a regional compromise, and a second use of the instrument: at
+White River optima sit near the trained point. So the census does not indicate an optimizer defect (which would show
+as the same displacement everywhere); it indicates a regional compromise (see §3 for its input-independence), and a second use of the instrument: at
 gauges with NSE < 0 the landscape is flat or creased in every channel direction, which localises the error to the
 inflow. That is the bias-propagation question answered per gauge: routing parameters cannot absorb the Plains
 inflow error.
@@ -90,6 +90,58 @@ Readings.
 compromise, and slow but not wrong along the unconstrained ones. The instrument separates the two. "Are we training
 correctly" gets a graded answer: yes for the stiff coordinate at well-fit downstream gauges; the upstream gauge is
 left 1 half-width short along its stiff axis; the sloppy coordinates are wherever the shared head puts them.
-## 3. Inputs (§7.3): pending (queued)
+## 3. Inputs (§7.3): five inflow arms, eight gauges
+
+Run `.ddrs/experiments/landscape-arms/2026-09-08T15-15-36Z/` (13 min, cpu, Newton and Hessian only;
+`figures/ARMS.md`, `arms.png`, `arms_compact.png`). Basin-median values; the optimum is median(n0)·exp(α*_n).
+
+| Newport 01567000 | trained n | gauge-optimal n | NSE trained → optimum | note |
+|---|---|---|---|---|
+| daily-lstm | 0.129 | 0.031 | 0.608 → 0.805 | range-bound after 2 iterations |
+| hourly-lstm | 0.120 | 0.026 | 0.725 → 0.868 | range-bound after 3 |
+| uh-retro | 0.103 | 0.037 | 0.692 → 0.769 | interior |
+| dhbv2-lumped | 0.170 | 0.050 | 0.501 → 0.644 | interior |
+| dhbv2-dist | 0.103 | 0.052 | 0.701 → 0.743 | interior |
+
+| Mapleton Depot 01563500 | trained n | gauge-optimal n | NSE trained → optimum |
+|---|---|---|---|
+| daily-lstm | 0.132 | 0.030 | 0.609 → 0.782 |
+| hourly-lstm | 0.121 | 0.018 | 0.683 → 0.831 |
+| uh-retro | 0.103 | 0.031 | 0.548 → 0.652 |
+| dhbv2-lumped | 0.170 | 0.084 | 0.539 → 0.628 |
+| dhbv2-dist | 0.103 | 0.020 | 0.553 → 0.630 |
+
+White River 06452000: the two LSTM arms find no descent direction (NSE −1.8, −0.6); uh moves n 0.12 → 0.10 for
++0.05; dhbv2-lumped n 0.16 → 0.04 for −2.3 → −1.2; dhbv2-dist −0.07 → 0.02. The Cannonball gauges as in §1.
+
+Readings.
+
+1. **Every input wants a faster Juniata, by a factor 2 to 6 in n.** The trained n across arms spans 0.10 to 0.17;
+   the gauge-optimal n spans 0.018 to 0.084, all far below trained, and NSE at the optimum is 0.04 to 0.20 higher.
+   The two LSTM arms hit the range bound on the way down, so their true optima are lower and better still
+   (hourly-lstm reaches 0.868 at Newport before the bound). Gauge-optimal n of 0.02 to 0.05 is a plausible
+   main-stem roughness; trained 0.10 to 0.17 is not.
+2. **The optimum does move with the input, but less than the trained point suggests.** Spread of the gauge-optimal
+   ln n across arms at Newport 0.71 (× 2.0) versus 0.51 (× 1.7) for the trained n; the fastest inflow in the
+   population study (dhbv2-dist) wants the least reduction, the slowest (dhbv2-lumped) the most in absolute n.
+   That is compensation: the channel optimum partly absorbs the inflow's timing. But it is second order next to
+   reading 1.
+3. **Together with §1 and §2: a regional, input-independent bias in trained n.** The same displacement appears in
+   both seeds (§1), in all five inputs (§3), and is where training was still heading at epoch 30 (§2). At the
+   Plains gauges it is absent (the optimum is near the trained point or undefined). So the batch pushes Juniata's n
+   up for a reason that is not the inflow product and not the seed: other gauges in the batch need the delay that
+   a high n provides (inflow that arrives too early, hillslope timing the routing is asked to absorb), and the
+   attribute-conditioned head cannot give the Juniata a low n while giving those basins a high one. This revises
+   §1's "not a training defect": it is not a defect of the optimizer, it is a compromise imposed by the shared
+   head across regions, and its cost at the Juniata is 0.08 to 0.20 NSE depending on the inflow.
+
+**Reading against the hypothesis.** Confirmed in the strong form for the well-fit gauges: the batch solution is a
+compromise, its direction is set by the batch and not by the input, and the inflow moves the gauge optimum only at
+second order. The landscape has told us where the model is trained wrong (Juniata n too high for every input),
+where it is trained right (the stiff coordinate at Newport under the UH arm reaches the optimum by epoch 5), and
+where the parameters cannot matter (Plains).
+
+**Limits.** Basin-uniform multipliers; the eight gauges; the Newton range bound on the LSTM arms; `p` and `q`
+optima are along sloppy directions and their cross-arm spread (× 4 in p) is not informative.
 ## 4. Dense terrain (n-p, stiff-sloppy; n-q with p at trained): pending (queued after §3)
 ## 5. Per-reach gradient map: pending (queued)
