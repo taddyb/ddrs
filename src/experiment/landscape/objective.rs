@@ -251,17 +251,31 @@ where
     }
 
     /// Evaluate `L_g(α)` (mean over windows) and optionally its gradient.
+    ///
+    /// The alpha leaves always get `require_grad()` and `total.backward()` is
+    /// always called below, even when `with_grad` is false -- the gradient
+    /// is simply not copied into `Eval.grad` in that case. This is not for
+    /// the gradient value: it's because a routing forward on the Autodiff
+    /// backend keeps its whole per-timestep tape alive until a `.backward()`
+    /// consumes it, even when no tensor is tracked. `MuskingumCunge<I>` only
+    /// runs on `Autodiff<I>` (there is no tape-free forward path), so a
+    /// forward-only `eval` leaked tape memory every call; the landscape
+    /// slice-grid loop (`src/experiment/landscape/mod.rs::run_gauge`) calls
+    /// `eval(_, with_grad=false)` thousands of times per gauge, which grew a
+    /// run from 31 GB to 77 GB RSS before this fix. See
+    /// `examples/leak_probe.rs` for the isolated repro (`ad-track-nobackward`
+    /// leaks, `ad-track-backward` does not).
     pub fn eval(&self, alpha: [f32; 3], with_grad: bool) -> Eval {
         let device = &self.ctx.device;
-        // α leaves (shape [1]) — one set shared across windows.
-        let leaves: [Tensor<AD<I>, 1>; 3] = std::array::from_fn(|k| {
-            let t = Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device);
-            if with_grad { t.require_grad() } else { t }
-        });
+        // α leaves (shape [1]) — one set shared across windows. Always
+        // require_grad so the tape-releasing backward below has leaves to
+        // walk back to.
+        let leaves: [Tensor<AD<I>, 1>; 3] =
+            std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device).require_grad());
         let (total, nses, clamped_max) = self.forward_loss(&leaves);
         let loss: f32 = total.clone().inner().into_data().to_vec::<f32>().unwrap()[0];
+        let grads = total.backward();
         let grad = if with_grad {
-            let grads = total.backward();
             let g: Vec<f32> = leaves
                 .iter()
                 .map(|l| l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()[0]).unwrap_or(0.0))
