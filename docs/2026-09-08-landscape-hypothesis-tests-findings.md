@@ -143,14 +143,15 @@ where the parameters cannot matter (Plains).
 
 **Limits.** Basin-uniform multipliers; the eight gauges; the Newton range bound on the LSTM arms; `p` and `q`
 optima are along sloppy directions and their cross-arm spread (× 4 in p) is not informative.
-## 4. Dense terrain, per-reach gradient map, 41-gauge census: NOT RUN (stopped, 2026-09-08 15:45Z)
+## 4. Dense terrain, per-reach gradient map, 41-gauge census: NOT RUN (stopped 15:45Z; leak diagnosed and fixed 16:15Z, `658cbfc`, see ddrs-dev traps.md T11)
 
 The 41×41 dense-grid landscape (`landscape-uh-surface`) leaks memory in the slice loop: the process grew from
 31 GB to 39 GB in its first 20 minutes alongside another run, and to 77 GB when re-run alone, at which point it was
 stopped to protect the GPU training. The 13×13 runs (169 cells per plane) complete; the 41×41 runs (1,681 cells per
 plane, two planes, four windows) do not. Suspects: per-cell tensors retained through the window loop in
 `Objective::forward_loss`/`eval` under the ndarray backend, or the per-cell `Eval` values accumulating something
-larger than three floats. Not diagnosed. Under the user's three-strike rule this was the third failed assumption
+larger than three floats. Diagnosed afterwards: the autodiff tape of every forward-only eval is retained until a backward consumes it
+(`examples/leak_probe.rs`); `Objective::eval` now runs a backward per eval, RSS is flat and numerics unchanged. Under the user's three-strike rule this was the third failed assumption
 of the day (nohup survival, two-process concurrency, serial dense run), so no further runs were launched.
 
 Not run for that reason: `landscape-uh-surface` (dense n-p and stiff-sloppy terrain), `landscape-uh-surface-nq`

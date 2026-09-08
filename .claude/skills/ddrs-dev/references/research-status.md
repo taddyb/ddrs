@@ -150,7 +150,7 @@ paper's R1–R5.
 | "leakance is identifiable" (any phrasing) | Explicitly forbidden by the NO-GO summary §7 |
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
-| Dense-grid landscape runs (grid >= 41, e.g. `landscape-uh-surface`) | Leak memory (process grew to 77 GB); do not launch until diagnosed |
+| Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T11 |
 
 ## Structural constants (stable)
 
