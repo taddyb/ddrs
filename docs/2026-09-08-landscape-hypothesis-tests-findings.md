@@ -180,12 +180,18 @@ Bundle `landscape-p21-reachgrad` (Newton, Hessian, per-reach gradients; 2 min):
 | Newport NSE at trained point (WY2000 windows) | 0.692 | 0.703 |
 | Newport gain to own optimum | +0.077 | none found (Newton: no descent; Hessian indefinite, λ₃ = −0.03) |
 | Mapleton NSE at trained point | 0.548 | 0.644 |
-| Mapleton gain to own optimum | +0.104 | +0.013 (n × 0.63, p → box edge, q × 0.16) |
+| Mapleton gain to own optimum | +0.104 | +0.013 (INVALID: the 3-D search moved p, which is not a parameter of this model; redo in 2-D) |
 
 With p pinned, training put the Juniata's n at 0.040, inside the 0.03 to 0.05 band that yesterday's landscapes
 identified as the gauge optimum under every inflow, and the remaining per-gauge gain collapsed from 0.08 to 0.10 NSE
 to at most 0.013. Whether that is the pinning of p (removing the n/p degeneracy) or the gauges being in the training
 set is exactly what the `uh_retro_pfixed21` run will separate.
+
+**Correction (17:40Z).** The p = 21 model has two channel parameters, n and q. The study treated p as a third axis
+(the multiplier on the constant 21) and let Newton move it; for this model the landscape must be two-dimensional.
+The running 41-gauge census on this model was stopped and the study is being restricted to the learnable parameters
+(inactive axes masked out of Newton, Hessian, eigenvectors, half-widths, and slices). The reach-gradient rows for p
+below are a sensitivity to a constant, not to a parameter, and are kept only as a diagnostic.
 
 **Per-reach gradient map at Newport** (`figures/reachgrad_p21-conus_01567000.png`). At the trained point, 95 % of
 reaches have dL/d ln n < 0 (loss falls if n rises: the network is now slightly too fast), with the largest magnitudes
