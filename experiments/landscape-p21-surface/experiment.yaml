@@ -1,0 +1,22 @@
+# p = 21 variant (user run 2026-09-08T15-55-52Z-conus-train-and-test, workspace ddrs.yaml with p_spatial not learnable). Derived from experiments/landscape-uh-surface.
+# Dense grid for the terrain (Li et al. 2018 style) rendering by
+# experiments/landscape/surface.py. The box is +/-1.5 around the optimum so
+# the trained point (alpha = 0) is inside it at Newport (01567000).
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-surface --backend cpu
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 90
+  water_year: 2000
+  n_windows: 4
+  alpha_max: 1.5
+  grid: 41
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-p", "stiff-sloppy"]
