@@ -337,6 +337,36 @@ the input, regional not CONUS-wide; INCONCLUSIVE at population scale pending the
 census. The dense-terrain, per-reach-gradient, and census41 bundles did not run: the 41×41
 slice loop leaks memory (process grew to 77 GB), stopped under the user's three-strike rule.
 
+**Population result (§9, §10 of the findings doc), on the two fixed-p (p = 21) models.** At
+the 30 gauges present in both models' 2-D censuses (both are in both training lists), the
+gages_3000 model's trained n is 0.48× the area-balanced model's: a CONUS-wide factor, not a
+Juniata-membership effect. The gages_3000 model reaches n = 0.040 by epoch 10 and holds it
+flat through epoch 30 (450 optimizer steps at 45/epoch, two learning-rate decays) even though
+the area-balanced run made more total steps (870) and still left n at 0.100; this is
+composition of the training population setting the batch's roughness, not step count. The
+gages_3000 model sits at the per-gauge optimum at its well-fit gauges (median gain 0.001 NSE,
+20 of 84), while all six well-fit gauges shared with the area-balanced model still want n ×
+0.6, unchanged from the learned-p reading. **Do not use:** do not attribute the 0.04 vs 0.10
+difference in trained n to pinning p: the clean twin (§8 below) shows p pinned alone leaves
+n at 0.100, unchanged from learned p, at the same out-of-sample Juniata. **Open question:**
+which gauges by drainage area supply the gradient that pulls n down; gages_3000 adds 1,370
+gauges of median area 333 km² over the area-balanced list, but this is not yet separated from
+the aggregate. A size-stratified training experiment is the direct test (not run; user
+decision).
+
+**Landscape-study infrastructure, this session, one line each:**
+- The landscape search is 2-D (n, q only) for fixed-p arms: inactive axes masked out of
+  Newton, Hessian, eigenvectors, half-widths, and slices (`active mask`, commit `692c00f`).
+- The 41×41 dense-grid autodiff-tape leak (§4 above) is fixed by running a backward per eval
+  in `Objective::eval` (commit `658cbfc`, `src/experiment/landscape/objective.rs`).
+- Small basins (3-5 reaches) no longer refuse to step under the 5 % `max_clamped` rule: a
+  per-reach floor, `max_clamped_min_reaches` (default 2), sets the effective bound to
+  `max(max_clamped, max_clamped_min_reaches / n_reach)` (`src/experiment/landscape/mod.rs`,
+  `output.rs`).
+- Cross-model and depth-axis comparison tools added: `experiments/landscape/population_compare.py`
+  (gauge-by-gauge trained-n ratio between two censuses) and `surface.py --depth-axis` (n-q
+  plane rendered over basin-median n and gauge-reach depth under mean flow instead of raw q).
+
 ## Fixed width coefficient p (2026-09-08)
 
 Authority: `docs/2026-09-08-fixed-p-assessment.md`. p = 21 (the DDR default)
@@ -366,6 +396,29 @@ excluding `plot3d.py`) updated to read the new `active` variable and drop the
 fixed parameter from tables/panels; all-active output (`landscape-uh-census`)
 verified byte-identical before/after. Decision on the Moody-Troutman p(A) arm
 is pending the user.
+
+**Both p = 21 runs finished (2026-09-08).** `2026-09-08T14-06-12Z-train-and-test`
+(the clean twin: `uh_retro_pfixed21`, area-balanced 1,841-gauge population, same
+config/seed as the learned-p arm otherwise) scored median NSE 0.700 / KGE 0.736
+on the test population, against learned-p's 0.707 / 0.738, indistinguishable.
+`2026-09-08T15-55-52Z-conus-train-and-test` (the user's run, gages_3000 population,
+which includes the Juniata gauges in training) scored median NSE 0.720 / KGE 0.754
+on its own 2,365-gauge test set. **Pinning p costs nothing at the population
+median in either case.**
+
+At the gauge level, pinning p does NOT move n toward the gauge optimum by itself.
+On the clean twin, with the Juniata still out of sample, trained n stays at 0.100
+(learned-p arm: 0.103) and the per-gauge gain to the own optimum is unchanged
+(Newport 0.661 → 0.742, Mapleton 0.514 → 0.607, both close to the learned-p gaps
+of 0.08-0.10 NSE). Only the user's gages_3000 run, which trains on the Juniata
+directly, lands n at 0.040. The gauge-optimal n scales with p as the n/p ratio
+identifiability predicts: n/p ≈ 0.0029-0.0034 at Newport under both the learned-p
+model (p ≈ 12.7, optimal n 0.037) and the p = 21 clean twin (optimal n 0.071),
+to within the q trade. This refutes the earlier reading (§5-§6 of the findings
+doc, corrected there) that pinning p had fixed the batch compromise: the clean
+twin isolates the single change (p pinned, same population) and shows the 0.040
+was a property of the training population (gages_3000, which contains the Juniata),
+not of removing the n/p degeneracy. See findings doc §8 for the full twin comparison.
 
 ## Open, not closed
 
