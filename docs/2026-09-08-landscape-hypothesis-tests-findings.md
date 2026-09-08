@@ -326,3 +326,34 @@ area-balanced run is simply under-trained along the sloppy direction.
 **Standing result either way.** The gages_3000 model sits at the per-gauge optimum at its well-fit gauges (median
 gain 0.001) and is the only model so far that does. Its population median NSE is 0.720 on its own 2,365-gauge test set.
 
+## 10. Composition, not step count: the gages_3000 model's trajectory (run `landscape-p21-trajectory/2026-09-08T21-00-25Z`)
+
+Basin-median trained n and q at the Juniata (Newport; Mapleton identical) per checkpoint of the gages_3000 p = 21 run,
+with the NSE at the trained point over the WY2000 windows:
+
+| epoch | init | 1 | 5 | 10 | 20 | 30 |
+|---|---|---|---|---|---|---|
+| n | 0.133 | 0.129 | 0.093 | 0.040 | 0.040 | 0.040 |
+| q | 0.50 | 0.48 | 0.34 | 0.12 | 0.10 | 0.10 |
+| Newport NSE | 0.562 | 0.575 | 0.710 | 0.708 | 0.703 | 0.703 |
+
+n reaches 0.040 by epoch 10 (about 450 optimizer steps at 45 per epoch) and does not move for the remaining 20
+epochs, through two learning-rate decays. The area-balanced run made about 870 steps in its 30 epochs and left n at
+0.100. So the difference is not step count: the gages_3000 batch's gradient drives n to 0.04 and holds it there; the
+area-balanced batch's gradient does not. **Composition of the training population sets the batch's roughness.**
+
+Across the four gauges checked (Juniata pair, White River pair) the trained n at epoch 30 is 0.040 to 0.058: the
+head's output is close to CONUS-uniform, so "the batch's n" is nearly a single number set by the aggregate gradient.
+Newport's NSE peaks at epoch 5 (0.710, n = 0.093) and settles at 0.703; the last 0.05 of n came from other gauges.
+
+**Which gauges supply the gradient** is the remaining question. The lists differ mainly in small basins (gages_3000
+adds 1,370 gauges of median area 333 km²). The direct test is a size-stratified training experiment (or the
+per-gauge dL/d ln n at α = 0 on the area-balanced model, tabulated against drainage area across the 84 gauges of
+the gages_3000 census: the gauges with a strong negative gradient are the ones that pull n down). Not run; user
+decision.
+
+**Consequence for the thesis.** The per-gauge landscape is doing what the hypothesis wanted: it identified that the
+area-balanced model's n was a batch compromise (§1 to §3), predicted the gauge value (0.03 to 0.05), and the model
+trained on the other population landed there and shows no residual per-gauge gain (§6). The same instrument now says
+the area-balanced population under-determines n, and which gauges hold the information.
+
