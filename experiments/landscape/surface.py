@@ -89,6 +89,15 @@ def field_medians(ds) -> dict[str, float]:
     return {k: float(np.median(ds[f"{k}0"].values)) for k in ("n", "p", "q")}
 
 
+def active_mask(ds) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
 def _nice_physical_ticks(median: float, alpha_lo: float, alpha_hi: float, param: str) -> tuple[list[float], list[str]]:
     """Nice physical-value tick locations, expressed as alpha (so callers can
     place them directly on the alpha grid), plus their labels. physical =
@@ -145,8 +154,14 @@ def pinned_third_note(ds, plane_name: str, alpha_axes: bool) -> str:
         return ""
     a_name, b_name = plane_name.split("-")
     pinned = ({"n", "p", "q"} - {a_name, b_name}).pop()
-    slice_center = ds.attrs.get("slice_center", "optimum")
     median = field_medians(ds)[pinned]
+    if not active_mask(ds)[ALPHA_INDEX[pinned]]:
+        # Fixed parameter: alpha_star is exactly 0 (Newton never moves it),
+        # so it's pinned at the trained/default value regardless of
+        # slice_center -- label it as such instead of "(optimum)", which
+        # would misleadingly imply it was fitted there.
+        return f"; third parameter pinned at {PARAM_DISPLAY_NAME[pinned]} = {median:.3g} (fixed, not learned)"
+    slice_center = ds.attrs.get("slice_center", "optimum")
     if slice_center == "trained":
         val = median
     else:
@@ -158,10 +173,15 @@ def marker_points(ds, plane_name: str) -> tuple[tuple[float, float], tuple[float
     """Return ((trained_x, trained_y), (star_x, star_y)) for this plane."""
     if plane_name == "stiff-sloppy":
         coord_trained = ds["coord_trained"].values
+        # Last real eigen-slot: 2 when all three components are active
+        # (unchanged behavior), or the last ACTIVE index when one component
+        # is fixed (its coord_trained slot at index 2 is NaN, not a real
+        # sloppy coordinate -- see active_mask).
+        last_k = int(active_mask(ds).sum()) - 1
         slice_center = ds.attrs.get("slice_center", "optimum")
         if slice_center == "trained":
-            return (0.0, 0.0), (-float(coord_trained[0]), -float(coord_trained[2]))
-        return (float(coord_trained[0]), float(coord_trained[2])), (0.0, 0.0)
+            return (0.0, 0.0), (-float(coord_trained[0]), -float(coord_trained[last_k]))
+        return (float(coord_trained[0]), float(coord_trained[last_k])), (0.0, 0.0)
     a_name, b_name = plane_name.split("-")
     i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
     alpha_star = ds["alpha_star"].values

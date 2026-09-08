@@ -16,7 +16,7 @@ use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
 use crate::experiment::adjoint::{seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{BoxError, ExperimentManifest, ResolvedArm};
 
-use self::objective::{eig3, solve3, Objective};
+use self::objective::{eig3, eig_active, solve_active, Objective};
 use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, Slice};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -240,6 +240,7 @@ where
     let staid = Staid::new(&g.staid);
     let obj = Objective::<I>::build(ctx, &staid, starts, spec.window_days)?;
     let h = spec.fd_step;
+    let active = obj.active();
 
     // 1. trained point
     let e0 = obj.eval([0.0; 3], true);
@@ -261,7 +262,12 @@ where
         for k in 0..3 {
             hd[k][k] += mu;
         }
-        let Some(d) = solve3(hd, [-gcur[0], -gcur[1], -gcur[2]]) else { break };
+        let Some(d) = solve_active(hd, [-gcur[0], -gcur[1], -gcur[2]], active) else { break };
+        for k in 0..3 {
+            if !active[k] {
+                assert_eq!(d[k], 0.0, "Newton step must not move fixed alpha component {k}");
+            }
+        }
         // backtracking line search within the domain; a trial whose
         // clamped_frac exceeds max_clamped is unacceptable exactly like a
         // non-decrease: halve the step and retry.
@@ -305,7 +311,7 @@ where
     let alpha_star = alpha;
     let e_star = cur;
     let hess_star = hess;
-    let (eigval_star, eigvec_star) = eig3(hess_star);
+    let (eigval_star, eigvec_star) = eig_active(hess_star, active);
     let grad_star = e_star.grad.unwrap();
     let hit_range_bound = newton_hit_bound || e_star.clamped_frac > spec.max_clamped;
     if hit_range_bound {
@@ -315,10 +321,18 @@ where
         );
     }
 
-    // 3. behavioural half-widths and trained-point coordinates in the eigenbasis of H(α*)
+    // 3. behavioural half-widths and trained-point coordinates in the
+    // eigenbasis of H(α*), over the active sub-block only. `eig_active`
+    // marks the dropped (fixed-parameter) eigen-slot with `eigval_star[k] ==
+    // NaN`; both quantities are NaN there too rather than a computed 0 or
+    // INFINITY, since that slot is not a real eigen-direction.
     let mut coord_trained = [0.0f32; 3];
     for k in 0..3 {
-        coord_trained[k] = (0..3).map(|r| eigvec_star[r][k] * (0.0 - alpha_star[r])).sum();
+        coord_trained[k] = if eigval_star[k].is_nan() {
+            f32::NAN
+        } else {
+            (0..3).map(|r| eigvec_star[r][k] * (0.0 - alpha_star[r])).sum()
+        };
     }
     let half_widths: Vec<[f32; 3]> = spec
         .tolerances
@@ -327,14 +341,20 @@ where
             let eps_l = tol * e_star.loss.max(1e-12);
             let mut w = [0.0f32; 3];
             for k in 0..3 {
-                w[k] = if eigval_star[k] > 0.0 { (2.0 * eps_l / eigval_star[k]).sqrt() } else { f32::INFINITY };
+                w[k] = if eigval_star[k].is_nan() {
+                    f32::NAN
+                } else if eigval_star[k] > 0.0 {
+                    (2.0 * eps_l / eigval_star[k]).sqrt()
+                } else {
+                    f32::INFINITY
+                };
             }
             w
         })
         .collect();
 
     // 4. analytic celerity direction: d(mean path travel time)/dα at α = 0 (hydraulic K), for pass criterion (iii)
-    let celerity_dir = celerity_direction(&obj, h);
+    let celerity_dir = celerity_direction(&obj, h, active);
 
     // 5. landscape slices through α*, named in `spec.planes` (default all
     // four: (n,p), (n,q), (p,q), and (v1, v3)). `grid: 0` skips every plane
@@ -355,6 +375,10 @@ where
         let axis_third = if trained_center { [0.0f32; 3] } else { alpha_star };
         let eigen_center = if trained_center { [0.0f32; 3] } else { alpha_star };
         for name in &spec.planes {
+            if let Some(fixed) = plane_skip_reason(name, active) {
+                println!("  [{}] {} plane {name} skipped: {fixed} fixed", arm.name, g.staid);
+                continue;
+            }
             if let Some(&(_, [i, j])) = axis_planes.iter().find(|(n, _)| *n == name) {
                 let mut loss = vec![f32::NAN; gsz * gsz];
                 let mut nse = vec![f32::NAN; gsz * gsz];
@@ -372,9 +396,19 @@ where
                 }
                 slices.push(Slice { name: name.clone(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: unit(i), basis_b: unit(j), loss, nse, clamped });
             } else if name == "stiff-sloppy" {
-                // eigen-plane: alpha = center + s*v1 + t*v3, s,t in [-alpha_max, alpha_max]
-                let v1 = [eigvec_star[0][0], eigvec_star[1][0], eigvec_star[2][0]];
-                let v3 = [eigvec_star[0][2], eigvec_star[1][2], eigvec_star[2][2]];
+                // eigen-plane: alpha = center + s*v1 + t*v3, s,t in [-alpha_max, alpha_max].
+                // v1/v3 are the first and last ACTIVE eigenvectors (the
+                // dropped fixed-parameter slot from `eig_active` is never
+                // used as a plane axis).
+                let active_cols: Vec<usize> = (0..3).filter(|&k| !eigval_star[k].is_nan()).collect();
+                if active_cols.len() < 2 {
+                    println!("  [{}] {} plane stiff-sloppy skipped: fewer than 2 active parameters", arm.name, g.staid);
+                    continue;
+                }
+                let v1_col = active_cols[0];
+                let v3_col = *active_cols.last().unwrap();
+                let v1 = [eigvec_star[0][v1_col], eigvec_star[1][v1_col], eigvec_star[2][v1_col]];
+                let v3 = [eigvec_star[0][v3_col], eigvec_star[1][v3_col], eigvec_star[2][v3_col]];
                 let mut loss = vec![f32::NAN; gsz * gsz];
                 let mut nse = vec![f32::NAN; gsz * gsz];
                 let mut clamped = vec![f32::NAN; gsz * gsz];
@@ -461,6 +495,7 @@ where
         reach_grad0,
         reach_grad_star,
         dist_to_gauge_m,
+        active,
     };
     write_landscape_netcdf(&arm_dir.join("gauges").join(format!("{}.nc", g.staid)), &r)?;
     output::append_summary(&arm_dir.join("summary.csv"), &r)?;
@@ -476,10 +511,41 @@ fn unit(i: usize) -> [f32; 3] {
     u
 }
 
+const PARAM_NAMES: [&str; 3] = ["n", "p_spatial", "q_spatial"];
+
+/// Which two alpha indices an axis plane's grid spans; `None` for
+/// `"stiff-sloppy"` (it is never skipped for naming a fixed parameter --
+/// it re-slices onto the active eigenvectors instead).
+fn axis_plane_indices(name: &str) -> Option<[usize; 2]> {
+    match name {
+        "n-p" => Some([0, 1]),
+        "n-q" => Some([0, 2]),
+        "p-q" => Some([1, 2]),
+        _ => None,
+    }
+}
+
+/// Name of the fixed parameter that makes axis plane `name` unavailable, or
+/// `None` when both its axes are active (or `name` isn't an axis plane at
+/// all, e.g. `"stiff-sloppy"`). Pure, so it's unit-tested without a trained
+/// run.
+fn plane_skip_reason(name: &str, active: [bool; 3]) -> Option<&'static str> {
+    let [i, j] = axis_plane_indices(name)?;
+    if !active[i] {
+        Some(PARAM_NAMES[i])
+    } else if !active[j] {
+        Some(PARAM_NAMES[j])
+    } else {
+        None
+    }
+}
+
 /// Unit vector in α-space along which the mean hydraulic path travel time to the
 /// gauge (Σ K = Σ L/c at the window-mean discharge of the first window) increases
 /// fastest at α = 0. The stiff eigenvector should be close to ± this direction.
-fn celerity_direction<I: Backend + 'static>(obj: &Objective<I>, h: f32) -> [f32; 3]
+/// Computed and normalized over `active` components only; a fixed
+/// parameter's slot is `NaN`, not 0: it is not part of the direction.
+fn celerity_direction<I: Backend + 'static>(obj: &Objective<I>, h: f32, active: [bool; 3]) -> [f32; 3]
 where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
@@ -526,14 +592,23 @@ where
     };
     let mut gvec = [0.0f32; 3];
     for k in 0..3 {
+        if !active[k] {
+            continue;
+        }
         let mut ap = [0.0f32; 3];
         ap[k] = h;
         let mut am = [0.0f32; 3];
         am[k] = -h;
         gvec[k] = (mean_tt(ap) - mean_tt(am)) / (2.0 * h);
     }
-    let nrm = norm(&gvec).max(1e-12);
-    [gvec[0] / nrm, gvec[1] / nrm, gvec[2] / nrm]
+    let nrm = (0..3).filter(|&k| active[k]).map(|k| gvec[k] * gvec[k]).sum::<f32>().sqrt().max(1e-12);
+    let mut dir = [f32::NAN; 3];
+    for k in 0..3 {
+        if active[k] {
+            dir[k] = gvec[k] / nrm;
+        }
+    }
+    dir
 }
 
 #[cfg(test)]
@@ -562,6 +637,24 @@ mod tests {
         let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
         assert_eq!(spec.slice_center, "optimum");
         assert!(spec.validate_slice_center().is_ok());
+    }
+
+    #[test]
+    fn plane_skip_reason_names_the_fixed_parameter() {
+        // p_spatial (index 1) fixed.
+        let active = [true, false, true];
+        assert_eq!(plane_skip_reason("n-p", active), Some("p_spatial"));
+        assert_eq!(plane_skip_reason("p-q", active), Some("p_spatial"));
+        assert_eq!(plane_skip_reason("n-q", active), None);
+        assert_eq!(plane_skip_reason("stiff-sloppy", active), None);
+    }
+
+    #[test]
+    fn plane_skip_reason_all_active_never_skips() {
+        let active = [true, true, true];
+        for name in VALID_PLANES {
+            assert_eq!(plane_skip_reason(name, active), None);
+        }
     }
 
     #[test]

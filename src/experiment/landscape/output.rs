@@ -78,6 +78,11 @@ pub struct LandscapeResult {
     /// Per-reach along-channel distance to the gauge outlet, meters; empty
     /// unless `landscape.reach_grad: true`.
     pub dist_to_gauge_m: Vec<f32>,
+    /// `active[k]` for `k` in `(n, p_spatial, q_spatial)`: true when the
+    /// parameter is a real model parameter (in the head's
+    /// `learnable_parameters`), false when it's fixed at `params.defaults`.
+    /// See `Objective::active`.
+    pub active: [bool; 3],
 }
 
 pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> {
@@ -101,6 +106,9 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("clamped_frac_star", r.clamped_frac_star as f64)?;
     f.add_attribute("hit_range_bound", r.hit_range_bound as i32)?;
     f.add_attribute("slice_center", r.slice_center.as_str())?;
+    const PARAM_NAMES: [&str; 3] = ["n", "p_spatial", "q_spatial"];
+    let active_params: Vec<&str> = PARAM_NAMES.iter().zip(r.active.iter()).filter(|(_, &a)| a).map(|(&n, _)| n).collect();
+    f.add_attribute("active_params", active_params.join(","))?;
 
     f.add_dimension("alpha", 3)?;
     f.add_dimension("k", 3)?;
@@ -114,6 +122,11 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
         f.add_dimension("ga", r.slices[0].axis_a.len())?;
         f.add_dimension("gb", r.slices[0].axis_b.len())?;
     }
+
+    let active_i: Vec<i32> = r.active.iter().map(|&a| a as i32).collect();
+    let mut active_var = f.add_variable::<i32>("active", &["alpha"])?;
+    active_var.put_values(&active_i, ..)?;
+    active_var.put_attribute("long_name", "1 if the alpha component is a learned model parameter, 0 if fixed at params.defaults")?;
 
     let mut put = |name: &str, dims: &[&str], vals: &[f32], long: &str| -> Result<(), BoxError> {
         let mut v = f.add_variable::<f32>(name, dims)?;
@@ -221,6 +234,7 @@ mod tests {
             reach_grad0: None,
             reach_grad_star: None,
             dist_to_gauge_m: Vec::new(),
+            active: [true, true, true],
         }
     }
 
@@ -240,6 +254,23 @@ mod tests {
         assert_eq!(plane_names, "");
         let hit: i32 = f.attribute("hit_range_bound").unwrap().value().unwrap().try_into().unwrap();
         assert_eq!(hit, 0);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn active_mask_writes_attribute_and_variable() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-active-{}.nc", std::process::id()));
+        let mut r = minimal_result(Vec::new());
+        r.active = [true, false, true]; // p_spatial fixed
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        let active_params: String = f.attribute("active_params").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(active_params, "n,q_spatial");
+        let active_var = f.variable("active").unwrap();
+        let vals: Vec<i32> = active_var.get_values(..).unwrap();
+        assert_eq!(vals, vec![1, 0, 1]);
 
         std::fs::remove_file(&path).unwrap();
     }

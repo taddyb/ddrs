@@ -348,7 +348,24 @@ candidate spatial function is `p = 7.2 · 0.27^(−q) · Q_ref^(0.5 − 0.3q)`. 
 `config/experiments/uh_retro_pfixed21.yaml` (constant p = 21, learn n and q
 only) started training 14:06Z 2026-09-08 (unit `ddrs-train-p21`); the
 landscape objective now supports fixed parameters (commit `b52d966`).
-Decision on the Moody-Troutman p(A) arm is pending the user.
+**Follow-up (2026-09-08): the landscape search itself is now mask-aware, not
+just the constant-broadcast forward pass.** Before this, `run_gauge`'s Newton
+step, Hessian, and eigen-decomposition still treated p as a free axis even
+when it wasn't learned, moving `alpha_p` off zero for no physical reason.
+`Objective::active()` (derived from `kan_head.learnable_parameters`, same
+source as the arm-open log line) now gates: `eval`/`hessian` force the fixed
+component's gradient/Hessian row+column to exactly 0; `solve_active` masks
+the Newton step so `alpha_p` never moves; `eig_active` drops the fixed
+component to a `NaN` eigenvalue placed last; axis planes naming the fixed
+parameter are skipped and logged; `stiff-sloppy` uses the two active
+eigenvectors. Verified against the real `p21-conus` arm
+(`.ddrs/experiments/landscape-p21-reachgrad/2026-09-08T17-48-24Z/`):
+`alpha_p_star = 0` exactly at both Juniata gauges, `active_params =
+"n,q_spatial"` in the netCDF. Python readers (`experiments/landscape/*.py`,
+excluding `plot3d.py`) updated to read the new `active` variable and drop the
+fixed parameter from tables/panels; all-active output (`landscape-uh-census`)
+verified byte-identical before/after. Decision on the Moody-Troutman p(A) arm
+is pending the user.
 
 ## Open, not closed
 

@@ -88,6 +88,15 @@ def tol_index(ds: xr.Dataset, tol_target: float) -> int:
     return int(np.argmin(np.abs(tolerances - tol_target)))
 
 
+def active_mask(ds: xr.Dataset) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
 def gauge_colors(staids):
     cmap = plt.get_cmap("tab10")
     return {s: cmap(i % 10) for i, s in enumerate(staids)}
@@ -109,6 +118,15 @@ def checkpoint_row(arm: str, epoch: int, staid: str, ds_ep: xr.Dataset, ds_final
     eigvec_final = ds_final["eigvec_star"].values  # [component, k]
     x = delta_alpha - alpha_star_final
     c = np.einsum("ik,i->k", eigvec_final, x)
+    # eigvec_final's dropped eigen-slot (when a component is fixed) is a
+    # placeholder basis vector, not a real eigenvector -- the projection onto
+    # it is a real-looking but meaningless number. Force it to NaN so the
+    # final checkpoint's self-check (c_k == coord_trained_final[k]) holds
+    # and c doesn't look like a genuine displacement along a sloppy axis
+    # that doesn't exist.
+    n_active_final = int(active_mask(ds_final).sum())
+    if n_active_final < 3:
+        c[n_active_final:] = np.nan
 
     loss0 = float(ds_ep["loss0"].values)
     nse0 = float(ds_ep["nse0"].values)
@@ -129,7 +147,11 @@ def checkpoint_row(arm: str, epoch: int, staid: str, ds_ep: xr.Dataset, ds_final
     for k, comp in enumerate(COMPONENTS):
         row[f"delta_alpha_{comp}"] = float(delta_alpha[k])
         row[f"delta_alpha_std_{comp}"] = float(delta_alpha_std[k])
-    row["delta_alpha_std_norm"] = float(np.linalg.norm(delta_alpha_std))
+    # Restrict the combined spread to active components: a fixed parameter's
+    # field is a constant default, not a displacement in alpha space, and
+    # shouldn't dilute or pad this norm.
+    active_final = active_mask(ds_final)
+    row["delta_alpha_std_norm"] = float(np.linalg.norm(delta_alpha_std[active_final]))
     for k in range(3):
         row[f"c{k + 1}"] = float(c[k])
     return row

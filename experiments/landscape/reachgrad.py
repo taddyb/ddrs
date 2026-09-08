@@ -62,6 +62,15 @@ def has_reach_grad(ds: xr.Dataset) -> bool:
     return "reach_grad0_n" in ds.variables and "reach_grad_star_n" in ds.variables
 
 
+def active_mask(ds: xr.Dataset) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
 # ------------------------------------------------------------------------- stats
 def cumulative_share(dist_km: np.ndarray, abs_g: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return (sorted_dist_km, cumulative |g| share) sorted by ascending distance."""
@@ -135,8 +144,11 @@ def scatter_panel(ax, dist_km: np.ndarray, g: np.ndarray, sum_g: float, netcdf_v
     ax.set_title(f"{label}: sum g = {sum_g:.4g} (netcdf {netcdf_val:.4g})", fontsize=8)
 
 
-def cumulative_panel(ax, dist_km: np.ndarray, grads: dict[str, np.ndarray], label: str):
-    for name in COMPONENTS:
+def cumulative_panel(ax, dist_km: np.ndarray, grads: dict[str, np.ndarray], label: str,
+                      active_comps: list[str] | None = None):
+    if active_comps is None:
+        active_comps = COMPONENTS
+    for name in active_comps:
         d_sorted, share = cumulative_share(dist_km, np.abs(grads[name]))
         ax.plot(d_sorted, share, label=name)
     ax.set_xlabel("distance to gauge [km]")
@@ -146,7 +158,9 @@ def cumulative_panel(ax, dist_km: np.ndarray, grads: dict[str, np.ndarray], labe
     ax.set_title(f"{label}: cumulative |g| vs distance", fontsize=8)
 
 
-def plot_gauge(ds: xr.Dataset, arm: str, staid: str, out_png: Path):
+def plot_gauge(ds: xr.Dataset, arm: str, staid: str, out_png: Path, active_comps: list[str] | None = None):
+    if active_comps is None:
+        active_comps = COMPONENTS
     dist_km = ds["dist_to_gauge_m"].values.astype(np.float64) / 1000.0
     grad0 = {c: ds[f"reach_grad0_{c}"].values.astype(np.float64) for c in COMPONENTS}
     grad_star = {c: ds[f"reach_grad_star_{c}"].values.astype(np.float64) for c in COMPONENTS}
@@ -160,15 +174,24 @@ def plot_gauge(ds: xr.Dataset, arm: str, staid: str, out_png: Path):
         [(grad0, nc_grad0, "alpha=0"), (grad_star, nc_grad_star, "alpha*")]
     ):
         for col, comp in enumerate(COMPONENTS):
+            ax = axes[row, col]
+            if comp not in active_comps:
+                # Fixed parameter: reach_grad*_{comp} is a real tensor in the
+                # file but not a meaningful sensitivity (comp isn't a
+                # learned parameter for this arm) -- don't present it as one.
+                ax.axis("off")
+                ax.text(0.5, 0.5, f"{comp}: fixed, not shown", ha="center", va="center",
+                        fontsize=9, transform=ax.transAxes)
+                continue
             g = grads[comp]
             scatter_panel(
-                axes[row, col], dist_km, g,
+                ax, dist_km, g,
                 sum_g=float(g.sum()), netcdf_val=float(nc_vals[ALPHA_INDEX[comp]]),
                 label=f"{alpha_label} {comp}",
             )
             if col == 0:
-                axes[row, col].set_ylabel("dL/d ln x (symlog)")
-        cumulative_panel(axes[row, 3], dist_km, grads, alpha_label)
+                ax.set_ylabel("dL/d ln x (symlog)")
+        cumulative_panel(axes[row, 3], dist_km, grads, alpha_label, active_comps)
 
     fig.suptitle(
         f"{staid}  arm={arm}  reach-gradient map  (NSE {nse0:.3f} -> {nse_star:.3f}, n_reach={ds.attrs['n_reach']})",
@@ -264,7 +287,11 @@ def main():
             comid = ds["comid"].values
             n0, p0, q0 = ds["n0"].values, ds["p0"].values, ds["q0"].values
 
-            for comp in COMPONENTS:
+            # Fixed parameters are dropped from the summary table -- comp
+            # isn't a learned model parameter for this arm, so its
+            # reach-gradient stats aren't a real sensitivity measurement.
+            active_comps = [c for c, a in zip(COMPONENTS, active_mask(ds)) if a]
+            for comp in active_comps:
                 g0 = ds[f"reach_grad0_{comp}"].values.astype(np.float64)
                 gs = ds[f"reach_grad_star_{comp}"].values.astype(np.float64)
                 stats = per_reach_stats(g0, gs, dist_km)
@@ -286,7 +313,7 @@ def main():
                 ))
 
             out_png = out / f"reachgrad_{arm}_{staid}.png"
-            plot_gauge(ds, arm, staid, out_png)
+            plot_gauge(ds, arm, staid, out_png, active_comps)
             written.append(out_png)
             print(f"wrote {out_png}")
 

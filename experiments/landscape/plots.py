@@ -50,6 +50,15 @@ def field_medians(ds) -> dict[str, float]:
     return {k: float(np.median(ds[f"{k}0"].values)) for k in ("n", "p", "q")}
 
 
+def active_mask(ds) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
 def _nice_physical_ticks(median: float, alpha_lo: float, alpha_hi: float, param: str) -> tuple[list[float], list[str]]:
     """Nice physical-value tick locations, expressed as alpha (so callers can
     place them directly on the alpha grid), plus their labels. physical =
@@ -112,6 +121,11 @@ def plot_plane(ax, ds, plane_idx, plane_name, alpha_axes: bool = False):
     nse_star = float(ds["nse_star"].values)
     alpha_star = ds["alpha_star"].values
     coord_trained = ds["coord_trained"].values
+    # Last real eigen-slot: 2 when all three components are active (unchanged
+    # behavior), or the last ACTIVE index when one component is fixed (its
+    # eigval/eigvec/coord_trained slot at index 2 is a NaN/placeholder, not a
+    # real sloppy eigenvector -- see active_mask).
+    last_k = int(active_mask(ds).sum()) - 1
 
     nan_min = np.nanmin(nse)
     nan_max = np.nanmax(nse)
@@ -132,9 +146,9 @@ def plot_plane(ax, ds, plane_idx, plane_name, alpha_axes: bool = False):
         slice_center = ds.attrs.get("slice_center", "optimum")
         if slice_center == "trained":
             trained_xy = (0.0, 0.0)
-            star_xy = (-float(coord_trained[0]), -float(coord_trained[2]))
+            star_xy = (-float(coord_trained[0]), -float(coord_trained[last_k]))
         else:
-            trained_xy = (float(coord_trained[0]), float(coord_trained[2]))
+            trained_xy = (float(coord_trained[0]), float(coord_trained[last_k]))
             star_xy = (0.0, 0.0)
         ax.set_xlabel("offset s along v1 (stiff)")
         ax.set_ylabel("offset t along v3 (sloppy)")
@@ -148,9 +162,9 @@ def plot_plane(ax, ds, plane_idx, plane_name, alpha_axes: bool = False):
         ax.plot(newton_alpha[:, i], newton_alpha[:, j], color="0.5", lw=0.9, zorder=4)
         eigvec = ds["eigvec_star"].values
         half_width = ds["half_width"].values
-        v1, v3 = eigvec[:, 0], eigvec[:, 2]
+        v1, v3 = eigvec[:, 0], eigvec[:, last_k]
         w1 = min(float(half_width[0, 0]), 1.5)
-        w3 = min(float(half_width[0, 2]), 1.5)
+        w3 = min(float(half_width[0, last_k]), 1.5)
         ax.annotate("", xy=(star_xy[0] + v1[i] * w1, star_xy[1] + v1[j] * w1), xytext=star_xy,
                     arrowprops=dict(arrowstyle="->", color="k", lw=1.3, linestyle="-"))
         ax.annotate("", xy=(star_xy[0] + v3[i] * w3, star_xy[1] + v3[j] * w3), xytext=star_xy,
@@ -230,13 +244,23 @@ def build_stats_df(arms, gauges, data) -> pd.DataFrame:
             hess_star = ds["hess_star"].values
             newton_grad_norm = ds["newton_grad_norm"].values
             v1 = eigvec[:, 0]
-            denom = np.linalg.norm(v1) * np.linalg.norm(celerity_dir)
-            cos_v1_cel = float(abs(np.dot(v1, celerity_dir) / denom)) if denom > 0 else np.nan
+            # celerity_dir is NaN at an inactive alpha component (by policy,
+            # not a real degenerate direction) -- restrict the alignment
+            # check to the active components so a fixed parameter doesn't
+            # turn cos_v1_cel into a stray NaN via 0 * NaN.
+            active_idx = np.where(active_mask(ds))[0]
+            v1_active = v1[active_idx]
+            cel_active = celerity_dir[active_idx]
+            denom = np.linalg.norm(v1_active) * np.linalg.norm(cel_active)
+            cos_v1_cel = float(abs(np.dot(v1_active, cel_active) / denom)) if denom > 0 else np.nan
             ck_wk = np.abs(coord_trained) / half_width[0]
             asym = np.abs(hess_star - hess_star.T)
             hmax = np.abs(hess_star).max()
             hess_asym_ratio = float(asym.max() / hmax) if hmax > 0 else np.nan
-            min_eigval = float(eigval.min())
+            # eigval is NaN at the dropped eigen-slot when a component is
+            # inactive; drop it rather than let plain .min() propagate NaN.
+            eigval_finite = eigval[np.isfinite(eigval)]
+            min_eigval = float(eigval_finite.min()) if len(eigval_finite) else np.nan
             grad_ratio = (
                 float(newton_grad_norm[-1] / newton_grad_norm[0])
                 if newton_grad_norm[0] != 0

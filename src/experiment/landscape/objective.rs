@@ -45,6 +45,11 @@ pub struct Objective<'a, I: Backend> {
     pub eps: f32,
     pub ranges: [[f32; 2]; 3],
     pub log_space: [bool; 3],
+    /// `active[k]` is true when component `k` of `(n, p_spatial, q_spatial)`
+    /// is in the head's `learnable_parameters` (a real model parameter);
+    /// false when it is fixed at `params.defaults` for this arm. See
+    /// `Objective::active`.
+    active: [bool; 3],
 }
 
 /// Result of one objective evaluation.
@@ -98,6 +103,16 @@ where
             .copied()
             .ok_or("gauge std unavailable (loss.kind must be nse-batch in the arm's config)")?;
         let eps = ctx.cfg.experiment.as_ref().map(|e| e.loss.eps).unwrap_or(0.1);
+        // Which of (n, p_spatial, q_spatial) is a real model parameter vs
+        // fixed at `params.defaults` for this arm. Same source of truth as
+        // `InfluenceContext::open`'s learnable/fixed log line, so the two
+        // never disagree.
+        let section = ctx.cfg.kan_head.as_ref().ok_or("arm config has no kan_head section")?;
+        let active = [
+            section.learnable_parameters.iter().any(|s| s == "n"),
+            section.learnable_parameters.iter().any(|s| s == "p_spatial"),
+            section.learnable_parameters.iter().any(|s| s == "q_spatial"),
+        ];
         let mut windows = Vec::new();
         for &start in window_starts {
             let batch = ctx.collate_gauge(staid, start, window_days)?;
@@ -145,11 +160,19 @@ where
             let length = Tensor::<I, 1>::from_floats(tensors.adjacency.length_m.as_slice(), device);
             windows.push(WindowData { start_day: start, tensors, obs, n0, p0, q0, x_storage, q_prime, slope, length, gauge_row, comids });
         }
-        Ok(Self { ctx, windows, sigma, eps, ranges, log_space })
+        Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active })
     }
 
     pub fn n_reach(&self) -> usize {
         self.windows[0].tensors.adjacency.n
+    }
+
+    /// `active[k]` for `k` in `(n, p_spatial, q_spatial)`: true when the
+    /// parameter is in the head's `learnable_parameters` and so is a real
+    /// model parameter; false when it's fixed at `params.defaults` and must
+    /// not be treated as an optimization axis.
+    pub fn active(&self) -> [bool; 3] {
+        self.active
     }
 
     /// Physical fields at `α` (inner backend), for hydraulic checks.
@@ -276,10 +299,21 @@ where
         let loss: f32 = total.clone().inner().into_data().to_vec::<f32>().unwrap()[0];
         let grads = total.backward();
         let grad = if with_grad {
-            let g: Vec<f32> = leaves
+            let mut g: Vec<f32> = leaves
                 .iter()
                 .map(|l| l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()[0]).unwrap_or(0.0))
                 .collect();
+            // A fixed parameter's leaf still multiplies into the forward
+            // pass (the alpha-scaled constant default field), so autograd
+            // would otherwise report a nonzero derivative along an axis that
+            // is not a model parameter. Force it to exactly 0.0 so Newton,
+            // the Hessian, and every downstream consumer treat that axis as
+            // never moving.
+            for k in 0..3 {
+                if !self.active[k] {
+                    g[k] = 0.0;
+                }
+            }
             Some([g[0], g[1], g[2]])
         } else {
             None
@@ -311,9 +345,15 @@ where
     }
 
     /// Central-difference Hessian of `L_g` at `α` (symmetrized), step `h`.
+    /// Only active components are perturbed: a fixed parameter's column
+    /// stays 0 (never finite-differenced), and its row stays 0 too since
+    /// `eval` forces that gradient component to 0.0 for every trial point.
     pub fn hessian(&self, alpha: [f32; 3], h: f32) -> [[f32; 3]; 3] {
         let mut hm = [[0.0f32; 3]; 3];
         for k in 0..3 {
+            if !self.active[k] {
+                continue;
+            }
             let mut ap = alpha;
             ap[k] += h;
             let mut am = alpha;
@@ -430,6 +470,50 @@ pub fn eig3(a: [[f32; 3]; 3]) -> ([f32; 3], [[f32; 3]; 3]) {
     (vals, vecs)
 }
 
+/// `solve3` restricted to the `active` sub-block: each inactive row/column
+/// of `a` is zeroed with 1 on its diagonal and 0 in `b`, so the corresponding
+/// component of the returned step is exactly 0 regardless of `a` and `b`
+/// there. Reduces to a plain `solve3` call when all three components are
+/// active.
+pub fn solve_active(mut a: [[f32; 3]; 3], mut b: [f32; 3], active: [bool; 3]) -> Option<[f32; 3]> {
+    for k in 0..3 {
+        if !active[k] {
+            for j in 0..3 {
+                a[k][j] = 0.0;
+                a[j][k] = 0.0;
+            }
+            a[k][k] = 1.0;
+            b[k] = 0.0;
+        }
+    }
+    solve3(a, b)
+}
+
+/// `eig3` restricted to the `active` sub-block. With one component fixed,
+/// its row/column is zeroed and its diagonal set to a sentinel far below any
+/// realistic curvature value, which decouples it from the real 2x2 active
+/// block and (because `eig3` sorts descending) always sorts it last. That
+/// slot is then overwritten with `NaN` / the fixed axis's own unit vector,
+/// per the module's placed-last convention. All-active input is unchanged
+/// (delegates straight to `eig3`).
+pub fn eig_active(mut a: [[f32; 3]; 3], active: [bool; 3]) -> ([f32; 3], [[f32; 3]; 3]) {
+    let Some(i) = active.iter().position(|&x| !x) else {
+        return eig3(a);
+    };
+    const SENTINEL: f32 = -1e30;
+    for j in 0..3 {
+        a[i][j] = 0.0;
+        a[j][i] = 0.0;
+    }
+    a[i][i] = SENTINEL;
+    let (mut vals, mut vecs) = eig3(a);
+    vals[2] = f32::NAN;
+    for r in 0..3 {
+        vecs[r][2] = if r == i { 1.0 } else { 0.0 };
+    }
+    (vals, vecs)
+}
+
 /// Solve the 3×3 system `a x = b` by Gaussian elimination with partial pivoting.
 pub fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
     let mut m = [[a[0][0] as f64, a[0][1] as f64, a[0][2] as f64, b[0] as f64], [a[1][0] as f64, a[1][1] as f64, a[1][2] as f64, b[1] as f64], [a[2][0] as f64, a[2][1] as f64, a[2][2] as f64, b[2] as f64]];
@@ -509,6 +593,45 @@ mod tests {
         // eigenvector for eigenvalue 1 is (1,-1,0)/√2
         let c = 2;
         assert!((vecs[0][c].abs() - 0.7071).abs() < 1e-3 && (vecs[1][c].abs() - 0.7071).abs() < 1e-3);
+    }
+
+    #[test]
+    fn solve_active_zeros_the_inactive_component() {
+        let a = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+        let b = [1.0, 2.0, 3.0];
+        // p (index 1) fixed: rows/cols 0 and 2 are diagonal-only in this `a`,
+        // so the masked solve reduces to two independent scalar equations.
+        let d = solve_active(a, b, [true, false, true]).unwrap();
+        assert_eq!(d[1], 0.0);
+        assert!((d[0] - 0.25).abs() < 1e-5);
+        assert!((d[2] - 1.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn solve_active_matches_solve3_when_all_active() {
+        let a = [[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]];
+        let b = [1.0, 2.0, 3.0];
+        assert_eq!(solve_active(a, b, [true, true, true]), solve3(a, b));
+    }
+
+    #[test]
+    fn eig_active_drops_the_inactive_component() {
+        // p (index 1) fixed. Diagonal matrix so the active eigenpairs (2.0
+        // at index 0, 1.0 at index 2) are known exactly.
+        let (vals, vecs) = eig_active([[2.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 1.0]], [true, false, true]);
+        assert!((vals[0] - 2.0).abs() < 1e-5);
+        assert!((vals[1] - 1.0).abs() < 1e-5);
+        assert!(vals[2].is_nan());
+        // eigenvector for the dropped slot is the unit vector on the fixed axis (index 1).
+        assert_eq!(vecs[0][2], 0.0);
+        assert_eq!(vecs[1][2], 1.0);
+        assert_eq!(vecs[2][2], 0.0);
+    }
+
+    #[test]
+    fn eig_active_matches_eig3_when_all_active() {
+        let a = [[2.0, 1.0, 0.0], [1.0, 2.0, 0.0], [0.0, 0.0, 3.0]];
+        assert_eq!(eig_active(a, [true, true, true]), eig3(a));
     }
 
     #[test]

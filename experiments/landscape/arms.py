@@ -92,6 +92,25 @@ def arm_colors(arms):
     return {a: cmap(i % 10) for i, a in enumerate(arms)}
 
 
+def active_mask(ds) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
+def study_active_components(data: dict) -> list[str]:
+    """Components active in EVERY gauge/arm netCDF in this study. Used to
+    drop a fixed parameter's column from the cross-arm figure rather than
+    presenting it as if it were a real, gradient-informative axis."""
+    mask = np.array([True, True, True])
+    for ds in data.values():
+        mask = mask & active_mask(ds)
+    return [c for c, a in zip(COMPONENTS, mask) if a]
+
+
 # --------------------------------------------------------------------- per-gauge
 def arm_row(ref_arm: str, arm: str, staid: str, ds_ref: xr.Dataset, ds_arm: xr.Dataset) -> dict:
     if arm == ref_arm:
@@ -162,7 +181,10 @@ def build_spread_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------- figure
-def fig_arms(out: Path, df: pd.DataFrame, spread_df: pd.DataFrame, ref_arm: str, arms) -> Path:
+def fig_arms(out: Path, df: pd.DataFrame, spread_df: pd.DataFrame, ref_arm: str, arms,
+             active_components: list[str] | None = None) -> Path:
+    if active_components is None:
+        active_components = COMPONENTS
     staids = sorted(df["staid"].unique())
     n_g = len(staids)
     colors = arm_colors(arms)
@@ -176,7 +198,10 @@ def fig_arms(out: Path, df: pd.DataFrame, spread_df: pd.DataFrame, ref_arm: str,
         sub = df[df["staid"] == staid].set_index("arm").reindex(arms)
         row_top = 2 * gi
         row_bot = 2 * gi + 1
-        for ci, comp in enumerate(COMPONENTS):
+        # A fixed parameter's column is dropped entirely (not plotted as a
+        # blank/zero axis) -- its delta_alpha/optimum_offset would just be
+        # the trained default with no real per-arm displacement to show.
+        for ci, comp in enumerate(active_components):
             ax_top = fig.add_subplot(gs[row_top, ci])
             ax_bot = fig.add_subplot(gs[row_bot, ci])
             if ci == 0:
@@ -199,7 +224,7 @@ def fig_arms(out: Path, df: pd.DataFrame, spread_df: pd.DataFrame, ref_arm: str,
     x = np.arange(n_g)
     width = 0.25
     comp_colors = {"n": "tab:blue", "p": "tab:orange", "q": "tab:green"}
-    for ci, comp in enumerate(COMPONENTS):
+    for ci, comp in enumerate(active_components):
         vals = [spread_df[(spread_df["staid"] == s) & (spread_df["component"] == comp)]["ratio"].iloc[0]
                 if not spread_df[(spread_df["staid"] == s) & (spread_df["component"] == comp)].empty else np.nan
                 for s in staids]
@@ -436,7 +461,7 @@ def main():
     if not df.empty:
         df.to_csv(out / "arms_per_gauge.csv", index=False)
         written.append(out / "arms_per_gauge.csv")
-        written.append(fig_arms(out, df, spread_df, ref_arm, arms))
+        written.append(fig_arms(out, df, spread_df, ref_arm, arms, study_active_components(data)))
 
     compact_p = fig_arms_compact(out, arms, data, arm_colors(arms))
     if compact_p is not None:

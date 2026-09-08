@@ -59,6 +59,25 @@ def tol_index(ds: xr.Dataset, tol_target: float) -> int:
     return int(np.argmin(np.abs(tolerances - tol_target)))
 
 
+def active_mask(ds: xr.Dataset) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
+def study_active(data: dict) -> dict[str, bool]:
+    """Per-component active flag for the whole study: a component counts as
+    active only if it is active in every gauge/arm netCDF present. Used to
+    decide which n-p/n-q/p-q panels are meaningful to draw."""
+    mask = np.array([True, True, True])
+    for ds in data.values():
+        mask = mask & active_mask(ds)
+    return {c: bool(mask[i]) for i, c in enumerate(COMPONENTS)}
+
+
 def arm_colors(arms):
     cmap = plt.get_cmap("tab10")
     return {a: cmap(i) for i, a in enumerate(arms)}
@@ -170,7 +189,9 @@ def pairwise_agreement(arms: list[str], gauges: pd.DataFrame, data: dict) -> pd.
 
 
 # ----------------------------------------------------------------------- figure
-def fig_census(out: Path, df: pd.DataFrame, arms: list[str]) -> Path:
+def fig_census(out: Path, df: pd.DataFrame, arms: list[str], active: dict[str, bool] | None = None) -> Path:
+    if active is None:
+        active = {"n": True, "p": True, "q": True}
     colors_map = arm_markers(arms)  # marker shape by arm
     gains = df["gain"].to_numpy(dtype=float)
     vmin, vmax = float(np.nanmin(gains)), float(np.nanmax(gains))
@@ -187,7 +208,14 @@ def fig_census(out: Path, df: pd.DataFrame, arms: list[str]) -> Path:
     ax_gain = fig.add_subplot(gs[1, 0:3])
     ax_ratio = fig.add_subplot(gs[1, 3:6])
 
-    panels = [("n", "p", ax_np), ("n", "q", ax_nq), ("p", "q", ax_pq)]
+    panels_all = [("n", "p", ax_np), ("n", "q", ax_nq), ("p", "q", ax_pq)]
+    # A pair panel only shows a real direction when both its components are
+    # learned; drop panels touching a fixed parameter (e.g. n-p and p-q when
+    # p is fixed) rather than plotting it as if it were a free axis.
+    panels = [(a, b, ax) for a, b, ax in panels_all if active[a] and active[b]]
+    for a_name, b_name, ax in panels_all:
+        if not (active[a_name] and active[b_name]):
+            ax.set_visible(False)
     for a_name, b_name, ax in panels:
         i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
         for _, row in df.iterrows():
@@ -205,7 +233,7 @@ def fig_census(out: Path, df: pd.DataFrame, arms: list[str]) -> Path:
         ax.set_title(f"{a_name}-{b_name}", fontsize=10)
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
-    fig.colorbar(sm, ax=[ax_np, ax_nq, ax_pq], shrink=0.8, pad=0.02, label="gain (NSE* - NSE0)")
+    fig.colorbar(sm, ax=[ax for _, _, ax in panels], shrink=0.8, pad=0.02, label="gain (NSE* - NSE0)")
 
     staids = sorted(df["staid"].unique())
     x = np.arange(len(staids))
@@ -359,7 +387,7 @@ def main():
     if not df.empty:
         df.to_csv(out / "census_per_gauge.csv", index=False)
         written.append(out / "census_per_gauge.csv")
-        written.append(fig_census(out, df, arms))
+        written.append(fig_census(out, df, arms, study_active(data)))
 
     write_report(out, df, cons_df, pair_df, arms, gauges, input_files, args.tol)
     written.append(out / "CENSUS.md")

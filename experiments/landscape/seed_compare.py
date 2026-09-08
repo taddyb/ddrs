@@ -55,6 +55,15 @@ def tol_index(ds: xr.Dataset, tol_target: float) -> int:
     return int(np.argmin(np.abs(tolerances - tol_target)))
 
 
+def active_mask(ds: xr.Dataset) -> np.ndarray:
+    """Bool (n, p, q) mask of which alpha components are learned model
+    parameters vs fixed at a constant default. Defaults to all-active for
+    netCDFs written before the active/active_params schema existed."""
+    if "active" in ds.variables:
+        return ds["active"].values.astype(bool)
+    return np.array([True, True, True])
+
+
 # --------------------------------------------------------------------- per-gauge
 def compare_gauge(run_dir: Path, ref_arm: str, other_arm: str, staid: str, tol_target: float = 0.05):
     ds_ref = load_gauge(run_dir, ref_arm, staid)
@@ -86,6 +95,14 @@ def compare_gauge(run_dir: Path, ref_arm: str, other_arm: str, staid: str, tol_t
 
     x = delta_alpha - alpha_star_ref
     coord_other = np.einsum("ik,i->k", eigvec_star_ref, x)  # c_k(other)
+    # eigvec_star_ref's dropped eigen-slot (when a component is fixed) is a
+    # placeholder basis vector, not a real eigenvector -- the projection onto
+    # it is a real-looking but meaningless number. Force it to NaN so it
+    # matches coord_trained_ref's own NaN at that slot instead of looking
+    # like a genuine displacement.
+    n_active_ref = int(active_mask(ds_ref).sum())
+    if n_active_ref < 3:
+        coord_other[n_active_ref:] = np.nan
 
     ratio_ref = np.abs(coord_trained_ref) / half_width
     ratio_other = np.abs(coord_other) / half_width
@@ -152,6 +169,12 @@ def fig_seed_compare(out: Path, staid: str, extra: dict) -> Path:
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
 
+    # Last real eigen-slot: 2 when all three components are active
+    # (unchanged behavior), or the last ACTIVE index when one component is
+    # fixed (its coord_trained/coord_other slot at index 2 is NaN/meaningless
+    # -- see active_mask).
+    last_k = int(active_mask(ds_ref).sum()) - 1
+
     # --- panel 1: stiff-sloppy plane, axes already offsets from alpha_star along (v1, v3)
     pi = planes.index("stiff-sloppy")
     axis_a = ds_ref["grid_axis_a"].values[pi]
@@ -159,8 +182,8 @@ def fig_seed_compare(out: Path, staid: str, extra: dict) -> Path:
     nse = ds_ref["grid_nse"].values[pi]
     cf = plot_filled_nse(axes[0], axis_a, axis_b, nse)
     fig.colorbar(cf, ax=axes[0], shrink=0.9, pad=0.03, label="NSE")
-    ref_xy = (float(coord_trained_ref[0]), float(coord_trained_ref[2]))
-    other_xy = (float(coord_other[0]), float(coord_other[2]))
+    ref_xy = (float(coord_trained_ref[0]), float(coord_trained_ref[last_k]))
+    other_xy = (float(coord_other[0]), float(coord_other[last_k]))
     axes[0].plot(*ref_xy, marker="x", color="k", ms=10, mew=2.2, zorder=5, label=f"{extra['ref_arm']} trained")
     axes[0].plot(*other_xy, marker="^", color="magenta", ms=9, zorder=5, label=f"{extra['other_arm']} trained")
     axes[0].plot(0.0, 0.0, marker="*", color="red", ms=13, zorder=5, label=f"{extra['ref_arm']} optimum")
@@ -169,21 +192,30 @@ def fig_seed_compare(out: Path, staid: str, extra: dict) -> Path:
     axes[0].set_title(f"{staid}: stiff-sloppy plane ({extra['ref_arm']} eigenbasis)", fontsize=9)
     axes[0].legend(fontsize=6.5, loc="best")
 
-    # --- panel 2: n-p plane, re-expressed as offsets from alpha_star
-    pi = planes.index("n-p")
-    axis_a = ds_ref["grid_axis_a"].values[pi] - alpha_star_ref[0]
-    axis_b = ds_ref["grid_axis_b"].values[pi] - alpha_star_ref[1]
-    nse = ds_ref["grid_nse"].values[pi]
-    cf = plot_filled_nse(axes[1], axis_a, axis_b, nse)
-    fig.colorbar(cf, ax=axes[1], shrink=0.9, pad=0.03, label="NSE")
-    ref_xy = (-float(alpha_star_ref[0]), -float(alpha_star_ref[1]))
-    other_xy = (float(delta_alpha[0] - alpha_star_ref[0]), float(delta_alpha[1] - alpha_star_ref[1]))
-    axes[1].plot(*ref_xy, marker="x", color="k", ms=10, mew=2.2, zorder=5)
-    axes[1].plot(*other_xy, marker="^", color="magenta", ms=9, zorder=5)
-    axes[1].plot(0.0, 0.0, marker="*", color="red", ms=13, zorder=5)
-    axes[1].set_xlabel("alpha_n - alpha_star_n")
-    axes[1].set_ylabel("alpha_p - alpha_star_p")
-    axes[1].set_title(f"{staid}: n-p plane, offsets from {extra['ref_arm']} optimum", fontsize=9)
+    # --- panel 2: an axis-aligned plane (prefer n-p; fall back to whichever
+    # axis-aligned plane is actually present, since n-p is absent when p is
+    # fixed), re-expressed as offsets from alpha_star
+    plane_pref = ["n-p", "n-q", "p-q"]
+    plane_choice = next((pn for pn in plane_pref if pn in planes), None)
+    if plane_choice is not None:
+        a_name, b_name = plane_choice.split("-")
+        ia, ib = COMPONENTS.index(a_name), COMPONENTS.index(b_name)
+        pi = planes.index(plane_choice)
+        axis_a = ds_ref["grid_axis_a"].values[pi] - alpha_star_ref[ia]
+        axis_b = ds_ref["grid_axis_b"].values[pi] - alpha_star_ref[ib]
+        nse = ds_ref["grid_nse"].values[pi]
+        cf = plot_filled_nse(axes[1], axis_a, axis_b, nse)
+        fig.colorbar(cf, ax=axes[1], shrink=0.9, pad=0.03, label="NSE")
+        ref_xy = (-float(alpha_star_ref[ia]), -float(alpha_star_ref[ib]))
+        other_xy = (float(delta_alpha[ia] - alpha_star_ref[ia]), float(delta_alpha[ib] - alpha_star_ref[ib]))
+        axes[1].plot(*ref_xy, marker="x", color="k", ms=10, mew=2.2, zorder=5)
+        axes[1].plot(*other_xy, marker="^", color="magenta", ms=9, zorder=5)
+        axes[1].plot(0.0, 0.0, marker="*", color="red", ms=13, zorder=5)
+        axes[1].set_xlabel(f"alpha_{a_name} - alpha_star_{a_name}")
+        axes[1].set_ylabel(f"alpha_{b_name} - alpha_star_{b_name}")
+        axes[1].set_title(f"{staid}: {plane_choice} plane, offsets from {extra['ref_arm']} optimum", fontsize=9)
+    else:
+        axes[1].set_visible(False)
 
     fig.suptitle(
         "black x: reference trained point   magenta triangle: other seed's trained point   red star: reference optimum",
