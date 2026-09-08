@@ -263,3 +263,34 @@ one parameter over.
 shows the valley floor at 2 to 3 m depth but hides the n structure. The q-axis figure with the depth annotation in
 the corner is the more legible of the two.
 
+## 8. The clean twin: p = 21 on the area-balanced population (run `2026-09-08T14-06-12Z-train-and-test`)
+
+Same config, seed, and 1,841-gauge population as the learned-p seed-42 arm; only `p_spatial` removed from the
+learnable list. Eval on the same test population: median NSE 0.700, KGE 0.736 (learned p: 0.707 / 0.738; seed 43:
+0.710 / 0.743). Pinning p costs nothing measurable at the population level. Study run `.ddrs/experiments/landscape-pfixed-reachgrad/2026-09-08T20-43-34Z/`.
+
+| Juniata, out of sample for this model | learned p (seed 42) | p = 21, area-balanced (this run) | p = 21, gages_3000 (user run, in sample) |
+|---|---|---|---|
+| Basin-median trained n | 0.103 | **0.100** | 0.040 |
+| Basin-median trained q | 0.35 | 0.385 | 0.10 |
+| Newport NSE trained → own optimum | 0.692 → 0.770 | 0.661 → 0.742 (n × 0.71, q to the low box edge) | 0.703 → 0.742 |
+| Mapleton NSE trained → own optimum | 0.548 → 0.652 | 0.514 → 0.607 (n × 0.36, q × 2.5) | 0.644 → 0.658 |
+
+**This refutes the reading in §5 and §6 that pinning p moved n to the gauge value.** With p pinned and the Juniata out
+of sample, training leaves n at 0.100, the same as with p learned, and the per-gauge gain (0.08 to 0.09 NSE) is
+unchanged. The 0.040 in the user's run came from the training population (gages_3000, 2,859 gauges, Juniata
+included), not from pinning p. Which part of the population change did it (the Juniata gauges themselves being in the
+batch, or the wider set shifting the batch's preferred n everywhere) is testable from the two 41-gauge censuses:
+compare trained n gauge by gauge between the two p = 21 runs, for gauges in both populations versus gauges only in
+gages_3000.
+
+**What survives.** The n/p ratio identifiability is confirmed once more from the other side: the gauge-optimal n
+scales with p. Learned p 12.7 → optimal n 0.037 (n/p = 0.0029); p = 21 → optimal n 0.071 (n/p = 0.0034); the two
+models' optima differ in n by the factor their p differ by, to within the q trade. What does not survive is the
+hope that fixing p alone repairs the batch compromise at gauges the batch does not contain: n stays where the
+batch's 1,841 gauges leave it, near 0.10, whether or not p is free.
+
+**Corrections to earlier sections.** §5 "with p pinned, training put the Juniata's n at 0.040" should read "with p
+pinned and the Juniata in the training population". §6's "pinning p removed the batch compromise on n" should read
+"in a model trained on these gauges, the per-gauge gain is small"; the out-of-sample statement is this section.
+
