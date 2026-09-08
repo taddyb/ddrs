@@ -294,3 +294,35 @@ batch's 1,841 gauges leave it, near 0.10, whether or not p is free.
 pinned and the Juniata in the training population". §6's "pinning p removed the batch compromise on n" should read
 "in a model trained on these gauges, the per-gauge gain is small"; the out-of-sample statement is this section.
 
+## 9. Population, not membership: the two p = 21 models compared gauge by gauge
+
+`experiments/landscape/population_compare.py` on the two 2-D censuses (`landscape-p21-census41/2026-09-08T18-06-55Z`,
+84 gauges, gages_3000 model; `landscape-pfixed-census41/2026-09-08T20-45-04Z`, 41 gauges, area-balanced model).
+The 30 gauges present in both censuses are in BOTH training lists.
+
+| | gages_3000 model | area-balanced model |
+|---|---|---|
+| Trained n at the 30 shared gauges, median ratio | 0.48 × | 1 |
+| Well-fit gauges (NSE > 0.3) in its census | 20 of 84 | 6 of 41 |
+| Median gain to own optimum at well-fit gauges | 0.001 | about 0 (window-mean NSE), loss falls |
+| Direction of the well-fit optima in n | scattered, resultant 0.15 | all 6 want n × 0.57 to 0.67 |
+
+The configs differ only in the gauge list (plus an unused precip path and the sparse-solver device, which the cpu
+backend overrides). So the factor-two difference in trained n is a property of the training population and it is
+CONUS-wide: gauges that both models trained on shift by the same factor as the Juniata. Membership of the Juniata in
+the batch is not the cause.
+
+**Which property of the population?** Two candidates, not yet separated.
+1. Composition. gages_3000 has 3,211 gauges with median area 700 km² (14 % above 5,000 km²); the area-balanced list
+   has 1,841 with median 1,249 km² (32 % above 5,000 km²). The list with MORE small basins trained the LOWER n.
+   A roughness of 0.10 over-attenuates daily peaks in small basins, which the daily NSE does see; 1,400 more of them
+   would supply a consistent gradient toward lower n that the area-balanced batch lacks.
+2. Step count. With `batch_size` 64, gages_3000 gives about 45 optimizer steps per epoch against 29, so 30 epochs is
+   1.55 × more updates. The area-balanced trajectory (§2) was still drifting toward lower n at epoch 30.
+The p = 21 trajectory on the gages_3000 run (bundle `landscape-p21-trajectory`, running) separates them: if its n
+reaches 0.04 within the first few epochs the composition sets the target; if it drifts there over 30 epochs, the
+area-balanced run is simply under-trained along the sloppy direction.
+
+**Standing result either way.** The gages_3000 model sits at the per-gauge optimum at its well-fit gauges (median
+gain 0.001) and is the only model so far that does. Its population median NSE is 0.720 on its own 2,365-gauge test set.
+
