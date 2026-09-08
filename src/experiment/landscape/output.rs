@@ -66,6 +66,15 @@ pub struct LandscapeResult {
     pub q0: Vec<f32>,
     /// Reach COMIDs, same order/length as n0/p0/q0.
     pub comid: Vec<i64>,
+    /// Per-reach `dL/d ln x` at alpha = 0, `[n, p, q]`; `Some` only when
+    /// `landscape.reach_grad: true`.
+    pub reach_grad0: Option<[Vec<f32>; 3]>,
+    /// Per-reach `dL/d ln x` at alpha*, `[n, p, q]`; `Some` only when
+    /// `landscape.reach_grad: true`.
+    pub reach_grad_star: Option<[Vec<f32>; 3]>,
+    /// Per-reach along-channel distance to the gauge outlet, meters; empty
+    /// unless `landscape.reach_grad: true`.
+    pub dist_to_gauge_m: Vec<f32>,
 }
 
 pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> {
@@ -146,6 +155,19 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     put("n0", &["reach"], &r.n0, "trained (alpha = 0) per-reach Manning's n")?;
     put("p0", &["reach"], &r.p0, "trained (alpha = 0) per-reach Leopold-Maddock p")?;
     put("q0", &["reach"], &r.q0, "trained (alpha = 0) per-reach Leopold-Maddock q")?;
+    if let Some(rg) = &r.reach_grad0 {
+        put("reach_grad0_n", &["reach"], &rg[0], "dL/d ln(n) at alpha = 0, per reach (loss per unit ln parameter)")?;
+        put("reach_grad0_p", &["reach"], &rg[1], "dL/d ln(p_spatial) at alpha = 0, per reach (loss per unit ln parameter)")?;
+        put("reach_grad0_q", &["reach"], &rg[2], "dL/d ln(q_spatial) at alpha = 0, per reach (loss per unit ln parameter)")?;
+    }
+    if let Some(rg) = &r.reach_grad_star {
+        put("reach_grad_star_n", &["reach"], &rg[0], "dL/d ln(n) at alpha*, per reach (loss per unit ln parameter)")?;
+        put("reach_grad_star_p", &["reach"], &rg[1], "dL/d ln(p_spatial) at alpha*, per reach (loss per unit ln parameter)")?;
+        put("reach_grad_star_q", &["reach"], &rg[2], "dL/d ln(q_spatial) at alpha*, per reach (loss per unit ln parameter)")?;
+    }
+    if !r.dist_to_gauge_m.is_empty() {
+        put("dist_to_gauge_m", &["reach"], &r.dist_to_gauge_m, "along-channel distance from reach outlet to gauge outlet, meters")?;
+    }
     f.add_attribute("plane_names", r.slices.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(","))?;
     let mut comid_var = f.add_variable::<i64>("comid", &["reach"])?;
     comid_var.put_values(&r.comid, ..)?;
@@ -191,6 +213,9 @@ mod tests {
             p0: vec![21.0, 21.0],
             q0: vec![0.5, 0.5],
             comid: vec![1, 2],
+            reach_grad0: None,
+            reach_grad_star: None,
+            dist_to_gauge_m: Vec::new(),
         }
     }
 
@@ -210,6 +235,23 @@ mod tests {
         assert_eq!(plane_names, "");
         let hit: i32 = f.attribute("hit_range_bound").unwrap().value().unwrap().try_into().unwrap();
         assert_eq!(hit, 0);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn reach_grad_writes_reach_dimensioned_variables() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-reachgrad-{}.nc", std::process::id()));
+        let mut r = minimal_result(Vec::new());
+        r.reach_grad0 = Some([vec![1.0, 2.0], vec![3.0, 4.0], vec![5.0, 6.0]]);
+        r.reach_grad_star = Some([vec![0.1, 0.2], vec![0.3, 0.4], vec![0.5, 0.6]]);
+        r.dist_to_gauge_m = vec![0.0, 1500.0];
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        assert!(f.variable("reach_grad0_n").is_some());
+        assert!(f.variable("reach_grad_star_q").is_some());
+        assert!(f.variable("dist_to_gauge_m").is_some());
 
         std::fs::remove_file(&path).unwrap();
     }

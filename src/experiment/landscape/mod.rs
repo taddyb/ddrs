@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::ids::Staid;
 use crate::experiment::adjoint::gauges::{gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
-use crate::experiment::adjoint::influence::InfluenceContext;
+use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
 use crate::experiment::adjoint::{seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{BoxError, ExperimentManifest, ResolvedArm};
 
@@ -51,6 +51,14 @@ pub struct LandscapeSpec {
     /// `VALID_PLANES` at the top of `run_landscape`.
     #[serde(default = "d_planes")]
     pub planes: Vec<String>,
+    /// Also compute per-reach `g_i = dL/d ln x_i` (x in n, p, q) at α = 0 and
+    /// α*, plus `dist_to_gauge_m`, for the "perturbations in a watershed"
+    /// study: where in the network the gauge still constrains parameters,
+    /// even where the basin-uniform gradient has gone to zero. Off by
+    /// default: it doubles the per-gauge netCDF's reach-dimensioned
+    /// variables and costs two extra backward passes.
+    #[serde(default)]
+    pub reach_grad: bool,
 }
 fn d_window_days() -> usize { 90 }
 fn d_water_year() -> i32 { 2000 }
@@ -353,6 +361,35 @@ where
         }
     }
 
+    // 6. per-reach gradients ("perturbations in a watershed"): where the
+    // gauge still constrains parameters, even at alpha* where the
+    // basin-uniform gradient is zero. Logs (not asserts) the chain-rule
+    // consistency check that would otherwise only be a `#[ignore]`d unit
+    // test: the sum over reaches of reach_grad must equal the
+    // basin-uniform grad, since both differentiate the same
+    // `x_i = x0_i * exp(leaf_i)` multiply.
+    let (reach_grad0, reach_grad_star, dist_to_gauge_m) = if spec.reach_grad {
+        let rg0 = obj.reach_grad([0.0; 3]);
+        let rgs = obj.reach_grad(alpha_star);
+        let sum = |v: &[f32]| v.iter().sum::<f32>();
+        for (label, rg, uniform) in [("alpha=0", &rg0, &grad0), ("alpha*", &rgs, &grad_star)] {
+            for (k, name) in ["n", "p", "q"].into_iter().enumerate() {
+                let per_reach = [&rg.n, &rg.p, &rg.q][k];
+                let s = sum(per_reach);
+                let u = uniform[k];
+                let rel = (s - u).abs() / u.abs().max(1e-8);
+                println!(
+                    "  [{}] {} reach_grad consistency ({label}, {name}): sum {s:.6e} vs uniform {u:.6e} (rel diff {rel:.2e})",
+                    arm.name, g.staid
+                );
+            }
+        }
+        let dist = dist_to_gauge(&obj.windows[0].tensors.adjacency, obj.windows[0].gauge_row);
+        (Some([rg0.n, rg0.p, rg0.q]), Some([rgs.n, rgs.p, rgs.q]), dist)
+    } else {
+        (None, None, Vec::new())
+    };
+
     let r = LandscapeResult {
         staid: g.staid.clone(),
         arm: arm.name.clone(),
@@ -386,6 +423,9 @@ where
         p0: obj.windows[0].p0.clone().into_data().to_vec::<f32>().unwrap(),
         q0: obj.windows[0].q0.clone().into_data().to_vec::<f32>().unwrap(),
         comid: obj.windows[0].comids.clone(),
+        reach_grad0,
+        reach_grad_star,
+        dist_to_gauge_m,
     };
     write_landscape_netcdf(&arm_dir.join("gauges").join(format!("{}.nc", g.staid)), &r)?;
     output::append_summary(&arm_dir.join("summary.csv"), &r)?;

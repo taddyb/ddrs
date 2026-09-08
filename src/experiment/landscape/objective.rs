@@ -59,6 +59,14 @@ pub struct Eval {
     pub grad: Option<[f32; 3]>,
 }
 
+/// Per-reach `dL/d ln x` for `x` in `(n, p_spatial, q_spatial)`, length `n_reach` each.
+#[derive(Debug, Clone)]
+pub struct ReachGrad {
+    pub n: Vec<f32>,
+    pub p: Vec<f32>,
+    pub q: Vec<f32>,
+}
+
 impl<'a, I: Backend + 'static> Objective<'a, I>
 where
     I::FloatTensorPrimitive: 'static,
@@ -155,18 +163,16 @@ where
         }
     }
 
-    /// Evaluate `L_g(α)` (mean over windows) and optionally its gradient.
-    pub fn eval(&self, alpha: [f32; 3], with_grad: bool) -> Eval {
+    /// Shared forward + loss over all windows, given the three `(n, p, q)`
+    /// log-scale leaves. A leaf may be shape `[1]` (basin-uniform, broadcast
+    /// via `ones`) or shape `[n_reach]` (per-reach); the multiply-by-`ones`
+    /// below broadcasts the former and is a no-op for the latter, so both
+    /// callers (`eval`, `reach_grad`) share this one forward path. Returns
+    /// the batch-mean loss tensor (still on the autodiff tape), per-window
+    /// NSE, and the max clamped fraction over windows.
+    fn forward_loss(&self, leaves: &[Tensor<AD<I>, 1>; 3]) -> (Tensor<AD<I>, 1>, Vec<f32>, f32) {
         let device = &self.ctx.device;
         let n = self.n_reach();
-        // α leaves (shape [1]) — one set shared across windows.
-        let leaves: Vec<Tensor<AD<I>, 1>> = alpha
-            .iter()
-            .map(|a| {
-                let t = Tensor::<AD<I>, 1>::from_floats([*a].as_slice(), device);
-                if with_grad { t.require_grad() } else { t }
-            })
-            .collect();
         let ones = Tensor::<AD<I>, 1>::ones([n], device);
         let mut total: Option<Tensor<AD<I>, 1>> = None;
         let mut nses = Vec::new();
@@ -233,7 +239,18 @@ where
         }
         let n_w = nses.iter().filter(|v| v.is_finite()).count().max(1) as f32;
         let total = total.expect("at least one window with valid observations");
-        let total = total / n_w;
+        (total / n_w, nses, clamped_max)
+    }
+
+    /// Evaluate `L_g(α)` (mean over windows) and optionally its gradient.
+    pub fn eval(&self, alpha: [f32; 3], with_grad: bool) -> Eval {
+        let device = &self.ctx.device;
+        // α leaves (shape [1]) — one set shared across windows.
+        let leaves: [Tensor<AD<I>, 1>; 3] = std::array::from_fn(|k| {
+            let t = Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device);
+            if with_grad { t.require_grad() } else { t }
+        });
+        let (total, nses, clamped_max) = self.forward_loss(&leaves);
         let loss: f32 = total.clone().inner().into_data().to_vec::<f32>().unwrap()[0];
         let grad = if with_grad {
             let grads = total.backward();
@@ -250,6 +267,25 @@ where
             if f.is_empty() { f32::NAN } else { f.iter().sum::<f32>() / f.len() as f32 }
         };
         Eval { loss, nse: nses, nse_mean, clamped_frac: clamped_max, grad }
+    }
+
+    /// Per-reach `g_i = dL/d ln x_i` for `x` in `(n, p_spatial, q_spatial)` at
+    /// `α`: same forward as `eval`, but each reach gets its own log-scale
+    /// leaf (initialized to `α`, broadcast) instead of one shared scalar.
+    /// Where the field is clamped at a range edge the local gradient is
+    /// zero (the clamp backward is exact); that's a correct answer, not a
+    /// bug: the gauge cannot see past the boundary at that reach.
+    pub fn reach_grad(&self, alpha: [f32; 3]) -> ReachGrad {
+        let device = &self.ctx.device;
+        let n = self.n_reach();
+        let leaves: [Tensor<AD<I>, 1>; 3] =
+            std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats(vec![alpha[k]; n].as_slice(), device).require_grad());
+        let (total, _nses, _clamped_max) = self.forward_loss(&leaves);
+        let grads = total.backward();
+        let extract = |l: &Tensor<AD<I>, 1>| -> Vec<f32> {
+            l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()).unwrap_or_else(|| vec![0.0; n])
+        };
+        ReachGrad { n: extract(&leaves[0]), p: extract(&leaves[1]), q: extract(&leaves[2]) }
     }
 
     /// Central-difference Hessian of `L_g` at `α` (symmetrized), step `h`.
@@ -373,4 +409,29 @@ mod tests {
         let r = [4.0 * x[0] + x[1], x[0] + 3.0 * x[1] + x[2], x[1] + 2.0 * x[2]];
         assert!((r[0] - 1.0).abs() < 1e-4 && (r[1] - 2.0).abs() < 1e-4 && (r[2] - 3.0).abs() < 1e-4);
     }
+
+    /// Consistency check (chain rule): the basin-uniform gradient is the sum
+    /// over reaches of the per-reach log-gradient, because the uniform
+    /// scalar leaf and the per-reach leaves both feed the same
+    /// `x_i = x0_i * exp(leaf_i)` multiply, so `dL/d(uniform leaf) = Σ_i dL/d
+    /// ln x_i`. `sum(obj.reach_grad(alpha).n/p/q)` should equal
+    /// `obj.eval(alpha, true).grad` component-wise to 1e-3 relative.
+    ///
+    /// Ignored: building an `Objective` needs a real trained run.
+    /// `Objective::build` reads an `InfluenceContext` opened from a
+    /// `ResolvedArm` (a `.ddrs/runs/<id>` checkpoint) plus real gauge
+    /// windows, which this crate's fixture-free unit tests don't have. To
+    /// run it against the Juniata example:
+    ///   1. `target/release/ddrs --config examples/juniata/ddrs.yaml run \
+    ///        --workflow train-and-test --backend cpu` and note the run id.
+    ///   2. Build a `ResolvedArm` for that run (see `resolve_arm` in
+    ///      `src/experiment/mod.rs`), open an `InfluenceContext`, and call
+    ///      `Objective::build(&ctx, &Staid::new("01567000"), &starts, 90)`.
+    ///   3. Compare `obj.reach_grad(alpha)` summed per component against
+    ///      `obj.eval(alpha, true).grad`.
+    /// The same check runs unconditionally at runtime in `run_gauge` (logged,
+    /// not asserted) whenever `landscape.reach_grad: true`.
+    #[test]
+    #[ignore = "needs a real trained run; see doc comment for the manual recipe against examples/juniata"]
+    fn reach_grad_sums_to_uniform_gradient() {}
 }
