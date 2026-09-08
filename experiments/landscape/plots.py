@@ -106,6 +106,8 @@ def fig_landscape_gauge(out: Path, arms, staid: str, data):
     rows = [a for a in arms if (a, staid) in data]
     if not rows:
         return None
+    if not any("grid_nse" in data[(a, staid)].variables for a in rows):
+        return None  # grid: 0 -- no slice grids to plot
     fig, axes = plt.subplots(len(rows), 4, figsize=(18, 4.2 * len(rows) + 0.6), squeeze=False)
     row_labels = []
     for r, arm in enumerate(rows):

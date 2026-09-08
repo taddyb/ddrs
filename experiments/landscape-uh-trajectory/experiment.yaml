@@ -1,0 +1,29 @@
+# Trajectory across training: how the stiff coordinate (leading Hessian
+# eigenvector at alpha_star) moves for each gauge as the same run's checkpoint
+# advances from the untrained head through epoch 30.
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-trajectory --backend cpu
+study: landscape
+arms:
+  - { name: ep-init, run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: init }
+  - { name: ep-01,   run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: epoch_1_mb_0 }
+  - { name: ep-05,   run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: epoch_5_mb_1 }
+  - { name: ep-10,   run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: epoch_10_mb_1 }
+  - { name: ep-20,   run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: epoch_20_mb_1 }
+  - { name: ep-30,   run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: epoch_30_mb_1 }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]   # Juniata: Mapleton Depot -> Newport
+      - ["06447000", "06452000"]   # White River, SD
+      - ["06449100", "06452000"]
+      - ["06350000", "06354000"]   # Cannonball River, ND
+      - ["06353000", "06354000"]
+  window_days: 90
+  water_year: 2000
+  n_windows: 4
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0

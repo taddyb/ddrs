@@ -70,8 +70,15 @@ where
             .as_ref()
             .ok_or_else(|| format!("arm `{}`: config has no kan_head section", arm.name))?;
         let template: KanHead<AD<I>> = kan_config(section, cfg.seed).init::<AD<I>>(device);
-        let head = load_kan_head::<AD<I>>(&head_base(&arm.checkpoint_dir), template, device)
-            .map_err(|e| format!("arm `{}`: {e}", arm.name))?;
+        let head = if arm.checkpoint_label == "init" {
+            // Same construction the trainer uses before any warm start
+            // (`bootstrap_head_and_state`): the seeded template, no weights loaded.
+            println!("arm `{}`: checkpoint label `init`, using the untrained head from config seed {}", arm.name, cfg.seed);
+            template
+        } else {
+            load_kan_head::<AD<I>>(&head_base(&arm.checkpoint_dir), template, device)
+                .map_err(|e| format!("arm `{}`: {e}", arm.name))?
+        };
         let axis = dataset.time_axis().clone();
         let tau = cfg.params.tau;
         let warmup = cfg.experiment.as_ref().map(|e| e.warmup).unwrap_or(5);

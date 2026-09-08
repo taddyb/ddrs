@@ -40,6 +40,10 @@ pub struct ArmSpec {
     pub name: String,
     /// Run id under `<workspace>/runs/`.
     pub run: String,
+    /// Checkpoint label override (`epoch_E_mb_M`, or `init` for the
+    /// pre-training head). Defaults to the run's latest checkpoint.
+    #[serde(default)]
+    pub checkpoint: Option<String>,
 }
 
 impl ExperimentSpec {
@@ -93,8 +97,26 @@ pub fn resolve_arm(ws: &Workspace, arm: &ArmSpec) -> Result<ResolvedArm, BoxErro
         )
         .into());
     }
-    let (checkpoint_label, checkpoint_dir) = latest_checkpoint(&run_dir.join("checkpoints"))
-        .map_err(|e| format!("arm `{}` (run `{}`): {e}", arm.name, arm.run))?;
+    let checkpoints_dir = run_dir.join("checkpoints");
+    let (checkpoint_label, checkpoint_dir) = match &arm.checkpoint {
+        Some(label) if label == "init" => ("init".to_string(), checkpoints_dir),
+        Some(label) => {
+            let dir = checkpoints_dir.join(label);
+            if !dir.is_dir() {
+                return Err(format!(
+                    "arm `{}` (run `{}`): checkpoint `{}` not found under {}",
+                    arm.name,
+                    arm.run,
+                    label,
+                    checkpoints_dir.display()
+                )
+                .into());
+            }
+            (label.clone(), dir)
+        }
+        None => latest_checkpoint(&checkpoints_dir)
+            .map_err(|e| format!("arm `{}` (run `{}`): {e}", arm.name, arm.run))?,
+    };
     Ok(ResolvedArm {
         name: arm.name.clone(),
         run_id: arm.run.clone(),
@@ -213,6 +235,30 @@ mod tests {
         let (label, path) = latest_checkpoint(&tmp).unwrap();
         assert_eq!(label, "epoch_10_mb_0");
         assert_eq!(path, tmp.join("epoch_10_mb_0"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn resolve_arm_explicit_checkpoint_label_wins() {
+        let tmp = std::env::temp_dir().join(format!("ddrs-exp-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let run_dir = tmp.join("runs").join("run-a");
+        std::fs::create_dir_all(run_dir.join("checkpoints").join("epoch_1_mb_0")).unwrap();
+        std::fs::create_dir_all(run_dir.join("checkpoints").join("epoch_30_mb_1")).unwrap();
+        std::fs::write(run_dir.join("config.yaml"), "x: 1\n").unwrap();
+        let ws = Workspace::with_root(tmp.clone());
+
+        // Explicit label wins over the latest checkpoint.
+        let arm = ArmSpec { name: "a".into(), run: "run-a".into(), checkpoint: Some("epoch_1_mb_0".into()) };
+        let resolved = resolve_arm(&ws, &arm).unwrap();
+        assert_eq!(resolved.checkpoint_label, "epoch_1_mb_0");
+        assert_eq!(resolved.checkpoint_dir, run_dir.join("checkpoints").join("epoch_1_mb_0"));
+
+        // A missing label errors.
+        let missing = ArmSpec { name: "a".into(), run: "run-a".into(), checkpoint: Some("epoch_99_mb_0".into()) };
+        let err = resolve_arm(&ws, &missing).unwrap_err().to_string();
+        assert!(err.contains("epoch_99_mb_0"), "{err}");
+
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

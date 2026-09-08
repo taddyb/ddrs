@@ -41,6 +41,10 @@ pub struct LandscapeSpec {
     /// Loss tolerances (fractions of L(α*)) for behavioural half-widths.
     #[serde(default = "d_tols")]
     pub tolerances: Vec<f32>,
+    /// Max acceptable `clamped_frac` for a Newton trial point (else treated
+    /// like a non-decrease: halve the step and retry).
+    #[serde(default = "d_max_clamped")]
+    pub max_clamped: f32,
 }
 fn d_window_days() -> usize { 90 }
 fn d_water_year() -> i32 { 2000 }
@@ -50,6 +54,7 @@ fn d_grid() -> usize { 11 }
 fn d_h() -> f32 { 0.05 }
 fn d_newton_iters() -> usize { 10 }
 fn d_tols() -> Vec<f32> { vec![0.05, 0.10] }
+fn d_max_clamped() -> f32 { 0.05 }
 
 pub struct LandscapeOptions {
     pub max_gauges: Option<usize>,
@@ -184,6 +189,7 @@ where
     let mut cur = e0.clone();
     let mut hess = hess0;
     let mut path: Vec<NewtonStep> = vec![NewtonStep { alpha, loss: cur.loss, grad_norm: norm(&grad0) }];
+    let mut newton_hit_bound = false;
     for it in 0..spec.newton_iters {
         let gcur = cur.grad.unwrap();
         let (vals, _) = eig3(hess);
@@ -193,15 +199,23 @@ where
             hd[k][k] += mu;
         }
         let Some(d) = solve3(hd, [-gcur[0], -gcur[1], -gcur[2]]) else { break };
-        // backtracking line search within the domain
+        // backtracking line search within the domain; a trial whose
+        // clamped_frac exceeds max_clamped is unacceptable exactly like a
+        // non-decrease: halve the step and retry.
         let mut t = 1.0f32;
         let mut accepted = None;
+        let mut saw_within_bound = false;
         for _ in 0..8 {
             let mut a = alpha;
             for k in 0..3 {
                 a[k] = (alpha[k] + t * d[k]).clamp(-spec.alpha_max, spec.alpha_max);
             }
             let e = obj.eval(a, true);
+            if e.clamped_frac > spec.max_clamped {
+                t *= 0.5;
+                continue;
+            }
+            saw_within_bound = true;
             if e.loss < cur.loss {
                 accepted = Some((a, e));
                 break;
@@ -209,7 +223,11 @@ where
             t *= 0.5;
         }
         let Some((a, e)) = accepted else {
-            println!("  [{}] {} newton: no decrease at iter {it}, stopping", arm.name, g.staid);
+            if saw_within_bound {
+                println!("  [{}] {} newton: no decrease at iter {it}, stopping", arm.name, g.staid);
+            } else {
+                newton_hit_bound = true;
+            }
             break;
         };
         let step = ((a[0] - alpha[0]).powi(2) + (a[1] - alpha[1]).powi(2) + (a[2] - alpha[2]).powi(2)).sqrt();
@@ -226,6 +244,13 @@ where
     let hess_star = hess;
     let (eigval_star, eigvec_star) = eig3(hess_star);
     let grad_star = e_star.grad.unwrap();
+    let hit_range_bound = newton_hit_bound || e_star.clamped_frac > spec.max_clamped;
+    if hit_range_bound {
+        println!(
+            "  [{}] {} landscape: hit_range_bound (clamped_frac_star {:.3}, max_clamped {:.3})",
+            arm.name, g.staid, e_star.clamped_frac, spec.max_clamped
+        );
+    }
 
     // 3. behavioural half-widths and trained-point coordinates in the eigenbasis of H(α*)
     let mut coord_trained = [0.0f32; 3];
@@ -248,48 +273,52 @@ where
     // 4. analytic celerity direction: d(mean path travel time)/dα at α = 0 (hydraulic K), for pass criterion (iii)
     let celerity_dir = celerity_direction(&obj, h);
 
-    // 5. landscape slices through α*: (n,p), (n,q), (p,q), and (v1, v3)
-    let gsz = spec.grid.max(3);
-    let axis: Vec<f32> = (0..gsz).map(|i| -spec.alpha_max + 2.0 * spec.alpha_max * i as f32 / (gsz - 1) as f32).collect();
+    // 5. landscape slices through α*: (n,p), (n,q), (p,q), and (v1, v3).
+    // `grid: 0` skips all four planes (used for cheap studies over many arms
+    // or checkpoints where only the Newton optimum is needed).
     let mut slices = Vec::new();
-    let planes: [(&str, [usize; 2]); 3] = [("n-p", [0, 1]), ("n-q", [0, 2]), ("p-q", [1, 2])];
-    for (name, [i, j]) in planes {
-        let mut loss = vec![f32::NAN; gsz * gsz];
-        let mut nse = vec![f32::NAN; gsz * gsz];
-        let mut clamped = vec![f32::NAN; gsz * gsz];
-        for (a_i, &va) in axis.iter().enumerate() {
-            for (b_i, &vb) in axis.iter().enumerate() {
-                let mut a = alpha_star;
-                a[i] = va;
-                a[j] = vb;
-                let e = obj.eval(a, false);
-                loss[a_i * gsz + b_i] = e.loss;
-                nse[a_i * gsz + b_i] = e.nse_mean;
-                clamped[a_i * gsz + b_i] = e.clamped_frac;
-            }
-        }
-        slices.push(Slice { name: name.into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: unit(i), basis_b: unit(j), loss, nse, clamped });
-    }
-    {
-        // eigen-plane: α = α* + s·v1 + t·v3, s,t ∈ [−alpha_max, alpha_max]
-        let v1 = [eigvec_star[0][0], eigvec_star[1][0], eigvec_star[2][0]];
-        let v3 = [eigvec_star[0][2], eigvec_star[1][2], eigvec_star[2][2]];
-        let mut loss = vec![f32::NAN; gsz * gsz];
-        let mut nse = vec![f32::NAN; gsz * gsz];
-        let mut clamped = vec![f32::NAN; gsz * gsz];
-        for (a_i, &s) in axis.iter().enumerate() {
-            for (b_i, &t) in axis.iter().enumerate() {
-                let mut a = alpha_star;
-                for k in 0..3 {
-                    a[k] = (alpha_star[k] + s * v1[k] + t * v3[k]).clamp(-2.0 * spec.alpha_max, 2.0 * spec.alpha_max);
+    if spec.grid > 0 {
+        let gsz = spec.grid.max(3);
+        let axis: Vec<f32> = (0..gsz).map(|i| -spec.alpha_max + 2.0 * spec.alpha_max * i as f32 / (gsz - 1) as f32).collect();
+        let planes: [(&str, [usize; 2]); 3] = [("n-p", [0, 1]), ("n-q", [0, 2]), ("p-q", [1, 2])];
+        for (name, [i, j]) in planes {
+            let mut loss = vec![f32::NAN; gsz * gsz];
+            let mut nse = vec![f32::NAN; gsz * gsz];
+            let mut clamped = vec![f32::NAN; gsz * gsz];
+            for (a_i, &va) in axis.iter().enumerate() {
+                for (b_i, &vb) in axis.iter().enumerate() {
+                    let mut a = alpha_star;
+                    a[i] = va;
+                    a[j] = vb;
+                    let e = obj.eval(a, false);
+                    loss[a_i * gsz + b_i] = e.loss;
+                    nse[a_i * gsz + b_i] = e.nse_mean;
+                    clamped[a_i * gsz + b_i] = e.clamped_frac;
                 }
-                let e = obj.eval(a, false);
-                loss[a_i * gsz + b_i] = e.loss;
-                nse[a_i * gsz + b_i] = e.nse_mean;
-                clamped[a_i * gsz + b_i] = e.clamped_frac;
             }
+            slices.push(Slice { name: name.into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: unit(i), basis_b: unit(j), loss, nse, clamped });
         }
-        slices.push(Slice { name: "stiff-sloppy".into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: v1, basis_b: v3, loss, nse, clamped });
+        {
+            // eigen-plane: α = α* + s·v1 + t·v3, s,t ∈ [−alpha_max, alpha_max]
+            let v1 = [eigvec_star[0][0], eigvec_star[1][0], eigvec_star[2][0]];
+            let v3 = [eigvec_star[0][2], eigvec_star[1][2], eigvec_star[2][2]];
+            let mut loss = vec![f32::NAN; gsz * gsz];
+            let mut nse = vec![f32::NAN; gsz * gsz];
+            let mut clamped = vec![f32::NAN; gsz * gsz];
+            for (a_i, &s) in axis.iter().enumerate() {
+                for (b_i, &t) in axis.iter().enumerate() {
+                    let mut a = alpha_star;
+                    for k in 0..3 {
+                        a[k] = (alpha_star[k] + s * v1[k] + t * v3[k]).clamp(-2.0 * spec.alpha_max, 2.0 * spec.alpha_max);
+                    }
+                    let e = obj.eval(a, false);
+                    loss[a_i * gsz + b_i] = e.loss;
+                    nse[a_i * gsz + b_i] = e.nse_mean;
+                    clamped[a_i * gsz + b_i] = e.clamped_frac;
+                }
+            }
+            slices.push(Slice { name: "stiff-sloppy".into(), axis_a: axis.clone(), axis_b: axis.clone(), basis_a: v1, basis_b: v3, loss, nse, clamped });
+        }
     }
 
     let r = LandscapeResult {
@@ -320,6 +349,7 @@ where
         newton_path: path,
         slices,
         clamped_frac_star: e_star.clamped_frac,
+        hit_range_bound,
         n0: obj.windows[0].n0.clone().into_data().to_vec::<f32>().unwrap(),
         p0: obj.windows[0].p0.clone().into_data().to_vec::<f32>().unwrap(),
         q0: obj.windows[0].q0.clone().into_data().to_vec::<f32>().unwrap(),

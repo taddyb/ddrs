@@ -57,6 +57,9 @@ pub struct LandscapeResult {
     pub newton_path: Vec<NewtonStep>,
     pub slices: Vec<Slice>,
     pub clamped_frac_star: f32,
+    /// True if the final accepted point has `clamped_frac > max_clamped`, or
+    /// the descent stopped because every Newton trial step exceeded it.
+    pub hit_range_bound: bool,
     /// Trained (alpha = 0) per-reach physical fields, length n_reach.
     pub n0: Vec<f32>,
     pub p0: Vec<f32>,
@@ -84,17 +87,20 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("half_width_definition", "w_k = sqrt(2 * tol * L(alpha_star) / lambda_k): behavioural half-width along eigenvector k (quadratic approximation)")?;
     f.add_attribute("celerity_dir_definition", "unit alpha direction that most increases the hydraulic mean path travel time (sum L/c) at alpha = 0")?;
     f.add_attribute("clamped_frac_star", r.clamped_frac_star as f64)?;
+    f.add_attribute("hit_range_bound", r.hit_range_bound as i32)?;
 
-    let g = r.slices[0].axis_a.len();
     f.add_dimension("alpha", 3)?;
     f.add_dimension("k", 3)?;
     f.add_dimension("window", r.window_starts.len())?;
     f.add_dimension("tol", r.tolerances.len())?;
     f.add_dimension("newton", r.newton_path.len())?;
-    f.add_dimension("plane", r.slices.len())?;
-    f.add_dimension("ga", g)?;
-    f.add_dimension("gb", g)?;
     f.add_dimension("reach", r.n0.len())?;
+    // `grid: 0` produces no slices, so skip the plane/ga/gb dims and grid variables.
+    if !r.slices.is_empty() {
+        f.add_dimension("plane", r.slices.len())?;
+        f.add_dimension("ga", r.slices[0].axis_a.len())?;
+        f.add_dimension("gb", r.slices[0].axis_b.len())?;
+    }
 
     let mut put = |name: &str, dims: &[&str], vals: &[f32], long: &str| -> Result<(), BoxError> {
         let mut v = f.add_variable::<f32>(name, dims)?;
@@ -125,16 +131,18 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     put("newton_alpha", &["newton", "alpha"], &na, "Newton iterate")?;
     put("newton_loss", &["newton"], &r.newton_path.iter().map(|s| s.loss).collect::<Vec<_>>(), "L at iterate")?;
     put("newton_grad_norm", &["newton"], &r.newton_path.iter().map(|s| s.grad_norm).collect::<Vec<_>>(), "|dL/dalpha| at iterate")?;
-    let cat = |sel: &dyn Fn(&Slice) -> &Vec<f32>| -> Vec<f32> { r.slices.iter().flat_map(|s| sel(s).iter().copied()).collect() };
-    put("grid_axis_a", &["plane", "ga"], &cat(&|s| &s.axis_a), "grid coordinate along basis_a")?;
-    put("grid_axis_b", &["plane", "gb"], &cat(&|s| &s.axis_b), "grid coordinate along basis_b")?;
-    put("grid_loss", &["plane", "ga", "gb"], &cat(&|s| &s.loss), "L on the slice")?;
-    put("grid_nse", &["plane", "ga", "gb"], &cat(&|s| &s.nse), "NSE on the slice")?;
-    put("grid_clamped", &["plane", "ga", "gb"], &cat(&|s| &s.clamped), "fraction of reach-parameters clamped at a range edge")?;
-    let ba: Vec<f32> = r.slices.iter().flat_map(|s| s.basis_a.iter().copied()).collect();
-    let bb: Vec<f32> = r.slices.iter().flat_map(|s| s.basis_b.iter().copied()).collect();
-    put("basis_a", &["plane", "alpha"], &ba, "unit alpha vector of grid axis a")?;
-    put("basis_b", &["plane", "alpha"], &bb, "unit alpha vector of grid axis b")?;
+    if !r.slices.is_empty() {
+        let cat = |sel: &dyn Fn(&Slice) -> &Vec<f32>| -> Vec<f32> { r.slices.iter().flat_map(|s| sel(s).iter().copied()).collect() };
+        put("grid_axis_a", &["plane", "ga"], &cat(&|s| &s.axis_a), "grid coordinate along basis_a")?;
+        put("grid_axis_b", &["plane", "gb"], &cat(&|s| &s.axis_b), "grid coordinate along basis_b")?;
+        put("grid_loss", &["plane", "ga", "gb"], &cat(&|s| &s.loss), "L on the slice")?;
+        put("grid_nse", &["plane", "ga", "gb"], &cat(&|s| &s.nse), "NSE on the slice")?;
+        put("grid_clamped", &["plane", "ga", "gb"], &cat(&|s| &s.clamped), "fraction of reach-parameters clamped at a range edge")?;
+        let ba: Vec<f32> = r.slices.iter().flat_map(|s| s.basis_a.iter().copied()).collect();
+        let bb: Vec<f32> = r.slices.iter().flat_map(|s| s.basis_b.iter().copied()).collect();
+        put("basis_a", &["plane", "alpha"], &ba, "unit alpha vector of grid axis a")?;
+        put("basis_b", &["plane", "alpha"], &bb, "unit alpha vector of grid axis b")?;
+    }
     put("n0", &["reach"], &r.n0, "trained (alpha = 0) per-reach Manning's n")?;
     put("p0", &["reach"], &r.p0, "trained (alpha = 0) per-reach Leopold-Maddock p")?;
     put("q0", &["reach"], &r.q0, "trained (alpha = 0) per-reach Leopold-Maddock q")?;
@@ -145,11 +153,73 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_result(slices: Vec<Slice>) -> LandscapeResult {
+        LandscapeResult {
+            staid: "test".into(),
+            arm: "arm".into(),
+            run_id: "run".into(),
+            checkpoint: "ckpt".into(),
+            n_reach: 2,
+            window_days: 90,
+            window_starts: vec![0],
+            sigma: 1.0,
+            loss0: 1.0,
+            nse0: 0.5,
+            grad0: [0.0; 3],
+            hess0: [[0.0; 3]; 3],
+            loss_star: 0.5,
+            nse_star: 0.6,
+            nse_star_windows: vec![0.6],
+            alpha_star: [0.0; 3],
+            grad_star: [0.0; 3],
+            hess_star: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            eigval_star: [1.0, 1.0, 1.0],
+            eigvec_star: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            coord_trained: [0.0; 3],
+            tolerances: vec![0.05],
+            half_widths: vec![[1.0; 3]],
+            celerity_dir: [1.0, 0.0, 0.0],
+            newton_path: vec![NewtonStep { alpha: [0.0; 3], loss: 1.0, grad_norm: 0.0 }],
+            slices,
+            clamped_frac_star: 0.0,
+            hit_range_bound: false,
+            n0: vec![0.03, 0.04],
+            p0: vec![21.0, 21.0],
+            q0: vec![0.5, 0.5],
+            comid: vec![1, 2],
+        }
+    }
+
+    #[test]
+    fn grid_zero_writes_no_slice_dims_or_variables() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-grid0-{}.nc", std::process::id()));
+        let r = minimal_result(Vec::new());
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        assert!(f.dimension("plane").is_none());
+        assert!(f.dimension("ga").is_none());
+        assert!(f.dimension("gb").is_none());
+        assert!(f.variable("grid_nse").is_none());
+        assert!(f.variable("n0").is_some());
+        let plane_names: String = f.attribute("plane_names").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(plane_names, "");
+        let hit: i32 = f.attribute("hit_range_bound").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(hit, 0);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+}
+
 pub fn append_summary(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> {
     let new = !path.exists();
     let mut w = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     if new {
-        writeln!(w, "arm,staid,n_reach,sigma,loss0,nse0,loss_star,nse_star,alpha_n_star,alpha_p_star,alpha_q_star,mult_n,mult_p,mult_q,lambda1,lambda2,lambda3,v1_n,v1_p,v1_q,v3_n,v3_p,v3_q,c1,c2,c3,hw1_tol0,hw2_tol0,hw3_tol0,cel_n,cel_p,cel_q,cos_v1_cel,grad0_norm,grad_star_norm,newton_iters,clamped_frac_star")?;
+        writeln!(w, "arm,staid,n_reach,sigma,loss0,nse0,loss_star,nse_star,alpha_n_star,alpha_p_star,alpha_q_star,mult_n,mult_p,mult_q,lambda1,lambda2,lambda3,v1_n,v1_p,v1_q,v3_n,v3_p,v3_q,c1,c2,c3,hw1_tol0,hw2_tol0,hw3_tol0,cel_n,cel_p,cel_q,cos_v1_cel,grad0_norm,grad_star_norm,newton_iters,clamped_frac_star,hit_range_bound")?;
     }
     let v = &r.eigvec_star;
     let cos = (0..3).map(|i| v[i][0] * r.celerity_dir[i]).sum::<f32>();
@@ -158,13 +228,14 @@ pub fn append_summary(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> 
     let ns = (r.grad_star[0].powi(2) + r.grad_star[1].powi(2) + r.grad_star[2].powi(2)).sqrt();
     writeln!(
         w,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         r.arm, r.staid, r.n_reach, r.sigma, r.loss0, r.nse0, r.loss_star, r.nse_star,
         r.alpha_star[0], r.alpha_star[1], r.alpha_star[2], r.alpha_star[0].exp(), r.alpha_star[1].exp(), r.alpha_star[2].exp(),
         r.eigval_star[0], r.eigval_star[1], r.eigval_star[2],
         v[0][0], v[1][0], v[2][0], v[0][2], v[1][2], v[2][2],
         r.coord_trained[0], r.coord_trained[1], r.coord_trained[2], hw[0], hw[1], hw[2],
-        r.celerity_dir[0], r.celerity_dir[1], r.celerity_dir[2], cos, n0, ns, r.newton_path.len() - 1, r.clamped_frac_star
+        r.celerity_dir[0], r.celerity_dir[1], r.celerity_dir[2], cos, n0, ns, r.newton_path.len() - 1, r.clamped_frac_star,
+        r.hit_range_bound as i32
     )?;
     Ok(())
 }

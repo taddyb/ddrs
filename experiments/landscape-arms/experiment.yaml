@@ -1,0 +1,28 @@
+# Cross-arm: whether the inflow input moves the gauge's physical optimum
+# (alpha_star, the eigenbasis of the Hessian at it) or only the batch
+# solution reached by training, across the five lateral-inflow arms.
+#   target/release/ddrs --workspace .ddrs experiment landscape-arms --backend cpu
+study: landscape
+arms:
+  - { name: daily-lstm,   run: 2026-08-09T12-05-08Z-train-and-test }
+  - { name: hourly-lstm,  run: 2026-08-09T14-55-05Z-train-and-test }
+  - { name: uh-retro,     run: 2026-08-09T09-30-39Z-train-and-test }
+  - { name: dhbv2-lumped, run: 2026-08-09T22-13-43Z-train-and-test }
+  - { name: dhbv2-dist,   run: 2026-08-09T03-05-54Z-train-and-test }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]   # Juniata: Mapleton Depot -> Newport
+      - ["06447000", "06452000"]   # White River, SD
+      - ["06449100", "06452000"]
+      - ["06350000", "06354000"]   # Cannonball River, ND
+      - ["06353000", "06354000"]
+  window_days: 90
+  water_year: 2000
+  n_windows: 4
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0

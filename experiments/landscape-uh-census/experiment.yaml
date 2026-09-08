@@ -1,0 +1,25 @@
+# Census across gauges and seeds: direction and size of each gauge's
+# displacement from its own optimum (alpha_star), compared between two
+# independent training seeds on the same inflow arm (UH retrospective).
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-census --backend cpu
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+  - { name: uh-seed43, run: 2026-09-07T18-45-57Z-train-and-test }   # replicate seed
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]   # Juniata: Mapleton Depot -> Newport
+      - ["06447000", "06452000"]   # White River, SD
+      - ["06449100", "06452000"]
+      - ["06350000", "06354000"]   # Cannonball River, ND
+      - ["06353000", "06354000"]
+  window_days: 90
+  water_year: 2000
+  n_windows: 4
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 13
