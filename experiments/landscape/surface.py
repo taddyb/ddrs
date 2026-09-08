@@ -76,6 +76,15 @@ PHYSICAL_AXIS_LABEL = {
 }
 PARAM_DISPLAY_NAME = {"n": "Manning n", "p": "width coefficient p", "q": "width exponent q"}
 
+# --depth-axis (n-q plane only): draw the loss surface over the gauge reach's
+# own depth under mean flow instead of a raw q multiplier axis. Uses the
+# model's own trapezoidal geometry (src/geometry.rs) at the gauge reach.
+# `attribute_minimums.slope` defaults to 1e-3 (src/config.rs:439); the
+# `slope` variable written by src/experiment/landscape/output.rs is already
+# clamped to that minimum by Objective::build, so this is a defensive floor
+# for older files or a differently-configured minimum, not the primary guard.
+GEOM_MIN_SLOPE = 1e-3
+
 
 def axis_labels(plane_name: str) -> tuple[str, str]:
     if plane_name == "stiff-sloppy":
@@ -96,6 +105,132 @@ def active_mask(ds) -> np.ndarray:
     if "active" in ds.variables:
         return ds["active"].values.astype(bool)
     return np.array([True, True, True])
+
+
+def has_depth_vars(ds) -> bool:
+    """True when this netCDF carries the depth-axis inputs (slope, length,
+    gauge_reach_row, obs_mean_q_m3s, obs_n_valid_days) written by
+    src/experiment/landscape/output.rs. False for older files."""
+    return (
+        "slope" in ds.variables
+        and "length" in ds.variables
+        and "gauge_reach_row" in ds.attrs
+        and "obs_mean_q_m3s" in ds.attrs
+        and "obs_n_valid_days" in ds.attrs
+    )
+
+
+def gauge_depth_and_width(n: np.ndarray, p, q: np.ndarray, discharge: float, slope: float):
+    """Trapezoidal depth and top width at the gauge reach under mean flow,
+    mirroring src/geometry.rs::compute_trapezoidal_geometry's depth and
+    top_width terms exactly: same `q + 1e-6` epsilon, same `1e-8` denominator
+    floor, same `3 / (5 + 3q)` depth exponent. No `depth_lb`/`bottom_width_lb`
+    clamp here -- those are routing-only lower bounds, irrelevant to this
+    display quantity."""
+    q_eps = q + 1e-6
+    numerator = discharge * n * (q_eps + 1.0)
+    denominator = p * np.sqrt(slope)
+    ratio = numerator / (denominator + 1e-8)
+    exponent = 3.0 / (q_eps * 3.0 + 5.0)
+    depth = ratio ** exponent
+    width = p * depth ** q_eps
+    return depth, width
+
+
+def pinned_alpha_p(ds) -> float:
+    """alpha_p held fixed while the n-q depth-axis plane sweeps (alpha_n,
+    alpha_q): 0 (the trained value) when p_spatial isn't a learned parameter
+    or the slices are centred at the trained point (slice_center ==
+    "trained", where alpha_star's p component is meaningless as a pin), else
+    the per-gauge optimum's alpha_p."""
+    if not active_mask(ds)[1] or ds.attrs.get("slice_center", "optimum") == "trained":
+        return 0.0
+    return float(ds["alpha_star"].values[1])
+
+
+def depth_axis_context(ds) -> dict:
+    """Scalars needed by the depth-axis n-q renderers: the gauge reach's
+    trained n0/p0/q0, the pinned physical p_g, the guarded slope, and the
+    mean observed discharge over the landscape windows."""
+    gauge_row = int(ds.attrs["gauge_reach_row"])
+    alpha_p = pinned_alpha_p(ds)
+    p_g = float(ds["p0"].values[gauge_row]) * float(np.exp(alpha_p))
+    raw_slope = float(ds["slope"].values[gauge_row])
+    slope = max(raw_slope, GEOM_MIN_SLOPE)
+    return dict(
+        gauge_row=gauge_row,
+        n0_row=float(ds["n0"].values[gauge_row]),
+        q0_row=float(ds["q0"].values[gauge_row]),
+        alpha_p=alpha_p,
+        p_g=p_g,
+        raw_slope=raw_slope,
+        slope=slope,
+        discharge=float(ds.attrs["obs_mean_q_m3s"]),
+        n_valid=int(ds.attrs["obs_n_valid_days"]),
+    )
+
+
+def depth_axis_mesh(ds, ctx: dict, ga: np.ndarray, gb: np.ndarray):
+    """(X, depth, width, median_n) over the (alpha_n, alpha_q) grid `ga`
+    (axis a) x `gb` (axis b): X is basin-median n (physical, the same
+    convention as the default axis-aligned-plane labelling); depth/width use
+    the GAUGE REACH's own n and q at each grid cell -- the two are
+    deliberately different transforms of the same (alpha_n, alpha_q) grid,
+    so plot_surface(X, depth, loss) draws over a warped (non-rectilinear)
+    mesh, not the plain alpha grid."""
+    alpha_n, alpha_q = np.meshgrid(ga, gb, indexing="ij")
+    n_g = ctx["n0_row"] * np.exp(alpha_n)
+    q_g = ctx["q0_row"] * np.exp(alpha_q)
+    depth, width = gauge_depth_and_width(n_g, ctx["p_g"], q_g, ctx["discharge"], ctx["slope"])
+    median_n = field_medians(ds)["n"]
+    X = median_n * np.exp(alpha_n)
+    return X, depth, width, median_n, q_g
+
+
+def depth_corner_note(ctx: dict) -> str:
+    note = (
+        f"depth from d = (Q n (q+1) / (p sqrt s))^(3/(5+3q)) at the gauge reach; "
+        f"Q = {ctx['discharge']:.4g} m3/s over {ctx['n_valid']} days; slope {ctx['slope']:.4g}"
+    )
+    if ctx["raw_slope"] < GEOM_MIN_SLOPE:
+        note += f" (clamped from raw {ctx['raw_slope']:.4g})"
+    note += f"; p = {ctx['p_g']:.4g}"
+    return note
+
+
+def _nice_log_tick_values(vmin: float, vmax: float, subs: tuple[float, ...]) -> list[float]:
+    """Physical tick VALUES (not alpha positions) in [vmin, vmax], stepping
+    through decades at the given {1,2,5,...}-style subdivisions."""
+    if vmin <= 0 or vmax <= vmin:
+        return []
+    e_lo = int(np.floor(np.log10(vmin)))
+    e_hi = int(np.ceil(np.log10(vmax)))
+    return sorted({
+        s * 10.0 ** e
+        for e in range(e_lo, e_hi + 1)
+        for s in subs
+        if vmin - 1e-9 <= s * 10.0 ** e <= vmax + 1e-9
+    })
+
+
+def _nice_linear_ticks(vmin: float, vmax: float, target: int = 6) -> list[float]:
+    """'Nice' round-number (1/2/5 x 10^k) tick locations spanning [vmin, vmax]."""
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        return []
+    raw_step = (vmax - vmin) / max(target, 1)
+    mag = 10.0 ** np.floor(np.log10(raw_step))
+    step = mag
+    for m in (1.0, 2.0, 5.0, 10.0):
+        step = m * mag
+        if step >= raw_step:
+            break
+    start = np.ceil(vmin / step) * step
+    ticks = []
+    v = start
+    while v <= vmax + 1e-9:
+        ticks.append(float(v))
+        v += step
+    return ticks
 
 
 def _nice_physical_ticks(median: float, alpha_lo: float, alpha_hi: float, param: str) -> tuple[list[float], list[str]]:
@@ -293,6 +428,157 @@ def plot_mpl(ds, plane_name: str, plane: dict, out_png: Path, log: bool, alpha_a
     plt.close(fig)
 
 
+def plot_mpl_depth(ds, plane: dict, out_png: Path, log: bool):
+    """n-q plane with the loss surface drawn over (basin-median n, depth at
+    the gauge under mean flow) instead of the raw (alpha_n, alpha_q) axes."""
+    staid = ds.attrs["staid"]
+    loss0 = float(ds["loss0"].values)
+    loss_star = float(ds["loss_star"].values)
+    nse0 = float(ds["nse0"].values)
+    nse_star = float(ds["nse_star"].values)
+
+    ctx = depth_axis_context(ds)
+    ga, gb, z, clamped, note = plane["ga"], plane["gb"], plane["z"], plane["clamped"], plane["note"]
+    ga_d, gb_d, z_d, clamped_d, upsampled = upsample_for_display(ga, gb, z, clamped)
+    if upsampled:
+        note = note + f"; display-interpolated x{UPSAMPLE_FACTOR}"
+    note = note + "; " + depth_corner_note(ctx)
+
+    X_d, Y_d, _w_d, median_n, _q_d = depth_axis_mesh(ds, ctx, ga_d, gb_d)
+    facecolors = shaded_facecolors(z_d, clamped_d)
+
+    (tx, ty), (sx, sy) = marker_points(ds, "n-q")
+    tz = nearest_z(ga, gb, z, tx, ty)
+    sz = nearest_z(ga, gb, z, sx, sy)
+    zfloor = float(np.nanmin(z_d))
+
+    t_depth, t_width = gauge_depth_and_width(ctx["n0_row"] * np.exp(tx), ctx["p_g"], ctx["q0_row"] * np.exp(ty), ctx["discharge"], ctx["slope"])
+    s_depth, s_width = gauge_depth_and_width(ctx["n0_row"] * np.exp(sx), ctx["p_g"], ctx["q0_row"] * np.exp(sy), ctx["discharge"], ctx["slope"])
+    t_x = median_n * float(np.exp(tx))
+    s_x = median_n * float(np.exp(sx))
+
+    xlabel = PHYSICAL_AXIS_LABEL["n"]
+    ylabel = "depth at gauge under mean flow (m)"
+    zlabel = "log10(loss)" if log else "loss"
+    xticks = _nice_log_tick_values(float(X_d.min()), float(X_d.max()), PHYSICAL_TICK_SUBS["n"])
+    yticks = _nice_linear_ticks(float(np.nanmin(Y_d)), float(np.nanmax(Y_d)))
+
+    fig = plt.figure(figsize=(18, 8))
+    views = [(35, -50), (20, 40)]
+    for panel, (elev, azim) in enumerate(views):
+        ax = fig.add_subplot(1, 2, panel + 1, projection="3d")
+        ax.plot_surface(
+            X_d, Y_d, z_d,
+            facecolors=facecolors,
+            rstride=1, cstride=1, linewidth=0, antialiased=True, shade=False,
+        )
+        ax.plot([t_x, t_x], [t_depth, t_depth], [zfloor, tz], color="k", lw=2.0, zorder=10)
+        ax.plot([t_x], [t_depth], [tz], marker="x", color="k", ms=12, mew=3, zorder=11)
+        ax.plot([s_x, s_x], [s_depth, s_depth], [zfloor, sz], color="red", lw=2.0, zorder=10)
+        ax.plot([s_x], [s_depth], [sz], marker="*", color="red", ms=16, zorder=11)
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_zlabel(zlabel, fontsize=9)
+        if xticks:
+            ax.set_xticks(xticks)
+            ax.set_xticklabels([f"{v:g}" for v in xticks], fontsize=7)
+        if yticks:
+            ax.set_yticks(yticks)
+            ax.set_yticklabels([f"{v:g}" for v in yticks], fontsize=7)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(f"elev={elev}, azim={azim}", fontsize=9)
+
+    fig.suptitle(
+        f"{staid}  n-q (depth axis)  loss trained {loss0:.4f}  optimum {loss_star:.4f}  "
+        f"(NSE {nse0:.3f} -> {nse_star:.3f})",
+        fontsize=12,
+    )
+    fig.text(0.01, 0.04, note, fontsize=7, ha="left", va="bottom")
+    fig.text(0.01, 0.01, f"width at gauge: trained w = {t_width:.3g} m, optimum w = {s_width:.3g} m", fontsize=7, ha="left", va="bottom")
+    fig.subplots_adjust(top=0.90, bottom=0.10, left=0.02, right=0.98, wspace=0.05)
+    fig.savefig(out_png, dpi=150)
+    plt.close(fig)
+
+
+def plot_plotly_depth(ds, plane: dict, out_html: Path, log: bool):
+    """Interactive counterpart of plot_mpl_depth; hovertext carries q, depth,
+    and width per grid cell since those aren't otherwise readable off the
+    (n, depth) axes."""
+    staid = ds.attrs["staid"]
+    loss0 = float(ds["loss0"].values)
+    loss_star = float(ds["loss_star"].values)
+    nse0 = float(ds["nse0"].values)
+    nse_star = float(ds["nse_star"].values)
+
+    ctx = depth_axis_context(ds)
+    ga, gb, z, clamped, note = plane["ga"], plane["gb"], plane["z"], plane["clamped"], plane["note"]
+    note = note + "; " + depth_corner_note(ctx)
+    X, Y, W, median_n, q_g = depth_axis_mesh(ds, ctx, ga, gb)
+
+    (tx, ty), (sx, sy) = marker_points(ds, "n-q")
+    tz = nearest_z(ga, gb, z, tx, ty)
+    sz = nearest_z(ga, gb, z, sx, sy)
+    zfloor = float(np.nanmin(z))
+    t_depth, t_width = gauge_depth_and_width(ctx["n0_row"] * np.exp(tx), ctx["p_g"], ctx["q0_row"] * np.exp(ty), ctx["discharge"], ctx["slope"])
+    s_depth, s_width = gauge_depth_and_width(ctx["n0_row"] * np.exp(sx), ctx["p_g"], ctx["q0_row"] * np.exp(sy), ctx["discharge"], ctx["slope"])
+    t_x = median_n * float(np.exp(tx))
+    s_x = median_n * float(np.exp(sx))
+
+    xlabel = PHYSICAL_AXIS_LABEL["n"]
+    ylabel = "depth at gauge under mean flow (m)"
+    zlabel = "log10(loss)" if log else "loss"
+    xticks = _nice_log_tick_values(float(X.min()), float(X.max()), PHYSICAL_TICK_SUBS["n"])
+    yticks = _nice_linear_ticks(float(np.nanmin(Y)), float(np.nanmax(Y)))
+
+    hover = np.array([
+        [f"q = {q_g[i, j]:.4g}<br>depth = {Y[i, j]:.4g} m<br>width = {W[i, j]:.4g} m" for j in range(X.shape[1])]
+        for i in range(X.shape[0])
+    ])
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Surface(
+            x=X, y=Y, z=z, colorscale="RdBu_r",
+            lighting=dict(ambient=0.5, diffuse=0.8, specular=0.2, roughness=0.6),
+            contours=dict(z=dict(show=True, usecolormap=True, project_z=True)),
+            colorbar=dict(title=zlabel),
+            text=hover, hovertemplate="n=%{x:.4g}<br>depth=%{y:.4g} m<br>loss=%{z:.4g}<br>%{text}<extra></extra>",
+        )
+    )
+    for (x, y, ztop, color, symbol, name) in [
+        (t_x, t_depth, tz, "black", "x", "trained (alpha=0)"),
+        (s_x, s_depth, sz, "red", "diamond", "optimum (alpha*)"),
+    ]:
+        fig.add_trace(go.Scatter3d(
+            x=[x, x], y=[y, y], z=[zfloor, ztop], mode="lines",
+            line=dict(color=color, width=6), showlegend=False,
+        ))
+        fig.add_trace(go.Scatter3d(
+            x=[x], y=[y], z=[ztop], mode="markers",
+            marker=dict(symbol=symbol, size=6, color=color), name=name,
+        ))
+
+    xaxis = dict(title=xlabel)
+    if xticks:
+        xaxis.update(tickvals=xticks)
+    yaxis = dict(title=ylabel)
+    if yticks:
+        yaxis.update(tickvals=yticks)
+
+    fig.update_layout(
+        title=(
+            f"{staid}  n-q (depth axis)  loss trained {loss0:.4f}  optimum {loss_star:.4f}  "
+            f"(NSE {nse0:.3f} -> {nse_star:.3f})<br><sup>{note}</sup>"
+            f"<br><sup>width at gauge: trained w = {t_width:.3g} m, optimum w = {s_width:.3g} m</sup>"
+        ),
+        scene=dict(
+            xaxis=xaxis, yaxis=yaxis, zaxis_title=zlabel,
+            aspectmode="manual", aspectratio=dict(x=1, y=1, z=0.6),
+        ),
+    )
+    fig.write_html(str(out_html), include_plotlyjs=True, full_html=True)
+
+
 def plot_plotly(ds, plane_name: str, plane: dict, out_html: Path, log: bool, alpha_axes: bool = False):
     staid = ds.attrs["staid"]
     loss0 = float(ds["loss0"].values)
@@ -361,6 +647,7 @@ def main():
     ap.add_argument("--log", action="store_true", help="plot z = log10(loss) instead of loss")
     ap.add_argument("--zmax", type=float, default=None, help="clip loss (raw, not log) at this value instead of the 99th percentile")
     ap.add_argument("--alpha-axes", action="store_true", help="label axis-aligned planes in ln multiplier (alpha) space instead of physical parameter values")
+    ap.add_argument("--depth-axis", action="store_true", help="n-q plane only: draw the surface over (basin-median n, depth at the gauge under mean flow) instead of the raw (n, q) axes; falls back to the normal q axis if the netCDF lacks the depth-axis variables")
     args = ap.parse_args()
 
     ds = xr.open_dataset(args.gauge_nc, decode_timedelta=False)
@@ -381,10 +668,20 @@ def main():
         plane = load_plane(ds, plane_idx, args.log, args.zmax)
         out_png = args.out / f"surface_{staid}_{plane_name}.png"
         out_html = args.out / f"surface_{staid}_{plane_name}.html"
-        plot_mpl(ds, plane_name, plane, out_png, args.log, args.alpha_axes)
-        print(f"wrote {out_png}")
-        plot_plotly(ds, plane_name, plane, out_html, args.log, args.alpha_axes)
-        print(f"wrote {out_html}")
+        use_depth_axis = args.depth_axis and plane_name == "n-q"
+        if use_depth_axis and not has_depth_vars(ds):
+            print(f"{args.gauge_nc} has no depth-axis variables (slope/length/gauge_reach_row/obs_mean_q_m3s/obs_n_valid_days) -- falling back to the q axis for plane n-q")
+            use_depth_axis = False
+        if use_depth_axis:
+            plot_mpl_depth(ds, plane, out_png, args.log)
+            print(f"wrote {out_png}")
+            plot_plotly_depth(ds, plane, out_html, args.log)
+            print(f"wrote {out_html}")
+        else:
+            plot_mpl(ds, plane_name, plane, out_png, args.log, args.alpha_axes)
+            print(f"wrote {out_png}")
+            plot_plotly(ds, plane_name, plane, out_html, args.log, args.alpha_axes)
+            print(f"wrote {out_html}")
 
 
 if __name__ == "__main__":

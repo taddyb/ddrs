@@ -458,6 +458,26 @@ where
         (None, None, Vec::new())
     };
 
+    // Per-reach slope/length (window 0; the network is the same reach order
+    // across windows) and the mean observed daily discharge over all valid
+    // days (finite, >= 0, day >= warmup) across all windows, for the
+    // depth-at-gauge landscape axis (surface.py --depth-axis).
+    let slope: Vec<f32> = obj.windows[0].slope.clone().into_data().to_vec::<f32>().unwrap();
+    let length: Vec<f32> = obj.windows[0].length.clone().into_data().to_vec::<f32>().unwrap();
+    let gauge_reach_row = obj.windows[0].gauge_row;
+    let mut obs_sum = 0.0f64;
+    let mut obs_n_valid_days = 0usize;
+    for w in &obj.windows {
+        for i in ctx.warmup..w.obs.len() {
+            let v = w.obs[i];
+            if v.is_finite() && v >= 0.0 {
+                obs_sum += v as f64;
+                obs_n_valid_days += 1;
+            }
+        }
+    }
+    let obs_mean_q_m3s = if obs_n_valid_days > 0 { (obs_sum / obs_n_valid_days as f64) as f32 } else { f32::NAN };
+
     let r = LandscapeResult {
         staid: g.staid.clone(),
         arm: arm.name.clone(),
@@ -496,6 +516,11 @@ where
         reach_grad_star,
         dist_to_gauge_m,
         active,
+        slope,
+        length,
+        gauge_reach_row,
+        obs_mean_q_m3s,
+        obs_n_valid_days,
     };
     write_landscape_netcdf(&arm_dir.join("gauges").join(format!("{}.nc", g.staid)), &r)?;
     output::append_summary(&arm_dir.join("summary.csv"), &r)?;

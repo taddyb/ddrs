@@ -69,6 +69,19 @@ pub struct LandscapeResult {
     pub q0: Vec<f32>,
     /// Reach COMIDs, same order/length as n0/p0/q0.
     pub comid: Vec<i64>,
+    /// Trained (window 0) per-reach channel slope (dimensionless, m/m),
+    /// clamped to `params.attribute_minimums.slope`. Same order as n0/p0/q0.
+    pub slope: Vec<f32>,
+    /// Trained (window 0) per-reach channel length, meters. Same order as
+    /// n0/p0/q0.
+    pub length: Vec<f32>,
+    /// Index of the gauge's own reach in the `reach` dimension (window 0).
+    pub gauge_reach_row: usize,
+    /// Mean observed daily discharge (m3/s) over all valid days (finite,
+    /// >= 0, day >= warmup) across all landscape windows.
+    pub obs_mean_q_m3s: f32,
+    /// Number of valid observed days that fed `obs_mean_q_m3s`.
+    pub obs_n_valid_days: usize,
     /// Per-reach `dL/d ln x` at alpha = 0, `[n, p, q]`; `Some` only when
     /// `landscape.reach_grad: true`.
     pub reach_grad0: Option<[Vec<f32>; 3]>,
@@ -106,6 +119,9 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("clamped_frac_star", r.clamped_frac_star as f64)?;
     f.add_attribute("hit_range_bound", r.hit_range_bound as i32)?;
     f.add_attribute("slice_center", r.slice_center.as_str())?;
+    f.add_attribute("gauge_reach_row", r.gauge_reach_row as i64)?;
+    f.add_attribute("obs_mean_q_m3s", r.obs_mean_q_m3s as f64)?;
+    f.add_attribute("obs_n_valid_days", r.obs_n_valid_days as i64)?;
     const PARAM_NAMES: [&str; 3] = ["n", "p_spatial", "q_spatial"];
     let active_params: Vec<&str> = PARAM_NAMES.iter().zip(r.active.iter()).filter(|(_, &a)| a).map(|(&n, _)| n).collect();
     f.add_attribute("active_params", active_params.join(","))?;
@@ -172,6 +188,8 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     put("n0", &["reach"], &r.n0, "trained (alpha = 0) per-reach Manning's n")?;
     put("p0", &["reach"], &r.p0, "trained (alpha = 0) per-reach Leopold-Maddock p")?;
     put("q0", &["reach"], &r.q0, "trained (alpha = 0) per-reach Leopold-Maddock q")?;
+    put("slope", &["reach"], &r.slope, "per-reach channel slope (dimensionless, m/m), clamped to params.attribute_minimums.slope")?;
+    put("length", &["reach"], &r.length, "per-reach channel length (m)")?;
     if let Some(rg) = &r.reach_grad0 {
         put("reach_grad0_n", &["reach"], &rg[0], "dL/d ln(n) at alpha = 0, per reach (loss per unit ln parameter)")?;
         put("reach_grad0_p", &["reach"], &rg[1], "dL/d ln(p_spatial) at alpha = 0, per reach (loss per unit ln parameter)")?;
@@ -235,6 +253,11 @@ mod tests {
             reach_grad_star: None,
             dist_to_gauge_m: Vec::new(),
             active: [true, true, true],
+            slope: vec![1e-3, 2e-3],
+            length: vec![500.0, 750.0],
+            gauge_reach_row: 1,
+            obs_mean_q_m3s: 12.5,
+            obs_n_valid_days: 360,
         }
     }
 
@@ -271,6 +294,27 @@ mod tests {
         let active_var = f.variable("active").unwrap();
         let vals: Vec<i32> = active_var.get_values(..).unwrap();
         assert_eq!(vals, vec![1, 0, 1]);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn slope_length_and_obs_mean_q_are_written() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-slope-{}.nc", std::process::id()));
+        let r = minimal_result(Vec::new());
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        let slope: Vec<f32> = f.variable("slope").unwrap().get_values(..).unwrap();
+        assert_eq!(slope, vec![1e-3, 2e-3]);
+        let length: Vec<f32> = f.variable("length").unwrap().get_values(..).unwrap();
+        assert_eq!(length, vec![500.0, 750.0]);
+        let gauge_row: i64 = f.attribute("gauge_reach_row").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(gauge_row, 1);
+        let mean_q: f64 = f.attribute("obs_mean_q_m3s").unwrap().value().unwrap().try_into().unwrap();
+        assert!((mean_q - 12.5).abs() < 1e-6);
+        let n_valid: i64 = f.attribute("obs_n_valid_days").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(n_valid, 360);
 
         std::fs::remove_file(&path).unwrap();
     }
