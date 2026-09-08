@@ -162,3 +162,41 @@ The fixed-p arm training (`ddrs-train-p21`) was left running; it does not use th
 **Next session, in order:** (1) find the leak with a 13×13 vs 25×25 run under `/usr/bin/time -v` and a heap
 profile, or reduce peak memory by evaluating the grid one window at a time; (2) run census41 (safe: grid 0);
 (3) the three dense/gradient bundles; (4) the fixed-p arm's landscape.
+
+## 5. The p = 21 model: first results (user run `2026-09-08T15-55-52Z-conus-train-and-test`)
+
+Trained from the workspace `ddrs.yaml` with `p_spatial` removed from the learnable list (p = 21 everywhere, the 2024
+setting), n and q learned, seed 42, 30 epochs, **gages_3000 (2,859 gauges after the drainage-area filter), which
+includes the Juniata gauges in training**. The learned-p arm was trained on gages_2000_area_balanced, which does not
+contain them. Two things changed at once; the clean single-change comparison is the `uh_retro_pfixed21` run
+(same population as the learned-p arm), training at epoch 16 of 30 when this was written.
+
+Bundle `landscape-p21-reachgrad` (Newton, Hessian, per-reach gradients; 2 min):
+
+| | learned p (seed 42) | p = 21 (this run) |
+|---|---|---|
+| Basin-median n at the Juniata (both gauges) | 0.103 | **0.040** (p10 to p90: 0.033 to 0.044) |
+| Basin-median q | 0.35 | 0.10 |
+| Newport NSE at trained point (WY2000 windows) | 0.692 | 0.703 |
+| Newport gain to own optimum | +0.077 | none found (Newton: no descent; Hessian indefinite, λ₃ = −0.03) |
+| Mapleton NSE at trained point | 0.548 | 0.644 |
+| Mapleton gain to own optimum | +0.104 | +0.013 (n × 0.63, p → box edge, q × 0.16) |
+
+With p pinned, training put the Juniata's n at 0.040, inside the 0.03 to 0.05 band that yesterday's landscapes
+identified as the gauge optimum under every inflow, and the remaining per-gauge gain collapsed from 0.08 to 0.10 NSE
+to at most 0.013. Whether that is the pinning of p (removing the n/p degeneracy) or the gauges being in the training
+set is exactly what the `uh_retro_pfixed21` run will separate.
+
+**Per-reach gradient map at Newport** (`figures/reachgrad_p21-conus_01567000.png`). At the trained point, 95 % of
+reaches have dL/d ln n < 0 (loss falls if n rises: the network is now slightly too fast), with the largest magnitudes
+spread along the whole main stem; the handful of positive values sit within 30 km of the gauge. So the gauge would
+raise n far upstream and lower it near the gauge, a spatial pattern the basin-uniform multiplier cannot express and the
+uniform gradient (−0.047) averages away. Half of the total |dL/d ln n| lies within about 130 km of the gauge (of
+320 km), half of the q sensitivity within about 60 km, p's further out. The ten most sensitive reaches carry 47 %
+(Newport) and 63 % (Mapleton) of the total n sensitivity. Per-reach sums match the basin-uniform gradients to 1e-7
+(chain-rule check).
+
+**Instrument note.** At Newport the Hessian at the trained point is indefinite, so the damped Newton direction is not
+a descent direction and the search stops at iteration 0 even though the gradient is nonzero. A gradient-descent
+fallback when Newton fails at the first iteration is needed (small change in `run_gauge`).
+
