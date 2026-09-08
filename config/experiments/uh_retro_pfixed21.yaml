@@ -1,4 +1,4 @@
-# REPLICATE SEED of the UH-retrospective arm (run 2026-08-09T09-30-39Z-train-and-test):
+# UH-retrospective arm, seed 42, with a FIXED width coefficient p (run 2026-08-09T09-30-39Z is the learned-p twin):
 # UH arm with p_spatial NOT learnable: p fixed at params.defaults.p_spatial = 21 (the 2024 setting), n and
 # q_spatial learned. Seeds 42/42 as the seed-42 UH arm. Purpose: identifiability of n vs p (spec 2026-09-07 landscape §7 follow-up).
 # tau=9 cross-source retrain arm: uh_retro

@@ -112,13 +112,21 @@ where
                 n_active,
                 device,
             );
-            let get = |k: &str| params_map.get(k).unwrap_or_else(|| panic!("KAN head missing {k}")).clone().inner();
-            let n0 = denormalize(get("n"), ranges[0], log_space[0]);
-            let q0 = denormalize(get("q_spatial"), ranges[2], log_space[2]);
-            let p0 = match params_map.get("p_spatial") {
-                Some(p) => denormalize(p.clone().inner(), ranges[1], log_space[1]),
-                None => Tensor::<I, 1>::full([n_active], *ctx.cfg.params.defaults.get("p_spatial").unwrap_or(&21.0), device),
+            // Trained field for each of n/p_spatial/q_spatial: denormalized
+            // head output when the parameter is in
+            // `kan_head.learnable_parameters`, else the constant physical
+            // default broadcast over reaches (see `trained_field` and
+            // `resolve_default` below). `forward_loss` applies the alpha
+            // multiplier and range clamp to this field identically either
+            // way, so the landscape over a fixed parameter is still defined.
+            let field = |name: &str, range: [f32; 2], log: bool| -> Result<Tensor<I, 1>, BoxError> {
+                let head_out = params_map.get(name).cloned().map(|t| t.inner());
+                let default = if head_out.is_some() { 0.0 } else { resolve_default(&ctx.cfg.params.defaults, name)? };
+                Ok(trained_field(head_out, range, log, default, n_active, device))
             };
+            let n0 = field("n", ranges[0], log_space[0])?;
+            let p0 = field("p_spatial", ranges[1], log_space[1])?;
+            let q0 = field("q_spatial", ranges[2], log_space[2])?;
             let x_storage = match params_map.get("x_storage") {
                 Some(x) => denormalize(
                     x.clone().inner(),
@@ -313,6 +321,48 @@ where
     }
 }
 
+/// Trained physical field for one channel parameter, length `n_active`.
+/// `Some(head_out)` denormalizes the KAN head's `[0,1]` output to the
+/// physical range (the parameter is in `kan_head.learnable_parameters`);
+/// `None` broadcasts the constant `default` — the field is the same value at
+/// every reach, but the alpha multiplier and range clamp in `forward_loss`
+/// still apply to it exactly as for a learned field, so the landscape over a
+/// fixed parameter stays defined. Pure — no I/O — so it's unit-tested below
+/// without a trained checkpoint.
+fn trained_field<I: Backend>(
+    head_out: Option<Tensor<I, 1>>,
+    range: [f32; 2],
+    log_space: bool,
+    default: f32,
+    n_active: usize,
+    device: &I::Device,
+) -> Tensor<I, 1> {
+    match head_out {
+        Some(v) => denormalize(v, range, log_space),
+        None => Tensor::<I, 1>::full([n_active], default, device),
+    }
+}
+
+/// Constant physical default for a parameter absent from
+/// `kan_head.learnable_parameters`. `p_spatial` mirrors the routing engine's
+/// own fallback (`Params::default()` seeds `defaults["p_spatial"] = 21.0`,
+/// and `mmc.rs::setup_inputs` falls back to that same key when its own
+/// `p_spatial` input is `None`); `n` and `q_spatial` have no established
+/// "fixed" convention elsewhere in this codebase (both are hard-required in
+/// `training/forward.rs`), so a config that leaves either non-learnable
+/// without a matching `params.defaults.<name>` entry is a config error, not
+/// a silent guess.
+fn resolve_default(defaults: &std::collections::HashMap<String, f32>, name: &str) -> Result<f32, BoxError> {
+    match defaults.get(name) {
+        Some(&v) => Ok(v),
+        None if name == "p_spatial" => Ok(21.0),
+        None => Err(format!(
+            "parameter `{name}` is not in kan_head.learnable_parameters and has no params.defaults.{name} entry"
+        )
+        .into()),
+    }
+}
+
 /// Jacobi eigen-decomposition of a symmetric 3×3: returns (eigenvalues desc, eigenvectors as columns).
 pub fn eig3(a: [[f32; 3]; 3]) -> ([f32; 3], [[f32; 3]; 3]) {
     let mut a = [[a[0][0] as f64, a[0][1] as f64, a[0][2] as f64], [a[1][0] as f64, a[1][1] as f64, a[1][2] as f64], [a[2][0] as f64, a[2][1] as f64, a[2][2] as f64]];
@@ -390,6 +440,50 @@ pub fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::backend::NdArray;
+    use std::collections::HashMap;
+
+    type TestBackend = NdArray<f32>;
+
+    #[test]
+    fn trained_field_denormalizes_head_output_when_present() {
+        let device = Default::default();
+        // head output 0.5 in [0,1] over range [0.0, 10.0], linear space -> 5.0.
+        let head_out = Tensor::<TestBackend, 1>::from_floats([0.0f32, 0.5, 1.0].as_slice(), &device);
+        let f = trained_field::<TestBackend>(Some(head_out), [0.0, 10.0], false, 999.0, 3, &device);
+        let v: Vec<f32> = f.into_data().to_vec::<f32>().unwrap();
+        assert!((v[0] - 0.0).abs() < 1e-6);
+        assert!((v[1] - 5.0).abs() < 1e-6);
+        assert!((v[2] - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn trained_field_broadcasts_default_when_absent() {
+        let device = Default::default();
+        let f = trained_field::<TestBackend>(None, [0.0, 10.0], false, 21.0, 4, &device);
+        let v: Vec<f32> = f.into_data().to_vec::<f32>().unwrap();
+        assert_eq!(v, vec![21.0, 21.0, 21.0, 21.0]);
+    }
+
+    #[test]
+    fn resolve_default_uses_configured_entry() {
+        let mut defaults = HashMap::new();
+        defaults.insert("n".to_string(), 0.05);
+        assert_eq!(resolve_default(&defaults, "n").unwrap(), 0.05);
+    }
+
+    #[test]
+    fn resolve_default_falls_back_to_21_for_p_spatial_only() {
+        let defaults = HashMap::new();
+        assert_eq!(resolve_default(&defaults, "p_spatial").unwrap(), 21.0);
+    }
+
+    #[test]
+    fn resolve_default_errors_for_n_and_q_spatial_without_a_configured_default() {
+        let defaults = HashMap::new();
+        assert!(resolve_default(&defaults, "n").is_err());
+        assert!(resolve_default(&defaults, "q_spatial").is_err());
+    }
 
     #[test]
     fn eig3_diagonalizes_known_matrix() {

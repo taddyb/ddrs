@@ -69,6 +69,19 @@ where
             .kan_head
             .as_ref()
             .ok_or_else(|| format!("arm `{}`: config has no kan_head section", arm.name))?;
+        // Record which of the three landscape channel parameters the head
+        // actually emits vs which are fixed at `params.defaults` — the
+        // landscape study (`Objective::build`) broadcasts a constant for any
+        // parameter not in `learnable_parameters`.
+        let (mut learnable, mut fixed) = (Vec::new(), Vec::new());
+        for name in ["n", "p_spatial", "q_spatial"] {
+            if section.learnable_parameters.iter().any(|s| s == name) {
+                learnable.push(name);
+            } else {
+                fixed.push(name);
+            }
+        }
+        println!("arm `{}`: channel parameters — learnable {learnable:?}, fixed at default {fixed:?}", arm.name);
         let template: KanHead<AD<I>> = kan_config(section, cfg.seed).init::<AD<I>>(device);
         let head = if arm.checkpoint_label == "init" {
             // Same construction the trainer uses before any warm start
