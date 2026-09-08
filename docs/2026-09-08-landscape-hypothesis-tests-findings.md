@@ -206,3 +206,29 @@ uniform gradient (−0.047) averages away. Half of the total |dL/d ln n| lies wi
 a descent direction and the search stops at iteration 0 even though the gradient is nonzero. A gradient-descent
 fallback when Newton fails at the first iteration is needed (small change in `run_gauge`).
 
+## 6. 2-D census on the p = 21 model: 84 nested-reference gauges (run `landscape-p21-census41/2026-09-08T18-06-55Z`)
+
+Newton and Hessian over (n, q) only (p inactive, `692c00f`), box ±ln 10, 30 min on cpu. The nested-reference
+selection on this run's gauge list (gages_3000) yields 84 gauges rather than the 41 of the area-balanced list.
+
+| | count | median gain to own optimum | median optimal n / trained n (IQR) | median q multiplier |
+|---|---|---|---|---|
+| Well fit (NSE at trained point > 0.3) | 20 | 0.001 | 1.00 (0.88 to 1.03) | 1.00 |
+| Poorly fit (NSE ≤ 0.3) | 64 | 0.000 | | |
+
+Five well-fit gauges gain more than 0.02 NSE, in mixed directions: 02110500 wants slower (n × 2.8, q × 3.2),
+03069500 slower (n × 1.5), 03161000 faster (n × 0.5), the two Kansas gauges 06889500 and 06889200 faster with q at
+the range ceiling. No common direction: the resultant of the unit displacement vectors is small.
+
+**Reading.** With p pinned, the trained model sits at or within noise of the per-gauge optimum at the median well-fit
+gauge, and the systematic "route faster" displacement of the learned-p arm (Juniata n × 0.3, all inputs, both seeds)
+is gone. What remains is a scatter of small, gauge-specific corrections in both directions, which is what a genuine
+batch compromise looks like. Poorly fit gauges are unchanged: nothing in the channel helps them.
+
+**Caveats.** (i) This model trained on gages_3000, so every gauge here is in its training set; the clean twin on the
+area-balanced list (`uh_retro_pfixed21`, training) will show whether the collapse of the per-gauge gain survives
+out-of-sample gauges. (ii) Nine of the 20 well-fit gauges hit the range bound, five of them with zero Newton
+iterations: they have 3 to 5 reaches, where a single clamped reach exceeds the 5 % `max_clamped` rule, so their
+"gain 0" is the instrument refusing to step, not an optimum. The rule needs a per-reach floor (at least one reach
+allowed) for small basins. (iii) The census figure with 84 gauges is dense; the per-gauge CSV is the reference.
+
