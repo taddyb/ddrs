@@ -516,3 +516,41 @@ the floor. Low-gradient agricultural and coastal-plain rivers of the Midwest and
 The routed flow arrives far too early at these gauges; whether the inflow or the channel is at fault is what the
 hydrographs (§15, pending) will show. Their (n, q) terrains and hydrographs run next, NSE then KGE.
 
+## 15. The ten most egregious gauges: terrains and hydrographs, NSE objective (run `landscape-p21-top10-nse/merged`)
+
+Five-year window, 25 × 25 (n, q) grid with p = 21, `series: true`; reports in `merged/figures/report_<staid>.png`,
+overview `docs/figures/2026-09-09-top10_nse_overview.png`, example `docs/figures/2026-09-09-top10_nse_report_05465000.png`.
+Timing below is the cross-correlation lag of each series against the observed daily flow (negative = arrives early).
+
+| gauge | NSE 0 → * | KGE 0 → * | n* / n | inflow vol / obs | inflow early (d) | routed early (d) | routed* early (d) | peak ratio 0 → * |
+|---|---|---|---|---|---|---|---|---|
+| 01674500 Mattaponi VA | 0.47 → 0.81 | 0.69 → 0.85 | 4.5 (box) | 1.16 | 3 | 3 | 1 | 1.28 → 1.14 |
+| 02223500 Oconee GA | 0.47 → 0.88 | 0.69 → 0.81 | 3.9 | 1.08 | 3 | 2 | 0 | 0.87 → 0.78 |
+| 02425000 Cahaba AL | 0.51 → 0.89 | 0.76 → 0.94 | 4.3 | 1.03 | 2 | 1 | 0 | 1.26 → 1.01 |
+| 03371500 East Fork White IN | 0.55 → 0.89 | 0.78 → 0.93 | 4.5 (box) | 1.06 | 3 | 2 | 0 | 1.08 → 0.93 |
+| 03381500 Little Wabash IL | 0.44 → 0.66 | 0.71 → 0.82 | 4.5 (box) | 1.10 | 3 | 3 | 2 | 1.46 → 1.31 |
+| 05458500 Shell Rock IA | 0.41 → 0.84 | 0.64 → 0.81 | 4.5 (box) | 1.14 | 2 | 2 | 0 | 1.30 → 1.16 |
+| 05464500 Cedar IA | 0.44 → 0.86 | 0.70 → 0.85 | 4.5 (box) | 1.06 | 4 | 3 | 1 | 1.28 → 1.16 |
+| 05465000 Iowa IA | 0.44 → 0.81 | 0.72 → 0.89 | 4.5 (box) | 1.03 | 6 | 5 | 1 | 1.25 → 1.12 |
+| 05594100 Kaskaskia IL | 0.40 → 0.77 | 0.71 → 0.88 | 4.5 (box) | 1.04 | 2 | 2 | 0 | 1.61 → 1.28 |
+| 06810000 Nishnabotna IA | 0.41 → 0.74 | 0.70 → 0.86 | 4.5 (box) | 0.99 | 2 | 2 | 0 | 1.13 → 1.05 |
+
+Readings.
+1. **The routed flow sits on the summed inflow.** At every gauge the trained channel removes at most one day of the
+   inflow's two-to-six-day lead; the routed hydrograph is the inflow hydrograph. With p = 21 and n = 0.04 these
+   100-to-450-reach rivers are routed with almost no delay and almost no attenuation (peaks 1.1 to 1.6 times observed).
+2. **Slower routing fixes most of it.** At the optimum the lead falls to zero or one day and the peaks to 1.0 to 1.3
+   times observed; NSE rises by 0.3 to 0.4 and KGE by 0.1 to 0.2. Volume is not the problem (inflow within 3 to
+   16 % of observed).
+3. **The optimum is a bound.** Nine of ten sit at n × 4.48 = exp(1.5), the box edge of these bundles (alpha_max 1.5,
+   inherited from the surface bundle); the census with a wider box (§14) found n × 5 to 9 at the same gauges. The
+   true optima want slower still.
+4. **Inflow early or channel too fast.** From the gauge alone the two are the same statement: the summed inflow reaches
+   the gauge two to six days before the observed flow, and the only lever the model has is the channel. What decides
+   between them is physics: a 21 m wide channel on a 10,000 km² river is too narrow, so its celerity at n = 0.04 is
+   far too high; a width of 100 to 200 m at these rivers would slow the wave without n leaving its physical range.
+   This is the p-from-river-size experiment (why-not-at-optimum findings §4, change 1).
+
+Caveat: the (n, q) terrains for these gauges show the trench at the box edge in n; the KGE run (same box) is in
+progress and will show whether the KGE optimum agrees in direction. Rerun both with alpha_max 2.3 to locate the optima.
+
