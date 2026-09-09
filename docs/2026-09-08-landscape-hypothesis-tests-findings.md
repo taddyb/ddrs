@@ -388,3 +388,25 @@ superseded by the all-gauge sharded census (§12, pending).
 blue (0) to red (ln 3), sign in a second panel, hollow grey where NSE < 0.3, black edge for range-bound optima. The
 preview on the 84 gauges is too blue for the reason above.
 
+
+
+## 12. Juniata pair on the full 15-year test period (run `landscape-p21-fulltest-juniata/2026-09-09T02-55-05Z`, 2 shards)
+
+One window over the whole test axis (5,479 days, 1995-10-01 to 2010-09-30; `window_days: 0`), Newton and Hessian
+only, about 20 minutes per gauge on one core.
+
+| gauge | NSE trained (landscape) | NSE trained (run's own eval, same period) | NSE at 2-D optimum | optimum n, q |
+|---|---|---|---|---|
+| Mapleton Depot | 0.841 | 0.847 | 0.845 | 0.050, 0.37 (n x1.24, q x3.67) |
+| Newport | 0.853 | 0.858 | 0.883 | 0.067, 0.36 (n x1.68, q x3.57) |
+
+The landscape's NSE at the trained point agrees with the run's own eval to the second decimal, which validates the
+objective (hourly routing, daily pooling under the training `tau`, warm-up excluded) against the production eval
+path. Over 15 years the per-gauge gain is +0.03 at Newport and +0.004 at Mapleton, smaller than over WY2000 alone
+(+0.07 and +0.02): a single year overstates what the gauge could gain.
+
+**q flips sign between windows.** Over WY2000 the optimum pushed q to its floor (0.02); over 15 years it pushes q up
+(0.36). n moves up in both (× 1.7 to 2 over one year, × 1.2 to 1.7 over 15). So the n direction is robust across
+windows and the q direction is not: q is the sloppy coordinate, and its "optimum" is whatever the particular
+sequence of floods rewards. For the paper this is the operational definition of a poorly constrained parameter:
+its optimum changes sign with the evaluation window while the loss barely moves.
