@@ -35,6 +35,7 @@ pub mod cache;
 pub mod dbf;
 pub mod fabric;
 pub mod gauges;
+pub mod gridded;
 pub mod gpkg;
 pub mod subdivide;
 pub mod validate;

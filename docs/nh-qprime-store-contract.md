@@ -15,7 +15,14 @@ lives here.
 
 - An **icechunk repository** (`main` branch, local filesystem), root group.
 - One data variable **`Qr(divide_id, time)`**, dtype **float32**, attr
-  `units: m^3/s`. The dtype is not checked at `open` — `open` only
+  `units: m^3/s`. The transposed layout **`Qr(time, divide_id)`** — what
+  DDR's gridded (DDM30) `build_gridded_qprime.py` writes — is also read:
+  `open` decides the axis order from the array's dimension names, falling
+  back to matching its shape against the coordinate lengths, and refuses a
+  shape that fits neither (`detect_time_major`). The check exists because
+  zarrs answers an out-of-range subset with fill values rather than an
+  error, so a wrong axis guess would read NaN silently (2026-09-08).
+  The dtype is not checked at `open` — `open` only
   resolves the array handle (`src/data/store/icechunk.rs:239-241`). It is
   enforced at the first *read*, where `retrieve_array_subset::<Vec<f32>>`
   errors on a non-f32 array. `ddrs import` triggers that read itself via

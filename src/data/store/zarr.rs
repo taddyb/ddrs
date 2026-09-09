@@ -216,13 +216,21 @@ impl GageSubgraph {
     /// node appears as an edge endpoint. Single-divide catchments have NO
     /// edges, so this returns empty — callers must filter with
     /// [`GageSubgraph::is_headwater`] first, as training does.
+    ///
+    /// On a **subdivided** store `order` repeats a parent's id once per piece,
+    /// so the position set is deduplicated by id: each divide (MERIT reach or
+    /// DDM30 cell) appears once, in the position order of its first piece.
+    /// The baseline sums Q′ per divide, and Q′ is stored per divide, so a
+    /// per-piece list would count every divide `m` times.
     pub fn upstream_comids(&self, conus: &ConusAdjacencyStore) -> Vec<Comid> {
         let mut positions: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
         positions.extend(self.indices_0.iter().copied());
         positions.extend(self.indices_1.iter().copied());
+        let mut seen: std::collections::HashSet<Comid> = std::collections::HashSet::new();
         positions
             .into_iter()
             .map(|pos| conus.order[pos as usize])
+            .filter(|c| seen.insert(*c))
             .collect()
     }
 }
@@ -374,6 +382,26 @@ mod tests {
         let comids = sg.upstream_comids(&conus);
         // Position order 0,1,2,3 → COMIDs 100, 200, 300, 400.
         assert_eq!(comids, vec![Comid(100), Comid(200), Comid(300), Comid(400)]);
+    }
+
+    /// Subdivided store: parent 100 owns rows 0..3, parent 200 owns rows 3..5
+    /// (`order` repeats the parent id per piece). The upstream set of a gauge
+    /// on the outlet piece names each parent ONCE — the baseline reads Q′ per
+    /// parent, and a per-piece list would triple-count parent 100.
+    #[test]
+    fn upstream_comids_names_each_subdivided_parent_once() {
+        let mut conus = fake_conus(vec![100, 100, 100, 200, 200]);
+        conus.parent_order = vec![Comid(100), Comid(200)];
+        conus.parent_offset = vec![0, 3, 5];
+        conus.index = IdIndex::new(conus.parent_order.clone());
+        let sg = GageSubgraph {
+            staid: Staid::from("00000004"),
+            gage_idx: 4,
+            gage_catchment: "200".into(),
+            indices_0: vec![1, 2, 3, 4],
+            indices_1: vec![0, 1, 2, 3],
+        };
+        assert_eq!(sg.upstream_comids(&conus), vec![Comid(100), Comid(200)]);
     }
 
     #[test]

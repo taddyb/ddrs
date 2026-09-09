@@ -59,6 +59,8 @@ ddrs.yaml
 # …but the Juniata sample's config is a committed example, not a personal
 # workspace config (its .ddrs/ workspace is still ignored by the rule above).
 !examples/juniata/ddrs.yaml
+# …same exception for the gridded Juniata example's committed config.
+!examples/juniata_gridded/ddrs.yaml
 
 # Personal research journal (local only)
 JOURNAL.md

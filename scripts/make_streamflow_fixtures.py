@@ -11,13 +11,18 @@ Deterministic values so tests can assert exact elements:
   qr_daily.ic   : 4 divides x 10 days,   Qr[j, t] = (j+1)*100  + t
   qr_hourly.ic  : 4 divides x 240 hours, Qr[j, h] = (j+1)*1000 + h
   qr_minutes.ic : sniff-rejection fixture (units "minutes since ...")
+  qr_daily_time_major.ic : qr_daily's values stored TIME-MAJOR, Qr(time, divide_id)
+                  -- the layout DDR's gridded (DDM30) Q' stores use; the reader
+                  must return identical values from both.
+
+Stores that already exist are left alone (icechunk snapshot ids are not
+deterministic, so rewriting would churn tracked bytes); delete one to regenerate.
 
 Note: xarray normalises "hours since 1981-01-01 00:00:00" to drop the time
 component on write.  We patch the zarr attr back to the full string after
 to_zarr() so the on-disk CF units string is exactly as documented above.
 """
 from pathlib import Path
-import shutil
 
 import icechunk
 import numpy as np
@@ -35,14 +40,19 @@ def write_store(
     time_units: str,
     *,
     time_units_on_disk: str | None = None,
+    time_major: bool = False,
 ) -> None:
-    shutil.rmtree(path, ignore_errors=True)
+    if path.exists():
+        print(f"exists, skipping: {path} (delete it to regenerate)")
+        return
+    dims = ["time", "divide_id"] if time_major else ["divide_id", "time"]
+    data = qr.T if time_major else qr
     storage = icechunk.local_filesystem_storage(str(path))
     repo = icechunk.Repository.create(storage)
     session = repo.writable_session("main")
     ds = xr.Dataset(
         data_vars={
-            "Qr": (["divide_id", "time"], qr.astype(np.float32), {"units": "m^3/s"}),
+            "Qr": (dims, data.astype(np.float32), {"units": "m^3/s"}),
         },
         coords={
             "divide_id": ("divide_id", DIVIDES),
@@ -70,6 +80,10 @@ def main() -> None:
     daily_times = np.datetime64("1981-01-01") + np.arange(n_days).astype("timedelta64[D]")
     daily = (np.arange(4)[:, None] + 1) * 100 + np.arange(n_days)[None, :]
     write_store(FIXTURES / "qr_daily.ic", daily_times, daily, "days since 1981-01-01")
+    write_store(
+        FIXTURES / "qr_daily_time_major.ic", daily_times, daily, "days since 1981-01-01",
+        time_major=True,
+    )
 
     n_hours = n_days * 24
     hourly_times = np.datetime64("1981-01-01T00") + np.arange(n_hours).astype("timedelta64[h]")

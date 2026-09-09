@@ -203,3 +203,38 @@ Tests:
 - **`ddrs sources use conus-gridded` needs a gauge CSV that does not exist in
   DDR's references yet**; `scripts/snap_gridded_gauges.py` produces it under
   DDR's venv, following the `build_gages_2000_area_balanced.py` precedent.
+
+## 9. Outcome (2026-09-09)
+
+Implemented on branch `worktree-gridded-routing` as designed, with two
+findings the design did not anticipate:
+
+1. **`GageSubgraph::upstream_comids` was per-piece on subdivided stores.** It
+   deduplicated on row position, so a cell with `k` sub-reaches appeared `k`
+   times and the summed-Q′ baseline counted its Q′ `k` times. Fixed to
+   deduplicate on the id (a no-op for un-subdivided stores). The same bug
+   applied to MERIT `params.subdivision` baselines.
+2. **DDR's gridded Q′ stores are `Qr(time, divide_id)`**, the transpose of the
+   contract, and zarrs returns fill values for an out-of-range subset rather
+   than an error — the fixed-axis reader produced an all-NaN baseline with no
+   message. `StreamflowStore::open` now detects the axis order from
+   `dimension_names` (shape fallback, refuses neither) and `read_slab` addresses
+   the raw buffer accordingly; `tests/fixtures/qr_daily_time_major.ic` pins it.
+
+Results on the Juniata bundle (CPU, 30 epochs):
+
+| | NSE | KGE |
+|---|---|---|
+| summed-Q′ baseline, ddrs / DDR | 0.594 / 0.594 | 0.672 / 0.671 |
+| routed, seed 42 | 0.751 | 0.730 |
+| routed, seeds {42, 7, 123} | 0.744–0.758 | 0.728–0.732 |
+| routed, DDR Python | 0.795 | 0.737 |
+
+CONUS (`config/experiments/gridded_conus.yaml`, 620 gauges, test window
+1995-10-01..1997-09-30): `plan` builds 5,198 cells → 91,867 sub-reaches in
+0.6 s; baseline median NSE 0.354 / KGE 0.505. DDR reports 0.390 for its summed
+baseline, which includes the `da_ratio` output correction ddrs omits
+(deviation 2 in §7). Training beyond a mechanics smoke was not run.
+
+Environment note: the worktree build needed `CUDARC_CUDA_VERSION=13020`
+(host CUDA 13.3.1 vs cudarc 0.19.7's table); recorded as trap T12.

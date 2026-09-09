@@ -127,6 +127,16 @@ pub struct DataSources {
     /// `.shp`/`.dbf` fabrics.
     #[serde(default)]
     pub geospatial_fabric_layer: Option<String>,
+    /// Path to a DDR gridded (ISIMIP DDM30) **sub-reach** adjacency zarr —
+    /// the output of DDR's `scripts/build_subdivided_adjacency.py` (`order`,
+    /// `parent_cell`, `indices_0/1`, `length_m`, `slope`). A third,
+    /// mutually-exclusive adjacency source next to `geospatial_fabric` and
+    /// the explicit zarr pair: `ddrs plan` turns it into ddrs's subdivided
+    /// store layout (parent = grid cell, pieces = sub-reaches) plus per-gauge
+    /// subgraphs under `.ddrs/adjacency/<key>/`. See
+    /// `docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md`.
+    #[serde(default)]
+    pub gridded_network: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -963,6 +973,26 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
     let has_conus = ds.conus_adjacency.is_some();
     let has_gages = ds.gages_adjacency.is_some();
     let has_fabric = ds.geospatial_fabric.is_some();
+    let has_gridded = ds.gridded_network.is_some();
+
+    // The gridded network is its own managed-build input; combining it with
+    // either other adjacency source would leave one of them silently unused.
+    if has_gridded && has_fabric {
+        return Err(
+            "data_sources: `gridded_network` and `geospatial_fabric` are both set; \
+             they are alternative adjacency sources — keep exactly one."
+                .to_string(),
+        );
+    }
+    if has_gridded && (has_conus || has_gages) {
+        return Err(
+            "data_sources: `gridded_network` is set alongside explicit \
+             `conus_adjacency`/`gages_adjacency` paths; the gridded store is built \
+             into the managed cache by `ddrs plan` — remove the explicit paths \
+             (or drop `gridded_network` to use them as-is)."
+                .to_string(),
+        );
+    }
 
     // Layer selection is a gpkg-only concept; reject it for dBASE fabrics
     // (or with no fabric at all) at load time rather than silently ignoring.
@@ -982,10 +1012,10 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
         }
     }
 
-    match (has_conus, has_gages, has_fabric) {
+    match (has_conus, has_gages, has_fabric || has_gridded) {
         // Both explicit zarr paths: valid.
         (true, true, _) => Ok(()),
-        // Managed build: neither zarr, fabric present: valid.
+        // Managed build: neither zarr, fabric or gridded network present: valid.
         (false, false, true) => Ok(()),
         // Partial adjacency: exactly one of the two zarr keys provided.
         (true, false, _) => Err(
@@ -998,11 +1028,11 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
              provide both adjacency paths or remove both and set `geospatial_fabric`."
             .to_string(),
         ),
-        // Neither zarr and no fabric.
+        // Neither zarr and no fabric / gridded network.
         (false, false, false) => Err(
             "data_sources: adjacency sources are missing — either set both \
              `conus_adjacency` and `gages_adjacency`, or set `geospatial_fabric` \
-             for a managed adjacency build."
+             (MERIT) or `gridded_network` (DDM30) for a managed adjacency build."
             .to_string(),
         ),
     }
@@ -1068,6 +1098,22 @@ fn validate_subdivision(cfg: &Config) -> std::result::Result<(), String> {
         );
     }
     if s.enabled {
+        if cfg
+            .data_sources
+            .as_ref()
+            .is_some_and(|ds| ds.gridded_network.is_some())
+        {
+            // The DDM30 sub-reach store arrives already split (DDR sizes its
+            // pieces from celerity at mean flow); ddrs's MERIT reach plan has
+            // no `catchsize`/fabric to work from and would be silently inert.
+            return Err(
+                "params.subdivision: `enabled: true` does not apply to \
+                 `data_sources.gridded_network` — the DDM30 sub-reach store is \
+                 already subdivided by DDR's build_subdivided_adjacency.py. \
+                 Set `enabled: false` (or resize the sub-reaches in DDR)."
+                    .to_string(),
+            );
+        }
         validate_subdivision_reaches_the_builder(cfg)?;
     }
     Ok(())
@@ -1585,6 +1631,84 @@ data_sources:
         assert!(
             msg.contains("adjacency sources are missing"),
             "expected missing-adjacency error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gridded_network_alone_is_a_valid_managed_build() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_only.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("gridded_network alone must be valid");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert!(ds.gridded_network.is_some());
+        assert!(ds.conus_adjacency.is_none() && ds.gages_adjacency.is_none());
+    }
+
+    #[test]
+    fn gridded_network_with_fabric_rejected() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_fabric.yaml", ds_block);
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("gridded_network") && msg.contains("geospatial_fabric"),
+            "expected the both-sources error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gridded_network_with_explicit_adjacency_rejected() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  conus_adjacency: /dev/null/conus.zarr
+  gages_adjacency: /dev/null/gages.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_explicit.yaml", ds_block);
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("gridded_network") && msg.contains("conus_adjacency"),
+            "expected the explicit-paths error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gridded_network_with_subdivision_enabled_rejected() {
+        let block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+params:
+  use_cuda_graphs: false
+  subdivision:
+    enabled: true
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_subdiv.yaml", block);
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("params.subdivision") && msg.contains("gridded_network"),
+            "expected the subdivision-vs-gridded error, got: {msg}"
         );
     }
 

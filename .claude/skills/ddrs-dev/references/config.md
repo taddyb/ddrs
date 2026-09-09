@@ -37,10 +37,14 @@ to §`params:` if you are looking for `tau` (it is not a routing sub-step count)
 (feature-concatenated on COMID, NaN-filled, `deserialize_one_or_many_paths`).
 An empty list is a hard error.
 
-Adjacency rule: provide **either** both `conus_adjacency` + `gages_adjacency`,
-**or** `geospatial_fabric` (managed build into `.ddrs/adjacency/<key>/`).
-Exactly one of the pair ⇒ error; neither source ⇒ `"adjacency sources are missing"`.
-For multi-layer gpkg set `geospatial_fabric_layer` (participates in the cache key).
+Adjacency rule: provide **exactly one** of (a) both `conus_adjacency` +
+`gages_adjacency`, (b) `geospatial_fabric` (MERIT managed build into
+`.ddrs/adjacency/<key>/`), (c) `gridded_network` (DDR's DDM30 sub-reach
+adjacency zarr, managed build via `resolve_or_build_gridded`; added 2026-09-09).
+Exactly one of the pair ⇒ error; neither source ⇒ `"adjacency sources are missing"`;
+`gridded_network` with (a) or (b) ⇒ error. For multi-layer gpkg set
+`geospatial_fabric_layer` (participates in the cache key). `params.subdivision.enabled`
+is rejected alongside `gridded_network` (the store is already split by DDR).
 
 `aorc_precip` is required whenever `kan_head.disaggregation:` is present — see below.
 
@@ -177,6 +181,9 @@ Four validators run at `Config::from_yaml_file`, plus one at dataset open.
 | `validate_data_sources` | one of the adjacency pair | `` "`gages_adjacency` is missing" `` |
 | | neither adjacency nor fabric | `"adjacency sources are missing"` |
 | | `geospatial_fabric_layer` on a non-gpkg | `"geospatial_fabric_layer"` + `".gpkg"` |
+| | `gridded_network` + `geospatial_fabric` | `"gridded_network"` + `"geospatial_fabric"` |
+| | `gridded_network` + explicit adjacency pair | `"gridded_network"` + `"conus_adjacency"` |
+| `validate_subdivision` | `subdivision.enabled: true` + `gridded_network` | `"params.subdivision"` + `"gridded_network"` |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
 | `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |

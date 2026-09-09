@@ -1,0 +1,17 @@
+data_sources:
+  # Gridded (ISIMIP DDM30, 0.5°) CONUS routing on DDR PR #194's products.
+  # The sub-reach adjacency is DDR's `scripts/build_subdivided_adjacency.py`
+  # output (91,867 Courant≈1 sub-reaches over 5,198 cells); ddrs relabels it
+  # into its subdivided store layout on the first `ddrs plan`.
+  gridded_network: /home/tbindas/projects/ddr/data/ddm30/ddm30_subreach_adjacency.zarr
+  # 25 cell attributes, `COMID` = cell id (statistics sidecar:
+  # scripts/build_attribute_statistics.py writes it beside the file).
+  attributes: /mnt/ssd1/data/icechunk/ddm30_conus_attributes.nc
+  # dHBV2 UH retrospective Q' area-weighted onto cells (`Qr(divide_id, time)`,
+  # 4,085 of 5,198 cells; the rest read as the 0.001 m³/s floor).
+  streamflow: /mnt/ssd1/data/icechunk/ddm30_conus_uh_retrospective_regridded.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  # gages_3000 gauges above 2,000 km² snapped to cells by drainage-area match
+  # (scripts/snap_gridded_gauges.py; `COMID` = snapped cell, 620 gauges as in
+  # DDR's train_conus.py).
+  gages: /home/tbindas/projects/ddr/references/gage_info/ddm30_conus_gauges.csv

@@ -72,6 +72,8 @@ cargo test --test ddr_sandbox_match
 # assert routed NSE/KGE floors + beats the summed-Q' baseline. Release-only
 # (silently skips in debug builds — a debug train takes minutes):
 cargo test --release --test juniata_acceptance
+# Same, on the gridded (ISIMIP DDM30) Juniata bundle (examples/juniata_gridded/):
+cargo test --release --test gridded_acceptance
 
 # Hydrograph plot for visual sanity-check:
 cargo run --release --example benchmark_hydrograph
@@ -314,6 +316,27 @@ math. Read it before touching `src/routing/` or `src/sparse/`.
 | Global observations | `/gpfs/hjj5218/data/dmc_forcing/observation/dMC_global_v3.1` (zarr v2 group, one f64 array per `Provider__GageId`) | `zarrs` |
 | Global streamflow forcing | `/gpfs/hjj5218/data/dmc_forcing/streamflow/zarr/8km/merit_global_v2.7` (multi-zone zarr v2, `(time, COMID)` f64 per pfaf-2 zone) | `zarrs` |
 | Global gage metadata | `/gpfs/hjj5218/data/dmc_forcing/gage_information/formatted_gage_csvs/v3.1/8km/` (57 per-zone `<zone>_all.csv`) | `csv` |
+
+**Gridded (ISIMIP DDM30, 0.5°) routing** (2026-09-09, mirrors DDR PR #194):
+ddrs has no `engine/` module and ports none of DDR's raster aggregation or Q′
+regridding — it consumes DDR's products as a data source. `data_sources.
+gridded_network` names DDR's **sub-reach** adjacency zarr (`order`,
+`parent_cell`, `indices_0/1`, `length_m`, `slope`); `ddrs plan` relabels it into
+the existing subdivided store layout (parent = cell, pieces = sub-reaches, gauge
+read at the cell's last piece) and cuts gauge subgraphs from it
+(`src/adjacency/gridded.rs`, `cache::resolve_or_build_gridded`). Attributes
+(`COMID` = cell id) and Q′ (`divide_id` = cell id, split across pieces by
+`pieces_per_row_divisor`) need no changes; the gauge CSV's `cell` column is an
+alias of `COMID`. It is exclusive with `geospatial_fabric` and the explicit
+zarr pair, and `params.subdivision.enabled` is rejected with it. Committed
+sample: `examples/juniata_gridded/` (routed NSE 0.751 / KGE 0.730 vs baseline
+0.594 / 0.672, which matches DDR's baseline to rounding); CONUS:
+`config/sources/conus-gridded.yaml` (620 gauges via
+`scripts/snap_gridded_gauges.py`). Known deviations from DDR (per-cell KAN head,
+no `da_ratio` output correction) are in
+`docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
+DDR's gridded Q′ stores are `Qr(time, divide_id)`; the icechunk reader sniffs
+the axis order (`detect_time_major`) — see the ddrs-dev skill's trap T11.
 
 The `observations` and `streamflow` data sources auto-detect their format
 (`ObservationsStore::open` / `StreamflowSource::open`,

@@ -17,6 +17,13 @@ Verified against `Cargo.toml` and source on 2026-07-30.
 
 If a system HDF5 leaks into the static build: `unset HDF5_DIR; unset NETCDF_DIR`.
 
+- **CUDA newer than `cudarc`'s table** (13.3.1 on this host since 2026-09 vs
+  cudarc 0.19.7's max 13.2): the build script panics with `Unsupported cuda
+  toolkit version`. Set `CUDARC_CUDA_VERSION=13020` — a gitignored
+  `.cargo/config.toml` with `[env] CUDARC_CUDA_VERSION = "13020"` is the
+  per-checkout fix (traps.md T12). Cached `target/` dirs mask it until the
+  build script reruns.
+
 ## Fork pins
 
 All **13** `burn-*` crates must resolve from `github.com/taddyb/burn` branch

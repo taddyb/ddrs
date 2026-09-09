@@ -76,7 +76,7 @@ pub fn write_conus_store(adj: &ConusAdjacency, dest: &Path) -> Result<()> {
 
     // Root group attrs — mirrors coo_to_zarr (zarr_io.py:131-138) and the real
     // store's root zarr.json.
-    let root_attrs = coo_root_attrs(n);
+    let root_attrs = coo_root_attrs(n, "merit");
     let root = GroupBuilder::new()
         .attributes(root_attrs)
         .build(storage.clone(), "/")
@@ -107,13 +107,24 @@ pub fn write_conus_store(adj: &ConusAdjacency, dest: &Path) -> Result<()> {
 /// [`write_conus_store`] plus the two identity arrays, which the reader would
 /// have synthesized anyway — so the disabled path stays a true no-op.
 pub fn write_conus_store_subdivided(sub: &SubdividedAdjacency, dest: &Path) -> Result<()> {
+    write_conus_store_subdivided_as(sub, dest, "merit")
+}
+
+/// [`write_conus_store_subdivided`] with an explicit `geodataset` root attr
+/// (`"merit"` for the fabric builder, `"ddm30"` for `gridded_network`). The
+/// attr is provenance only — no reader dispatches on it.
+pub fn write_conus_store_subdivided_as(
+    sub: &SubdividedAdjacency,
+    dest: &Path,
+    geodataset: &str,
+) -> Result<()> {
     let storage = Arc::new(FilesystemStore::new(dest).map_err(|e| zarr_err(dest, e))?);
 
     let n_sub = sub.order.len();
     let nnz = sub.rows.len();
 
     let root = GroupBuilder::new()
-        .attributes(coo_root_attrs(n_sub))
+        .attributes(coo_root_attrs(n_sub, geodataset))
         .build(storage.clone(), "/")
         .map_err(|e| zarr_err(dest, e))?;
     root.store_metadata().map_err(|e| zarr_err(dest, e))?;
@@ -141,6 +152,16 @@ pub fn write_conus_store_subdivided(sub: &SubdividedAdjacency, dest: &Path) -> R
 ///
 /// Round-trips through [`crate::data::store::zarr::GagesAdjacencyStore::open`].
 pub fn write_gauges_store(subgraphs: &[GaugeSubgraph], conus_n: usize, dest: &Path) -> Result<()> {
+    write_gauges_store_as(subgraphs, conus_n, dest, "merit")
+}
+
+/// [`write_gauges_store`] with an explicit `geodataset` attr on every subgroup.
+pub fn write_gauges_store_as(
+    subgraphs: &[GaugeSubgraph],
+    conus_n: usize,
+    dest: &Path,
+    geodataset: &str,
+) -> Result<()> {
     let storage = Arc::new(FilesystemStore::new(dest).map_err(|e| zarr_err(dest, e))?);
 
     // Empty root group (matches the real merit_gages store's root zarr.json).
@@ -152,7 +173,7 @@ pub fn write_gauges_store(subgraphs: &[GaugeSubgraph], conus_n: usize, dest: &Pa
     for sg in subgraphs {
         let group_path = format!("/{}", sg.staid.as_str());
 
-        let mut attrs = coo_root_attrs(conus_n);
+        let mut attrs = coo_root_attrs(conus_n, geodataset);
         attrs.insert(
             "gage_catchment".into(),
             serde_json::Value::Number(sg.gage_catchment.into()),
@@ -181,7 +202,7 @@ pub fn write_gauges_store(subgraphs: &[GaugeSubgraph], conus_n: usize, dest: &Pa
 
 /// The COO `format`/`shape`/`geodataset`/`data_types` attr block shared by the
 /// CONUS root and every gauge subgroup (zarr_io.py:131-138, 382-392).
-fn coo_root_attrs(dim: usize) -> serde_json::Map<String, serde_json::Value> {
+fn coo_root_attrs(dim: usize, geodataset: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut m = serde_json::Map::new();
     m.insert("format".into(), serde_json::Value::String("COO".into()));
     m.insert(
@@ -193,7 +214,7 @@ fn coo_root_attrs(dim: usize) -> serde_json::Map<String, serde_json::Value> {
     );
     m.insert(
         "geodataset".into(),
-        serde_json::Value::String("merit".into()),
+        serde_json::Value::String(geodataset.into()),
     );
     let mut data_types = serde_json::Map::new();
     data_types.insert("indices_0".into(), serde_json::Value::String("int32".into()));

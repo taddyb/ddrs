@@ -1,0 +1,19 @@
+{
+  "attributes": {
+    "format": "COO",
+    "shape": [
+      27,
+      27
+    ],
+    "geodataset": "ddm30",
+    "subdivided": true,
+    "cell_id_scheme": "node id = cell id * 1000 + sub index (upstream-most first)",
+    "data_types": {
+      "indices_0": "int32",
+      "indices_1": "int32",
+      "values": "uint8"
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

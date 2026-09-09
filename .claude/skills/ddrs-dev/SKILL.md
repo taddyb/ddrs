@@ -114,6 +114,7 @@ Full commands and rationale in `references/testing.md`.
 | `config/**/*.yaml` only | **D** | `ddrs plan --config … --workspace …` exits 0, no drift |
 | `.github/workflows/ci.yml`, `.githooks/**` | — | push to a branch and let the PR run vet it; there is no local gate for workflow changes |
 | `examples/juniata/**` (bundle, config, README) | — | `cargo test --test juniata_bundle` (never skips — bundle is committed), `cargo test --release --test juniata_acceptance` (end-to-end metric floors), and `ddrs --config examples/juniata/ddrs.yaml plan` exits 0 from the repo root |
+| `src/adjacency/gridded.rs`, `resolve_or_build_gridded`, `examples/juniata_gridded/**`, the `Qr` axis-order sniff in `src/data/store/icechunk.rs` | **C** | `cargo test --test gridded_bundle` (never skips), `cargo test --test hourly_streamflow` (time-major fixture), `cargo test --release --test gridded_acceptance`, then Tier C |
 | Plotting / analysis scripts only | — | no gate |
 | `epochs`, `learning_rate`, `batch_size`, loss weights within documented ranges | — | no gate |
 
@@ -182,6 +183,44 @@ Two deviations from DDR's bundle: `data/statistics/*.json` is **committed**
 `!examples/juniata/ddrs.yaml` so the example config survives the global
 `ddrs.yaml` ignore. Regenerate the bundle in the ddr repo
 (`extract_bundle.py`), then re-copy `data/` plus the generated statistics JSON.
+
+## Gridded (ISIMIP DDM30) routing — `examples/juniata_gridded/` (2026-09-09)
+
+ddrs consumes DDR PR #194's gridded products as a **data source**; it ports
+none of the raster/regridding engine. `data_sources.gridded_network` points at
+DDR's sub-reach adjacency zarr (`order`, `parent_cell`, `indices_0/1`,
+`length_m`, `slope`) and `ddrs plan` relabels it into the existing subdivided
+store layout (parent = cell, pieces = the cell's contiguous sub-reaches, gauge
+read at the last piece) via `adjacency::gridded::GriddedNetwork` +
+`cache::resolve_or_build_gridded`. Attributes and Q′ are keyed on the cell id,
+so `parent_order` lookups and `pieces_per_row_divisor` (Q′/k) need no change.
+The gauge CSV's `cell` column is a serde alias of `COMID`. Guards: exclusive
+with `geospatial_fabric` and the explicit zarr pair; `params.subdivision.enabled`
+is rejected with it. Spec:
+`docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md`.
+
+```bash
+target/release/ddrs --config examples/juniata_gridded/ddrs.yaml plan
+target/release/ddrs --config examples/juniata_gridded/ddrs.yaml run --workflow train-and-test --backend cpu
+```
+
+Verified 2026-09-09 (4 cells / 27 sub-reaches, 30 epochs, CPU, ~15 s): baseline
+NSE 0.594 / KGE 0.672 (DDR 0.594 / 0.671); routed NSE 0.751 / KGE 0.730 at seed
+42, seeds {42, 7, 123} span 0.744–0.758 / 0.728–0.732 (DDR 0.795 / 0.737 — RNG
+windows plus ddrs's per-cell KAN head vs DDR's per-sub-reach `log10_uparea`).
+CONUS: `config/sources/conus-gridded.yaml` + `config/experiments/gridded_conus.yaml`
+(620 gauges from `scripts/snap_gridded_gauges.py`, DDR's population); `plan`
+builds 5,198 cells → 91,867 sub-reaches in 0.6 s, baseline median NSE 0.354 /
+KGE 0.505 over 1995-10-01..1997-09-30 (DDR's 0.390 includes its `da_ratio`
+output correction, which ddrs does not apply).
+
+Two things this work found, both fixed: (1) `GageSubgraph::upstream_comids`
+returned one entry per piece on subdivided stores, so the summed-Q′ baseline
+counted each divide `m` times — now deduplicated by id (also affected MERIT
+`params.subdivision` baselines); (2) DDR's gridded Q′ stores are
+`Qr(time, divide_id)`, and zarrs returns fill values for an out-of-range subset
+instead of erroring, so the old fixed-axis reader silently read NaN — the
+reader now sniffs the axis order (traps.md T11).
 
 ## Maintenance
 
