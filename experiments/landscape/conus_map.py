@@ -83,8 +83,24 @@ def active_p_dim(run_dir: Path, arm: str) -> str:
     return "2-D" if "p_spatial" not in active_params.split(",") else "3-D"
 
 
+def window_info(run_dir: Path, arm: str) -> tuple[int | None, float | None]:
+    """Reads window_days (attr) and window_start_day[0] (var) from one gauge
+    netCDF (spec: uniform per training config, like active_p_dim)."""
+    files = sorted(glob.glob(str(run_dir / arm / "gauges" / "*.nc")))
+    if not files:
+        return None, None
+    ds = xr.open_dataset(files[0], decode_timedelta=False)
+    window_days = ds.attrs.get("window_days")
+    window_start_day = None
+    if "window_start_day" in ds.variables and ds["window_start_day"].size:
+        window_start_day = float(ds["window_start_day"].values[0])
+    return (int(window_days) if window_days is not None else None), window_start_day
+
+
 # ------------------------------------------------------------------------ build
-def build_df(run_dir: Path, arm: str, gage_csv: pd.DataFrame, nse_min: float) -> pd.DataFrame:
+def build_df(
+    run_dir: Path, arm: str, gage_csv: pd.DataFrame, nse_min: float, window_days: int | None
+) -> pd.DataFrame:
     summary = pd.read_csv(run_dir / arm / "summary.csv", dtype={"staid": str})
     summary["staid"] = summary["staid"].str.zfill(8)
     df = summary.merge(gage_csv, left_on="staid", right_on="STAID", how="inner")
@@ -100,10 +116,12 @@ def build_df(run_dir: Path, arm: str, gage_csv: pd.DataFrame, nse_min: float) ->
         "n_reach": df["n_reach"],
         "nse0": df["nse0"],
         "nse_star": df["nse_star"],
+        "gain": df["nse_star"] - df["nse0"],
         "alpha_n_star": df["alpha_n_star"],
         "mult_n": df["mult_n"],
         "hit_range_bound": df["hit_range_bound"],
         "well_fit": df["well_fit"],
+        "window_days": window_days,
     })
     return out
 
@@ -141,17 +159,26 @@ def alpha_colorbar_ticks():
     return [math.log(f) for f in factors], factors
 
 
-def fig_conus(out: Path, df: pd.DataFrame, arm: str, run_id: str, dim_note: str) -> Path:
+def fig_conus(
+    out: Path,
+    df: pd.DataFrame,
+    arm: str,
+    run_id: str,
+    dim_note: str,
+    title_suffix: str | None,
+    window_days: int | None,
+    window_start_day: float | None,
+) -> Path:
     sizes = marker_sizes(df["area_km2"].to_numpy(dtype=float))
     df = df.assign(_size=sizes)
     well = df[df["well_fit"]]
     poor = df[~df["well_fit"]]
 
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(18, 7), dpi=150)
+    fig, (ax_a, ax_b, ax_c) = plt.subplots(1, 3, figsize=(27, 7), dpi=150)
 
     # ---- panel (a): distance from optimum
     cmap_a = plt.get_cmap("RdBu_r")
-    for ax in (ax_a, ax_b):
+    for ax in (ax_a, ax_b, ax_c):
         draw_frame(ax)
 
     poor_a = poor
@@ -197,20 +224,56 @@ def fig_conus(out: Path, df: pd.DataFrame, arm: str, run_id: str, dim_note: str)
     )
     ax_b.set_title("(b) direction the gauge wants to move n")
 
+    # ---- panel (c): actionable gain at the gauge's own optimum. Panel (a)
+    # says how far n is from the optimum, but where the landscape is flat a
+    # large distance costs nothing -- (c) is the "how well is training doing"
+    # view: NSE the gauge could still gain by moving to alpha_star.
+    cmap_c = plt.get_cmap("RdBu_r")
+    poor_c = poor
+    if not poor_c.empty:
+        ax_c.scatter(poor_c["lon"], poor_c["lat"], s=poor_c["_size"], facecolors="none",
+                     edgecolors="0.6", linewidths=0.8, zorder=3)
+    bound_c = well[well["hit_range_bound"] == 1]
+    unbound_c = well[well["hit_range_bound"] != 1]
+    sc_c = ax_c.scatter(unbound_c["lon"], unbound_c["lat"], s=unbound_c["_size"],
+                         c=unbound_c["gain"], cmap=cmap_c, vmin=0, vmax=0.10,
+                         edgecolors="none", zorder=5)
+    ax_c.scatter(bound_c["lon"], bound_c["lat"], s=bound_c["_size"],
+                 c=bound_c["gain"], cmap=cmap_c, vmin=0, vmax=0.10,
+                 edgecolors="k", linewidths=0.8, zorder=6)
+    cbar_c = fig.colorbar(sc_c, ax=ax_c, shrink=0.85, pad=0.02)
+    cbar_c.set_label("NSE gain available at the gauge optimum (0 = none)", fontsize=8)
+    ax_c.set_title("(c) NSE the gauge could gain at its own optimum")
+
     n_gauges = len(df)
     n_well = int(well.shape[0])
     med_abs = float(np.median(well["alpha_n_star"].abs())) if n_well else float("nan")
     frac_1p25 = float((well["alpha_n_star"].abs() <= math.log(1.25)).mean()) if n_well else float("nan")
-    fig.suptitle(
-        f"arm={arm}  run={run_id}\n"
+    med_gain = float(np.median(well["gain"])) if n_well else float("nan")
+    frac_gain = float((well["gain"] > 0.02).mean()) if n_well else float("nan")
+    frac_slower = float((well["mult_n"] > 1.25).mean()) if n_well else float("nan")
+    frac_faster = float((well["mult_n"] < 0.8).mean()) if n_well else float("nan")
+    window_note = ""
+    if window_days is not None:
+        window_note = f"; window {window_days} d"
+        if window_start_day is not None:
+            window_note += f" starting at day {window_start_day:g}"
+    title = (
+        f"arm={arm}  run={run_id}"
+        + (f"  ({title_suffix})" if title_suffix else "")
+        + "\n"
         f"N gauges={n_gauges}  N well-fit (nse0>=nse_min)={n_well}  "
         f"median |ln(n_opt/n_trained)| (well-fit)={med_abs:.3f}  "
         f"share within factor 1.25={frac_1p25:.1%}\n"
+        f"median NSE gain (well-fit)={med_gain:.3f}  share gain>0.02={frac_gain:.1%}  "
+        f"share wanting slower (mult_n>1.25)={frac_slower:.1%}  "
+        f"share wanting faster (mult_n<0.8)={frac_faster:.1%}\n"
         f"corner note: optimum = {dim_note} Newton over basin-uniform "
         f"{'(n, q)' if dim_note == '2-D' else '(n, p, q)'} multipliers"
-        + (", p fixed" if dim_note == "2-D" else ""),
-        fontsize=10,
+        + (", p fixed" if dim_note == "2-D" else "")
+        + window_note
     )
+    fig.suptitle(title, fontsize=10)
     fig.text(
         0.5, 0.005,
         f"hollow grey = nse0 < nse_min (optimum not meaningful, n={int((~df['well_fit']).sum())}); "
@@ -221,7 +284,7 @@ def fig_conus(out: Path, df: pd.DataFrame, arm: str, run_id: str, dim_note: str)
     # subplots_adjust (not tight_layout) here: tight_layout's colorbar
     # accounting leaves a large unused vertical band above the axes for this
     # wide/short CONUS extent -- fixed margins fill the figure correctly.
-    fig.subplots_adjust(top=0.82, bottom=0.10, left=0.035, right=0.99, wspace=0.28)
+    fig.subplots_adjust(top=0.76, bottom=0.12, left=0.025, right=0.99, wspace=0.30)
     p = out / "conus_n_gap.png"
     fig.savefig(p)
     plt.close(fig)
@@ -235,6 +298,7 @@ def main():
     ap.add_argument("--arm", default=None)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--nse-min", type=float, default=0.3)
+    ap.add_argument("--title-suffix", default=None, help='e.g. "WY2000, 365 d", appended to the header')
     args = ap.parse_args()
 
     run_dir = args.census_run_dir
@@ -247,20 +311,31 @@ def main():
     run_id = arm_entry["run_id"]
 
     gage_csv = load_gage_csv(run_dir, arm_entry)
-    df = build_df(run_dir, arm, gage_csv, args.nse_min)
+    window_days, window_start_day = window_info(run_dir, arm)
+    df = build_df(run_dir, arm, gage_csv, args.nse_min, window_days)
     dim_note = active_p_dim(run_dir, arm)
 
     csv_path = out / "conus_n_gap.csv"
     df.to_csv(csv_path, index=False)
-    png_path = fig_conus(out, df, arm, run_id, dim_note)
+    png_path = fig_conus(
+        out, df, arm, run_id, dim_note, args.title_suffix, window_days, window_start_day
+    )
 
     n_well = int(df["well_fit"].sum())
     med_abs = float(np.median(df.loc[df["well_fit"], "alpha_n_star"].abs())) if n_well else float("nan")
     frac_1p25 = float((df.loc[df["well_fit"], "alpha_n_star"].abs() <= math.log(1.25)).mean()) if n_well else float("nan")
+    med_gain = float(np.median(df.loc[df["well_fit"], "gain"])) if n_well else float("nan")
+    frac_gain = float((df.loc[df["well_fit"], "gain"] > 0.02).mean()) if n_well else float("nan")
+    frac_slower = float((df.loc[df["well_fit"], "mult_n"] > 1.25).mean()) if n_well else float("nan")
+    frac_faster = float((df.loc[df["well_fit"], "mult_n"] < 0.8).mean()) if n_well else float("nan")
     print(f"arm={arm} run={run_id}")
     print(f"N gauges={len(df)}  N well-fit(nse0>={args.nse_min})={n_well}")
     print(f"median |ln(n_opt/n_trained)| over well-fit gauges = {med_abs:.4f}")
     print(f"share of well-fit gauges within factor 1.25 of optimum = {frac_1p25:.1%}")
+    print(f"median NSE gain over well-fit gauges = {med_gain:.4f}")
+    print(f"share of well-fit gauges with gain > 0.02 = {frac_gain:.1%}")
+    print(f"share of well-fit gauges wanting slower (mult_n>1.25) = {frac_slower:.1%}")
+    print(f"share of well-fit gauges wanting faster (mult_n<0.8) = {frac_faster:.1%}")
     print(f"wrote {csv_path}")
     print(f"wrote {png_path}")
 
