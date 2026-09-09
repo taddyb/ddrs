@@ -1,0 +1,23 @@
+# Diagnostic pass for the why-not-at-optimum analysis: all test gauges, five water years, trained point only, with daily series.
+# p = 21 variant (user run 2026-09-08T15-55-52Z-conus-train-and-test, workspace ddrs.yaml with p_spatial not learnable). Derived from experiments/landscape-p21-census41.
+# All test gauges (source: all -- the population `evaluate` scores: has a
+# subgraph and observations), no pairing, one seed. Covers the full 2,365-gauge
+# population instead of the 41-gauge GAGES-II nested-reference subset.
+# Sharded via scripts/landscape_shards.sh for parallel coverage across processes.
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    source: all
+  window_days: 1826  # five water years, WY1996 to WY2000 (dry and wet years); full 15-year test set would be about 100 h across 24 shards
+  water_year: 1996   # window starts 1995-10-01
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0
+  newton_iters: 0     # no search: gradient, Hessian and series at the trained point only
+  series: true        # obs, routed, summed q_prime daily series for the why-analysis
