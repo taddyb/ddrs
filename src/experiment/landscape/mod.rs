@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::ids::Staid;
 use crate::experiment::adjoint::gauges::{all_gauges_selection, gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
-use crate::experiment::adjoint::{seasonal_window_starts, GaugeSource, GaugeSpec};
+use crate::experiment::adjoint::{resolve_window_days, seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
 use self::objective::{eig3, eig_active, newton_step_capped, Objective};
@@ -22,6 +22,13 @@ use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, Slice};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LandscapeSpec {
     pub gauges: GaugeSpec,
+    /// Length of each evaluation window, in days. `0` means "from the
+    /// window start to the end of the eval axis" (`resolve_window_days`),
+    /// resolved once per arm from the first window's start. Only valid with
+    /// `n_windows: 1` — with more than one seasonal window a single shared
+    /// length can't span every window to the axis end (later starts leave
+    /// less axis remaining), so `run_landscape` rejects the combination via
+    /// `validate_window_days`.
     #[serde(default = "d_window_days")]
     pub window_days: usize,
     #[serde(default = "d_water_year")]
@@ -145,6 +152,22 @@ impl LandscapeSpec {
         }
         Ok(())
     }
+
+    /// Reject `window_days: 0` ("span to the eval axis end") unless
+    /// `n_windows == 1`. A single resolved length applied to more than one
+    /// seasonal window would give each window a different actual duration
+    /// (later starts leave less axis remaining) while `Objective::build`
+    /// assumes all windows share the same length.
+    pub fn validate_window_days(&self) -> Result<(), BoxError> {
+        if self.window_days == 0 && self.n_windows != 1 {
+            return Err(format!(
+                "landscape.window_days: 0 (span to the eval axis end) requires n_windows: 1, got {}",
+                self.n_windows
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 pub struct LandscapeOptions {
@@ -171,6 +194,7 @@ where
 {
     spec.validate_planes()?;
     spec.validate_slice_center()?;
+    spec.validate_window_days()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -202,9 +226,10 @@ where
         "landscape: {} arm(s), {} gauge(s) (of {population_n} population), {} window(s) × {} d, grid {}², α ∈ ±{:.3}, fd_step {}",
         arms.len(), gauges.len(), spec.n_windows, spec.window_days, spec.grid, spec.alpha_max, spec.fd_step
     );
-    if opts.dry_run {
-        return Ok(());
-    }
+    // Dry runs still enter `run_arm` (one per arm): it opens the arm's
+    // context, resolves and logs the actual window length, then stops
+    // before the per-gauge loop. That's needed so `window_days: 0`'s
+    // resolved length is visible in a dry-run log, not just a real run's.
     let jobs = opts.jobs.max(1);
     let mut all_notes: Vec<String> = Vec::new();
     for chunk in arms.chunks(jobs) {
@@ -246,10 +271,21 @@ where
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
     let seasonal = seasonal_window_starts(&ctx.axis, spec.water_year, spec.window_days)?;
     let starts: Vec<usize> = seasonal.iter().take(spec.n_windows.clamp(1, 4)).map(|(s, _)| *s).collect();
+    // Resolve `window_days: 0` from the (only, per `validate_window_days`)
+    // window's start.
+    let window_days = resolve_window_days(spec.window_days, ctx.axis.num_days, starts[0])?;
+    println!(
+        "  [{}] resolved window_days: {window_days}{}",
+        arm.name,
+        if spec.window_days == 0 { format!(" (spec 0 -> full axis from day {})", starts[0]) } else { String::new() }
+    );
+    if opts.dry_run {
+        return Ok(Vec::new());
+    }
     let mut notes = Vec::new();
     for (gi, g) in gauges.iter().enumerate() {
         let t_g = Instant::now();
-        match run_gauge::<I>(&ctx, spec, arm, g, &arm_dir, &starts) {
+        match run_gauge::<I>(&ctx, spec, arm, g, &arm_dir, &starts, window_days) {
             Ok(r) => {
                 println!(
                     "  [{}] {} done in {:.0} s ({} of {}): L0 {:.4} → L* {:.4} (NSE {:.3} → {:.3}), α* = [{:+.3} {:+.3} {:+.3}], λ = [{:.3e} {:.3e} {:.3e}]",
@@ -276,13 +312,14 @@ fn run_gauge<I: Backend + 'static>(
     g: &GaugeEntry,
     arm_dir: &Path,
     starts: &[usize],
+    window_days: usize,
 ) -> Result<LandscapeResult, BoxError>
 where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
     let staid = Staid::new(&g.staid);
-    let obj = Objective::<I>::build(ctx, &staid, starts, spec.window_days)?;
+    let obj = Objective::<I>::build(ctx, &staid, starts, window_days)?;
     let h = spec.fd_step;
     let active = obj.active();
     let n_active_params = active.iter().filter(|&&a| a).count();
@@ -537,7 +574,7 @@ where
         run_id: arm.run_id.clone(),
         checkpoint: arm.checkpoint_dir.display().to_string(),
         n_reach: obj.n_reach(),
-        window_days: spec.window_days,
+        window_days,
         window_starts: starts.to_vec(),
         sigma: obj.sigma,
         loss0: e0.loss,
@@ -717,6 +754,22 @@ mod tests {
         let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
         assert_eq!(spec.slice_center, "optimum");
         assert!(spec.validate_slice_center().is_ok());
+    }
+
+    #[test]
+    fn window_days_zero_requires_n_windows_one() {
+        let ok: LandscapeSpec = serde_yaml::from_str("gauges: {}\nwindow_days: 0\nn_windows: 1\n").unwrap();
+        assert!(ok.validate_window_days().is_ok());
+        let bad: LandscapeSpec = serde_yaml::from_str("gauges: {}\nwindow_days: 0\nn_windows: 4\n").unwrap();
+        let err = bad.validate_window_days().unwrap_err().to_string();
+        assert!(err.contains("window_days: 0"), "{err}");
+        assert!(err.contains("n_windows: 1"), "{err}");
+    }
+
+    #[test]
+    fn nonzero_window_days_never_requires_n_windows_one() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nwindow_days: 90\nn_windows: 4\n").unwrap();
+        assert!(spec.validate_window_days().is_ok());
     }
 
     #[test]

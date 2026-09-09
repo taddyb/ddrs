@@ -31,6 +31,21 @@ use super::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdjointSpec {
     pub gauges: GaugeSpec,
+    /// Length of the extraction window around each anchor / seasonal start,
+    /// in days. `0` means "from the window start to the end of the eval
+    /// axis" (`resolve_window_days`), resolved once per arm from the
+    /// earliest seasonal window's start (`seasonal_window_starts`'s Oct-1
+    /// anchor of `water_year - 1`). Unlike `LandscapeSpec`, there is no
+    /// `n_windows` field here to guard with, so `0` is just allowed: the
+    /// kernel functional still works because `anchor_offset` scales with the
+    /// resolved length, which means a full-axis window pushes valid anchors
+    /// toward the axis's tail (anchors must be at least `anchor_offset` days
+    /// in) — pair `window_days: 0` with a short eval axis or accept a
+    /// clustered anchor set. The `residual` functional's four seasonal
+    /// windows are resolved once from the earliest window's start and reused
+    /// for all four, so the later (start-later) windows will error per-gauge
+    /// once their fixed length runs past the axis end — the run continues
+    /// with a note rather than aborting.
     #[serde(default = "d_window_days")]
     pub window_days: usize,
     #[serde(default)]
@@ -220,7 +235,10 @@ pub fn select_anchors(
 }
 
 /// Four seasonal windows of `window_days` starting Oct 1 (+0, +92, +182, +273
-/// days) of the given water year.
+/// days) of the given water year. `window_days: 0` ("span to the eval axis
+/// end", see `resolve_window_days`) skips the fixed-length overflow check
+/// here — its actual length is resolved later, per start index, by the
+/// caller.
 pub fn seasonal_window_starts(
     axis: &TimeAxis,
     water_year: i32,
@@ -233,12 +251,27 @@ pub fn seasonal_window_starts(
         let idx = axis
             .day_index(date)
             .ok_or_else(|| format!("window start {date} outside the eval axis [{}, {}]", axis.start, axis.end))?;
-        if idx + window_days > axis.num_days {
+        if window_days > 0 && idx + window_days > axis.num_days {
             return Err(format!("window starting {date} (+{window_days} d) runs past the eval axis end {}", axis.end).into());
         }
         out.push((idx, date));
     }
     Ok(out)
+}
+
+/// Resolve `window_days: 0` ("from the window start to the end of the eval
+/// axis") to an actual day count. `spec_value != 0` passes through
+/// unchanged. Pure and side-effect-free so it's unit-tested directly; both
+/// `landscape` and `adjoint` call it once per arm (see each study's
+/// `run_arm`) and log the result.
+pub fn resolve_window_days(spec_value: usize, axis_num_days: usize, start_idx: usize) -> Result<usize, BoxError> {
+    if spec_value != 0 {
+        return Ok(spec_value);
+    }
+    if start_idx > axis_num_days {
+        return Err(format!("window start day {start_idx} is past the eval axis end ({axis_num_days} days)").into());
+    }
+    Ok(axis_num_days - start_idx)
 }
 
 /// Per-arm report merged into the manifest after the threads join.
@@ -263,11 +296,16 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static + Send + Sync,
 {
-    if adjoint.window_days < adjoint.tail_days + 2 {
-        return Err("adjoint.window_days must exceed tail_days + 1".into());
-    }
-    if adjoint.lag_days > adjoint.window_days - 1 - adjoint.tail_days {
-        return Err("adjoint.lag_days must fit before the anchor: lag_days <= window_days - 1 - tail_days".into());
+    // window_days: 0 ("span to the eval axis end") is resolved per-arm, once
+    // the axis is known — see `resolve_window_days` and its check re-run in
+    // `run_arm` below.
+    if adjoint.window_days != 0 {
+        if adjoint.window_days < adjoint.tail_days + 2 {
+            return Err("adjoint.window_days must exceed tail_days + 1".into());
+        }
+        if adjoint.lag_days > adjoint.window_days - 1 - adjoint.tail_days {
+            return Err("adjoint.lag_days must fit before the anchor: lag_days <= window_days - 1 - tail_days".into());
+        }
     }
     if arms.is_empty() {
         return Err("no arms selected".into());
@@ -406,6 +444,23 @@ where
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
     let seasonal = seasonal_window_starts(&ctx.axis, adjoint.water_year, adjoint.window_days)?;
+    // Resolve `window_days: 0` from the earliest seasonal window's start
+    // (see the field doc on `AdjointSpec::window_days` for the residual-
+    // functional caveat this implies for the later three seasonal starts).
+    let window_days = resolve_window_days(adjoint.window_days, ctx.axis.num_days, seasonal[0].0)?;
+    println!(
+        "  [{}] resolved window_days: {window_days}{}",
+        arm.name,
+        if adjoint.window_days == 0 { format!(" (spec 0 -> full axis from day {})", seasonal[0].0) } else { String::new() }
+    );
+    if adjoint.window_days == 0 {
+        if window_days < adjoint.tail_days + 2 {
+            return Err("resolved window_days must exceed tail_days + 1".into());
+        }
+        if adjoint.lag_days > window_days - 1 - adjoint.tail_days {
+            return Err("adjoint.lag_days must fit before the anchor: lag_days <= resolved window_days - 1 - tail_days".into());
+        }
+    }
     let mut notes = Vec::new();
     let mut validation: Option<ValidationResult> = None;
     let mut full_maps: Vec<FullMapResult> = Vec::new();
@@ -416,7 +471,7 @@ where
     }
     for (gi, g) in gauges.iter().enumerate() {
         let t_g = Instant::now();
-        match run_gauge::<I>(&ctx, adjoint, arm, g, &arm_dir, &seasonal, validate_pending) {
+        match run_gauge::<I>(&ctx, adjoint, arm, g, &arm_dir, &seasonal, window_days, validate_pending) {
             Ok((vr, gauge_notes, fms)) => {
                 notes.extend(gauge_notes);
                 full_maps.extend(fms);
@@ -463,6 +518,7 @@ fn run_gauge<I: Backend + 'static>(
     g: &GaugeEntry,
     arm_dir: &Path,
     seasonal: &[(usize, NaiveDate)],
+    window_days: usize,
     validate: bool,
 ) -> Result<(Option<ValidationResult>, Vec<String>, Vec<FullMapResult>), BoxError>
 where
@@ -472,8 +528,8 @@ where
     let device = &ctx.device;
     let mut full_maps: Vec<FullMapResult> = Vec::new();
     let mut full_map_done: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
-    let n_hourly = (adjoint.window_days - 1) * 24;
-    let anchor_offset = adjoint.window_days - 1 - adjoint.tail_days;
+    let n_hourly = (window_days - 1) * 24;
+    let anchor_offset = window_days - 1 - adjoint.tail_days;
     let t0 = anchor_offset * 24 + 12;
     let warm_h = ctx.warmup * 24;
     let tail_h = adjoint.tail_days * 24;
@@ -503,7 +559,7 @@ where
         }
         for (day, obs, kind) in picks {
             let start = day - anchor_offset;
-            let batch = ctx.collate_gauge(&staid, start, adjoint.window_days)?;
+            let batch = ctx.collate_gauge(&staid, start, window_days)?;
             let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
             let gauge_row = batch.outflow_idx[0][0];
             let adjacency = batch.adjacency.clone();
@@ -515,7 +571,7 @@ where
             let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
             let dist = dist_to_gauge(&adjacency, gauge_row);
             let r = result.get_or_insert_with(|| {
-                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist.clone(), gauge_row, column_means(&q_hourly, grad.t, grad.n), downstream_rows(&adjacency))
+                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist.clone(), gauge_row, column_means(&q_hourly, grad.t, grad.n), downstream_rows(&adjacency), window_days)
             });
             let (mass, mean_lag) = grad.kernel_moments(t0, adjoint.lag_days);
             r.kernel.push(grad.kernel_daily(t0, adjoint.lag_days));
@@ -606,7 +662,7 @@ where
     // ---------------- volume ----------------
     if adjoint.functionals.contains(&Functional::Volume) {
         let (start, _) = seasonal[0];
-        let batch = ctx.collate_gauge(&staid, start, adjoint.window_days)?;
+        let batch = ctx.collate_gauge(&staid, start, window_days)?;
         let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
         let gauge_row = batch.outflow_idx[0][0];
         let adjacency = batch.adjacency.clone();
@@ -616,7 +672,7 @@ where
         let grad = inflow_gradient::<I>(scalar, &lf.q_leaf);
         let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
         let r = result.get_or_insert_with(|| {
-            new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, grad.t, grad.n), downstream_rows(&adjacency))
+            new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, grad.t, grad.n), downstream_rows(&adjacency), window_days)
         });
         r.volume_window_start_day = Some(start);
         r.volume_sens = grad.time_mean(warm_h, reduce_to);
@@ -711,7 +767,7 @@ where
     // ---------------- residual (squared error) ----------------
     if adjoint.functionals.contains(&Functional::Residual) {
         for (start, date) in seasonal {
-            let batch = ctx.collate_gauge(&staid, *start, adjoint.window_days)?;
+            let batch = ctx.collate_gauge(&staid, *start, window_days)?;
             let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
             let gauge_row = batch.outflow_idx[0][0];
             let adjacency = batch.adjacency.clone();
@@ -727,7 +783,7 @@ where
             let q_hourly: Vec<f32> = lf.q_hourly_inner.clone().into_data().to_vec::<f32>().unwrap();
             let (t_h, n_r) = (lf.q_leaf.dims()[0], lf.q_leaf.dims()[1]);
             let r = result.get_or_insert_with(|| {
-                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, t_h, n_r), downstream_rows(&adjacency))
+                new_result(arm, adjoint, ctx, &g.staid, comids.clone(), dist_to_gauge(&adjacency, gauge_row), gauge_row, column_means(&q_hourly, t_h, n_r), downstream_rows(&adjacency), window_days)
             });
             if valid.is_empty() {
                 notes.push(format!("{}/{}: residual window {date} has no valid observations", arm.name, g.staid));
@@ -787,6 +843,7 @@ fn new_result<I: Backend>(
     gauge_row: usize,
     q_prime_mean: Vec<f32>,
     downstream_row: Vec<i32>,
+    window_days: usize,
 ) -> GaugeResult {
     GaugeResult {
         staid: staid.to_string(),
@@ -798,7 +855,7 @@ fn new_result<I: Backend>(
         dist_to_gauge_m,
         q_prime_mean,
         gauge_row,
-        window_days: adjoint.window_days,
+        window_days,
         lag_days: adjoint.lag_days,
         tail_days: adjoint.tail_days,
         tau: ctx.tau,
@@ -867,5 +924,36 @@ mod tests {
         let y2 = "gauges:\n  source: nested-reference\n  gages_ii_dbf: /tmp/x.dbf\n";
         let s2: AdjointSpec = serde_yaml::from_str(y2).unwrap();
         assert_eq!(s2.gauges.source, GaugeSource::NestedReference);
+    }
+
+    #[test]
+    fn resolve_window_days_passes_through_nonzero() {
+        assert_eq!(resolve_window_days(365, 5479, 0).unwrap(), 365);
+        assert_eq!(resolve_window_days(90, 5479, 3000).unwrap(), 90);
+    }
+
+    #[test]
+    fn resolve_window_days_zero_spans_to_axis_end() {
+        // 15-year axis (5479 days), window starting Oct 1 of the first
+        // water year (start_idx 0): resolved length is the whole axis.
+        assert_eq!(resolve_window_days(0, 5479, 0).unwrap(), 5479);
+        // A later start leaves less axis remaining.
+        assert_eq!(resolve_window_days(0, 5479, 4000).unwrap(), 1479);
+    }
+
+    #[test]
+    fn resolve_window_days_zero_errors_past_axis_end() {
+        let err = resolve_window_days(0, 100, 200).unwrap_err().to_string();
+        assert!(err.contains("past the eval axis end"), "{err}");
+    }
+
+    #[test]
+    fn seasonal_window_starts_skips_overflow_check_for_zero_window_days() {
+        let axis = TimeAxis::new(NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(), NaiveDate::from_ymd_opt(2001, 9, 30).unwrap());
+        // A fixed 365-day window starting on the later seasonal offsets
+        // would run past this one-year axis; window_days: 0 does not.
+        let seasonal = seasonal_window_starts(&axis, 2001, 0).unwrap();
+        assert_eq!(seasonal.len(), 4);
+        assert!(seasonal_window_starts(&axis, 2001, 365).is_err());
     }
 }
