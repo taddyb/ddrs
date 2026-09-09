@@ -25,6 +25,26 @@ pub struct Slice {
     pub clamped: Vec<f32>,
 }
 
+/// Window-0 daily series, present only when `landscape.series: true`. See
+/// `LandscapeResult::series`.
+pub struct SeriesData {
+    /// Observed discharge, m3/s (NaN = missing), length `d`.
+    pub obs_daily: Vec<f32>,
+    /// Routed discharge at the gauge, alpha = 0 (trained point), m3/s, length `d`.
+    pub routed_daily_trained: Vec<f32>,
+    /// Routed discharge at the gauge, alpha = alpha_star, m3/s, length `d`.
+    pub routed_daily_star: Vec<f32>,
+    /// No-routing baseline: sum over the gauge's subgraph reaches of the
+    /// daily q_prime inflow (`WindowData.tensors.q_prime_daily`, already
+    /// daily resolution -- not pooled from the inner hourly `q_prime`),
+    /// m3/s, length `d`.
+    pub summed_qprime_daily: Vec<f32>,
+    /// Eval-axis start date (`InfluenceContext.axis.start`), "%Y-%m-%d".
+    /// Combined with `window_start_day[0]` and the `day` index, this dates
+    /// every entry of the four series above.
+    pub axis_start_date: String,
+}
+
 pub struct LandscapeResult {
     pub staid: String,
     pub arm: String,
@@ -106,6 +126,17 @@ pub struct LandscapeResult {
     /// `learnable_parameters`), false when it's fixed at `params.defaults`.
     /// See `Objective::active`.
     pub active: [bool; 3],
+    /// `LandscapeSpec::objective` used to drive the Newton search for this
+    /// gauge: "nse-batch" or "kge".
+    pub objective: String,
+    /// KGE at the trained point (mean over windows). Always computed,
+    /// regardless of `objective`.
+    pub kge0: f32,
+    /// KGE at the per-gauge optimum (mean over windows).
+    pub kge_star: f32,
+    pub kge_star_windows: Vec<f32>,
+    /// Window-0 daily series; `Some` only when `landscape.series: true`.
+    pub series: Option<SeriesData>,
 }
 
 pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> {
@@ -121,7 +152,7 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("window_days", r.window_days as i64)?;
     f.add_attribute("sigma_obs_training", r.sigma as f64)?;
     f.add_attribute("alpha_components", "log-multipliers on (n, p_spatial, q_spatial) applied to the trained physical fields; alpha = 0 is the trained point")?;
-    f.add_attribute("objective", "NSE-batch loss (training objective) restricted to this gauge, mean over windows")?;
+    f.add_attribute("objective", r.objective.as_str())?;
     f.add_attribute("eigvec_layout", "eigvec[component, k]: column k is the k-th eigenvector (descending eigenvalue) of the Hessian at alpha_star")?;
     f.add_attribute("coord_trained_definition", "c_k = v_k^T (0 - alpha_star): trained point in the eigenbasis of H(alpha_star)")?;
     f.add_attribute("half_width_definition", "w_k = sqrt(2 * tol * L(alpha_star) / lambda_k): behavioural half-width along eigenvector k (quadratic approximation)")?;
@@ -150,6 +181,10 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
         f.add_dimension("ga", r.slices[0].axis_a.len())?;
         f.add_dimension("gb", r.slices[0].axis_b.len())?;
     }
+    if let Some(s) = &r.series {
+        f.add_dimension("day", s.obs_daily.len())?;
+        f.add_attribute("axis_start_date", s.axis_start_date.as_str())?;
+    }
 
     let active_i: Vec<i32> = r.active.iter().map(|&a| a as i32).collect();
     let mut active_var = f.add_variable::<i32>("active", &["alpha"])?;
@@ -168,6 +203,9 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     put("loss_star", &[], &[r.loss_star], "L at per-gauge optimum")?;
     put("nse_star", &[], &[r.nse_star], "NSE at per-gauge optimum")?;
     put("nse_star_windows", &["window"], &r.nse_star_windows, "NSE per window at optimum")?;
+    put("kge0", &[], &[r.kge0], "KGE at trained point (mean over windows)")?;
+    put("kge_star", &[], &[r.kge_star], "KGE at per-gauge optimum (mean over windows)")?;
+    put("kge_star_windows", &["window"], &r.kge_star_windows, "KGE per window at optimum")?;
     put("alpha_star", &["alpha"], &r.alpha_star, "per-gauge optimum in log-multiplier space")?;
     put("grad0", &["alpha"], &r.grad0, "dL/dalpha at trained point")?;
     put("grad_star", &["alpha"], &r.grad_star, "dL/dalpha at optimum")?;
@@ -215,6 +253,19 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     if !r.dist_to_gauge_m.is_empty() {
         put("dist_to_gauge_m", &["reach"], &r.dist_to_gauge_m, "along-channel distance from reach outlet to gauge outlet, meters")?;
     }
+    if let Some(s) = &r.series {
+        put("obs_daily", &["day"], &s.obs_daily, "observed discharge at the gauge, window 0, m3/s (NaN = missing)")?;
+        put("routed_daily_trained", &["day"], &s.routed_daily_trained, "routed discharge at the gauge, window 0, alpha = 0 (trained point), m3/s")?;
+        put("routed_daily_star", &["day"], &s.routed_daily_star, "routed discharge at the gauge, window 0, alpha = alpha_star (per-gauge optimum), m3/s")?;
+        put(
+            "summed_qprime_daily",
+            &["day"],
+            &s.summed_qprime_daily,
+            "no-routing baseline: sum over the gauge's subgraph reaches of the daily q_prime inflow (WindowData.tensors.q_prime_daily), window 0, m3/s",
+        )?;
+    }
+    // `put`'s last use is above; from here on `f` is borrowed directly (NLL
+    // releases the closure's borrow once it's no longer called).
     f.add_attribute("plane_names", r.slices.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(","))?;
     let mut comid_var = f.add_variable::<i64>("comid", &["reach"])?;
     comid_var.put_values(&r.comid, ..)?;
@@ -272,6 +323,11 @@ mod tests {
             gauge_reach_row: 1,
             obs_mean_q_m3s: 12.5,
             obs_n_valid_days: 360,
+            objective: "nse-batch".into(),
+            kge0: 0.4,
+            kge_star: 0.7,
+            kge_star_windows: vec![0.7],
+            series: None,
         }
     }
 
@@ -329,6 +385,73 @@ mod tests {
         assert!((mean_q - 12.5).abs() < 1e-6);
         let n_valid: i64 = f.attribute("obs_n_valid_days").unwrap().value().unwrap().try_into().unwrap();
         assert_eq!(n_valid, 360);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn objective_and_kge_are_written() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-objective-{}.nc", std::process::id()));
+        let mut r = minimal_result(Vec::new());
+        r.objective = "kge".into();
+        r.kge0 = 0.4;
+        r.kge_star = 0.7;
+        r.kge_star_windows = vec![0.7];
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        let objective: String = f.attribute("objective").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(objective, "kge");
+        let kge0: Vec<f32> = f.variable("kge0").unwrap().get_values(..).unwrap();
+        assert_eq!(kge0, vec![0.4]);
+        let kge_star: Vec<f32> = f.variable("kge_star").unwrap().get_values(..).unwrap();
+        assert_eq!(kge_star, vec![0.7]);
+        let kge_star_windows: Vec<f32> = f.variable("kge_star_windows").unwrap().get_values(..).unwrap();
+        assert_eq!(kge_star_windows, vec![0.7]);
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn series_off_by_default_writes_no_day_dim_or_variables() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-noseries-{}.nc", std::process::id()));
+        let r = minimal_result(Vec::new());
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        assert!(f.dimension("day").is_none());
+        assert!(f.variable("obs_daily").is_none());
+        assert!(f.attribute("axis_start_date").is_none());
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn series_writes_day_dim_and_four_series() {
+        let path = std::env::temp_dir().join(format!("ddrs-landscape-series-{}.nc", std::process::id()));
+        let mut r = minimal_result(Vec::new());
+        r.series = Some(SeriesData {
+            obs_daily: vec![1.0, f32::NAN, 3.0],
+            routed_daily_trained: vec![1.1, 2.1, 2.9],
+            routed_daily_star: vec![1.05, 2.05, 2.95],
+            summed_qprime_daily: vec![0.9, 1.9, 2.8],
+            axis_start_date: "1980-01-01".into(),
+        });
+        write_landscape_netcdf(&path, &r).unwrap();
+
+        let f = netcdf::open(&path).unwrap();
+        assert_eq!(f.dimension("day").unwrap().len(), 3);
+        let axis_start_date: String = f.attribute("axis_start_date").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(axis_start_date, "1980-01-01");
+        let obs_daily: Vec<f32> = f.variable("obs_daily").unwrap().get_values(..).unwrap();
+        assert_eq!(obs_daily[0], 1.0);
+        assert!(obs_daily[1].is_nan());
+        let routed_trained: Vec<f32> = f.variable("routed_daily_trained").unwrap().get_values(..).unwrap();
+        assert_eq!(routed_trained, vec![1.1, 2.1, 2.9]);
+        let routed_star: Vec<f32> = f.variable("routed_daily_star").unwrap().get_values(..).unwrap();
+        assert_eq!(routed_star, vec![1.05, 2.05, 2.95]);
+        let summed_qprime: Vec<f32> = f.variable("summed_qprime_daily").unwrap().get_values(..).unwrap();
+        assert_eq!(summed_qprime, vec![0.9, 1.9, 2.8]);
 
         std::fs::remove_file(&path).unwrap();
     }

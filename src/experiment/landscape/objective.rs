@@ -8,7 +8,7 @@
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
+use burn::tensor::{Int, Tensor, TensorData};
 
 use crate::data::dataset::RoutingTensors;
 use crate::data::ids::Staid;
@@ -50,6 +50,9 @@ pub struct Objective<'a, I: Backend> {
     /// false when it is fixed at `params.defaults` for this arm. See
     /// `Objective::active`.
     active: [bool; 3],
+    /// Which per-window loss `forward_loss` builds: "nse-batch" or "kge".
+    /// Validated against `landscape::VALID_OBJECTIVES` before this is built.
+    objective: String,
 }
 
 /// Result of one objective evaluation.
@@ -59,6 +62,10 @@ pub struct Eval {
     /// Per-window NSE of the daily series.
     pub nse: Vec<f32>,
     pub nse_mean: f32,
+    /// Per-window KGE of the daily series (always computed, regardless of
+    /// `objective`; see `objective::kge`).
+    pub kge: Vec<f32>,
+    pub kge_mean: f32,
     /// Fraction of (reach, parameter) entries clamped at a range edge, max over windows.
     pub clamped_frac: f32,
     pub grad: Option<[f32; 3]>,
@@ -82,6 +89,7 @@ where
         staid: &Staid,
         window_starts: &[usize],
         window_days: usize,
+        objective: &str,
     ) -> Result<Self, BoxError> {
         let device = &ctx.device;
         let ranges = [
@@ -160,7 +168,7 @@ where
             let length = Tensor::<I, 1>::from_floats(tensors.adjacency.length_m.as_slice(), device);
             windows.push(WindowData { start_day: start, tensors, obs, n0, p0, q0, x_storage, q_prime, slope, length, gauge_row, comids });
         }
-        Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active })
+        Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active, objective: objective.to_string() })
     }
 
     pub fn n_reach(&self) -> usize {
@@ -199,14 +207,19 @@ where
     /// via `ones`) or shape `[n_reach]` (per-reach); the multiply-by-`ones`
     /// below broadcasts the former and is a no-op for the latter, so both
     /// callers (`eval`, `reach_grad`) share this one forward path. Returns
-    /// the batch-mean loss tensor (still on the autodiff tape), per-window
-    /// NSE, and the max clamped fraction over windows.
-    fn forward_loss(&self, leaves: &[Tensor<AD<I>, 1>; 3]) -> (Tensor<AD<I>, 1>, Vec<f32>, f32) {
+    /// the batch-mean loss tensor (still on the autodiff tape, built from
+    /// `self.objective`), per-window NSE, per-window KGE (always computed
+    /// regardless of `self.objective` -- see `kge`), the max clamped
+    /// fraction over windows, and each window's daily gauge series (m3/s;
+    /// consumed by `daily_series`, dropped by `eval`).
+    fn forward_loss(&self, leaves: &[Tensor<AD<I>, 1>; 3]) -> (Tensor<AD<I>, 1>, Vec<f32>, Vec<f32>, f32, Vec<Vec<f32>>) {
         let device = &self.ctx.device;
         let n = self.n_reach();
         let ones = Tensor::<AD<I>, 1>::ones([n], device);
         let mut total: Option<Tensor<AD<I>, 1>> = None;
         let mut nses = Vec::new();
+        let mut kges = Vec::new();
+        let mut dailies: Vec<Vec<f32>> = Vec::new();
         let mut clamped_max = 0.0f32;
         for w in &self.windows {
             let mut norm = Vec::new();
@@ -241,28 +254,51 @@ where
             let gauge = scatter_add_by_group(runoff, w.tensors.flat_indices.clone(), w.tensors.group_ids.clone(), w.tensors.num_gauges);
             let daily = self.ctx.daily(gauge); // (1, D)
             let d = daily.dims()[1];
+            let dv: Vec<f32> = daily.clone().inner().into_data().to_vec::<f32>().unwrap();
+            dailies.push(dv.clone());
             let valid: Vec<usize> = (self.ctx.warmup..d).filter(|&i| i < w.obs.len() && w.obs[i].is_finite() && w.obs[i] >= 0.0).collect();
             if valid.is_empty() {
                 nses.push(f32::NAN);
+                kges.push(f32::NAN);
                 continue;
             }
-            let mut wts = vec![0.0f32; d];
-            let mut obs_f = vec![0.0f32; d];
-            for &i in &valid {
-                wts[i] = 1.0 / valid.len() as f32;
-                obs_f[i] = w.obs[i];
-            }
-            let w_t = Tensor::<AD<I>, 1>::from_floats(wts.as_slice(), device).reshape([1, d]);
-            let o_t = Tensor::<AD<I>, 1>::from_floats(obs_f.as_slice(), device).reshape([1, d]);
-            let denom = (self.sigma + self.eps) * (self.sigma + self.eps);
-            let sq = (daily.clone() - o_t).powf_scalar(2.0) * w_t;
-            let loss_w = sq.sum() / denom;
-            // NSE (diagnostic)
-            let dv: Vec<f32> = daily.inner().into_data().to_vec::<f32>().unwrap();
+            // NSE + KGE (diagnostics, both always computed)
             let om: f32 = valid.iter().map(|&i| w.obs[i]).sum::<f32>() / valid.len() as f32;
             let sse: f32 = valid.iter().map(|&i| (dv[i] - w.obs[i]).powi(2)).sum();
             let sst: f32 = valid.iter().map(|&i| (w.obs[i] - om).powi(2)).sum();
             nses.push(if sst > 0.0 { 1.0 - sse / sst } else { f32::NAN });
+            let sim_valid: Vec<f32> = valid.iter().map(|&i| dv[i]).collect();
+            let obs_valid: Vec<f32> = valid.iter().map(|&i| w.obs[i]).collect();
+            kges.push(kge(&sim_valid, &obs_valid));
+
+            let loss_w = match self.objective.as_str() {
+                "kge" => {
+                    // Differentiable `1 - KGE` restricted to the valid days:
+                    // gather them with `select` into a (1, n_valid) tensor
+                    // and reuse `training::loss::nnse_kge_loss`'s KGE term
+                    // (nnse_weight 0, kge_weight 1) -- it already implements
+                    // this exact formula on (G, T) tensors, and (1, n_valid)
+                    // is the same tensor shape family.
+                    let idx_i32: Vec<i32> = valid.iter().map(|&i| i as i32).collect();
+                    let idx = Tensor::<AD<I>, 1, Int>::from_data(TensorData::from(idx_i32.as_slice()), device);
+                    let p_valid = daily.clone().select(1, idx);
+                    let o_valid = Tensor::<AD<I>, 1>::from_floats(obs_valid.as_slice(), device).reshape([1, valid.len()]);
+                    crate::training::loss::nnse_kge_loss(p_valid, o_valid, 0.0, 1.0, self.eps)
+                }
+                _ => {
+                    let mut wts = vec![0.0f32; d];
+                    let mut obs_f = vec![0.0f32; d];
+                    for &i in &valid {
+                        wts[i] = 1.0 / valid.len() as f32;
+                        obs_f[i] = w.obs[i];
+                    }
+                    let w_t = Tensor::<AD<I>, 1>::from_floats(wts.as_slice(), device).reshape([1, d]);
+                    let o_t = Tensor::<AD<I>, 1>::from_floats(obs_f.as_slice(), device).reshape([1, d]);
+                    let denom = (self.sigma + self.eps) * (self.sigma + self.eps);
+                    let sq = (daily.clone() - o_t).powf_scalar(2.0) * w_t;
+                    sq.sum() / denom
+                }
+            };
             total = Some(match total {
                 Some(t) => t + loss_w,
                 None => loss_w,
@@ -270,7 +306,7 @@ where
         }
         let n_w = nses.iter().filter(|v| v.is_finite()).count().max(1) as f32;
         let total = total.expect("at least one window with valid observations");
-        (total / n_w, nses, clamped_max)
+        (total / n_w, nses, kges, clamped_max, dailies)
     }
 
     /// Evaluate `L_g(α)` (mean over windows) and optionally its gradient.
@@ -295,7 +331,7 @@ where
         // walk back to.
         let leaves: [Tensor<AD<I>, 1>; 3] =
             std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device).require_grad());
-        let (total, nses, clamped_max) = self.forward_loss(&leaves);
+        let (total, nses, kges, clamped_max, _dailies) = self.forward_loss(&leaves);
         let loss: f32 = total.clone().inner().into_data().to_vec::<f32>().unwrap()[0];
         let grads = total.backward();
         let grad = if with_grad {
@@ -322,7 +358,25 @@ where
             let f: Vec<f32> = nses.iter().copied().filter(|v| v.is_finite()).collect();
             if f.is_empty() { f32::NAN } else { f.iter().sum::<f32>() / f.len() as f32 }
         };
-        Eval { loss, nse: nses, nse_mean, clamped_frac: clamped_max, grad }
+        let kge_mean = {
+            let f: Vec<f32> = kges.iter().copied().filter(|v| v.is_finite()).collect();
+            if f.is_empty() { f32::NAN } else { f.iter().sum::<f32>() / f.len() as f32 }
+        };
+        Eval { loss, nse: nses, nse_mean, kge: kges, kge_mean, clamped_frac: clamped_max, grad }
+    }
+
+    /// Routed daily discharge (m3/s) at the gauge, window 0, at `alpha`. Runs
+    /// its own forward + backward pass (`backward()` is required even though
+    /// the gradient is discarded, to release the routing tape -- see the doc
+    /// comment on `eval`). For the series output (`landscape.series: true`)
+    /// only; not cached against `eval`'s calls at the same `alpha`.
+    pub fn daily_series(&self, alpha: [f32; 3]) -> Vec<f32> {
+        let device = &self.ctx.device;
+        let leaves: [Tensor<AD<I>, 1>; 3] =
+            std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device).require_grad());
+        let (total, _nses, _kges, _clamped_max, dailies) = self.forward_loss(&leaves);
+        let _ = total.backward();
+        dailies.into_iter().next().expect("at least one window")
     }
 
     /// Per-reach `g_i = dL/d ln x_i` for `x` in `(n, p_spatial, q_spatial)` at
@@ -336,7 +390,7 @@ where
         let n = self.n_reach();
         let leaves: [Tensor<AD<I>, 1>; 3] =
             std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats(vec![alpha[k]; n].as_slice(), device).require_grad());
-        let (total, _nses, _clamped_max) = self.forward_loss(&leaves);
+        let (total, _nses, _kges, _clamped_max, _dailies) = self.forward_loss(&leaves);
         let grads = total.backward();
         let extract = |l: &Tensor<AD<I>, 1>| -> Vec<f32> {
             l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()).unwrap_or_else(|| vec![0.0; n])
@@ -415,6 +469,41 @@ fn resolve_default(defaults: &std::collections::HashMap<String, f32>, name: &str
         )
         .into()),
     }
+}
+
+/// Kling-Gupta Efficiency of `sim` vs `obs` (population moments; equal
+/// length; caller filters NaNs/invalid days beforehand -- see the `valid`
+/// day list in `forward_loss`).
+///
+/// `KGE = 1 - sqrt((r-1)^2 + (alpha-1)^2 + (beta-1)^2)`, with `r` the
+/// Pearson correlation, `alpha = std(sim)/std(obs)`, `beta =
+/// mean(sim)/mean(obs)`. This is the diagnostic metric (reported as
+/// `kge0`/`kge_star`), always computed regardless of `LandscapeSpec::objective`;
+/// the differentiable training-objective path (`forward_loss`'s `"kge"` arm)
+/// instead reuses `training::loss::nnse_kge_loss`'s eps-regularized tensor
+/// formula. Returns `NaN` when `obs` has zero variance or zero mean (the
+/// ratios are degenerate), mirroring the NSE diagnostic's `sst > 0.0` guard
+/// in `forward_loss`.
+pub fn kge(sim: &[f32], obs: &[f32]) -> f32 {
+    assert_eq!(sim.len(), obs.len(), "kge: sim and obs must be the same length");
+    let n = sim.len() as f32;
+    if n == 0.0 {
+        return f32::NAN;
+    }
+    let mean_s = sim.iter().sum::<f32>() / n;
+    let mean_o = obs.iter().sum::<f32>() / n;
+    let var_o = obs.iter().map(|v| (v - mean_o).powi(2)).sum::<f32>() / n;
+    if var_o <= 0.0 || mean_o == 0.0 {
+        return f32::NAN;
+    }
+    let var_s = sim.iter().map(|v| (v - mean_s).powi(2)).sum::<f32>() / n;
+    let cov = sim.iter().zip(obs).map(|(&s, &o)| (s - mean_s) * (o - mean_o)).sum::<f32>() / n;
+    let std_s = var_s.sqrt();
+    let std_o = var_o.sqrt();
+    let r = cov / (std_s * std_o);
+    let alpha = std_s / std_o;
+    let beta = mean_s / mean_o;
+    1.0 - ((r - 1.0).powi(2) + (alpha - 1.0).powi(2) + (beta - 1.0).powi(2)).sqrt()
 }
 
 /// Jacobi eigen-decomposition of a symmetric 3×3: returns (eigenvalues desc, eigenvectors as columns).
@@ -646,6 +735,31 @@ mod tests {
     }
 
     #[test]
+    fn kge_perfect_prediction_is_one() {
+        let obs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let v = kge(&obs, &obs);
+        assert!((v - 1.0).abs() < 1e-5, "expected KGE 1.0 (loss 0), got {v}");
+    }
+
+    #[test]
+    fn kge_doubled_matches_hand_computation() {
+        // sim = 2*obs: r = 1 (perfectly correlated), alpha = std(sim)/std(obs) = 2,
+        // beta = mean(sim)/mean(obs) = 2. KGE = 1 - sqrt(0^2 + 1^2 + 1^2) = 1 - sqrt(2).
+        let obs = vec![1.0, 2.0, 3.0, 4.0];
+        let sim: Vec<f32> = obs.iter().map(|v| 2.0 * v).collect();
+        let v = kge(&sim, &obs);
+        let expected = 1.0 - std::f32::consts::SQRT_2;
+        assert!((v - expected).abs() < 1e-4, "expected {expected}, got {v}");
+    }
+
+    #[test]
+    fn kge_degenerate_obs_is_nan() {
+        let obs = vec![0.0, 0.0, 0.0];
+        let sim = vec![1.0, 2.0, 3.0];
+        assert!(kge(&sim, &obs).is_nan());
+    }
+
+    #[test]
     fn eig3_diagonalizes_known_matrix() {
         let (vals, vecs) = eig3([[2.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 1.0]]);
         assert_eq!(vals, [5.0, 2.0, 1.0]);
@@ -773,7 +887,7 @@ mod tests {
     ///        --workflow train-and-test --backend cpu` and note the run id.
     ///   2. Build a `ResolvedArm` for that run (see `resolve_arm` in
     ///      `src/experiment/mod.rs`), open an `InfluenceContext`, and call
-    ///      `Objective::build(&ctx, &Staid::new("01567000"), &starts, 90)`.
+    ///      `Objective::build(&ctx, &Staid::new("01567000"), &starts, 90, "nse-batch")`.
     ///   3. Compare `obj.reach_grad(alpha)` summed per component against
     ///      `obj.eval(alpha, true).grad`.
     /// The same check runs unconditionally at runtime in `run_gauge` (logged,

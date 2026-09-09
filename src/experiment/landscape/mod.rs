@@ -11,13 +11,13 @@ use burn::tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
 
 use crate::data::ids::Staid;
-use crate::experiment::adjoint::gauges::{all_gauges_selection, gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
+use crate::experiment::adjoint::gauges::{all_gauges_selection, gauge_list_from_pairs, gauge_list_from_staids, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
 use crate::experiment::adjoint::{resolve_window_days, seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
 use self::objective::{eig3, eig_active, newton_step_capped, Objective};
-use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, Slice};
+use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, SeriesData, Slice};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LandscapeSpec {
@@ -93,6 +93,21 @@ pub struct LandscapeSpec {
     /// Checked against `VALID_SLICE_CENTERS` at the top of `run_landscape`.
     #[serde(default = "d_slice_center")]
     pub slice_center: String,
+    /// Which per-window loss the Newton search optimizes: "nse-batch"
+    /// (default; the training objective restricted to this gauge) or "kge"
+    /// (`1 - KGE` over the window's valid days). `nse` and `kge`
+    /// diagnostics are always both computed regardless of which one drives
+    /// the search. Checked against `VALID_OBJECTIVES` at the top of
+    /// `run_landscape`.
+    #[serde(default = "d_objective")]
+    pub objective: String,
+    /// When true, write each gauge's window-0 daily series (observed,
+    /// routed at alpha = 0 and alpha*, and the no-routing summed-q'
+    /// baseline) to the netCDF on a new `day` dimension. Off by default: it
+    /// triples the per-gauge netCDF's day-dimensioned payload and needs two
+    /// extra forward passes (`Objective::daily_series`).
+    #[serde(default)]
+    pub series: bool,
 }
 fn d_window_days() -> usize { 365 }
 fn d_water_year() -> i32 { 2000 }
@@ -121,11 +136,16 @@ fn d_planes() -> Vec<String> {
 fn d_slice_center() -> String {
     "optimum".to_string()
 }
+fn d_objective() -> String {
+    "nse-batch".to_string()
+}
 
 /// The four slices `run_gauge` knows how to compute.
 pub const VALID_PLANES: [&str; 4] = ["n-p", "n-q", "p-q", "stiff-sloppy"];
 /// The two slice-centering conventions accepted by `slice_center`.
 pub const VALID_SLICE_CENTERS: [&str; 2] = ["optimum", "trained"];
+/// The two per-window losses accepted by `LandscapeSpec::objective`.
+pub const VALID_OBJECTIVES: [&str; 2] = ["nse-batch", "kge"];
 
 impl LandscapeSpec {
     /// Reject any `planes` entry that isn't one of `VALID_PLANES`.
@@ -168,6 +188,18 @@ impl LandscapeSpec {
         }
         Ok(())
     }
+
+    /// Reject an `objective` that isn't one of `VALID_OBJECTIVES`.
+    pub fn validate_objective(&self) -> Result<(), BoxError> {
+        if !VALID_OBJECTIVES.contains(&self.objective.as_str()) {
+            return Err(format!(
+                "unknown landscape objective `{}`; valid objectives are {VALID_OBJECTIVES:?}",
+                self.objective
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 pub struct LandscapeOptions {
@@ -195,6 +227,7 @@ where
     spec.validate_planes()?;
     spec.validate_slice_center()?;
     spec.validate_window_days()?;
+    spec.validate_objective()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -212,6 +245,7 @@ where
             println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
             list
         }
+        GaugeSource::List => gauge_list_from_staids(&spec.gauges.staids),
     };
     let population_n = gauges.len();
     gauges = shard_gauges(gauges, opts.shard);
@@ -319,7 +353,7 @@ where
     I::Device: 'static,
 {
     let staid = Staid::new(&g.staid);
-    let obj = Objective::<I>::build(ctx, &staid, starts, window_days)?;
+    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective)?;
     let h = spec.fd_step;
     let active = obj.active();
     let n_active_params = active.iter().filter(|&&a| a).count();
@@ -568,6 +602,44 @@ where
     }
     let obs_mean_q_m3s = if obs_n_valid_days > 0 { (obs_sum / obs_n_valid_days as f64) as f32 } else { f32::NAN };
 
+    // 7. Optional daily series (window 0 only -- `day` is a single window's
+    // timeline, so this doesn't generalize past `n_windows: 1`): observed,
+    // routed at alpha = 0 and alpha*, and the no-routing baseline (summed
+    // q_prime over the gauge's subgraph reaches). `daily_series` re-runs the
+    // forward at each alpha (not cached from steps 1-2 above) since `eval`
+    // doesn't carry the daily tensor out. The no-routing baseline sums
+    // `WindowData.tensors.q_prime_daily` -- the already-daily-resolution
+    // inflow tensor (not the inner hourly `q_prime`, which would need
+    // pooling) -- over reaches (dim 1), truncated to the routed series'
+    // length (`q_prime_daily` is one day longer: the tau-trim in
+    // `InfluenceContext::daily` drops the last day, see
+    // `training::loss::tau_trim_and_downsample`).
+    let series = if spec.series {
+        let routed_daily_trained = obj.daily_series([0.0; 3]);
+        let routed_daily_star = obj.daily_series(alpha_star);
+        let d = routed_daily_trained.len();
+        let obs_daily: Vec<f32> = obj.windows[0].obs.iter().take(d).copied().collect();
+        let mut summed_qprime_daily: Vec<f32> = obj.windows[0]
+            .tensors
+            .q_prime_daily
+            .clone()
+            .inner()
+            .sum_dim(1)
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        summed_qprime_daily.truncate(d);
+        Some(SeriesData {
+            obs_daily,
+            routed_daily_trained,
+            routed_daily_star,
+            summed_qprime_daily,
+            axis_start_date: ctx.axis.start.format("%Y-%m-%d").to_string(),
+        })
+    } else {
+        None
+    };
+
     let r = LandscapeResult {
         staid: g.staid.clone(),
         arm: arm.name.clone(),
@@ -613,6 +685,11 @@ where
         gauge_reach_row,
         obs_mean_q_m3s,
         obs_n_valid_days,
+        objective: spec.objective.clone(),
+        kge0: e0.kge_mean,
+        kge_star: e_star.kge_mean,
+        kge_star_windows: e_star.kge.clone(),
+        series,
     };
     write_landscape_netcdf(&arm_dir.join("gauges").join(format!("{}.nc", g.staid)), &r)?;
     output::append_summary(&arm_dir.join("summary.csv"), &r)?;
@@ -808,6 +885,36 @@ mod tests {
         // 213-reach basin, 2 active params: floor 2 / (213*2) << 0.05.
         let eff = effective_max_clamped(0.05, 2, 213, 2);
         assert!((eff - 0.05).abs() < 1e-6, "eff = {eff}");
+    }
+
+    #[test]
+    fn default_objective_is_nse_batch() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.objective, "nse-batch");
+        assert!(spec.validate_objective().is_ok());
+        assert!(!spec.series);
+    }
+
+    #[test]
+    fn unknown_objective_errors_with_valid_list() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nobjective: bogus\n").unwrap();
+        let err = spec.validate_objective().unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+        assert!(err.to_string().contains("nse-batch"));
+        assert!(err.to_string().contains("kge"));
+    }
+
+    #[test]
+    fn gauge_source_list_parses() {
+        let spec: LandscapeSpec =
+            serde_yaml::from_str("gauges:\n  source: list\n  staids: [\"01563500\", \"01567000\"]\nobjective: kge\nseries: true\n").unwrap();
+        assert_eq!(spec.gauges.source, GaugeSource::List);
+        assert_eq!(spec.gauges.staids, vec!["01563500".to_string(), "01567000".to_string()]);
+        assert_eq!(spec.objective, "kge");
+        assert!(spec.series);
+        let gauges = gauge_list_from_staids(&spec.gauges.staids);
+        assert_eq!(gauges.len(), 2);
+        assert!(gauges.iter().all(|g| g.role == "gauge" && g.upstream.is_empty()));
     }
 
     #[test]

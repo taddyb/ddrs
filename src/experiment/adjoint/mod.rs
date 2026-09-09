@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::dates::TimeAxis;
 use crate::data::ids::Staid;
 
-use self::gauges::{all_gauges_selection, gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
+use self::gauges::{all_gauges_selection, gauge_list_from_pairs, gauge_list_from_staids, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use self::influence::{column_means, dist_to_gauge, downstream_rows, inflow_gradient, InfluenceContext};
 use self::output::{append_summary, write_gauge_netcdf, AnchorRecord, GaugeResult, WindowRecord};
 use self::hydraulics::{mean_reach_k_hours, path_travel_time_hours, reach_k_hours};
@@ -139,6 +139,8 @@ pub enum GaugeSource {
     /// Every gauge the arm's dataset can evaluate (has a subgraph and
     /// observations — the same population `evaluate` scores). No pairing.
     All,
+    /// `staids:` lists gauges explicitly, each on its own (no pairing).
+    List,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -153,6 +155,9 @@ pub struct GaugeSpec {
     /// Cap on downstream gauges (sorted by staid) for smoke runs.
     #[serde(default)]
     pub max_downstream: Option<usize>,
+    /// Gauges for `source: list`, each on its own, role "gauge".
+    #[serde(default)]
+    pub staids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -359,6 +364,12 @@ where
             let list = all_gauges_selection(&ctx.dataset);
             println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
             list
+        }
+        GaugeSource::List => {
+            if adjoint.gauges.staids.is_empty() {
+                return Err("adjoint.gauges.staids is empty".into());
+            }
+            gauge_list_from_staids(&adjoint.gauges.staids)
         }
     };
     let population_n = gauges.len();

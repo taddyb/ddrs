@@ -49,6 +49,18 @@ pub fn gauge_list_from_pairs(pairs: &[[String; 2]]) -> Vec<GaugeEntry> {
     out
 }
 
+/// `List` gauge source: gauges named directly in `gauges.staids`, each on its
+/// own (no pairing, `upstream` empty, `role: "gauge"`). Unlike
+/// `all_gauges_selection`, no dataset lookup is available here, so
+/// `comid`/`class` are left `None` -- the same convention `gauge_list_from_pairs`
+/// uses for its entries.
+pub fn gauge_list_from_staids(staids: &[String]) -> Vec<GaugeEntry> {
+    staids
+        .iter()
+        .map(|s| GaugeEntry { staid: s.clone(), role: "gauge", pair: 0, upstream: vec![], comid: None, class: None })
+        .collect()
+}
+
 /// `STAID → CLASS` from the GAGES-II point shapefile's dbf.
 pub fn read_gages_ii_class(dbf: &Path) -> Result<HashMap<String, String>, BoxError> {
     let mut reader = dbase::Reader::from_path(dbf).map_err(|e| format!("{}: {e}", dbf.display()))?;
