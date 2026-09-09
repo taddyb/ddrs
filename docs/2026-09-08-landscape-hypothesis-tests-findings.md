@@ -480,3 +480,39 @@ basins where routing timing matters at the daily step. (iv) The Xeric West and t
 farthest with the most balanced directions: routing is poorly identified there rather than biased. (v) HUC2 06
 (Tennessee) has the largest positive median displacement and the highest share of gauges with gain above 0.02 (79 %).
 
+## 14. Five water years (WY1996 to WY2000), all 2,365 gauges (run `landscape-p21-all-5yr/merged`, 16 shards, 12.7 h)
+
+Maps: `docs/figures/2026-09-09-conus_n_gap_p21_wy1996-2000.png`, `docs/figures/2026-09-09-conus_n_gap_by_ecoregion_wy1996-2000.png`.
+The 15-year all-gauge census was held at launch (12 shards would need about 140 GB); scope pending the user.
+
+| | WY2000 (365 d) | WY1996 to 2000 (1,826 d) |
+|---|---|---|
+| well fit (NSE > 0.3) | 1,710 | 2,124 |
+| median NSE at trained point, well fit | 0.733 | 0.754 |
+| median gain to own optimum | 0.014 | 0.010 |
+| gain > 0.02 | 42 % | 35 % |
+| median |ln(n*/n)| | 0.67 | 0.72 |
+| within a factor 1.25 | 19 % | 18 % |
+| wants slower / faster | 61 % / 19 % | 65 % / 17 % |
+| range-bound | 10 | 15 |
+
+Across the 1,675 gauges well fit in both windows the direction of the n displacement agrees 79 % of the time and
+ln(n*/n) correlates at 0.63 between windows: the direction is stable, the magnitude is noisy at the gauge level.
+The longer window makes more gauges "well fit" (a five-year record is dominated by the floods the model captures)
+and shrinks the gain available (0.010 median), which strengthens the §13 reading: n is weakly identifiable at most
+daily gauges, and the systematic "slower" bias is CONUS-wide (65 %).
+
+By ecoregion on five years: SEPlains (364 well fit) 74 % want slower with median gain 0.019; CntlPlains 64 % / 0.014;
+EastHghlnds 69 % / 0.013; NorthEast 70 % / 0.010; WestMnts 63 % / 0.004 (far from optimum, flat); the two small
+regions (WestPlains 44, MxWdShld 47) are balanced in direction. Gains above 0.02 concentrate in the Plains and the
+Southeast: 44 to 52 % of gauges there versus 15 % in the Western Mountains.
+
+**Ten most egregious gauges** (largest five-year gain among the well fit; `experiments/landscape-p21-top10_selection.csv`):
+05464500 and 05465000 (Cedar and Iowa Rivers, IA; 377 and 453 reaches), 05458500 (Shell Rock, IA), 05594100
+(Kaskaskia, IL), 02223500 (Oconee, GA), 02425000 (Cahaba, AL), 01674500 (Mattaponi, VA), 03381500 (Little Wabash,
+IL), 06810000 (Nishnabotna, IA), 03371500 (East Fork White, IN). NSE at the trained point 0.40 to 0.55, at the
+optimum 0.77 to 0.90 (gains 0.35 to 0.45). Every one wants n × 3.9 to 8.6: slower, by a lot, and most push q to
+the floor. Low-gradient agricultural and coastal-plain rivers of the Midwest and Southeast, 100 to 450 reaches.
+The routed flow arrives far too early at these gauges; whether the inflow or the channel is at fault is what the
+hydrographs (§15, pending) will show. Their (n, q) terrains and hydrographs run next, NSE then KGE.
+
