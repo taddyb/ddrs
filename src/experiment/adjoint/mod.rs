@@ -846,7 +846,7 @@ mod tests {
         let y = "gauges:\n  pairs: [[\"A\", \"B\"]]\n";
         let s: AdjointSpec = serde_yaml::from_str(y).unwrap();
         assert_eq!(s.gauges.source, GaugeSource::Explicit);
-        assert_eq!(s.window_days, 90);
+        assert_eq!(s.window_days, 365);
         let y2 = "gauges:\n  source: nested-reference\n  gages_ii_dbf: /tmp/x.dbf\n";
         let s2: AdjointSpec = serde_yaml::from_str(y2).unwrap();
         assert_eq!(s2.gauges.source, GaugeSource::NestedReference);
