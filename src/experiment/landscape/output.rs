@@ -69,6 +69,10 @@ pub struct LandscapeResult {
     /// True if the final accepted point has `clamped_frac > max_clamped`, or
     /// the descent stopped because every Newton trial step exceeded it.
     pub hit_range_bound: bool,
+    /// True if at least one Newton iteration used the steepest-descent
+    /// fallback (the damped Newton step was not a descent direction). See
+    /// `objective::newton_step_capped`.
+    pub used_gradient_fallback: bool,
     /// Trained (alpha = 0) per-reach physical fields, length n_reach.
     pub n0: Vec<f32>,
     pub p0: Vec<f32>,
@@ -125,6 +129,7 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("clamped_frac_star", r.clamped_frac_star as f64)?;
     f.add_attribute("max_clamped_effective", r.max_clamped_effective as f64)?;
     f.add_attribute("hit_range_bound", r.hit_range_bound as i32)?;
+    f.add_attribute("used_gradient_fallback", r.used_gradient_fallback as i32)?;
     f.add_attribute("slice_center", r.slice_center.as_str())?;
     f.add_attribute("gauge_reach_row", r.gauge_reach_row as i64)?;
     f.add_attribute("obs_mean_q_m3s", r.obs_mean_q_m3s as f64)?;
@@ -253,6 +258,7 @@ mod tests {
             clamped_frac_star: 0.0,
             max_clamped_effective: 0.05,
             hit_range_bound: false,
+            used_gradient_fallback: false,
             n0: vec![0.03, 0.04],
             p0: vec![21.0, 21.0],
             q0: vec![0.5, 0.5],
@@ -349,7 +355,7 @@ pub fn append_summary(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> 
     let new = !path.exists();
     let mut w = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     if new {
-        writeln!(w, "arm,staid,n_reach,sigma,loss0,nse0,loss_star,nse_star,alpha_n_star,alpha_p_star,alpha_q_star,mult_n,mult_p,mult_q,lambda1,lambda2,lambda3,v1_n,v1_p,v1_q,v3_n,v3_p,v3_q,c1,c2,c3,hw1_tol0,hw2_tol0,hw3_tol0,cel_n,cel_p,cel_q,cos_v1_cel,grad0_norm,grad_star_norm,newton_iters,clamped_frac_star,hit_range_bound")?;
+        writeln!(w, "arm,staid,n_reach,sigma,loss0,nse0,loss_star,nse_star,alpha_n_star,alpha_p_star,alpha_q_star,mult_n,mult_p,mult_q,lambda1,lambda2,lambda3,v1_n,v1_p,v1_q,v3_n,v3_p,v3_q,c1,c2,c3,hw1_tol0,hw2_tol0,hw3_tol0,cel_n,cel_p,cel_q,cos_v1_cel,grad0_norm,grad_star_norm,newton_iters,clamped_frac_star,hit_range_bound,used_gradient_fallback")?;
     }
     let v = &r.eigvec_star;
     let cos = (0..3).map(|i| v[i][0] * r.celerity_dir[i]).sum::<f32>();
@@ -358,14 +364,14 @@ pub fn append_summary(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> 
     let ns = (r.grad_star[0].powi(2) + r.grad_star[1].powi(2) + r.grad_star[2].powi(2)).sqrt();
     writeln!(
         w,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         r.arm, r.staid, r.n_reach, r.sigma, r.loss0, r.nse0, r.loss_star, r.nse_star,
         r.alpha_star[0], r.alpha_star[1], r.alpha_star[2], r.alpha_star[0].exp(), r.alpha_star[1].exp(), r.alpha_star[2].exp(),
         r.eigval_star[0], r.eigval_star[1], r.eigval_star[2],
         v[0][0], v[1][0], v[2][0], v[0][2], v[1][2], v[2][2],
         r.coord_trained[0], r.coord_trained[1], r.coord_trained[2], hw[0], hw[1], hw[2],
         r.celerity_dir[0], r.celerity_dir[1], r.celerity_dir[2], cos, n0, ns, r.newton_path.len() - 1, r.clamped_frac_star,
-        r.hit_range_bound as i32
+        r.hit_range_bound as i32, r.used_gradient_fallback as i32
     )?;
     Ok(())
 }

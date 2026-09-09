@@ -16,7 +16,7 @@ use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
 use crate::experiment::adjoint::{seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
-use self::objective::{eig3, eig_active, solve_active, Objective};
+use self::objective::{eig3, eig_active, newton_step_capped, Objective};
 use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, Slice};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -38,6 +38,15 @@ pub struct LandscapeSpec {
     pub fd_step: f32,
     #[serde(default = "d_newton_iters")]
     pub newton_iters: usize,
+    /// Max length (log units, active components only) of the damped Newton
+    /// step before backtracking. Small basins have a nearly flat or
+    /// indefinite Hessian, so the raw Newton step can be hundreds of log
+    /// units long; every backtracking trial then lands on the same clamped
+    /// box corner and the search reports `hit_range_bound` with zero
+    /// iterations even though the gradient is not small. See
+    /// `objective::newton_direction`.
+    #[serde(default = "d_newton_step_cap")]
+    pub newton_step_cap: f32,
     /// Loss tolerances (fractions of L(α*)) for behavioural half-widths.
     #[serde(default = "d_tols")]
     pub tolerances: Vec<f32>,
@@ -85,6 +94,7 @@ fn d_alpha_max() -> f32 { 1.0986123 }
 fn d_grid() -> usize { 11 }
 fn d_h() -> f32 { 0.05 }
 fn d_newton_iters() -> usize { 10 }
+fn d_newton_step_cap() -> f32 { 1.0 }
 fn d_tols() -> Vec<f32> { vec![0.05, 0.10] }
 fn d_max_clamped() -> f32 { 0.05 }
 fn d_max_clamped_min_reaches() -> usize { 2 }
@@ -296,15 +306,16 @@ where
     let mut hess = hess0;
     let mut path: Vec<NewtonStep> = vec![NewtonStep { alpha, loss: cur.loss, grad_norm: norm(&grad0) }];
     let mut newton_hit_bound = false;
+    let mut used_gradient_fallback = false;
     for it in 0..spec.newton_iters {
         let gcur = cur.grad.unwrap();
         let (vals, _) = eig3(hess);
         let mu = (-vals[2]).max(0.0) + 1e-3 * vals[0].abs().max(1e-6);
-        let mut hd = hess;
-        for k in 0..3 {
-            hd[k][k] += mu;
+        let (d, fallback) = newton_step_capped(hess, gcur, mu, active, spec.newton_step_cap);
+        if fallback {
+            println!("  [{}] {} newton direction not descent; using gradient step", arm.name, g.staid);
+            used_gradient_fallback = true;
         }
-        let Some(d) = solve_active(hd, [-gcur[0], -gcur[1], -gcur[2]], active) else { break };
         for k in 0..3 {
             if !active[k] {
                 assert_eq!(d[k], 0.0, "Newton step must not move fixed alpha component {k}");
@@ -316,7 +327,7 @@ where
         let mut t = 1.0f32;
         let mut accepted = None;
         let mut saw_within_bound = false;
-        for _ in 0..8 {
+        for _ in 0..16 {
             let mut a = alpha;
             for k in 0..3 {
                 a[k] = (alpha[k] + t * d[k]).clamp(-spec.alpha_max, spec.alpha_max);
@@ -551,6 +562,7 @@ where
         clamped_frac_star: e_star.clamped_frac,
         max_clamped_effective: max_clamped,
         hit_range_bound,
+        used_gradient_fallback,
         n0: obj.windows[0].n0.clone().into_data().to_vec::<f32>().unwrap(),
         p0: obj.windows[0].p0.clone().into_data().to_vec::<f32>().unwrap(),
         q0: obj.windows[0].q0.clone().into_data().to_vec::<f32>().unwrap(),

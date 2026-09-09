@@ -514,6 +514,68 @@ pub fn eig_active(mut a: [[f32; 3]; 3], active: [bool; 3]) -> ([f32; 3], [[f32; 
     (vals, vecs)
 }
 
+/// Levenberg-Marquardt-damped Newton direction `d = -(H + mu*I)^-1 g`,
+/// restricted to `active` components, capped to length `step_cap` (active
+/// components only), with a steepest-descent fallback.
+///
+/// For small basins the Hessian `H` is nearly flat or indefinite, so the raw
+/// Newton direction can be hundreds of log units long; every backtracking
+/// trial in `run_gauge`'s line search then lands on the same clamped box
+/// corner, is rejected on `clamped_frac`, and the search reports
+/// `hit_range_bound` with zero iterations even though the gradient is not
+/// small. Capping the step length (rather than clamping to the box before
+/// scaling) fixes this: the direction is preserved, only its length is
+/// bounded, so backtracking can still find an acceptable interior point.
+///
+/// If the damped Newton step is not itself a descent direction (`dot(d,
+/// grad) >= 0` over active components) -- possible when `H + mu*I` is still
+/// indefinite on the active sub-block -- or the damped system is singular,
+/// `d` is replaced by the steepest-descent direction `-grad` (active
+/// components only), rescaled to `step_cap`. Fixed (non-active) components
+/// are always exactly 0.
+///
+/// Also reports whether the fallback was used, so callers can log it and
+/// record it in `LandscapeResult::used_gradient_fallback`.
+pub fn newton_step_capped(hess: [[f32; 3]; 3], grad: [f32; 3], mu: f32, active: [bool; 3], step_cap: f32) -> ([f32; 3], bool) {
+    let mut hd = hess;
+    for k in 0..3 {
+        hd[k][k] += mu;
+    }
+    let neg_g = [-grad[0], -grad[1], -grad[2]];
+    let dot_active = |d: &[f32; 3]| -> f32 { (0..3).filter(|&k| active[k]).map(|k| d[k] * grad[k]).sum() };
+    let norm_active = |d: &[f32; 3]| -> f32 { (0..3).filter(|&k| active[k]).map(|k| d[k] * d[k]).sum::<f32>().sqrt() };
+    let rescale_to = |mut d: [f32; 3], target: f32| -> [f32; 3] {
+        let n = norm_active(&d);
+        if n > 1e-12 {
+            let s = target / n;
+            for v in d.iter_mut() {
+                *v *= s;
+            }
+        }
+        d
+    };
+    if let Some(d) = solve_active(hd, neg_g, active) {
+        if dot_active(&d) < 0.0 {
+            let n = norm_active(&d);
+            let d = if n > step_cap { rescale_to(d, step_cap) } else { d };
+            return (d, false);
+        }
+    }
+    let mut steepest = [0.0f32; 3];
+    for k in 0..3 {
+        if active[k] {
+            steepest[k] = -grad[k];
+        }
+    }
+    (rescale_to(steepest, step_cap), true)
+}
+
+/// `newton_step_capped` without the fallback flag; the pure function used
+/// for unit tests below.
+pub fn newton_direction(hess: [[f32; 3]; 3], grad: [f32; 3], mu: f32, active: [bool; 3], step_cap: f32) -> [f32; 3] {
+    newton_step_capped(hess, grad, mu, active, step_cap).0
+}
+
 /// Solve the 3×3 system `a x = b` by Gaussian elimination with partial pivoting.
 pub fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
     let mut m = [[a[0][0] as f64, a[0][1] as f64, a[0][2] as f64, b[0] as f64], [a[1][0] as f64, a[1][1] as f64, a[1][2] as f64, b[1] as f64], [a[2][0] as f64, a[2][1] as f64, a[2][2] as f64, b[2] as f64]];
@@ -639,6 +701,60 @@ mod tests {
         let x = solve3([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]], [1.0, 2.0, 3.0]).unwrap();
         let r = [4.0 * x[0] + x[1], x[0] + 3.0 * x[1] + x[2], x[1] + 2.0 * x[2]];
         assert!((r[0] - 1.0).abs() < 1e-4 && (r[1] - 2.0).abs() < 1e-4 && (r[2] - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn newton_direction_caps_flat_hessian_step() {
+        // Flat 2-D Hessian (n, p active; q fixed): mu alone provides the
+        // curvature, so the raw Newton step is -grad/mu, arbitrarily long
+        // for small mu. The capped direction must have length exactly
+        // step_cap over the active components.
+        let hess = [[0.0; 3]; 3];
+        let grad = [3.0, -4.0, 0.0];
+        let mu = 1e-4;
+        let active = [true, true, false];
+        let step_cap = 1.0;
+        let d = newton_direction(hess, grad, mu, active, step_cap);
+        assert_eq!(d[2], 0.0);
+        let len = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        assert!((len - step_cap).abs() < 1e-4, "expected length {step_cap}, got {len}");
+        // direction is descent: dot(d, grad) < 0.
+        assert!(d[0] * grad[0] + d[1] * grad[1] < 0.0);
+    }
+
+    #[test]
+    fn newton_direction_falls_back_to_gradient_when_uphill() {
+        // Indefinite Hessian; with this grad the damped Newton step points
+        // uphill (dot(d, grad) >= 0), so the fallback must kick in and
+        // return the (rescaled) steepest-descent direction.
+        let hess = [[-5.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]];
+        let grad = [1.0, 0.0, 0.0];
+        let mu = 0.0; // damping alone would flip the sign; keep it at 0 to force the uphill case
+        let active = [true, false, false];
+        let step_cap = 2.0;
+        let d = newton_direction(hess, grad, mu, active, step_cap);
+        // Raw Newton step here is -grad/hess[0][0] = -1/-5 = 0.2 (uphill:
+        // dot(d, grad) = 0.2 > 0), so the fallback direction is -grad
+        // rescaled to step_cap: (-step_cap, 0, 0).
+        assert!((d[0] - (-step_cap)).abs() < 1e-5);
+        assert_eq!(d[1], 0.0);
+        assert_eq!(d[2], 0.0);
+    }
+
+    #[test]
+    fn newton_direction_unmodified_when_well_conditioned_and_short() {
+        // Well-conditioned diagonal Hessian; raw Newton step is well within
+        // step_cap, so it must come back unmodified.
+        let hess = [[4.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 4.0]];
+        let grad = [1.0, -1.0, 2.0];
+        let mu = 0.0;
+        let active = [true, true, true];
+        let step_cap = 10.0;
+        let d = newton_direction(hess, grad, mu, active, step_cap);
+        let expected = solve_active(hess, [-grad[0], -grad[1], -grad[2]], active).unwrap();
+        assert_eq!(d, expected);
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        assert!(len < step_cap);
     }
 
     /// Consistency check (chain rule): the basin-uniform gradient is the sum
