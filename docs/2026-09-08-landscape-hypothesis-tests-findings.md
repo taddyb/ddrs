@@ -357,3 +357,34 @@ area-balanced model's n was a batch compromise (§1 to §3), predicted the gauge
 trained on the other population landed there and shows no residual per-gauge gain (§6). The same instrument now says
 the area-balanced population under-determines n, and which gauges hold the information.
 
+## 11. Full water-year window (user decision 2026-09-09): p = 21 model, epoch 30
+
+All bundles now use one 365-day window over WY2000 (`window_days: 365`, `n_windows: 1`; code defaults changed,
+`7352665`). The p = 21 studies were rerun on `2026-09-08T15-55-52Z-conus-train-and-test/epoch_30_mb_1`; the clean-twin
+steps were dropped at the user's request (only this model from here on).
+
+**Juniata (n, q) terrain** (`landscape-p21-surface-nq/2026-09-09T02-14-52Z`, 25 × 25, p pinned at 21):
+
+| full year | NSE trained | NSE at 2-D optimum | optimum move |
+|---|---|---|---|
+| Newport | 0.790 | 0.859 | n 0.040 → 0.082, q 0.10 → 0.023 (box edge) |
+| Mapleton Depot | 0.840 | 0.858 | n 0.040 → 0.073, q 0.10 → 0.022 (box edge) |
+
+The shape is the seasonal-window shape: a trench in n at 0.04 for q ≥ 0.1 whose floor drops and drifts to n ≈ 0.08 as q
+→ 0. NSE at the trained point is much higher over a full year (0.79 vs 0.70 at Newport) because the annual variance is
+dominated by the spring floods the model gets right; 90-day windows scored each season's small variance alone. The
+gain to the gauge optimum is larger over the year (+0.07 at Newport) and points the same way: with a 21 m channel the
+gauge wants roughly double the roughness and a near-rectangular section. q sits on the box edge, so the true 2-D
+optimum is at smaller q still.
+
+**84-gauge census, full year, before the line-search fix** (`landscape-p21-census41/2026-09-09T01-52-19Z`): 58 of 84
+gauges well fit (NSE > 0.3; 20 with seasonal windows), median gain 0.000, 66 % within a factor 1.25 of their optimum,
+but 41 of the 58 range-bound and 26 with zero Newton iterations: the unbounded Newton step for small basins landed on
+the box corner every trial (fixed in `964f062`: step cap 1 log unit, gradient fallback, 16 halvings; verified on
+01436000, 01435000, 01452000, which now take 5 to 12 steps). The "at optimum" share from this census is inflated and is
+superseded by the all-gauge sharded census (§12, pending).
+
+**CONUS map** (`experiments/landscape/conus_map.py`, `figures/conus_n_gap.png`): per gauge |ln(n_optimal / n_trained)|
+blue (0) to red (ln 3), sign in a second panel, hollow grey where NSE < 0.3, black edge for range-bound optima. The
+preview on the 84 gauges is too blue for the reason above.
+
