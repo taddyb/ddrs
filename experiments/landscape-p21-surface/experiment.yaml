@@ -10,9 +10,9 @@ landscape:
   gauges:
     pairs:
       - ["01563500", "01567000"]
-  window_days: 90
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
   water_year: 2000
-  n_windows: 4
+  n_windows: 1     # one window covering the water year; was 4 seasonal
   alpha_max: 1.5
   grid: 41
   fd_step: 0.05

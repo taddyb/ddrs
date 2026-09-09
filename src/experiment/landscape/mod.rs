@@ -78,9 +78,9 @@ pub struct LandscapeSpec {
     #[serde(default = "d_slice_center")]
     pub slice_center: String,
 }
-fn d_window_days() -> usize { 90 }
+fn d_window_days() -> usize { 365 }
 fn d_water_year() -> i32 { 2000 }
-fn d_n_windows() -> usize { 4 }
+fn d_n_windows() -> usize { 1 }
 fn d_alpha_max() -> f32 { 1.0986123 }
 fn d_grid() -> usize { 11 }
 fn d_h() -> f32 { 0.05 }

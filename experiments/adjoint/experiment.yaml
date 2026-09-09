@@ -24,7 +24,7 @@ adjoint:
     # / examples/juniata gauge). Both are in gages_2000_area_balanced.csv.
     pairs:
       - ["01563500", "01567000"]
-  window_days: 90          # hourly tape = (window_days - 1) * 24 steps
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
   anchors: { high: 2, low: 2 }
   anchor_min_gap_days: 60
   lag_days: 30             # kernel horizon

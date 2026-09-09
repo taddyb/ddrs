@@ -23,7 +23,7 @@ adjoint:
   gauges:
     source: nested-reference
     gages_ii_dbf: /mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf
-  window_days: 90
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
   anchors: { high: 2, low: 2 }
   anchor_min_gap_days: 60
   lag_days: 30

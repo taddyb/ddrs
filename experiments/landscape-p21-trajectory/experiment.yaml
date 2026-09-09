@@ -19,9 +19,9 @@ landscape:
       - ["06449100", "06452000"]
       - ["06350000", "06354000"]   # Cannonball River, ND
       - ["06353000", "06354000"]
-  window_days: 90
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
   water_year: 2000
-  n_windows: 4
+  n_windows: 1     # one window covering the water year; was 4 seasonal
   alpha_max: 2.3025851
   fd_step: 0.05
   newton_iters: 12

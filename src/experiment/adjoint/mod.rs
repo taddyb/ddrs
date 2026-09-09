@@ -103,7 +103,7 @@ fn d_fm_rel() -> f32 { 0.02 }
 fn d_fm_abs() -> f32 { 1e-4 }
 fn d_fm_pass() -> f32 { 0.95 }
 
-fn d_window_days() -> usize { 90 }
+fn d_window_days() -> usize { 365 }
 fn d_lag_days() -> usize { 30 }
 fn d_water_year() -> i32 { 2000 }
 fn d_functionals() -> Vec<Functional> { vec![Functional::Kernel, Functional::Volume, Functional::Residual] }
