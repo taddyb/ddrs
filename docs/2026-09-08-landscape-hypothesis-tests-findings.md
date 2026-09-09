@@ -554,3 +554,29 @@ Readings.
 Caveat: the (n, q) terrains for these gauges show the trench at the box edge in n; the KGE run (same box) is in
 progress and will show whether the KGE optimum agrees in direction. Rerun both with alpha_max 2.3 to locate the optima.
 
+## 16. The same ten gauges with 1 − KGE as the objective (run `landscape-p21-top10-kge/merged`)
+
+Same window, grid and box as §15; objective `kge`. Overview `docs/figures/2026-09-09-top10_kge_overview.png`.
+
+| gauge | NSE-optimum: n* / n, q* / q, NSE*, KGE* | KGE-optimum: n* / n, q* / q, NSE*, KGE* |
+|---|---|---|
+| 01674500 | 4.48 (box), 4.48, 0.811, 0.847 | 4.48 (box), 0.22, 0.794, 0.840 |
+| 02223500 | 3.94, 0.22, 0.884, 0.811 | 3.12, 0.22, 0.849, 0.819 |
+| 02425000 | 4.31, 0.22, 0.886, 0.939 | 3.98, 0.25, 0.886, 0.942 |
+| 03371500 | 4.48, 0.25, 0.889, 0.925 | 4.48, 1.26, 0.876, 0.923 |
+| 03381500 | 4.48, 0.42, 0.661, 0.815 | 4.48, 0.79, 0.658, 0.814 |
+| 05458500 | 4.48, 0.76, 0.839, 0.808 | 4.48, 1.30, 0.838, 0.807 |
+| 05464500 | 4.48, 0.22, 0.859, 0.853 | 4.48, 0.46, 0.854, 0.851 |
+| 05465000 | 4.48, 0.87, 0.809, 0.890 | 4.48, 0.87, 0.809, 0.890 |
+| 05594100 | 4.48, 0.22, 0.765, 0.881 | 4.48, 1.17, 0.762, 0.881 |
+| 06810000 | 4.48, 0.22, 0.741, 0.864 | 4.48, 1.42, 0.718, 0.852 |
+
+Readings. (i) The two objectives agree on n at all ten gauges: the same direction, and the same box-edge value at
+eight of them (3.1 to 4.0 at the other two). (ii) They disagree on q, freely: the q multiplier at the KGE optimum
+differs from the NSE one by factors up to 20 (01674500: 4.48 vs 0.22) with NSE and KGE at the two optima within 0.02
+of each other. q is the sloppy direction under both objectives. (iii) Optimising KGE costs at most 0.035 NSE and
+optimising NSE costs at most 0.012 KGE at these gauges; the two scores move together because the fix is timing and
+attenuation, which both measure. Conclusion: the choice of objective does not change the diagnosis at the worst
+gauges; it only relocates the optimum along the flat q direction, which is another demonstration that q is not
+identified. The wide-box reruns (n up to × 10) will give the true optima for both objectives.
+
