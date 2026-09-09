@@ -452,3 +452,31 @@ a size- or region-stratified training run is the direct test.
 the full 15-year test period (12 shards, about a day), to check that the direction and the flatness hold across years.
 The Juniata full-period result (§12) says the n direction holds and the q direction does not.
 
+### 13b. By region (GAGES-II aggregated ecoregions; `experiments/landscape/region_breakdown.py`)
+
+`docs/figures/2026-09-09-conus_n_gap_by_ecoregion_wy2000.png`; tables in `merged/figures/region-ecoregion/REGION.md`
+and `region-huc02/`. The seven PUR regions of Feng et al. (2021, GRL, doi 10.1029/2021GL092999) are defined in that
+paper's Table S4 (neighbouring HUC2 units combined); the SI was not retrievable, so a provisional geographic grouping
+is in the script, flagged, pending the published table.
+
+| Ecoregion | gauges | well fit | median gain | gain > 0.02 | wants slower | wants faster | median |ln(n*/n)| |
+|---|---|---|---|---|---|---|---|
+| WestPlains | 55 | 15 | 0.049 | 67 % | 47 % | 33 % | 0.60 |
+| CntlPlains | 409 | 300 | 0.022 | 51 % | 55 % | 27 % | 0.60 |
+| EastHghlnds | 327 | 291 | 0.020 | 50 % | 68 % | 16 % | 0.63 |
+| SEPlains | 384 | 297 | 0.020 | 50 % | 56 % | 21 % | 0.57 |
+| NorthEast | 291 | 274 | 0.017 | 46 % | 65 % | 11 % | 0.63 |
+| WestXeric | 171 | 85 | 0.014 | 34 % | 48 % | 38 % | 0.96 |
+| SECstPlain | 69 | 37 | 0.011 | 38 % | 51 % | 35 % | 0.86 |
+| MxWdShld | 52 | 33 | 0.010 | 27 % | 33 % | 39 % | 0.71 |
+| WestMnts | 607 | 378 | 0.005 | 21 % | 70 % | 12 % | 0.76 |
+
+Readings. (i) The "wants slower" majority holds in every region except the Mixed Wood Shield; the bias in trained n is
+CONUS-wide, strongest in the Western Mountains (70 %) and the Northeast (65 %). (ii) Distance and gain anti-correlate
+across regions: the Western Mountains sit farthest from their optima (median factor 2.1) and gain least (0.005);
+these are snowmelt basins where daily NSE is set by the melt season the inflow controls. (iii) Gains concentrate in
+the Plains and the Eastern Highlands (median 0.02 to 0.05, half the gauges above 0.02): the rain-driven, flashier
+basins where routing timing matters at the daily step. (iv) The Xeric West and the coastal plain want to move
+farthest with the most balanced directions: routing is poorly identified there rather than biased. (v) HUC2 06
+(Tennessee) has the largest positive median displacement and the highest share of gauges with gain above 0.02 (79 %).
+
