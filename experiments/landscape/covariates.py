@@ -203,7 +203,7 @@ def series_metrics(obs: np.ndarray, routed: np.ndarray, qprime: np.ndarray, axis
     lag_days_routed = best_lag(routed, obs, valid)
 
     dates = pd.Timestamp(axis_start_date) + pd.to_timedelta(window_start_day + np.arange(len(obs)), unit="D")
-    spring_mask = valid & dates.month.isin([3, 4, 5, 6]).to_numpy()
+    spring_mask = valid & dates.month.isin([3, 4, 5, 6])
     spring_frac = float(np.sum(obs[spring_mask]) / sum_obs) if sum_obs != 0 else np.nan
 
     k = max(1, int(round(0.01 * n_valid)))
