@@ -22,7 +22,7 @@ landscape:
   window_days: 1826   # 5 water years
   water_year: 1996
   n_windows: 1
-  alpha_max: 1.5
+  alpha_max: 2.3025851   # ln 10: the 1.5 box put nine of ten NSE optima on its edge (n x4.48)
   grid: 25
   fd_step: 0.05
   newton_iters: 12
