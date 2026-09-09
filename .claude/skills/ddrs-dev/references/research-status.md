@@ -152,6 +152,8 @@ paper's R1–R5.
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
 | Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T11 |
+| The 84-gauge full-year census (`landscape-p21-census41/2026-09-09T01-52-19Z`), or any census run on a binary before `964f062`, for "share of gauges at optimum" | Unbounded Newton step landed on the search-box corner and reported zero iterations, which read as already-at-optimum; superseded by the 2,365-gauge sharded census, §Landscape census above |
+| The (n, q) landscape with a depth axis by default | User: the axis should show post-transformation q, not depth |
 
 ## Structural constants (stable)
 
@@ -421,6 +423,69 @@ twin isolates the single change (p pinned, same population) and shows the 0.040
 was a property of the training population (gages_3000, which contains the Juniata),
 not of removing the n/p degeneracy. See findings doc §8 for the full twin comparison.
 
+## Landscape census, all 2,365 test gauges, p = 21 model (2026-09-09)
+
+Authority: `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §11-13.
+
+**Window policy (user decision 2026-09-09).** Every landscape bundle now uses full water
+years: `window_days: 365` (one water year, `n_windows: 1`) or `window_days: 0` (the whole
+eval axis, one window). 90-day seasonal windows are retired; a season scores only that
+season's small variance and understates the model's real skill (Newport NSE at the trained
+point was 0.70 over 90 days, 0.79 over the full year). Code defaults changed in `7352665`.
+
+**Sharded workflow.** A full-population census runs as K parallel shards:
+`scripts/landscape_shards.sh <bundle> <K> [backend]` launches `ddrs experiment <bundle>
+--shard I/K` as transient systemd --user units against gauge source `all` (all 2,365 test
+gauges, not a fixed list); `scripts/landscape_merge.py` concatenates the shards' `summary.csv`,
+hard-links their `gauges/*.nc`, and writes one merged manifest that `census.py`, `conus_map.py`,
+and `plots.py` read like an ordinary unsharded run. 24 shards covered all 2,365 gauges on
+WY2000 in 1 h 47 min.
+
+**Newton line-search fix (`964f062`).** The Newton step is now capped at 1 log unit per
+iteration with a gradient-descent fallback and up to 16 step halvings. Before this fix, small
+basins' unbounded Newton step landed on the search-box corner on the first trial and reported
+zero iterations, which the code then read as "already at the optimum," inflating the
+"fraction of gauges at their optimum" statistic. Verified on 01436000, 01435000, 01452000,
+which now take 5 to 12 Newton steps instead of 0.
+
+**Results (`landscape-p21-all/merged`, 24 shards, WY2000, p = 21 model epoch 30, Newton +
+Hessian over (n, q), p pinned): 0.4 % of gauges range-bound, none with zero iterations, 4 %
+used the gradient fallback.**
+
+| WY2000 | count | median gain to own optimum | gain > 0.02 | median \|ln(n*/n)\| | within × 1.25 | wants slower | wants faster |
+|---|---|---|---|---|---|---|---|
+| well fit, NSE > 0.3 | 1,710 | 0.014 | 42 % | 0.67 (factor 1.95) | 19 % | 61 % | 19 % |
+| NSE > 0.6 | 1,261 | 0.013 | 40 % | 0.62 | 22 % | 62 % | 16 % |
+| poorly fit, NSE ≤ 0.3 | 655 | 0.027 | 55 % | 0.92 | 11 % | 55 % | 34 % |
+
+By basin size among the well fit, median gain only reaches 0.03 above 200 reaches (107
+gauges); it is 0.01 to 0.02 in every smaller size class, while median |ln(n*/n)| stays 0.4 to
+0.65 across every size class: the trained n is far from most gauges' optima (median distance
+factor 2, 61 % want slower) but moving there buys almost nothing (58 % of well-fit gauges gain
+under 0.02 NSE).
+
+**Verdict: n is weakly identifiable at the daily scale over most of CONUS.** This is why the
+batch's n is set by population composition (see the gages_3000 vs area-balanced comparison
+above), not by any individual gauge: the loss surface in n is nearly flat at most gauges, so
+the gradient that sets the batch optimum comes from wherever the population happens to weight
+it, not from a well-conditioned per-gauge signal. Map: `docs/figures/2026-09-09-conus_n_gap_p21_wy2000.png`
+(`experiments/landscape/conus_map.py`): the |ln(n*/n)| panel is red over much of the East and
+the West Coast (wants slower routing), the gain panel is blue almost everywhere except the
+large rivers.
+
+**Juniata, full 15-year test period** (`landscape-p21-fulltest-juniata/2026-09-09T02-55-05Z`,
+`window_days: 0`, 5,479 days, 1995-10-01 to 2010-09-30). The landscape's NSE at the trained
+point matches the run's own eval on the same period to the second decimal (Mapleton 0.841 vs
+0.847, Newport 0.853 vs 0.858), which validates the landscape objective (hourly routing, daily
+pooling under the training tau, warm-up excluded) against the production eval path. Per-gauge
+gain over the full period is +0.004 at Mapleton and +0.03 at Newport, both smaller than the
+WY2000-only gains (+0.02 and +0.07): a single year overstates what a gauge could gain. **The q
+optimum flips sign between windows while n does not**: over WY2000 the optimum pushes q to its
+floor, over 15 years it pushes q up (× 3.6 at both gauges); n moves the same direction in both
+windows (up, × 1.2 to 2). This is the operational definition of a poorly constrained
+parameter used in the paper: its optimum changes sign with the evaluation window while the
+loss barely moves.
+
 ## Open, not closed
 
 - **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30
@@ -521,3 +586,15 @@ not of removing the n/p degeneracy. See findings doc §8 for the full twin compa
   pre-registered hypotheses, leakance disabled (ζ=0) in every arm. Abstract, intro,
   and methods are drafted; the Results section is still a `\tbd{}` skeleton. Only the
   dHBV2 cross-family arms remain unrun.
+- **Five-year and 15-year all-gauge censuses (running).** `landscape-p21-all-5yr` (WY1996 to
+  WY2000, 16 shards) and `landscape-p21-all-15yr` (the full test period, 12 shards) repeat the
+  §Landscape census methodology to check whether the n direction and the flatness in §Landscape
+  census hold across years the way the Juniata pair suggests, or whether they are a WY2000
+  artifact.
+- **Which gauges set the batch's n.** gages_3000 adds 1,370 gauges of median area 333 km² over
+  the area-balanced list and pulls the batch's trained n down by roughly half; a size- or
+  region-stratified training run is the direct test of which gauges in that addition supply the
+  gradient (not run; user decision, see §Fixed width coefficient p above).
+- **p as a function of river size.** The Moody & Troutman-derived candidate
+  `p = 7.2 · 0.27^(−q) · Q_ref^(0.5 − 0.3q)` is a candidate spatial function for p, not yet
+  fit or tested against a learned-p model at varying basin size.
