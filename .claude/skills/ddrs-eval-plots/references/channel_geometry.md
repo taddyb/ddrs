@@ -182,7 +182,7 @@ for name, unit in (("width", "m"), ("depth", "m"), ("wd_ratio", "-")):
            linewidth=0.0, vmin=lo, vmax=hi, zorder=1)
     try:
         import contextily as cx
-        cx.add_basemap(ax, crs=g.crs, source=cx.providers.CartoDB.Positron,
+        cx.add_basemap(ax, crs=g.crs, source=cx.providers.Esri.WorldGrayCanvas,
                        alpha=0.6, zorder=0, attribution=False)
     except Exception as e:
         print(f"basemap skipped ({type(e).__name__})"); ax.set_facecolor("#f0f0f0")
