@@ -154,6 +154,9 @@ paper's R1–R5.
 | Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T11 |
 | The 84-gauge full-year census (`landscape-p21-census41/2026-09-09T01-52-19Z`), or any census run on a binary before `964f062`, for "share of gauges at optimum" | Unbounded Newton step landed on the search-box corner and reported zero iterations, which read as already-at-optimum; superseded by the 2,365-gauge sharded census, §Landscape census above |
 | The (n, q) landscape with a depth axis by default | User: the axis should show post-transformation q, not depth |
+| alpha_q_star or q half-widths as a reported optimum | The Hessian at the optimum is a saddle along q at 53 % of well-fit gauges (§Why gauges are not at their roughness optimum, F). Confirm with the 1-D line scan at n\* before quoting a q optimum |
+| The integer `lag_days_*` columns of `covariates.csv` | Coarse to the day; use the fractional lags in analyst D's `D_wellfit_with_fractional_lags.csv` (`early_r`, `early_q`, `delay_channel`, positive = early) instead |
+| The 15-year all-gauge census, cited as a result | Held at launch (12 shards would need about 140 GB); scope pending the user, see §Landscape census, all 2,365 test gauges |
 
 ## Structural constants (stable)
 
@@ -486,6 +489,105 @@ windows (up, × 1.2 to 2). This is the operational definition of a poorly constr
 parameter used in the paper: its optimum changes sign with the evaluation window while the
 loss barely moves.
 
+## Why gauges are not at their roughness optimum (2026-09-09, swarm synthesis)
+
+Authority: `docs/2026-09-09-why-not-at-optimum-findings.md` (six-analyst swarm synthesis, reports
+`docs/why-analysis/A-flat-q.md`, `B-clamping.md`, `C-weak-gradient.md`, `D-inflow-bias.md`,
+`E-training-side.md`, `F-equifinality.md`) and `docs/2026-09-08-landscape-hypothesis-tests-findings.md`
+§14.
+
+**Five-year census facts** (`landscape-p21-all-5yr/merged`, WY1996 to WY2000, all 2,365 gauges,
+16 shards, 12.7 h): 2,124 gauges well fit (NSE > 0.3 at the trained point), median NSE 0.754,
+median gain to own optimum 0.010, median |ln(n*/n)| 0.72, 65 % want slower routing and 17 %
+want faster. The longer window raises the well-fit count and lowers the median gain versus
+WY2000 alone (0.010 vs 0.014): a single year overstates what a gauge could gain, and the
+systematic "wants slower" bias (65 %) is CONUS-wide, not a WY2000 artifact.
+
+**Consolidated partition of the 2,124 well-fit gauges** (six independent analyses of clamping,
+flat q, weak gradient vs travel time, inflow timing, training mechanics, and Hessian structure,
+reconciled against each other in the synthesis):
+
+| class | share | median gain | who they are |
+|---|---|---|---|
+| at the optimum | about 20 % | 0.001 | all sizes and regions, including the 24 gauges beyond eight days of travel time |
+| equifinal: inside the behavioural set or on flat ground | about 45 % | 0.005 to 0.009 | small or steep basins, travel time under a day, routed flow on time within a quarter day; Western Mountains is the largest regional block (63 % want slower, gain 0.004) |
+| real error along the stiff axis | about 35 % | 0.028 to 0.029 | larger, floor-slope, rain-fed rivers with one to four days of travel; routed flow early by a quarter day or more; 76 to 93 % want slower, n × 2.5; ecoregion shares Eastern Highlands 51 %, Southeast Plains 49 %, Northeast 40 %, Central Plains 39 %, Western Mountains 14 % |
+| degenerate optimum | 16 % (overlaps the rows above) | 0.014 | q on the box edge (11.6 %) or λ₁ ≤ 0 (86 gauges) |
+
+The poorly fit 241 gauges sit outside this partition: an intermittent Xeric/Plains subset
+(about 60 gauges) is clamp-marked, and a Western Mountains subset (104 gauges) has the right
+inflow volume and the wrong snowmelt timing.
+
+**Verdicts.**
+
+- **Clamping: refuted for the fitted population.** No well-fit gauge has a trained n or q
+  within 1 % of a range edge. Routed floor days occur at 2.2 % of well-fit gauges, observed
+  zero-flow days at 8.2 %, and those gauges are steeper (not flatter) and want no change in n.
+  Clamping only marks the ~60 arid intermittent gauges among the 241 poorly fit.
+- **Low flow: refuted as the cause of flat q.** Low-flow and zero-flow fractions do not
+  correlate with q flatness (rho −0.04, −0.01). Flatness in q instead falls monotonically
+  with depth at the gauge (94 % below 0.3 m, 28 % above 4 m), which rules out the
+  symmetric-leverage prediction that flatness peaks near 1 m depth.
+- **q is flat at 85 % of well-fit gauges by construction, not by accident.** A factor-2 move
+  in q changes the loss by under 1 % at those gauges; n is flat at only 11 %, and no gauge is
+  flat in n but curved in q. The 15 % where q is identifiable are deep, large, low-slope main
+  stems (median depth 1.5 m, area 2,600 km²).
+- **n is identifiable above about one day of travel time.** Curvature in n rises with channel
+  length (rho +0.31), area (+0.27), and the travel-time proxy (+0.26); median |H_nn| is 0.006
+  to 0.008 below one day of travel and 0.023 to 0.025 at one to four days.
+- **The trained channel adds about zero days of delay, so routed flow inherits the inflow's
+  early timing.** Median added delay is 0.00 days (68 % of gauges under 0.1 day). The
+  displacement correlates with "routed flow arrives early" at Spearman +0.73 (fractional
+  lags), and a joint linear model explains 45 % of the displacement variance (78 % boosted),
+  with timing dominant and volume bias under 1 %.
+- **Loss weighting and step count are refuted.** The NSE-batch per-day weights are nearly
+  uniform; reweighting would move the median displacement by a partial contribution of only
+  0.03. The run made 60 optimizer updates and n was settled by the twentieth.
+- **Head attributes explain only 12 % of ln n\* variance.** Attribute nearest neighbours still
+  disagree by a factor 1.75 in the gauge-optimal n (random pairs disagree by 2.2), and the
+  head's trained ln n spread is half of what the gauges want.
+
+**Ranked training changes** (highest expected effect first):
+
+1. **Width as a function of river size (p(A) or p(Q_ref)), not a fixed coefficient.** Targets
+   the 35 % real-error class directly: the class wants n × 2.5 to 9 with q pinned to the floor,
+   consistent with a channel too narrow for large rivers (a 21 m channel at Newport on an
+   8,700 km² basin). Expected effect is the largest of any single change.
+2. **A learnable per-basin timing term** (inflow delay, unit-hydrograph scale, or a learnable
+   tau), trained jointly. Routed-flow timing is the strongest covariate of both displacement
+   (rho +0.73) and gain (drop-one dR² 0.14 of 0.31). Run after item 1 to measure the residual.
+3. **Attributes that carry routing-timing information**: channel width or width-to-depth from
+   GRWL, sinuosity, floodplain/wetland fraction, tile drainage/cropland, reservoir/lake storage.
+   Targets the 12 % ceiling on attribute-explained ln n\*.
+4. **Stop learning q from daily discharge where it is unidentifiable** (flat at 85 % of
+   gauges, a saddle at 53 % of optima, sign flips between windows): prescribe q, tie it to a
+   downstream hydraulic-geometry relation, or learn it only where an hourly test shows
+   curvature.
+5. **An hourly diagnostic at 60 gauges** spanning the depth and travel-time bins, run first as
+   a cheap check: if |H_nn| and q curvature rise 2 to 5× at short-travel-time gauges under an
+   hourly step, the daily objective (not the physics) is suppressing identifiability there and
+   an hourly or timing-aware loss is warranted; if not, item 4 stands.
+
+Area/sigma reweighting and more optimizer steps rank last: partial contributions of 0.03, and
+n was already converged by update 20 of 60.
+
+**Equifinality statements.**
+
+- q is unidentifiable from daily discharge at 85 % of gauges: any q in the range gives the
+  same five-year loss within 1 %, and learning it per reach there learns noise.
+- n is unidentifiable below about one day of channel travel time (45 % of well-fit gauges):
+  median |H_nn| 0.006 to 0.008, gain only 0.009 despite a median displacement of a factor 4.4.
+- The trained point sits on a ridge or shoulder of the per-gauge surface at most gauges
+  (H_nn ≤ 0 at 46 %, H_qq ≤ 0 at 69 %), while the optimum itself is convex in n at 96 % of
+  gauges: the batch compromise lands between conflicting gauges, not inside any one gauge's
+  bowl, so trained-point curvature understates identifiability.
+- The Hessian at the optimum is indefinite (a saddle, almost always along q) at 53 % of
+  well-fit optima: the reported q\* is often not a minimum.
+- Real error is the complement: about 35 % of gauges, one direction (slower), concentrated
+  east of the Rockies, worth 0.03 NSE at the median and up to 0.45 at the ten most egregious
+  rivers (n × 3.9 to 8.6, low-gradient agricultural/coastal-plain rivers of the Midwest and
+  Southeast).
+
 ## Open, not closed
 
 - **tau is mis-set (pilot-strength, 2026-08-06).** WY1996 sweep on the epoch-30
@@ -598,3 +700,20 @@ loss barely moves.
 - **p as a function of river size.** The Moody & Troutman-derived candidate
   `p = 7.2 · 0.27^(−q) · Q_ref^(0.5 − 0.3q)` is a candidate spatial function for p, not yet
   fit or tested against a learned-p model at varying basin size.
+- **The p(A) retrain on gages_3000 is the highest-value experiment (§Why gauges are not at
+  their roughness optimum above).** Retrain with width as a function of river size, everything
+  else unchanged, then rerun the five-year census and the diagnostic pass. Targets the 35 %
+  real-error class directly; costs one ~2 h training run plus a ~13 h census. Success: the
+  early-arrival class shrinks toward the on-time share and class-iv gain falls below 0.01.
+- **The hourly landscape at 60 gauges** spanning the depth and travel-time bins is the cheap
+  companion, runnable today: it decides whether the 45 % equifinal share is a property of the
+  daily objective or of the physics (§Why gauges are not at their roughness optimum, item 5).
+- **The q line scan on the 60 saddle gauges.** A stratified 1-D scan in q at n\* (25 points
+  over the box, about 2 h as 6 shards) decides whether the 53 %-of-optima q saddles are
+  numerical or a second regime, and is the prerequisite for quoting any q\* or q half-width.
+- **A per-gauge clamp accumulator** (floor hours, negative pre-clamp hours, depth/width floor
+  reaches) added to the diagnostic pass, to close the clamping question at the hourly level.
+- **PUR-7 grouping pending Table S4.** The seven PUR regions of Feng et al. (2021, GRL, doi
+  10.1029/2021GL092999) are defined in that paper's Table S4; the SI was not retrievable, so
+  the regional breakdown currently uses a provisional geographic grouping
+  (`experiments/landscape/region_breakdown.py`), flagged pending the published table.
