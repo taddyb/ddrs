@@ -21,6 +21,58 @@ use crate::cli::workspace::Workspace;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// A shard spec `I/K`: this process handles every K-th gauge starting at
+/// index `I`, once the population is sorted by staid. Parsed from
+/// `--shard I/K`; `K == 0` or `I >= K` is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Shard {
+    pub index: usize,
+    pub count: usize,
+}
+
+impl std::fmt::Display for Shard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.index, self.count)
+    }
+}
+
+impl std::str::FromStr for Shard {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (i, k) = s
+            .split_once('/')
+            .ok_or_else(|| format!("--shard must be I/K (e.g. 0/24), got `{s}`"))?;
+        let index: usize = i
+            .parse()
+            .map_err(|_| format!("--shard index `{i}` is not a non-negative integer"))?;
+        let count: usize = k
+            .parse()
+            .map_err(|_| format!("--shard count `{k}` is not a non-negative integer"))?;
+        if count == 0 {
+            return Err("--shard count K must be >= 1".into());
+        }
+        if index >= count {
+            return Err(format!("--shard index {index} must be < count {count}"));
+        }
+        Ok(Shard { index, count })
+    }
+}
+
+/// Sort `gauges` by staid, then keep only the entries at sorted-index `i`
+/// where `i % shard.count == shard.index`. A no-op (order untouched) when
+/// `shard` is `None`, so bundles that never pass `--shard` see no behavior
+/// change.
+pub fn shard_gauges(gauges: Vec<adjoint::gauges::GaugeEntry>, shard: Option<Shard>) -> Vec<adjoint::gauges::GaugeEntry> {
+    match shard {
+        None => gauges,
+        Some(s) => {
+            let mut sorted = gauges;
+            sorted.sort_by(|a, b| a.staid.cmp(&b.staid));
+            sorted.into_iter().enumerate().filter(|(i, _)| i % s.count == s.index).map(|(_, g)| g).collect()
+        }
+    }
+}
+
 /// `experiment.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExperimentSpec {
@@ -179,9 +231,16 @@ pub struct ExperimentRun {
 }
 
 impl ExperimentRun {
-    pub fn create(ws: &Workspace, name: &str) -> Result<Self, BoxError> {
+    /// `shard` is folded into the run directory's name only
+    /// (`<ts>-shard-I-of-K`), not `started_utc`, so K shards launched in the
+    /// same second land in distinct directories without colliding.
+    pub fn create(ws: &Workspace, name: &str, shard: Option<Shard>) -> Result<Self, BoxError> {
         let started_utc = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string();
-        let dir = ws.root().join("experiments").join(name).join(&started_utc);
+        let dir_name = match shard {
+            Some(s) => format!("{started_utc}-shard-{}-of-{}", s.index, s.count),
+            None => started_utc.clone(),
+        };
+        let dir = ws.root().join("experiments").join(name).join(&dir_name);
         std::fs::create_dir_all(&dir)?;
         Ok(Self { dir, started_utc })
     }
@@ -199,6 +258,8 @@ pub struct ExperimentManifest {
     pub git: GitInfo,
     pub backend: String,
     pub ddrs_version: String,
+    /// `"I/K"` when `--shard I/K` was passed, else `None`.
+    pub shard: Option<String>,
     /// Study-specific result block (e.g. the adjoint finite-difference gate).
     pub validation: Option<serde_json::Value>,
     pub notes: Vec<String>,
@@ -271,5 +332,40 @@ mod tests {
         let err = latest_checkpoint(&tmp).unwrap_err().to_string();
         assert!(err.contains("stale"), "{err}");
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn shard_parses_valid_and_rejects_bad_input() {
+        assert_eq!("0/24".parse::<Shard>().unwrap(), Shard { index: 0, count: 24 });
+        assert_eq!("23/24".parse::<Shard>().unwrap(), Shard { index: 23, count: 24 });
+        assert!("24/24".parse::<Shard>().is_err(), "index must be < count");
+        assert!("0/0".parse::<Shard>().is_err(), "count must be >= 1");
+        assert!("x/3".parse::<Shard>().is_err());
+        assert!("1".parse::<Shard>().is_err());
+    }
+
+    fn entry(staid: &str) -> adjoint::gauges::GaugeEntry {
+        adjoint::gauges::GaugeEntry { staid: staid.into(), role: "gauge", pair: 0, upstream: vec![], comid: None, class: None }
+    }
+
+    #[test]
+    fn shard_gauges_keeps_index_mod_k_after_sorting_by_staid() {
+        // Unsorted input; sorted-by-staid order is 01,02,03,04,05.
+        let gauges = vec![entry("03"), entry("01"), entry("05"), entry("02"), entry("04")];
+        let shard0 = shard_gauges(gauges.clone(), Some(Shard { index: 0, count: 2 }));
+        assert_eq!(shard0.iter().map(|g| g.staid.as_str()).collect::<Vec<_>>(), vec!["01", "03", "05"]);
+        let shard1 = shard_gauges(gauges.clone(), Some(Shard { index: 1, count: 2 }));
+        assert_eq!(shard1.iter().map(|g| g.staid.as_str()).collect::<Vec<_>>(), vec!["02", "04"]);
+        // Every gauge lands in exactly one shard.
+        let mut all: Vec<String> = shard0.into_iter().chain(shard1).map(|g| g.staid).collect();
+        all.sort();
+        assert_eq!(all, vec!["01", "02", "03", "04", "05"]);
+    }
+
+    #[test]
+    fn shard_gauges_is_noop_when_shard_is_none() {
+        let gauges = vec![entry("03"), entry("01"), entry("02")];
+        let out = shard_gauges(gauges.clone(), None);
+        assert_eq!(out.iter().map(|g| g.staid.as_str()).collect::<Vec<_>>(), vec!["03", "01", "02"]);
     }
 }

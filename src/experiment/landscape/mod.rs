@@ -11,10 +11,10 @@ use burn::tensor::backend::Backend;
 use serde::{Deserialize, Serialize};
 
 use crate::data::ids::Staid;
-use crate::experiment::adjoint::gauges::{gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
+use crate::experiment::adjoint::gauges::{all_gauges_selection, gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
 use crate::experiment::adjoint::{seasonal_window_starts, GaugeSource, GaugeSpec};
-use crate::experiment::{BoxError, ExperimentManifest, ResolvedArm};
+use crate::experiment::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
 use self::objective::{eig3, eig_active, solve_active, Objective};
 use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, Slice};
@@ -142,6 +142,9 @@ pub struct LandscapeOptions {
     pub force_cpu: bool,
     pub jobs: usize,
     pub dry_run: bool,
+    /// Keep only every K-th gauge (sorted by staid), for parallel sharding
+    /// across processes. `None` runs the whole selected population.
+    pub shard: Option<Shard>,
 }
 
 pub fn run_landscape<I: Backend + 'static>(
@@ -169,13 +172,24 @@ where
             let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
             nested_reference_selection(&ctx.dataset, &class, spec.gauges.max_downstream)?
         }
+        GaugeSource::All => {
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let list = all_gauges_selection(&ctx.dataset);
+            println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
+            list
+        }
     };
+    let population_n = gauges.len();
+    gauges = shard_gauges(gauges, opts.shard);
+    if let Some(s) = opts.shard {
+        println!("shard {s}: kept {} of {population_n} gauges (sorted by staid, index % {} == {})", gauges.len(), s.count, s.index);
+    }
     if let Some(k) = opts.max_gauges {
         gauges.truncate(k);
     }
     write_gauges_csv(&out_dir.join("gauges.csv"), &gauges)?;
     println!(
-        "landscape: {} arm(s), {} gauge(s), {} window(s) × {} d, grid {}², α ∈ ±{:.3}, fd_step {}",
+        "landscape: {} arm(s), {} gauge(s) (of {population_n} population), {} window(s) × {} d, grid {}², α ∈ ±{:.3}, fd_step {}",
         arms.len(), gauges.len(), spec.n_windows, spec.window_days, spec.grid, spec.alpha_max, spec.fd_step
     );
     if opts.dry_run {

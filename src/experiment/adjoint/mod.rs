@@ -21,12 +21,12 @@ use serde::{Deserialize, Serialize};
 use crate::data::dates::TimeAxis;
 use crate::data::ids::Staid;
 
-use self::gauges::{gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
+use self::gauges::{all_gauges_selection, gauge_list_from_pairs, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
 use self::influence::{column_means, dist_to_gauge, downstream_rows, inflow_gradient, InfluenceContext};
 use self::output::{append_summary, write_gauge_netcdf, AnchorRecord, GaugeResult, WindowRecord};
 use self::hydraulics::{mean_reach_k_hours, path_travel_time_hours, reach_k_hours};
 use self::validate::{finite_difference_gate, full_map_gate, write_full_map_csv, FullMapInputs, FullMapResult, GateInputs, ValidationResult};
-use super::{BoxError, ExperimentManifest, ResolvedArm};
+use super::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AdjointSpec {
@@ -121,6 +121,9 @@ pub enum GaugeSource {
     /// GAGES-II `Ref` downstream gauges with ≥1 nested training gauge
     /// (spec §2.1); requires `gages_ii_dbf`.
     NestedReference,
+    /// Every gauge the arm's dataset can evaluate (has a subgraph and
+    /// observations — the same population `evaluate` scores). No pairing.
+    All,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -165,6 +168,9 @@ pub struct AdjointOptions {
     pub jobs: usize,
     /// Select gauges, write `gauges.csv`, and stop.
     pub dry_run: bool,
+    /// Keep only every K-th gauge (sorted by staid), for parallel sharding
+    /// across processes. `None` runs the whole selected population.
+    pub shard: Option<Shard>,
 }
 
 /// Anchor days: the `n_high` highest and `n_low` lowest strictly-positive
@@ -310,13 +316,24 @@ where
             );
             list
         }
+        GaugeSource::All => {
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let list = all_gauges_selection(&ctx.dataset);
+            println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
+            list
+        }
     };
+    let population_n = gauges.len();
+    gauges = shard_gauges(gauges, opts.shard);
+    if let Some(s) = opts.shard {
+        println!("shard {s}: kept {} of {population_n} gauges (sorted by staid, index % {} == {})", gauges.len(), s.count, s.index);
+    }
     if let Some(k) = opts.max_gauges {
         gauges.truncate(k);
     }
     write_gauges_csv(&out_dir.join("gauges.csv"), &gauges)?;
     println!(
-        "adjoint: {} arm(s), {} gauge(s), functionals {:?}, window {} d, lag {} d, anchors {}h/{}l, jobs {}",
+        "adjoint: {} arm(s), {} gauge(s) (of {population_n} population), functionals {:?}, window {} d, lag {} d, anchors {}h/{}l, jobs {}",
         arms.len(),
         gauges.len(),
         adjoint.functionals,

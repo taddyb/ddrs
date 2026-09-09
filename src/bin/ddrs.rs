@@ -140,6 +140,12 @@ enum Cmd {
         #[arg(long)] jobs: Option<usize>,
         /// Select gauges, write gauges.csv, and stop.
         #[arg(long)] dry_run: bool,
+        /// Process 1/K of the gauge population: "I/K" (e.g. "0/24"). After
+        /// the gauge list is built and sorted by staid, keeps gauges whose
+        /// index satisfies `index % K == I`. Also suffixes the run directory
+        /// with `-shard-I-of-K` so K shards launched in the same second
+        /// don't collide.
+        #[arg(long)] shard: Option<String>,
     },
     /// Delete old run directories from .ddrs/runs/.
     Gc {
@@ -249,7 +255,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
             eprintln!("run complete → {}", run_dir.display());
             Ok(())
         }
-        Cmd::Experiment { name, bundle, backend, arms, max_gauges, skip_validate, jobs, dry_run } => {
+        Cmd::Experiment { name, bundle, backend, arms, max_gauges, skip_validate, jobs, dry_run, shard } => {
             let dir = ddrs::cli::experiment::run_experiment(ddrs::cli::experiment::ExperimentInput {
                 workspace: Workspace::with_root(ws.root()),
                 name,
@@ -260,6 +266,7 @@ fn dispatch(cli: Cli) -> Result<(), CliError> {
                 skip_validate,
                 jobs,
                 dry_run,
+                shard,
             })?;
             eprintln!("experiment complete → {}", dir.display());
             Ok(())

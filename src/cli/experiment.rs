@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::workspace::Workspace;
 use crate::cli::{tee, CliError};
-use crate::experiment::{adjoint, landscape, resolve_arm, ExperimentManifest, ExperimentRun, ExperimentSpec, ResolvedArm};
+use crate::experiment::{adjoint, landscape, resolve_arm, ExperimentManifest, ExperimentRun, ExperimentSpec, ResolvedArm, Shard};
 
 pub struct ExperimentInput {
     pub workspace: Workspace,
@@ -20,9 +20,19 @@ pub struct ExperimentInput {
     pub jobs: Option<usize>,
     /// Select gauges, write gauges.csv, and stop.
     pub dry_run: bool,
+    /// `--shard I/K`: keep only every K-th gauge (sorted by staid), for
+    /// parallel sharding across processes.
+    pub shard: Option<String>,
 }
 
 pub fn run_experiment(input: ExperimentInput) -> Result<PathBuf, CliError> {
+    let shard: Option<Shard> = input
+        .shard
+        .as_deref()
+        .map(|s| s.parse::<Shard>())
+        .transpose()
+        .map_err(|e: String| CliError::ConfigInvalid { path: PathBuf::from("--shard"), source: e.into() })?;
+
     let bundle = input
         .bundle
         .clone()
@@ -49,7 +59,7 @@ pub fn run_experiment(input: ExperimentInput) -> Result<PathBuf, CliError> {
         arms.push(resolve_arm(&input.workspace, a)?);
     }
 
-    let run = ExperimentRun::create(&input.workspace, &input.name)?;
+    let run = ExperimentRun::create(&input.workspace, &input.name, shard)?;
     std::fs::copy(&spec_path, run.dir.join("experiment.yaml"))?;
     let mut manifest = ExperimentManifest {
         study: spec.study.clone(),
@@ -62,6 +72,7 @@ pub fn run_experiment(input: ExperimentInput) -> Result<PathBuf, CliError> {
         git: crate::cli::run::capture_git(),
         backend: input.backend.clone(),
         ddrs_version: env!("CARGO_PKG_VERSION").into(),
+        shard: shard.map(|s| s.to_string()),
         validation: None,
         notes: vec![],
     };
@@ -70,7 +81,7 @@ pub fn run_experiment(input: ExperimentInput) -> Result<PathBuf, CliError> {
     eprintln!("experiment `{}` → {}", input.name, run.dir.display());
 
     let log_path = run.dir.join("run.log");
-    let outcome = tee::tee_to(&log_path, || dispatch(&spec, &spec_path, &arms, &run.dir, &input, &mut manifest));
+    let outcome = tee::tee_to(&log_path, || dispatch(&spec, &spec_path, &arms, &run.dir, &input, shard, &mut manifest));
 
     manifest.finished_utc = Some(chrono::Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string());
     manifest.status = if outcome.is_ok() { "success".into() } else { "failed".into() };
@@ -88,6 +99,7 @@ fn dispatch(
     arms: &[ResolvedArm],
     out_dir: &Path,
     input: &ExperimentInput,
+    shard: Option<Shard>,
     manifest: &mut ExperimentManifest,
 ) -> Result<(), CliError> {
     match spec.study.as_str() {
@@ -102,6 +114,7 @@ fn dispatch(
                 force_cpu: input.backend == "cpu",
                 jobs: input.jobs.unwrap_or(arms.len().max(1)),
                 dry_run: input.dry_run,
+                shard,
             };
             match input.backend.as_str() {
                 "cpu" => {
@@ -135,6 +148,7 @@ fn dispatch(
                 force_cpu: input.backend == "cpu",
                 jobs: input.jobs.unwrap_or(arms.len().max(1)),
                 dry_run: input.dry_run,
+                shard,
             };
             match input.backend.as_str() {
                 "cpu" => {

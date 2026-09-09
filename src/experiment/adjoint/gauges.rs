@@ -131,6 +131,25 @@ pub fn nested_reference_selection(
     Ok(list)
 }
 
+/// Every gauge the dataset can evaluate: `MeritGagesDataset::open`'s filter
+/// pipeline (DA_VALID + adjacency present, non-headwater + observations
+/// present — the `gages_adjacency filter: kept X gauges` / `observations
+/// filter: kept X/Y gauges` log lines) already leaves exactly this
+/// population in `dataset.gauges`, the same one `evaluate` scores. No
+/// pairing: every entry stands alone (`upstream` empty, `role: "gauge"`).
+pub fn all_gauges_selection(dataset: &MeritGagesDataset) -> Vec<GaugeEntry> {
+    let mut list: Vec<GaugeEntry> = dataset
+        .gauges
+        .iter()
+        .map(|s| {
+            let comid = dataset.gages_adj.get(s).and_then(|sg| sg.gage_catchment.trim().parse::<i64>().ok());
+            GaugeEntry { staid: s.as_str().to_string(), role: "gauge", pair: 0, upstream: vec![], comid, class: None }
+        })
+        .collect();
+    list.sort_by(|a, b| a.staid.cmp(&b.staid));
+    list
+}
+
 pub fn write_gauges_csv(path: &Path, gauges: &[GaugeEntry]) -> Result<(), BoxError> {
     use std::io::Write;
     let mut w = std::fs::File::create(path)?;
