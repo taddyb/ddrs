@@ -410,3 +410,45 @@ path. Over 15 years the per-gauge gain is +0.03 at Newport and +0.004 at Mapleto
 windows and the q direction is not: q is the sloppy coordinate, and its "optimum" is whatever the particular
 sequence of floods rewards. For the paper this is the operational definition of a poorly constrained parameter:
 its optimum changes sign with the evaluation window while the loss barely moves.
+
+## 13. All 2,365 test gauges, WY2000, p = 21 model, epoch 30 (run `landscape-p21-all/merged`, 24 shards, 1 h 47 min)
+
+First census with the fixed line search (§11) and the full population. Newton and Hessian over (n, q), p pinned;
+0.4 % of gauges range-bound, none with zero iterations, 4 % used the gradient fallback. Map:
+`docs/figures/2026-09-09-conus_n_gap_p21_wy2000.png` (copy of `merged/figures/conus_n_gap.png`).
+
+| WY2000 | count | median gain to own optimum | gain > 0.02 | median |ln(n*/n)| | within × 1.25 | wants slower (n* > 1.25 n) | wants faster (n* < 0.8 n) |
+|---|---|---|---|---|---|---|---|
+| well fit, NSE > 0.3 | 1,710 | 0.014 | 42 % | 0.67 (factor 1.95) | 19 % | 61 % | 19 % |
+| NSE > 0.6 | 1,261 | 0.013 | 40 % | 0.62 | 22 % | 62 % | 16 % |
+| poorly fit, NSE ≤ 0.3 | 655 | 0.027 | 55 % | 0.92 | 11 % | 55 % | 34 % |
+
+By basin size among the well fit (reaches in the subgraph): ≤ 10 reaches, 578 gauges, median gain 0.01; 10 to 50,
+717, 0.01; 50 to 200, 308, 0.02; > 200, 107, 0.03. Median |ln(n*/n)| is 0.4 to 0.65 in every size class.
+
+**Reading.** Two facts that look contradictory and are not.
+1. **The trained n is far from most gauges' optima.** Only 19 % of well-fit gauges have their optimum within a factor
+   1.25 of the trained n; the median distance is a factor 2, and the direction is systematic: 61 % want slower
+   (higher n, median optimum about × 1.65), 19 % faster. The gages_3000 batch put n at 0.04 to 0.06 CONUS-wide (§10),
+   and the typical well-fit gauge would rather have 0.07 to 0.10. The signed median ln(n*/n) is +0.50 among the well fit.
+2. **Moving there buys almost nothing.** The median gain is 0.014 NSE, and 58 % of well-fit gauges gain under 0.02.
+   Only in basins over 200 reaches does the median gain reach 0.03. The landscape is flat in n at most gauges: a factor 2
+   in roughness changes the daily NSE by about a hundredth.
+
+Together: **n is weakly identifiable at the daily scale for most of CONUS**, which is why the batch's n is set by
+population composition (§9 and §10) rather than by any gauge, and why two seeds or two populations can land a factor 2
+apart in n at the same skill. The gauges where n is identifiable, and where the map is actionable, are the large basins
+(gain 0.03 median above 200 reaches) and the poorly fit gauges, where the "gain" of 0.027 is a fraction of a large
+deficit and the inflow, not the channel, is the problem. This is the population-scale statement of the equifinality
+thesis, measured with the gradient rather than assumed: the map of |ln(n*/n)| (panel a) is red over much of the East
+and the West Coast, the map of what that costs (gain) is blue almost everywhere except the large rivers.
+
+**Regional pattern** (panel b): the Appalachians, the Southeast, the Northeast, and the Pacific coast want slower
+routing (red); the Upper Midwest and the northern Rockies are mixed; the Plains are hollow (poorly fit). The eastern
+"slower" band is the population that a gages_3000 batch under-weights relative to its own count (§10 hypothesis 1);
+a size- or region-stratified training run is the direct test.
+
+**Next in the chain** (running): the same census over five water years (1996 to 2000, 16 shards, about 4 h) and then
+the full 15-year test period (12 shards, about a day), to check that the direction and the flatness hold across years.
+The Juniata full-period result (§12) says the n direction holds and the q direction does not.
+
