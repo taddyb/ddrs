@@ -943,3 +943,39 @@ than a test of whether n can move at all.
 whether the alignment holds up where snow and aridity dominate; the eastern sample is precisely where earlier
 sections put the largest displacement, so the continental figure could come in lower. The paired comparison should
 be re-read on the full set. Reproduce with `experiments/landscape/trainwin_compare.py <testing-merged> <training-merged>`.
+
+### 21.3 Correction: the alignment statistic was not robust, and the robust version is stronger
+
+At 806 gauges the training-window alignment `|mean(g)| / mean(|g|)` read 0.781 overall and 0.990 at basins over
+200 reaches. At 1,508 gauges the same statistic reads 0.409 and **0.149**, while the median gradient and the share
+of negative gradients barely moved. A handful of gauges with extreme positive gradients entered the large-basin
+bin (sd 1.38 on 98 gauges) and destroyed a ratio of means. The test-window figures quoted in §19 and §21 have the
+same weakness: sd 2.78 on the 140 large basins there.
+
+`|mean| / mean|g|` was the wrong statistic. Per-gauge gradients span orders of magnitude with heavy tails, so any
+ratio of means is set by a few gauges. Three robust replacements, all measured on both windows:
+
+| | share where loss falls if n rises | median-based alignment | 10 % trimmed alignment |
+|---|---|---|---|
+| **training WY1991-1995, all** | 79.1 % | 0.747 | 0.945 |
+| testing WY1996-2000, all | 78.2 % | 0.749 | 0.940 |
+| **training, n_reach <= 50** | 76.7 % | 0.698 | 0.890 |
+| testing, n_reach <= 50 | 76.8 % | 0.696 | 0.908 |
+| **training, 51 to 200** | 84.7 % | 0.906 | 0.988 |
+| testing, 51 to 200 | 80.0 % | 0.789 | 0.966 |
+| **training, n_reach > 200** | 90.8 % | 0.973 | 1.000 |
+| testing, n_reach > 200 | 90.0 % | 0.962 | 1.000 |
+
+Every share is more than seven standard deviations from the 50 % a converged optimum would give (p < 1e-12 on a
+binomial test against 0.5), at every basin size, on both windows.
+
+**The conclusion of §21 is unchanged and better supported.** The two windows now agree to within a percentage
+point on the sign share and to within 0.05 on both robust alignments, which is a far cleaner refutation of
+nonstationarity than the mean-based numbers ever were. After trimming the extreme tenth of each tail, essentially
+the whole gradient mass points one way (0.94 overall, 1.00 at large basins). Descent stopped; the gauges are not
+pulling against each other.
+
+**What to quote from here on:** the sign share and the trimmed alignment. Treat every `|mean| / mean|g|` figure in
+§19 and in §21's first two tables as superseded, including the 0.813 and 0.974 that motivated this whole line of
+work. Their qualitative reading survives; their values do not.
+
