@@ -32,6 +32,11 @@ import pandas as pd  # noqa: E402
 from conus_map import LN3, build_df, load_gage_csv, load_manifest, pick_arm, window_info  # noqa: E402
 
 GAGES_II_DBF = Path("/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf")
+# HUC02/AGGECOREGI/STATE are dbf-only fields -- not present in the gauge CSV
+# (data_sources.gages) -- so --gages-csv is accepted here only for parity
+# with covariates.py/trainwin_compare.py's --gages-csv/--gages-ii-dbf pair;
+# it is not consumed by this script's own GAGES-II join.
+GAGES_CSV = Path("/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv")
 
 # TODO: this is a provisional geography-only grouping of HUC02 codes, standing
 # in for the published Feng et al. 2021 PUR (physiographic/unit-response)
@@ -49,7 +54,9 @@ PUR7 = {
 
 
 # ----------------------------------------------------------------------------- io
-def load_gages_ii(dbf_path: Path) -> pd.DataFrame:
+def load_gages_ii(dbf_path: Path) -> pd.DataFrame | None:
+    if gpd is None or not dbf_path.exists():
+        return None
     gdf = gpd.read_file(dbf_path)
     df = pd.DataFrame(gdf[["STAID", "HUC02", "AGGECOREGI", "STATE"]])
     df["STAID"] = df["STAID"].astype(str).str.zfill(8)
@@ -63,8 +70,14 @@ def huc02_to_pur7(huc02: str) -> str:
     return "Other"
 
 
-def assign_region(df: pd.DataFrame, gages_ii: pd.DataFrame, region_kind: str) -> pd.DataFrame:
-    merged = df.merge(gages_ii, left_on="staid", right_on="STAID", how="left")
+def assign_region(df: pd.DataFrame, gages_ii: pd.DataFrame | None, region_kind: str) -> pd.DataFrame:
+    if gages_ii is None:
+        print(f"warning: GAGES-II table unavailable at {GAGES_II_DBF}; HUC02/AGGECOREGI/STATE left as NaN")
+        merged = df.copy()
+        for c in ("HUC02", "AGGECOREGI", "STATE"):
+            merged[c] = np.nan
+    else:
+        merged = df.merge(gages_ii, left_on="staid", right_on="STAID", how="left")
     missing = int(merged["HUC02"].isna().sum())
     if missing:
         print(f"warning: {missing} gauge(s) have no match in the GAGES-II table; dropped from the regional breakdown")
@@ -287,6 +300,7 @@ def main():
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--nse-min", type=float, default=0.3)
     ap.add_argument("--gages-ii-dbf", type=Path, default=GAGES_II_DBF)
+    ap.add_argument("--gages-csv", type=Path, default=GAGES_CSV)
     args = ap.parse_args()
 
     run_dir = args.census_run_dir

@@ -6,9 +6,12 @@ Joins, for every gauge in a landscape census run: the census run's own
 displacement/curvature diagnostics (<census_dir>/<arm>/summary.csv and
 <census_dir>/<arm>/gauges/<staid>.nc), optionally a second diagnostic run's
 daily series and 5-yr gradient/Hessian (--diag, same layout, written with
-`landscape.series: true`), GAGES-II basin attributes
-(/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf), MERIT reach
-attributes at the gauge's own COMID
+`landscape.series: true`), per-gauge basin attributes -- DRAIN_SQKM/LAT_GAGE/
+LNG_GAGE from the gauge CSV (--gages-csv, the workspace's data_sources.gages),
+falling back to the GAGES-II dbf (--gages-ii-dbf,
+/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf) for gauges the CSV
+lacks or when the CSV itself is unavailable; HUC02/AGGECOREGI/CLASS/STATE come
+from the dbf only -- MERIT reach attributes at the gauge's own COMID
 (~/projects/ddr/data/merit_global_attributes_v2.nc), and the census run's own
 eval-window NSE/KGE (<run_dir>/eval/predictions.zarr, run_id read from
 manifest.json).
@@ -60,6 +63,7 @@ except ImportError:
         return depth, width
 
 GAGES_II_DBF = Path("/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf")
+GAGES_CSV = Path("/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv")
 MERIT_ATTR_NC = Path("/home/tbindas/projects/ddr/data/merit_global_attributes_v2.nc")
 GEOM_MIN_SLOPE = 1e-3  # matches surface.py's depth-axis slope floor
 
@@ -250,14 +254,57 @@ def extract_diag_row(path: Path) -> dict:
 
 
 # --------------------------------------------------------------------- gages-ii
-def load_gages_ii(dbf_path: Path) -> pd.DataFrame | None:
+GAGES_CSV_COLS = ["DRAIN_SQKM", "LAT_GAGE", "LNG_GAGE"]
+GAGES_DBF_ONLY_COLS = ["HUC02", "AGGECOREGI", "CLASS", "STATE"]
+
+
+def _load_gages_csv(csv_path: Path) -> pd.DataFrame | None:
+    if not csv_path.exists():
+        return None
+    df = pd.read_csv(csv_path, dtype={"STAID": str})
+    df["STAID"] = df["STAID"].str.zfill(8)
+    return df[["STAID", *GAGES_CSV_COLS]].drop_duplicates("STAID").set_index("STAID")
+
+
+def _load_gages_dbf(dbf_path: Path) -> pd.DataFrame | None:
     if gpd is None or not dbf_path.exists():
         return None
     gdf = gpd.read_file(dbf_path)
-    cols = ["STAID", "DRAIN_SQKM", "HUC02", "AGGECOREGI", "CLASS", "STATE", "LAT_GAGE", "LNG_GAGE"]
+    cols = ["STAID", *GAGES_CSV_COLS, *GAGES_DBF_ONLY_COLS]
     df = pd.DataFrame(gdf[cols])
     df["STAID"] = df["STAID"].astype(str).str.zfill(8)
-    return df
+    return df.drop_duplicates("STAID").set_index("STAID")
+
+
+def load_gages(csv_path: Path, dbf_path: Path) -> tuple[pd.DataFrame | None, list[str]]:
+    """Per-STAID gauge attribute table (STAID column plus GAGES_CSV_COLS +
+    GAGES_DBF_ONLY_COLS). DRAIN_SQKM/LAT_GAGE/LNG_GAGE come from the gauge CSV
+    first, falling back to the GAGES-II dbf for gauges the CSV is missing or
+    when the CSV itself is absent; HUC02/AGGECOREGI/CLASS/STATE are dbf-only.
+    Returns (df, lost) where `lost` lists the requested columns that ended up
+    entirely NaN because their only source was unavailable; df is None if
+    neither source was available at all."""
+    csv_df = _load_gages_csv(csv_path)
+    dbf_df = _load_gages_dbf(dbf_path)
+    if csv_df is None and dbf_df is None:
+        return None, GAGES_CSV_COLS + GAGES_DBF_ONLY_COLS
+
+    index = pd.Index([], name="STAID")
+    if csv_df is not None:
+        index = index.union(csv_df.index)
+    if dbf_df is not None:
+        index = index.union(dbf_df.index)
+
+    out = pd.DataFrame(index=index)
+    for c in GAGES_CSV_COLS:
+        primary = csv_df[c].reindex(index) if csv_df is not None else pd.Series(np.nan, index=index)
+        fallback = dbf_df[c].reindex(index) if dbf_df is not None else pd.Series(np.nan, index=index)
+        out[c] = primary.combine_first(fallback)
+    for c in GAGES_DBF_ONLY_COLS:
+        out[c] = dbf_df[c].reindex(index) if dbf_df is not None else np.nan
+
+    lost = [c for c in GAGES_CSV_COLS + GAGES_DBF_ONLY_COLS if out[c].isna().all()]
+    return out.reset_index(), lost
 
 
 # --------------------------------------------------------------------- merit
@@ -329,7 +376,7 @@ def load_eval(census_run_dir: Path, staids: list[str]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------- main
-def build(census_dir: Path, diag_dir: Path | None) -> pd.DataFrame:
+def build(census_dir: Path, diag_dir: Path | None, gages_csv: Path = GAGES_CSV, gages_ii_dbf: Path = GAGES_II_DBF) -> pd.DataFrame:
     manifest = load_manifest(census_dir)
     arm = pick_arm(manifest)["name"]
     alpha_max = alpha_max_of(manifest)
@@ -381,11 +428,11 @@ def build(census_dir: Path, diag_dir: Path | None) -> pd.DataFrame:
             print(f"diag: {n_missing_diag}/{len(staids)} gauges have no {diag_dir}/{diag_arm}/gauges/<staid>.nc")
 
     # -------------------------------------------------------------- gages-ii
-    gages_ii = load_gages_ii(GAGES_II_DBF)
     gages_ii_cols = ["DRAIN_SQKM", "HUC02", "AGGECOREGI", "CLASS", "STATE", "LAT_GAGE", "LNG_GAGE"]
-    if gages_ii is not None:
+    gages, lost_cols = load_gages(gages_csv, gages_ii_dbf)
+    if gages is not None:
         before = len(df)
-        df = df.merge(gages_ii, left_on="staid", right_on="STAID", how="left")
+        df = df.merge(gages, left_on="staid", right_on="STAID", how="left")
         df = df.drop(columns=["STAID"])
         n_missing_gages_ii = int(df["HUC02"].isna().sum())
         assert len(df) == before
@@ -393,7 +440,8 @@ def build(census_dir: Path, diag_dir: Path | None) -> pd.DataFrame:
         for c in gages_ii_cols:
             df[c] = np.nan
         n_missing_gages_ii = len(df)
-        print(f"warning: GAGES-II table unavailable at {GAGES_II_DBF}; {gages_ii_cols} left as NaN")
+    if lost_cols:
+        print(f"warning: gauge CSV {gages_csv} / GAGES-II dbf {gages_ii_dbf} unavailable; {lost_cols} left as NaN")
 
     # -------------------------------------------------------------------- merit
     # Assigned positionally (not merged on comid_gauge): gauge-reach COMIDs
@@ -440,10 +488,12 @@ def main() -> None:
     ap.add_argument("census_dir", type=Path)
     ap.add_argument("--diag", type=Path, default=None)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--gages-csv", type=Path, default=GAGES_CSV)
+    ap.add_argument("--gages-ii-dbf", type=Path, default=GAGES_II_DBF)
     args = ap.parse_args()
 
     out = args.out if args.out is not None else args.census_dir / "figures" / "covariates.csv"
-    df = build(args.census_dir, args.diag)
+    df = build(args.census_dir, args.diag, args.gages_csv, args.gages_ii_dbf)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)

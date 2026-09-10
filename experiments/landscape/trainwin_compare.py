@@ -15,8 +15,11 @@ manifest.json with a single arm).
 For each window this loads staid/n_reach/nse0/grad0_n/grad0_q/DRAIN_SQKM,
 preferring an existing <merged>/figures/covariates.csv (as already built
 for the testing window) and falling back to summary.csv + per-gauge
-gauges/<staid>.nc + a GAGES-II join when covariates.csv has not been
-generated yet (the training window, freshly merged).
+gauges/<staid>.nc + a gauge-CSV/GAGES-II join when covariates.csv has not
+been generated yet (the training window, freshly merged). DRAIN_SQKM comes
+from the gauge CSV (--gages-csv, the workspace's data_sources.gages) first,
+falling back to the GAGES-II dbf (--gages-ii-dbf) for gauges the CSV lacks
+or when the CSV itself is unavailable.
 
 Usage:
     uv run --with numpy --with pandas python experiments/landscape/trainwin_compare.py \\
@@ -42,6 +45,7 @@ except ImportError:
     gpd = None
 
 GAGES_II_DBF = Path("/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf")
+GAGES_CSV = Path("/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv")
 COLS = ["staid", "n_reach", "nse0", "grad0_n", "grad0_q", "DRAIN_SQKM"]
 NSE0_MIN = 0.3
 
@@ -64,7 +68,29 @@ def load_gages_ii_drain_sqkm(dbf_path: Path) -> pd.DataFrame | None:
     df["STAID"] = df["STAID"].astype(str).str.zfill(8)
     return df.rename(columns={"STAID": "staid"})
 
-def load_window(merged_dir: Path) -> pd.DataFrame:
+def load_drain_sqkm(csv_path: Path, dbf_path: Path) -> pd.DataFrame | None:
+    """staid/DRAIN_SQKM table: primary source is the gauge CSV, falling back
+    to the GAGES-II dbf for gauges the CSV is missing or when the CSV itself
+    is absent. None if neither source is available."""
+    csv_df = None
+    if csv_path.exists():
+        raw = pd.read_csv(csv_path, dtype={"STAID": str})
+        raw["STAID"] = raw["STAID"].str.zfill(8)
+        csv_df = raw[["STAID", "DRAIN_SQKM"]].drop_duplicates("STAID").rename(columns={"STAID": "staid"})
+
+    dbf_df = load_gages_ii_drain_sqkm(dbf_path)
+
+    if csv_df is None and dbf_df is None:
+        return None
+    if csv_df is None:
+        return dbf_df
+    if dbf_df is None:
+        return csv_df
+    merged = csv_df.merge(dbf_df, on="staid", how="outer", suffixes=("", "_dbf"))
+    merged["DRAIN_SQKM"] = merged["DRAIN_SQKM"].combine_first(merged["DRAIN_SQKM_dbf"])
+    return merged[["staid", "DRAIN_SQKM"]]
+
+def load_window(merged_dir: Path, gages_csv: Path = GAGES_CSV, gages_ii_dbf: Path = GAGES_II_DBF) -> pd.DataFrame:
     """staid/n_reach/nse0/grad0_n/grad0_q/DRAIN_SQKM table for one merged
     landscape-census directory."""
     cov_path = merged_dir / "figures" / "covariates.csv"
@@ -95,12 +121,12 @@ def load_window(merged_dir: Path) -> pd.DataFrame:
 
     df = summary.merge(grad_df, on="staid", how="left")
 
-    gages_ii = load_gages_ii_drain_sqkm(GAGES_II_DBF)
-    if gages_ii is not None:
-        df = df.merge(gages_ii, on="staid", how="left")
+    gages = load_drain_sqkm(gages_csv, gages_ii_dbf)
+    if gages is not None:
+        df = df.merge(gages, on="staid", how="left")
     else:
         df["DRAIN_SQKM"] = np.nan
-        print(f"warning: GAGES-II table unavailable at {GAGES_II_DBF}; DRAIN_SQKM left as NaN")
+        print(f"warning: gauge CSV {gages_csv} and GAGES-II dbf {gages_ii_dbf} both unavailable; DRAIN_SQKM left as NaN")
 
     return df[COLS].copy()
 
@@ -229,10 +255,12 @@ def main() -> None:
     ap.add_argument("testing_dir", type=Path, help="merged landscape-census dir scored on the testing window")
     ap.add_argument("training_dir", type=Path, help="merged landscape-census dir scored on the training window")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--gages-csv", type=Path, default=GAGES_CSV)
+    ap.add_argument("--gages-ii-dbf", type=Path, default=GAGES_II_DBF)
     args = ap.parse_args()
 
-    df_test = load_window(args.testing_dir)
-    df_train = load_window(args.training_dir)
+    df_test = load_window(args.testing_dir, args.gages_csv, args.gages_ii_dbf)
+    df_train = load_window(args.training_dir, args.gages_csv, args.gages_ii_dbf)
 
     lines = [
         "trainwin_compare: per-gauge loss-gradient alignment, testing window vs training window",
