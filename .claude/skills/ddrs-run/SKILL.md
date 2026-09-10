@@ -37,6 +37,12 @@ The key was right there in the file. Alternatives to `cargo install`: run
 `cargo run --release --bin ddrs -- <args>`, or use an **absolute** path to
 `target/release/ddrs` (a relative one resolves to the main tree from a worktree).
 
+`cargo install` writes the machine-global `~/.cargo/bin/ddrs`, shared by every
+checkout and worktree on the box. Installing from a worktree silently changes what
+plain `ddrs` means everywhere until someone installs from a different checkout. When
+several branches are in play, prefer the absolute `target/release/ddrs` of the tree
+you mean.
+
 **2. Pass `--workspace` whenever you pass `--config`.**
 
 The workspace defaults to `.ddrs/` *beside the config*, so
@@ -57,6 +63,28 @@ meant to land beside it.
 baseline, source drift, and the resolved adjacency cache **before** burning hours.
 If the trained median NSE does not beat that baseline number, the routing is not
 earning its keep.
+
+## Start from a ready-made config, not from scratch
+
+`ddrs.yaml` is gitignored and per-workspace; the committed configs are the
+starting points. Copy one in rather than hand-building a config:
+
+| Want | Copy |
+|---|---|
+| MERIT CONUS | `config/merit_training.yaml` |
+| Gridded ISIMIP DDM30 CONUS | `config/experiments/gridded_conus.yaml` |
+| Single-basin MERIT sample | `examples/juniata/ddrs.yaml` (run in place) |
+| Single-basin gridded sample | `examples/juniata_gridded/ddrs.yaml` (run in place) |
+
+```bash
+cp config/experiments/gridded_conus.yaml ddrs.yaml   # gitignored; safe to overwrite
+```
+
+**`ddrs plan`'s interactive bootstrap does not offer these.** With no `ddrs.yaml`
+present it offers exactly two choices: the last successful run's config snapshot,
+or the clean template, and the clean template is hardcoded to
+`config/merit_training.yaml` (`src/cli/plan_bootstrap.rs`). Bootstrapping and then
+expecting a gridded config gets you a MERIT one. Copy the file you want first.
 
 ## Launch a training run
 
@@ -95,8 +123,14 @@ and report *"no groups"*. The groups are fine, the lookup was wrong.
 Switching is textual: the whole `data_sources:` block is replaced, so keys that
 belong to only one network (`gridded_network`, `geospatial_fabric`, `aorc_precip`)
 appear and disappear correctly. Everything outside the block is untouched, so
-`geodataset:` and `params.subdivision` do **not** follow the switch. Check them by
-hand when moving between MERIT and gridded.
+`geodataset:` and `params.subdivision` do **not** follow the switch.
+
+Fix `geodataset:` by hand after switching. **Nothing validates it**: no code path
+compares it against the adjacency keys, so a mismatch does not error. It is a
+provenance label, written into managed-build zarr attrs and copied into the run's
+`config.yaml` snapshot. Leaving `geodataset: ddm30` on a MERIT run produces a
+successful run whose audit trail names the wrong network, which is worse than a
+rejected config because nothing tells you.
 
 ## Track a run
 
@@ -145,7 +179,8 @@ baseline to `<run_dir>/baseline/manifest.json`, but its `metrics` are **per-gaug
 arrays** (`nse`, `kge`, `rmse`, `bias`, `fhv`, `flv`, one entry per gauge in
 `gage_ids` order), not pre-reduced medians. The run manifest's
 `median_nse_finite` is already a median, so take the median of the baseline array
-yourself or you will compare a median against a 620-element list:
+yourself or you will compare a median against a 620-element list. `run` also never
+re-prints the baseline table that `plan` shows, so read it from the file:
 
 ```bash
 RUN=$(ls -t .ddrs/runs | head -1)
@@ -171,6 +206,13 @@ experiment:
 Resume restores all three files, so the run draws the same gauge batches and
 windows the original would have. Weights are stored f16, so a resumed trajectory
 drifts slowly from an uninterrupted one. That is expected, not a bug.
+
+**A resume produces a NEW run id; it does not continue the old directory.** The run
+id is built from the invocation's own start timestamp, so every `ddrs run` mints a
+fresh `.ddrs/runs/<id>/`. The interrupted run's manifest, log, and checkpoints stay
+frozen at the crash, and the resumed run starts an empty log of its own. Expect two
+run ids for one training curve, and keep both: the first holds the epochs the second
+does not.
 
 Flat `epoch_E_mb_M.mpk` **files** instead of directories mean a stale pre-resume
 binary wrote them. Go back to preflight step 1.
