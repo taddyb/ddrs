@@ -1,0 +1,24 @@
+# Harvest the basin-median trained Manning n at every gauge of the AREA-BALANCED p = 21 model
+# (run 2026-09-08T14-06-12Z-train-and-test), so the factor-two roughness difference against the
+# gages_3000 model can be measured across the full shared population instead of the 30 gauges of
+# findings §9. See §22 of docs/2026-09-08-landscape-hypothesis-tests-findings.md.
+#
+# The trained field n0 is a KAN forward pass and does NOT depend on the evaluation window, so this
+# runs a deliberately short window purely to harvest n0/q0 cheaply. Its loss and NSE columns are
+# one water year and are NOT comparable to the five-year censuses; do not use them.
+study: landscape
+arms:
+  - { name: uh-pfixed21, run: 2026-09-08T14-06-12Z-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, area-balanced population
+landscape:
+  gauges:
+    source: all
+  window_days: 365
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 0     # no search: trained fields, gradient and Hessian at the trained point only
+  grid: 0
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  series: false
