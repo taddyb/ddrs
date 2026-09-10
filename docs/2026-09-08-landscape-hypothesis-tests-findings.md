@@ -1064,3 +1064,56 @@ in both 41-gauge censuses of §9 (median trained-n ratio 0.48, so a factor 2.1) 
 0.040, a factor 2.5). Thirty gauges is a small basis for a headline number. Before the abstract is submitted this
 should be recomputed across the full shared population, which is cheap: both runs' trained fields are already on
 disk and only the basin-median n per gauge is needed, not a landscape.
+
+---
+
+## 23. The factor-two roughness difference, measured across 570 shared gauges
+
+§22 flagged that the headline roughness difference between the two p = 21 models rested on the 30 gauges common
+to the two 41-gauge censuses plus the Juniata pair. Bundle `landscape-pfixed-all-nfield` harvests the trained
+field at every gauge of the area-balanced model. The trained field is a KAN forward pass and does not depend on
+the evaluation window, so the bundle runs a one-year window with no Newton search and no series purely to collect
+`n0` and `q0` cheaply; its loss and NSE columns are one water year and must not be compared to the five-year
+censuses.
+
+Basin-median trained Manning n, area-balanced model over gages_3000 model, on the 570 gauges harvested in both:
+
+| quantile of the ratio | value |
+|---|---|
+| p10 | 1.21 |
+| p25 | 2.21 |
+| **p50** | **2.46** |
+| p75 | 2.64 |
+| p90 | 3.23 |
+| geometric mean | 2.27 |
+| share where the area-balanced model is rougher | **99.1 %** |
+
+Median basin-median n: **0.1033 area-balanced against 0.0421 gages_3000**. The width exponent differs by more:
+median q 0.401 against 0.115, a ratio of 3.49.
+
+The ratio is almost independent of basin size, which is what makes it a population effect rather than a
+composition artifact:
+
+| basin size | gauges | median n ratio |
+|---|---|---|
+| n_reach <= 50 | 420 | 2.44 |
+| 51 to 200 | 92 | 2.51 |
+| > 200 | 58 | 2.51 |
+
+**This confirms the original claim and strengthens its basis by a factor of 19.** The "factor 2.4" quoted from
+the 30-gauge comparison was accurate: the population figure is 2.46, and the two models disagree in the same
+direction at 99.1 % of shared gauges. Unlike the skill comparison of §22, this number needed no correction.
+
+**Caveats.** 570 of roughly 1,323 shared gauges, because the harvest run aborted partway (below). The completed
+gauges are a staid-ordered prefix per shard and therefore lean eastern, but the ratio is uniform across basin
+size and 99.1 % consistent in sign, so a regional bias is unlikely to move it. Finish the run and re-read before
+submission.
+
+**Why the run aborted, and the fix.** `src/experiment/landscape/objective.rs` panicked with "at least one window
+with valid observations" at a gauge with no observations inside the 365-day slice, which killed the whole arm
+thread and lost every remaining gauge in that shard: 720 of about 1,841 were produced. The run-level gauge filter
+guarantees coverage over the configured training and testing window, not over whatever shorter sub-window a
+landscape study selects, so a gauge can pass the filter and still be empty in the slice. A whole-arm panic is the
+wrong response to an expected per-gauge data condition; the study now skips the gauge with a warning and
+continues. Any earlier study using a sub-window narrower than the run's own window could have been silently
+truncated the same way.
