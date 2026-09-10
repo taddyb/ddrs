@@ -1,4 +1,4 @@
-# Tests of the batch-compromise hypothesis (landscape spec §7) — findings, 2026-09-08
+# Tests of the batch-compromise hypothesis (landscape spec §7) - findings, 2026-09-08
 
 **Spec:** `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md` §7.
 **Hypothesis (user):** each gauge's loss under large-batch training sits at a batch compromise, not the gauge's own
@@ -974,6 +974,19 @@ point on the sign share and to within 0.05 on both robust alignments, which is a
 nonstationarity than the mean-based numbers ever were. After trimming the extreme tenth of each tail, essentially
 the whole gradient mass points one way (0.94 overall, 1.00 at large basins). Descent stopped; the gauges are not
 pulling against each other.
+
+Paired on the 1,458 gauges well-fit in both windows, which is the cleanest form of the statement because it holds
+the gauge population fixed:
+
+| | testing WY1996-2000 | training WY1991-1995 |
+|---|---|---|
+| share where loss falls if n rises | 78.7 % (z = 21.9) | 79.6 % (z = 22.6) |
+| median-based alignment | 0.788 | 0.753 |
+| 10 % trimmed alignment | 0.933 | 0.948 |
+| sign agreement between the two windows | - | 85.5 % |
+
+`experiments/landscape/trainwin_compare.py` prints all of these (commit ace9411); the mean-based line is retained
+and labelled as not robust.
 
 **What to quote from here on:** the sign share and the trimmed alignment. Treat every `|mean| / mean|g|` figure in
 §19 and in §21's first two tables as superseded, including the 0.813 and 0.974 that motivated this whole line of
