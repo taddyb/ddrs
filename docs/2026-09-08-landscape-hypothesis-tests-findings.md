@@ -825,22 +825,26 @@ surface the Newton search settled on a spurious nearby point, which is what manu
 **This makes the filtered column the better estimate, not merely the upper end of a range.** The unfiltered 9 %
 and 31 % are artifacts of parabolas that predict an NSE collapse the model does not actually suffer.
 
-With 21 grids in hand the picture is complete enough to settle it. Two of the 21 are in the pathological class
+With 32 grids in hand (26 from `landscape-p21-report38` plus the six large basins of
+`landscape-p21-report6-large`) the picture is complete enough to settle it. Two of the 32 are in the pathological
+class
 (02120780 k = 25.7, 02151500 k = 29.6) and both behave identically: wrong by about 7 NSE at `c = +0.5` and about
 29 at `c = +1.0`, pessimistic every time. Away from that class the parabola errs the other way, being mildly
-optimistic in 16 of 21 gauges, so the two biases partly cancel in a median. On the 21-gauge subsample the
+optimistic in 23 of 32 gauges, so the two biases partly cancel in a median. On the 21-gauge subsample the
 parabola reproduces the grid-derived captured fraction to one point (84 % against 83 %), which is why the
 population sweep is worth repairing rather than abandoning.
 
-What the grids bound directly is how far a gauge ever really falls. Scaling roughness up across the 21:
+What the grids bound directly is how far a gauge ever really falls. Scaling roughness up across all 32:
 
 | shift | median drop in NSE | p90 | max |
 |---|---|---|---|
-| c = +0.25 (n x 1.28) | -0.005 (a gain) | +0.000 | +0.013 |
-| c = +0.50 (n x 1.65) | -0.009 (a gain) | +0.004 | +0.089 |
-| c = +1.00 (n x 2.72) | -0.009 (a gain) | +0.060 | +0.087 |
+| c = +0.25 (n x 1.28) | -0.012 (a gain) | +0.000 | +0.017 |
+| c = +0.50 (n x 1.65) | -0.016 (a gain) | +0.003 | +0.089 |
+| c = +1.00 (n x 2.72) | -0.013 (a gain) | +0.083 | +0.150 |
 
-No gauge in a sample deliberately loaded with the worst cases loses more than 0.09 NSE. A parabola predicting a
+No gauge in a sample deliberately loaded with the worst cases loses more than 0.15 NSE, and the median gauge
+gains at every shift. Adding the six large basins raised the worst case from 0.089 to 0.150 (at 01646500, the
+Potomac at Little Falls) without changing the medians. A parabola predicting a
 fall of 6 or 26 is measurably wrong, and the correct repair is not a floor (the curves are nearly flat, not
 steeply bounded) but a sane curvature. Three independent repairs of the 120 affected gauges, 6.4 % of the
 population:
@@ -1121,3 +1125,36 @@ panic is the wrong response. The study now skips the gauge, logs
 `manifest.notes`, and continues (commit eb3f159). **Any earlier study using a sub-window narrower than its run's
 configured window could have been truncated the same way**, and would have looked like a crashed shard rather than
 a short population.
+
+---
+
+## 24. The NSE optimum does not cost KGE
+
+A standing worry about acting on the displacement is that the per-gauge optima were found on an `nse-batch`
+objective, and NSE is maximised at a simulated variance below observed, so chasing it could degrade KGE. Computed
+directly from the stored daily series at the 32 gauges that have grids, comparing the trained point against the
+gauge's own optimum:
+
+| | value |
+|---|---|
+| median NSE change | **+0.0267** |
+| median KGE change | **+0.0121** |
+| NSE improves at | 100 % of gauges |
+| KGE improves at | **81 %** of gauges |
+| NSE up while KGE falls | 6 of 32 |
+
+| basin size | gauges | median dNSE | median dKGE | KGE falls at |
+|---|---|---|---|---|
+| n_reach <= 50 | 13 | +0.012 | +0.007 | 3 of 13 |
+| 51 to 200 | 9 | +0.325 | +0.078 | 1 of 9 |
+| > 200 | 10 | +0.049 | +0.025 | 2 of 10 |
+
+So the two objectives broadly agree about which way roughness should move, and the "train longer" recommendation
+of §21 does not trade one metric for the other at four gauges in five. The exception is real but small: at 6 of 32
+gauges, including the Potomac at Little Falls (NSE 0.877 to 0.912 while KGE falls 0.839 to 0.824), the NSE optimum
+costs KGE. This agrees with §16, which found the two objectives pick the same direction at the population level.
+
+**Caveat.** These 32 gauges were selected to span the gain range (14 worst, 8 largest, 8 mid, 8 near-optimal), so
+they over-represent large displacements. The median changes here are not population estimates; the population
+figures are in §20.
+
