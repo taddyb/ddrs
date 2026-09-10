@@ -1067,53 +1067,57 @@ disk and only the basin-median n per gauge is needed, not a landscape.
 
 ---
 
-## 23. The factor-two roughness difference, measured across 570 shared gauges
+## 23. The factor-two roughness difference, measured across all 1,323 shared gauges
 
 §22 flagged that the headline roughness difference between the two p = 21 models rested on the 30 gauges common
 to the two 41-gauge censuses plus the Juniata pair. Bundle `landscape-pfixed-all-nfield` harvests the trained
 field at every gauge of the area-balanced model. The trained field is a KAN forward pass and does not depend on
 the evaluation window, so the bundle runs a one-year window with no Newton search and no series purely to collect
 `n0` and `q0` cheaply; its loss and NSE columns are one water year and must not be compared to the five-year
-censuses.
+censuses. 1,821 of 1,841 gauges produced a field, 20 skipped for having no observations in the one-year slice.
 
-Basin-median trained Manning n, area-balanced model over gages_3000 model, on the 570 gauges harvested in both:
+Basin-median trained Manning n, area-balanced model over gages_3000 model, on the 1,323 shared gauges. That is the
+same population as the skill comparison of §22, which is a useful consistency check: the eval overlap and the
+trained-field overlap are the same 1,323 gauges.
 
 | quantile of the ratio | value |
 |---|---|
-| p10 | 1.21 |
-| p25 | 2.21 |
-| **p50** | **2.46** |
-| p75 | 2.64 |
-| p90 | 3.23 |
-| geometric mean | 2.27 |
-| share where the area-balanced model is rougher | **99.1 %** |
+| p10 | 1.15 |
+| p25 | 1.57 |
+| **p50** | **2.39** |
+| p75 | 2.65 |
+| p90 | 3.32 |
+| geometric mean | 2.10 |
+| share where the area-balanced model is rougher | **96.6 %** |
 
-Median basin-median n: **0.1033 area-balanced against 0.0421 gages_3000**. The width exponent differs by more:
-median q 0.401 against 0.115, a ratio of 3.49.
+Median basin-median n: **0.1036 area-balanced against 0.0435 gages_3000**. The width exponent differs by more:
+median q 0.402 against 0.121, a ratio of 3.33.
 
 The ratio is almost independent of basin size, which is what makes it a population effect rather than a
 composition artifact:
 
 | basin size | gauges | median n ratio |
 |---|---|---|
-| n_reach <= 50 | 420 | 2.44 |
-| 51 to 200 | 92 | 2.51 |
-| > 200 | 58 | 2.51 |
+| n_reach <= 50 | 924 | 2.38 |
+| 51 to 200 | 246 | 2.40 |
+| > 200 | 153 | 2.39 |
 
-**This confirms the original claim and strengthens its basis by a factor of 19.** The "factor 2.4" quoted from
-the 30-gauge comparison was accurate: the population figure is 2.46, and the two models disagree in the same
-direction at 99.1 % of shared gauges. Unlike the skill comparison of §22, this number needed no correction.
+**This confirms the original claim and strengthens its basis by a factor of 44.** The "factor 2.4" quoted from the
+30-gauge comparison was accurate: the population figure is 2.39, the two models disagree in the same direction at
+96.6 % of shared gauges, and the ratio is flat to within 0.03 across two orders of magnitude in basin size. Unlike
+the skill comparison of §22, this number needed no correction.
 
-**Caveats.** 570 of roughly 1,323 shared gauges, because the harvest run aborted partway (below). The completed
-gauges are a staid-ordered prefix per shard and therefore lean eastern, but the ratio is uniform across basin
-size and 99.1 % consistent in sign, so a regional bias is unlikely to move it. Finish the run and re-read before
-submission.
+An interim read on the eastern 570 gauges gave 2.46 and 99.1 %. Adding the West lowered the sign agreement to
+96.6 % and widened the lower tail (p10 from 1.21 to 1.15, p25 from 2.21 to 1.57) while leaving the median
+essentially unchanged, so the arid interior holds a minority of gauges where the two models nearly agree.
 
-**Why the run aborted, and the fix.** `src/experiment/landscape/objective.rs` panicked with "at least one window
-with valid observations" at a gauge with no observations inside the 365-day slice, which killed the whole arm
-thread and lost every remaining gauge in that shard: 720 of about 1,841 were produced. The run-level gauge filter
-guarantees coverage over the configured training and testing window, not over whatever shorter sub-window a
-landscape study selects, so a gauge can pass the filter and still be empty in the slice. A whole-arm panic is the
-wrong response to an expected per-gauge data condition; the study now skips the gauge with a warning and
-continues. Any earlier study using a sub-window narrower than the run's own window could have been silently
-truncated the same way.
+**Why the first attempt aborted, and the fix.** `src/experiment/landscape/objective.rs` panicked when *every*
+window for a gauge came up empty, which killed the whole arm thread and lost every remaining gauge in that shard:
+720 of 1,841 were produced. The run-level gauge filter guarantees coverage over the configured training and
+testing window, not over whatever shorter sub-window a landscape study selects, so a gauge can pass the filter and
+still be empty in the slice. That is an expected per-gauge data condition, not a bug in the data, and a whole-arm
+panic is the wrong response. The study now skips the gauge, logs
+`[arm] <staid> skipped: no valid observations in the window <start> .. <end>`, records the count in
+`manifest.notes`, and continues (commit eb3f159). **Any earlier study using a sub-window narrower than its run's
+configured window could have been truncated the same way**, and would have looked like a crashed shard rather than
+a short population.
