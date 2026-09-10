@@ -1,0 +1,21 @@
+# Convergence check on the 500-UPDATE retrain (2026-09-10T21-21-48Z), scored on the training window.
+# Direct counterpart of landscape-p21-all-trainwin-diag on the 60-update run, so findings §21's
+# statistics (sign share, 10 % trimmed alignment) can be recomputed and compared like for like.
+# Success = the share of gauges where the loss falls if n rises moves from ~79 % toward 50 %.
+study: landscape
+arms:
+  - { name: p21b-conus, run: 2026-09-10T21-21-48Z-conus-train-and-test, checkpoint: epoch_50_mb_9 }   # grad_accum_steps 4, 50 epochs, 500 optimizer updates
+landscape:
+  gauges:
+    source: all
+  period: training
+  window_days: 1826
+  water_year: 1991
+  n_windows: 1
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 0     # gradient, Hessian and series at the trained point only
+  grid: 0
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  series: true
