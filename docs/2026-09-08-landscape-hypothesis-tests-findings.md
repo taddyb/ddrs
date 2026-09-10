@@ -873,39 +873,39 @@ could still show a gradient on a later one, and that would say nothing about the
 re-runs the trained-point gradient over WY1991 to WY1995, the last five training years, matching the test run's
 window length exactly.
 
-**Final result, 2,120 well-fit gauges of 2,312 scored (the run covers all 14 HUC regions).** An interim read at
+**Final result, 2,170 well-fit gauges of 2,365 scored, all 14 HUC regions, run complete.** An interim read at
 806 eastern gauges gave the same answer, and adding the West and the arid interior moved the headline shares by
 under a point, so the conclusion is not a regional artifact. The tables below use the robust statistics of §21.3;
 the mean-based `alignment` values that appeared in earlier drafts of this section are superseded.
 
 | statistic | testing window (WY1996-2000) | training window (WY1991-1995) |
 |---|---|---|
-| well-fit gauges | 2,124 | 2,120 |
+| well-fit gauges | 2,124 | 2,170 |
 | median dL/d ln n | -0.0130 | -0.0104 |
-| **share where loss falls if n rises** | **78.2 %** (z = 26.0) | **77.6 %** (z = 25.5) |
-| median-based alignment | 0.749 | 0.687 |
-| 10 % trimmed alignment | 0.940 | 0.950 |
-| share negative, n_reach <= 50 | 76.8 % | 76.3 % |
-| share negative, 51 to 200 | 80.0 % | 80.0 % |
-| share negative, n_reach > 200 | 90.0 % | 86.9 % |
+| **share where loss falls if n rises** | **78.2 %** (z = 26.0) | **78.0 %** (z = 26.1) |
+| median-based alignment | 0.749 | 0.694 |
+| 10 % trimmed alignment | 0.940 | 0.953 |
+| share negative, n_reach <= 50 | 76.8 % | 76.6 % |
+| share negative, 51 to 200 | 80.0 % | 80.5 % |
+| share negative, n_reach > 200 | 90.0 % | 87.1 % |
 | trimmed alignment, n_reach > 200 | 1.000 | 0.998 |
 
 Every share is more than eight standard deviations from the 50 % a converged optimum would give (p < 1e-12).
 
-Paired, on the 2,009 gauges well-fit in both windows, which holds the population fixed:
+Paired, on the 2,059 gauges well-fit in both windows, which holds the population fixed:
 
 | | testing | training |
 |---|---|---|
-| share where loss falls if n rises | 77.9 % (z = 25.1) | **78.5 %** (z = 25.5) |
-| median-based alignment | 0.730 | 0.710 |
-| 10 % trimmed alignment | 0.937 | **0.957** |
-| Spearman r between the windows | - | 0.692 |
-| sign agreement | - | **83.8 %** |
+| share where loss falls if n rises | 78.4 % (z = 25.8) | **78.9 %** (z = 26.2) |
+| median-based alignment | 0.762 | 0.711 |
+| 10 % trimmed alignment | 0.941 | **0.959** |
+| Spearman r between the windows | - | 0.691 |
+| sign agreement | - | **84.2 %** |
 
 ### 21.1 What it settles
 
-**Nonstationarity is refuted as the explanation.** On the same 2,009 gauges the training window is if anything
-marginally more unanimous than the test window: 78.5 % against 77.9 % on the sign share, 0.957 against 0.937 on the
+**Nonstationarity is refuted as the explanation.** On the same 2,059 gauges the training window is if anything
+marginally more unanimous than the test window: 78.9 % against 78.4 % on the sign share, 0.959 against 0.941 on the
 trimmed alignment. The training period wants more roughness exactly as the test period does. The trained point is not a stationary point of the
 objective the model was actually fitted to.
 
@@ -943,8 +943,8 @@ architecture changes. The width-from-river-size retrain becomes a test of whethe
 than a test of whether n can move at all.
 
 **Confirmed continentally.** The concern that the eastern sample was where earlier sections put the largest
-displacement did not materialise: adding HUC 04 through 14 changed the paired sign share from 79.6 % to 78.5 % and
-the trimmed alignment from 0.948 to 0.957. Reproduce with
+displacement did not materialise: adding HUC 04 through 14 changed the paired sign share from 79.6 % to 78.9 % and
+the trimmed alignment from 0.948 to 0.959. Reproduce with
 `experiments/landscape/trainwin_compare.py <testing-merged> <training-merged> --out <dir>`.
 
 ### 21.3 Correction: the alignment statistic was not robust, and the robust version is stronger
