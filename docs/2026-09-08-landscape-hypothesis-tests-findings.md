@@ -606,3 +606,25 @@ the amount of delay and attenuation the model needs and cannot get from a 21 m w
 target for the p-from-river-size experiment is precisely this: recover the same NSE with n in the 0.03 to 0.05 range
 and the width doing the work.
 
+## 18. Wide box, both objectives, at the ten gauges (runs `landscape-p21-top10-{nse,kge}/merged`, box ln 10)
+
+| gauge | n*/n (NSE) | n*/n (KGE) | q*/q (NSE) | q*/q (KGE) | NSE* nse-opt / kge-opt | KGE* nse-opt / kge-opt |
+|---|---|---|---|---|---|---|
+| 01674500 | 4.68 | 4.90 | 6.22 | 0.11 | 0.837 / 0.814 | 0.862 / 0.850 |
+| 02223500 | 3.87 | 3.08 | 0.10 | 0.10 | 0.884 / 0.852 | 0.811 / 0.820 |
+| 02425000 | 4.06 | 3.96 | 0.11 | 0.16 | 0.887 / 0.887 | 0.940 / 0.942 |
+| 03371500 | 5.25 | 4.90 | 0.10 | 0.73 | 0.903 / 0.896 | 0.923 / 0.928 |
+| 03381500 | 8.62 | 8.62 | 0.24 | 0.54 | 0.803 / 0.801 | 0.882 / 0.882 |
+| 05458500 | 5.40 | 6.40 | 3.07 | 1.03 | 0.842 / 0.803 | 0.824 / 0.832 |
+| 05464500 | 5.34 | 8.19 | 0.10 | 3.56 | 0.885 / 0.862 | 0.871 / 0.887 |
+| 05465000 | 5.60 | 5.94 | 0.10 | 0.25 | 0.881 / 0.878 | 0.929 / 0.930 |
+| 05594100 | 8.07 | 5.31 | 0.93 | 2.13 | 0.818 / 0.785 | 0.868 / 0.887 |
+| 06810000 | 6.01 | 5.80 | 0.10 | 0.10 | 0.770 / 0.770 | 0.879 / 0.881 |
+
+All twenty optima are interior. The two objectives agree on roughness: median multiplier 5.4 (NSE) and 5.6 (KGE),
+per-gauge ratio median 0.99 across a 0.66 to 1.53 range, and all ten want slower under both. They disagree on the
+width exponent by a median factor 1.8 and by up to 35, while the scores at the two optima differ by at most 0.039 NSE
+and 0.018 KGE. Choosing the objective relocates the optimum along q and leaves n where it was: the same conclusion as
+the narrow box (§16), now with interior optima. The routing correction these gauges need is objective-independent;
+the width exponent is not identified by either score.
+
