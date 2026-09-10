@@ -1018,3 +1018,49 @@ training change.
 gradient-only run costs. Worth running only if the transfer magnitude, not the direction, becomes load-bearing for
 the paper.
 
+
+---
+
+## 22. Correction: the two-model skill comparison, done on a common gauge population
+
+§8 and §9 report the two p = 21 models as scoring median NSE 0.700 (area-balanced population) and 0.720
+(gages_3000 population), and the abstract draft built its strongest sentence on those being indistinguishable.
+**Those two numbers are on different test populations** and must not be compared: 0.700 is the area-balanced
+model on its own 1,841-gauge test set and 0.720 is the gages_3000 model on its own 2,365-gauge set. Each model's
+test set is derived from its own training list, so the two differ in composition and difficulty.
+
+Both runs' eval stores cover the identical window, 1995-10-01 to 2010-09-30, 5,477 days
+(`.ddrs/runs/<id>/eval/predictions.zarr`), so the paired comparison is directly computable on the 1,323 gauges
+present in both.
+
+| on the 1,323 shared gauges, same 15 years | area-balanced model | gages_3000 model |
+|---|---|---|
+| median NSE | **0.7384** | **0.7330** |
+| median KGE | 0.7695 | 0.7711 |
+
+| paired per-gauge difference, gages_3000 minus area-balanced | |
+|---|---|
+| median | -0.0042 |
+| mean | -0.0169 |
+| median absolute difference | 0.0214 |
+| gages_3000 better at | 37.5 % of gauges |
+| sign test | z = -9.1 |
+
+**What changes.** The 0.020 NSE gap in §8 and §9 was an artifact of the differing test populations, and it ran the
+wrong way: on a common set the area-balanced model is marginally *better*, not 0.020 worse. The gap between the
+models is 0.005 in the median, which is a quarter of the median gauge-to-gauge difference between them (0.021), so
+in magnitude their skill is practically identical. But the difference is consistent in sign, with the area-balanced
+model ahead at 62.5 % of gauges at z = -9.1, so **"statistically indistinguishable" is not the right phrase**.
+Write "practically identical median skill, 0.738 against 0.733" and, if the direction matters, note that the
+smaller, larger-basin population is very slightly ahead.
+
+**What survives, and it is the part that matters.** The equifinality argument never needed the two models to be
+exactly equal, only close. Two models whose median skill differs by 0.005 carry basin-median roughness differing by
+about a factor of two and sit on opposite sides of the per-gauge optima, and they differ only in the population of
+gauges each was shown. That claim stands.
+
+**Caveat on the roughness factor, which is thinner than the skill comparison.** It rests on the 30 gauges present
+in both 41-gauge censuses of §9 (median trained-n ratio 0.48, so a factor 2.1) plus the Juniata pair (0.100 against
+0.040, a factor 2.5). Thirty gauges is a small basis for a headline number. Before the abstract is submitted this
+should be recomputed across the full shared population, which is cheap: both runs' trained fields are already on
+disk and only the basin-median n per gauge is needed, not a landscape.
