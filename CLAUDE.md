@@ -87,12 +87,14 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 
 `.github/workflows/ci.yml` runs on every PR and every master push: job
 `test` (debug `cargo test --features fixtures`) and job `acceptance`
-(release `compare_ddr_sandbox` + `juniata_acceptance`). Branch protection
+(release `compare_ddr_sandbox` + `juniata_acceptance` +
+`gridded_acceptance`). Branch protection
 requires both for PR merges; direct pushes stay possible and are vetted by
 the push-triggered run. CI has no GPU and no real data: green CI does NOT
 cover `--features cuda` tests or the data-dependent suite; run those
 locally per the tier gates. Local pre-push hook (opt-in):
-`git config core.hooksPath .githooks`.
+`git config core.hooksPath .githooks` — runs `ddr_sandbox_match` +
+`gridded_bundle` (both never skip; ~0.4 s warm).
 
 ### `ddrs` CLI (preferred entrypoint)
 

@@ -135,3 +135,8 @@ jobs:
         run: mkdir -p output && cargo run --release --example compare_ddr_sandbox
       - name: Juniata end-to-end acceptance
         run: cargo test --release --test juniata_acceptance -- --nocapture
+      # Same chain on the gridded (ISIMIP DDM30) network: both acceptance
+      # tests self-skip under debug_assertions, so the debug `test` job never
+      # runs them. Shares this job's release build; the test itself is ~10 s.
+      - name: Gridded (DDM30) end-to-end acceptance
+        run: cargo test --release --test gridded_acceptance -- --nocapture

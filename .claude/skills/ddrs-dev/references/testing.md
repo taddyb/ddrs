@@ -88,7 +88,10 @@ Exit 0, no drift warnings.
 required checks must never be skipped): job `test` = debug
 `cargo test --features fixtures --no-fail-fast` (~12–17 min cold; warm is
 shorter); job `acceptance` = release `compare_ddr_sandbox` +
-`juniata_acceptance` (~25 min cold; warm is shorter). The acceptance job
+`juniata_acceptance` + `gridded_acceptance` (~25 min cold; warm is shorter;
+both acceptance tests self-skip under `debug_assertions`, so the debug `test`
+job never runs them — the release job is their only CI coverage). The
+acceptance job
 builds with `CARGO_PROFILE_RELEASE_LTO=false` (env override in the workflow
 only): the thin-LTO link of the test binary was 30 of 40 minutes on the
 2-core runner while the 30 training epochs took ~13 s, so the training is
@@ -103,8 +106,10 @@ local tier gates.
 
 Both jobs install a CUDA toolkit only because compilation requires it
 (build-and-env.md). Local hook: `git config core.hooksPath .githooks`
-enables `.githooks/pre-push` (runs `ddr_sandbox_match`; bypass with
-`git push --no-verify`).
+enables `.githooks/pre-push`, which runs `ddr_sandbox_match` +
+`gridded_bundle` in one cargo invocation (~0.4 s warm; both never skip, so a
+broken checkout fails locally rather than in CI). Bypass with
+`git push --no-verify`.
 
 ## What covers what
 
