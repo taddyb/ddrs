@@ -4,11 +4,13 @@ Struct: `src/config.rs::Config`. Loaded via
 `Config::from_yaml_file_with_mode(path, ConfigMode::Training|Testing)`.
 Six top-level sections. Verified against source 2026-07-30.
 
-**No `deny_unknown_fields` except `DisaggregationSection`** (added 2026-08-03)
-**and `Subdivision`** (`params.subdivision`; corrected 2026-09-09 — `src/config.rs`
-carries exactly these two) —
-everywhere else a typo'd key silently takes its default instead of erroring. This
-is the single most common cause of "my config change did nothing".
+**Every section sets `deny_unknown_fields`** as of 2026-09-09 (`ConfigRaw`,
+`DataSources`, `Experiment`, `KanHeadConfigSection`, `LossConfig`, `ParamsRaw`,
+`TestingOverridesRaw`, plus `DisaggregationSection` and `Subdivision`, which had it
+already), so a typo'd key is a load error naming the key. Historically only the last
+two had it and everywhere else a typo silently took its default, which was the
+single most common cause of "my config change did nothing". On a binary older than
+2026-09-09, that silence is still the first thing to suspect.
 
 ## Contents
 
@@ -186,6 +188,7 @@ Four validators run at `Config::from_yaml_file`, plus one at dataset open.
 | | `gridded_network` + `geospatial_fabric` | `"gridded_network"` + `"geospatial_fabric"` |
 | | `gridded_network` + explicit adjacency pair | `"gridded_network"` + `"conus_adjacency"` |
 | `validate_subdivision` | `subdivision.enabled: true` + `gridded_network` | `"params.subdivision"` + `"gridded_network"` |
+| `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
 | `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |

@@ -125,12 +125,14 @@ belong to only one network (`gridded_network`, `geospatial_fabric`, `aorc_precip
 appear and disappear correctly. Everything outside the block is untouched, so
 `geodataset:` and `params.subdivision` do **not** follow the switch.
 
-Fix `geodataset:` by hand after switching. **Nothing validates it**: no code path
-compares it against the adjacency keys, so a mismatch does not error. It is a
-provenance label, written into managed-build zarr attrs and copied into the run's
-`config.yaml` snapshot. Leaving `geodataset: ddm30` on a MERIT run produces a
-successful run whose audit trail names the wrong network, which is worse than a
-rejected config because nothing tells you.
+Fix `geodataset:` after switching, or just delete the key. It is a provenance label
+(written into managed-build zarr attrs and the run's `config.yaml` snapshot) and
+nothing at runtime reads it, but since 2026-09-09 a value contradicting the
+adjacency source is a **load error**, and an absent one is **inferred** from the
+source. So omitting it is always right, and a stale one now stops the run instead of
+silently mislabelling its audit trail. Only the two managed-build sources are
+decidable; with explicit `conus_adjacency`/`gages_adjacency` any label is accepted,
+because a pre-built store could be either network.
 
 ## Track a run
 
@@ -153,14 +155,26 @@ signal, not noise (see `ddrs-dev` traps).
 
 ```bash
 ddrs status                    # workspace summary: last run, lock state, disk usage
-ddrs show <run-id>             # status, workflow, git SHA, adjacency, drift
-ddrs show <run-id> --json      # the FULL manifest, including metrics
+ddrs show <run-id>             # status, git SHA, adjacency, metrics, baseline delta
+ddrs show <run-id> --json      # the full manifest, machine-readable
 ```
 
-**Text-mode `ddrs show` never prints metrics. `--json` is required for them.**
-Verified 2026-09-09 on a finished train-and-test run: the human view has zero
-NSE/KGE lines, so `ddrs show <id> | grep nse` returns nothing on a perfectly good
-run and reads like a failed one.
+`ddrs show` prints a `metrics` block and, for a `train-and-test` run, the
+summed-Q' baseline reduced to a median per metric with the routed value and the
+delta beside it, flagging the case where routed does not beat baseline:
+
+```
+metrics
+  median_nse_finite      0.7511
+  median_kge_finite      0.7299
+baseline (summed Q', median over gauges)
+  NSE                    0.5943   routed 0.7511   Δ +0.1568
+  KGE                    0.6715   routed 0.7299   Δ +0.0583
+```
+
+(Before 2026-09-09 text mode printed no metrics at all, so `ddrs show <id> | grep
+nse` came back empty on a healthy run. If you are on an older binary and see that,
+it is the binary, not the run.)
 
 `.ddrs/runs/<id>/` holds `manifest.json`, `config.yaml` (the exact config that ran),
 `run.log`, `checkpoints/`, and `Cargo.lock`. The manifest is the audit record:
@@ -174,19 +188,13 @@ numbers, because nothing was evaluated. Skill numbers
 from `train-and-test`. Comparing a `train` run's metrics to a baseline is a category
 error; re-run as `train-and-test`.
 
-**Comparing against the baseline takes one extra step.** `train-and-test` copies the
-baseline to `<run_dir>/baseline/manifest.json`, but its `metrics` are **per-gauge
-arrays** (`nse`, `kge`, `rmse`, `bias`, `fhv`, `flv`, one entry per gauge in
-`gage_ids` order), not pre-reduced medians. The run manifest's
-`median_nse_finite` is already a median, so take the median of the baseline array
-yourself or you will compare a median against a 620-element list. `run` also never
-re-prints the baseline table that `plan` shows, so read it from the file:
-
-```bash
-RUN=$(ls -t .ddrs/runs | head -1)
-ddrs show "$RUN" --json | python3 -c 'import json,sys; m=json.load(sys.stdin)["metrics"]; print("routed  NSE", m["median_nse_finite"], "KGE", m["median_kge_finite"])'
-python3 -c 'import json,statistics as s; m=json.load(open(".ddrs/runs/'"$RUN"'/baseline/manifest.json"))["metrics"]; print("baseline NSE", s.median(m["nse"]), "KGE", s.median(m["kge"]))'
-```
+**If you read the baseline file yourself, reduce it first.** `train-and-test` copies
+the baseline to `<run_dir>/baseline/manifest.json`, and its `metrics` are
+**per-gauge arrays** (`nse`, `kge`, `rmse`, `bias`, `fhv`, `flv`, one entry per
+gauge in `gage_ids` order), not pre-reduced medians. Comparing that raw array to the
+run manifest's `median_nse_finite` compares a scalar against a 620-element list.
+`ddrs show` does the reduction for you; `--json` does not, and `run` never re-prints
+the baseline table that `plan` shows.
 
 `git.dirty: true` means the working tree had uncommitted edits, so the SHA alone
 does not reproduce that run.
@@ -237,7 +245,7 @@ content-addressed and expensive to rebuild.
 | `ddrs experiment <name>` | **Not on master.** The subcommand and `src/experiment/` live on the `experiment-adjoint` branch. On master it exits with *"unrecognized subcommand"*. |
 | `ddrs run --epochs 10` | No such flag. `experiment.epochs` is YAML-only; edit the config. |
 | `ddrs run --checkpoint <dir>` | No such flag. Resume goes through `experiment.checkpoint:` in the config. |
-| A typo'd config key | Silently takes its default almost everywhere. Only `kan_head.disaggregation` and `params.subdivision` set `deny_unknown_fields` (verified 2026-09-09). This is the most common cause of "my config change did nothing". |
+| A typo'd config key | Now a load error naming the key. Every config section sets `deny_unknown_fields` as of 2026-09-09; before that a typo silently took its default, which was the most common cause of "my config change did nothing". On an older binary, that silence is still the first thing to suspect. |
 
 ## Red flags: stop and re-check preflight
 
