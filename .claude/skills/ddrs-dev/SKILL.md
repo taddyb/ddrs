@@ -27,6 +27,7 @@ config reference, test-authoring patterns, and the current research status.
 | Diagnose a failed, hung, or wrong-result run | `references/traps.md` §Symptom → trap |
 | Check whether a question is already settled | `references/research-status.md` |
 | Build or change the training gauge CSV / population | `references/gauge-population.md` |
+| Launch / watch / resume / audit a training run, or use any `ddrs` subcommand | skill `ddrs-run` |
 | Plot or interpret eval output | skill `ddrs-eval-plots` |
 
 ## Contents
@@ -224,7 +225,9 @@ reader now sniffs the axis order (traps.md T11).
 
 ## Maintenance
 
-This skill and `ddrs-eval-plots` are the only two skills in this repo. When a run,
+Three skills live in this repo: this one (build / code / configure / test / debug),
+`ddrs-run` (launch, watch, resume, and audit runs; the full `ddrs` command
+reference), and `ddrs-eval-plots` (visualize and interpret run output). When a run,
 eval, or export completes, update the relevant section here in the same session that
 produced the knowledge — do not leave it only in a findings doc. If a rule here is
 superseded, correct it in place with the new nuance rather than deleting it.

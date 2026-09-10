@@ -4,7 +4,9 @@ Struct: `src/config.rs::Config`. Loaded via
 `Config::from_yaml_file_with_mode(path, ConfigMode::Training|Testing)`.
 Six top-level sections. Verified against source 2026-07-30.
 
-**No `deny_unknown_fields` except `DisaggregationSection`** (added 2026-08-03) —
+**No `deny_unknown_fields` except `DisaggregationSection`** (added 2026-08-03)
+**and `Subdivision`** (`params.subdivision`; corrected 2026-09-09 — `src/config.rs`
+carries exactly these two) —
 everywhere else a typo'd key silently takes its default instead of erroring. This
 is the single most common cause of "my config change did nothing".
 

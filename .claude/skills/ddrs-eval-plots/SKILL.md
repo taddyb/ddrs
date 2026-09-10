@@ -197,7 +197,10 @@ L1, run `2026-06-23T02-49-12Z-conus-hourly-train-and-test`) — that is +0.037 N
 −0.007 KGE against the baseline. Full table and the 2026-07-30 KGE qualification:
 `ddrs-dev` → `references/research-status.md`.
 
-`ddrs show <id> | grep -E "nse|kge|loss"` is the cheap pre-plot triage.
+`ddrs show <id> --json | grep -E "nse|kge"` is the cheap pre-plot triage. **The
+`--json` is required** (corrected 2026-09-09): text-mode `ddrs show` prints status,
+workflow, git SHA, drift and adjacency only, never metrics, so the same grep without
+it silently returns nothing on a perfectly good run. See skill `ddrs-run`.
 
 ### Have the parameters converged?
 
