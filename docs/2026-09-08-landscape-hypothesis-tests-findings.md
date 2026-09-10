@@ -668,3 +668,99 @@ attribute and architecture changes, and the width experiment becomes a test of w
 rather than a test of whether n can move at all. It does not overturn the equifinality results: q stays unidentified
 at 85 % of gauges and n stays unidentifiable below one day of travel time whatever the optimizer does.
 
+
+---
+
+## 20. How much skill is actually recoverable from the displacement
+
+§19 established that the per-gauge gradients do not cancel: the population wants more roughness than it has. That
+raises the obvious question for training. If we could act on it, what would it buy? Two calculations on the WY1996 to
+2000 census (`landscape-p21-all-5yr`) bound the answer from both sides, and the answer is: very little.
+
+Both use a per-gauge quadratic surrogate in the log-multiplier `c` on Manning's n,
+
+    NSE(c) = NSE* - k (c - a*)^2 ,    k = (NSE* - NSE_0) / a*^2
+
+which is exact at the two points the census measures (the trained point `c = 0` and the Newton optimum `c = a*`) and
+interpolates between them. Gauges on the search-box edge are excluded, leaving 1,884 of the 2,365. Values quoted
+inside `[0, a*]` are interpolation; anything past `a*` is extrapolation and is only used to show the shape.
+
+### 20.1 One global roughness level recovers 9 % of the gain
+
+Scale every reach's trained n by a single common factor and sweep it:
+
+| global log-multiplier c | n factor | median NSE |
+|---|---|---|
+| -0.50 | 0.61 | 0.7041 |
+| -0.25 | 0.78 | 0.7272 |
+| **0.00 (trained)** | 1.00 | **0.7507** |
+| +0.275 (best) | 1.32 | **0.7533** |
+| +0.50 | 1.65 | 0.7519 |
+| +1.00 | 2.72 | 0.7414 |
+| +1.25 | 3.49 | 0.7330 |
+
+Against a median of 0.7786 if every gauge were placed at its own optimum, the best single global number captures
+**0.0026 of the 0.0279, or 9 %**. The median is also extraordinarily flat: a factor 2.7 on the roughness of every
+channel in the CONUS costs 0.009 NSE.
+
+The population is not globally displaced in a way one number can fix, even though 73 % of gauges want more roughness
+and the median gauge optimum is n x 1.71 (p25 x 0.98, p75 x 2.70, p95 x 5.27). The displacement is real in direction
+and diffuse in magnitude. Only the largest basins behave like a coherent group: at `n_reach > 200` the best global
+multiplier is +0.735 and it lifts the median from 0.778 to 0.823, which is 65 % of that group's per-gauge gain.
+That is the same size dependence as §19's alignment statistic, and it is the one place where a global fix works.
+
+A caution on the mean. Mean NSE collapses under any global shift (0.714 at `c = 0`, 0.351 at +0.25, negative beyond),
+but that number is extrapolation-driven: a downward parabola has no floor, while a real NSE curve flattens. Read the
+median row only.
+
+### 20.2 A per-gauge optimum estimated on one year transfers at 31 %
+
+The census was also run on WY2000 alone (`landscape-p21-all`, 365 days). Comparing the two on the 1,351 gauges that
+are well-fit and off the box edge in both:
+
+| quantity | value |
+|---|---|
+| Pearson r of `a*` between windows | 0.646 |
+| Spearman r | 0.672 |
+| sign agreement | 78.8 % |
+| median `a*`, one year | +0.491 |
+| median `a*`, five years | +0.524 |
+| median &#124;a*_1y - a*_5y&#124; | 0.248 log units (median &#124;a*_5y&#124; = 0.714) |
+
+So the direction is a stable property of the gauge, not window noise: the two medians agree to 0.03 log units and
+four gauges in five agree on the sign. But stability of direction is not the same as usable precision. Taking the
+WY2000 optimum and scoring it on the five-year window:
+
+| placement | median 5-year NSE | gain |
+|---|---|---|
+| trained point | 0.7771 | - |
+| WY2000 optimum, scored on WY1996 to 2000 | 0.7847 | **+0.0076** |
+| WY1996 to 2000 optimum (in sample) | 0.8015 | +0.0244 |
+
+**31 % of the in-sample gain survives the transfer**, and it improves only 68 % of gauges. This is an optimistic
+bound: WY2000 is *inside* WY1996 to 2000, so the two estimates share a fifth of their data. A genuinely disjoint
+transfer would be worse.
+
+### 20.3 What this means
+
+The two bounds squeeze from opposite directions. The displacement cannot be fixed by a global constant (9 %), and it
+cannot be estimated reliably per gauge from a normal length of record (31 % from one year, sharing data). The honest
+reading of the "0.03 NSE gain" reported in §11 and in
+`docs/2026-09-09-why-not-at-optimum-findings.md` is that it is an **in-sample upper bound on a quantity that is
+largely unrecoverable**, not skill the model is leaving on the table.
+
+That is not a negative result. It is the sharpest identifiability statement the study has produced. A large,
+systematic, reproducible displacement in Manning's n costs almost nothing in discharge skill. The loss surface has a
+well-defined minimum at each gauge, and that minimum is both shallow and window-dependent, so daily discharge cannot
+pin the parameter down even where it does constrain it. This is Beven's argument stated as a measurement rather than
+an assertion.
+
+For training it reorders the priorities again. Spending optimizer updates to chase the aggregate gradient of §19 buys
+at most a few thousandths of NSE outside the largest basins, so "train longer" is worth doing to make the model's
+parameters defensible, not to make it more skillful. The exception is `n_reach > 200`, where the displacement is
+coherent, a global fix works, and the gain is 0.045.
+
+**Caveats.** The surrogate is a two-point quadratic; a true grid at a subset of gauges would sharpen 20.1 (the
+`landscape-p21-report38` run supplies 25 x 25 grids at 37 gauges and can be used to check it). The transfer test in
+20.2 is nested and therefore optimistic. Both calculations are on `nse-batch` optima and NSE scoring; KGE was checked
+separately (§16) and agrees on the direction.
