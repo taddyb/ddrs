@@ -628,3 +628,43 @@ and 0.018 KGE. Choosing the objective relocates the optimum along q and leaves n
 the narrow box (§16), now with interior optima. The routing correction these gauges need is objective-independent;
 the width exponent is not identified by either score.
 
+## 19. Did training converge? The aggregate gradient at the trained point (2026-09-10)
+
+The per-gauge landscape gradient `grad0_n` = dL_gauge / d ln(n multiplier) at the trained point is stored for every
+gauge by the five-year census. If training had reached a stationary point for a global scaling of n, these gradients
+would cancel across the population: some gauges pulling n up, others down, mean near zero relative to the spread.
+
+| well-fit gauges, five-year window, n = 2,124 | value |
+|---|---|
+| share with `grad0_n` < 0 (loss falls if n rises) | 78.2 % |
+| mean gradient | −0.0519 |
+| mean absolute gradient | 0.0639 |
+| alignment, abs(mean) / mean(abs) | **0.81** |
+| significance of the mean | 3 sigma |
+| basins > 200 reaches (n = 140): share negative, alignment | 90 %, **0.97** |
+| basins <= 50 reaches (n = 1,580): share negative, alignment | 77 %, 0.56 |
+
+An alignment of 0 means the gauges disagree and their gradients cancel, which is what a converged batch compromise
+looks like. An alignment of 1 means they all pull the same way, which is what an unfinished descent looks like. The
+population sits at 0.81, and at 0.97 among the large basins. **The aggregate gradient on a global n scaling has not
+vanished: it still points toward higher n.**
+
+This is consistent with the optimizer budget. Gradient accumulation over 20 micro-batches at 2 updates per epoch gives
+**60 optimizer updates in the whole 30-epoch run**, and the trajectory study (§10, the same run) found n stationary
+from update 20 onward while the learning rate decayed 0.005 to 0.001 to 0.0005. So n stopped moving when the steps
+became small, not when the gradient became small.
+
+**Confound to eliminate.** These gradients are evaluated on WY1996 to 2000, the test period; training used 1981 to
+1995. A model converged on its training data could still show a gradient on a later period, which would be
+nonstationarity rather than undertraining. The decisive test is the same aggregate on the training window, and it
+needs the study to be able to score on the training period (`period: training`, in progress). If the training-window
+alignment is also near 1, training genuinely stopped early and the fix is optimizer steps, not physics. If it is near
+0 while the test-window alignment is 0.81, the model converged on what it was shown and the test period wants a
+different channel.
+
+**If undertraining is confirmed**, it reorders the ranked changes of `docs/2026-09-09-why-not-at-optimum-findings.md`
+§4: more optimizer updates (smaller accumulation, more epochs, or a flatter learning-rate schedule) moves ahead of the
+attribute and architecture changes, and the width experiment becomes a test of whether the converged n is physical
+rather than a test of whether n can move at all. It does not overturn the equifinality results: q stays unidentified
+at 85 % of gauges and n stays unidentifiable below one day of travel time whatever the optimizer does.
+
