@@ -700,8 +700,9 @@ Scale every reach's trained n by a single common factor and sweep it:
 | +1.00 | 2.72 | 0.7414 | 0.7510 |
 | +1.25 | 3.49 | 0.7330 | |
 
-Against a per-gauge ceiling of 0.7786, the best single global number captures **9 % of the gain on all gauges and
-38 % once the unstable gauges of §20.4 are removed.** A minority either way.
+Against a per-gauge ceiling of 0.7786, the best single global number captures **about a third of the available
+gain**: 32 to 38 % under the three principled repairs of §20.4, at a multiplier of n x 1.5, worth roughly +0.009
+median NSE out of an available +0.028. The 9 % from the unbounded parabola is an artifact and is superseded.
 
 The robust part of this table is the flatness. **A factor 2.7 on the roughness of every channel in the CONUS moves
 the continental median efficiency by less than 0.01 in either direction** (-0.009 all gauges, +0.002 filtered).
@@ -728,7 +729,7 @@ A caution on the mean. Mean NSE collapses under any global shift (0.714 at `c = 
 beyond), but that is extrapolation-driven: a downward parabola has no floor while a real NSE curve flattens. Read
 the median rows only.
 
-### 20.2 A per-gauge optimum estimated on one year transfers at 31 to 59 %
+### 20.2 A per-gauge optimum estimated on one year transfers at about 59 %
 
 The census was also run on WY2000 alone (`landscape-p21-all`, 365 days). Comparing the two on the 1,351 gauges
 well-fit and off the box edge in both:
@@ -756,14 +757,14 @@ window, through the surrogate:
 | **fraction of the in-sample gain kept** | **31 %** | **59 %** |
 | share of gauges improved | 67.7 % | 71.3 % |
 
-So between a third and three fifths of the in-sample gain survives a five-fold change in record length. Both
-figures are optimistic: WY2000 sits *inside* WY1996 to 2000, so the two estimates share a fifth of their data. A
+By the same argument as §20.4 the filtered column is the one to quote: about three fifths of the in-sample gain
+survives a five-fold change in record length. Both figures are optimistic: WY2000 sits *inside* WY1996 to 2000, so the two estimates share a fifth of their data. A
 genuinely disjoint transfer would be worse.
 
 ### 20.3 What this means
 
-Neither route to the displacement is clean. It is not fixable by a global constant (9 to 38 %), and a per-gauge
-estimate from a normal length of record loses between two fifths and two thirds of its own promise. The "0.03 NSE
+Neither route to the displacement is clean. A single global constant recovers about a third of it, and a
+per-gauge estimate from a normal length of record loses about two fifths of its own promise. The "0.03 NSE
 gain" reported in §11 and in `docs/2026-09-09-why-not-at-optimum-findings.md` is an **in-sample upper bound on a
 quantity that is only partly recoverable**, and the recoverable part is of order 0.01, not 0.03.
 
@@ -774,7 +775,7 @@ minimum at each gauge; that minimum is shallow and window-dependent, so daily di
 down even where it does constrain it. This is Beven's argument stated as a measurement rather than an assertion.
 
 For training the priority is unchanged in direction and softened in magnitude. Chasing the aggregate gradient of
-§19 is worth a few thousandths to perhaps 0.01 NSE outside the largest basins, so "train longer" is mainly about
+§19 is worth about 0.009 NSE at the population median, so "train longer" is mainly about
 making the model's parameters defensible. The exception is `n_reach > 200`, where the displacement is coherent, a
 global fix works, and the gain is 0.045.
 
@@ -822,10 +823,38 @@ gauge's true optimum at +0.384 with a gain of 0.0044, not at -0.022 with a gain 
 surface the Newton search settled on a spurious nearby point, which is what manufactured the divergent k.
 
 **This makes the filtered column the better estimate, not merely the upper end of a range.** The unfiltered 9 %
-and 31 % are artifacts of parabolas that predict an NSE collapse the model does not actually suffer. Pending the
-other 31 grids, quote **38 % for the global fix and 59 % for the one-year transfer**, and treat 9 % / 31 % as
-superseded. One pathological gauge is a small sample, but the mechanism was predicted in advance from the
-definition of k and the measurement matches it in sign, location and magnitude.
+and 31 % are artifacts of parabolas that predict an NSE collapse the model does not actually suffer.
+
+With 21 grids in hand the picture is complete enough to settle it. Two of the 21 are in the pathological class
+(02120780 k = 25.7, 02151500 k = 29.6) and both behave identically: wrong by about 7 NSE at `c = +0.5` and about
+29 at `c = +1.0`, pessimistic every time. Away from that class the parabola errs the other way, being mildly
+optimistic in 16 of 21 gauges, so the two biases partly cancel in a median. On the 21-gauge subsample the
+parabola reproduces the grid-derived captured fraction to one point (84 % against 83 %), which is why the
+population sweep is worth repairing rather than abandoning.
+
+What the grids bound directly is how far a gauge ever really falls. Scaling roughness up across the 21:
+
+| shift | median drop in NSE | p90 | max |
+|---|---|---|---|
+| c = +0.25 (n x 1.28) | -0.005 (a gain) | +0.000 | +0.013 |
+| c = +0.50 (n x 1.65) | -0.009 (a gain) | +0.004 | +0.089 |
+| c = +1.00 (n x 2.72) | -0.009 (a gain) | +0.060 | +0.087 |
+
+No gauge in a sample deliberately loaded with the worst cases loses more than 0.09 NSE. A parabola predicting a
+fall of 6 or 26 is measurably wrong, and the correct repair is not a floor (the curves are nearly flat, not
+steeply bounded) but a sane curvature. Three independent repairs of the 120 affected gauges, 6.4 % of the
+population:
+
+| treatment of &#124;a*&#124; < 0.05 | best c* | median NSE | captured |
+|---|---|---|---|
+| unbounded parabola (as first published) | +0.275 | 0.7533 | 9 % |
+| impute the population median k = 0.027 | +0.440 | 0.7604 | 35 % |
+| impute k = 0.07, the grid-measured value | +0.390 | 0.7598 | 32 % |
+| drop them entirely | +0.455 | 0.7601 | 38 % |
+
+They converge on **a third, at n x 1.5, worth about +0.009 median NSE**. Flooring the parabola does not work
+(0.15 gives 12 %, 0.10 gives 19 %) because a floor still places the anchored gauges well below the median while
+the grids say their curves barely move. The 9 % figure is the outlier and is withdrawn.
 
 **Remaining caveats.** The transfer test in 20.2 is nested and therefore optimistic. Both calculations are on
 `nse-batch` optima with NSE scoring; KGE was checked separately (§16) and agrees on the direction. The stiff
