@@ -17,7 +17,7 @@ use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext, PER
 use crate::experiment::adjoint::{resolve_window_days, seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
-use self::objective::{eig3, eig_active, newton_step_capped, Objective};
+use self::objective::{eig3, eig_active, newton_step_capped, NoValidObservations, Objective};
 use self::output::{write_landscape_netcdf, LandscapeResult, NewtonStep, SeriesData, Slice};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -360,6 +360,7 @@ where
     if opts.dry_run {
         return Ok(notes);
     }
+    let mut skipped_no_obs = 0usize;
     for (gi, g) in gauges.iter().enumerate() {
         let t_g = Instant::now();
         match run_gauge::<I>(&ctx, spec, arm, g, &arm_dir, &starts, window_days) {
@@ -372,11 +373,26 @@ where
                 );
             }
             Err(e) => {
-                let msg = format!("{}/{}: FAILED — {e}", arm.name, g.staid);
-                eprintln!("  {msg}");
-                notes.push(msg);
+                if let Some(no_obs) = e.downcast_ref::<NoValidObservations>() {
+                    let msg = format!("[{}] {} skipped: {no_obs}", arm.name, g.staid);
+                    println!("  {msg}");
+                    notes.push(msg);
+                    skipped_no_obs += 1;
+                } else {
+                    let msg = format!("{}/{}: FAILED — {e}", arm.name, g.staid);
+                    eprintln!("  {msg}");
+                    notes.push(msg);
+                }
             }
         }
+    }
+    if skipped_no_obs > 0 {
+        let note = format!(
+            "[{}] skipped {skipped_no_obs} of {} gauge(s): no valid observations in the study window",
+            arm.name, gauges.len()
+        );
+        println!("  {note}");
+        notes.push(note);
     }
     println!("=== arm {} done in {:.1} s ===", arm.name, t_arm.elapsed().as_secs_f32());
     Ok(notes)

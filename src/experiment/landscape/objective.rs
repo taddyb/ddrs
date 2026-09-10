@@ -9,6 +9,7 @@
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
+use chrono::{Duration, NaiveDate};
 
 use crate::data::dataset::RoutingTensors;
 use crate::data::ids::Staid;
@@ -79,6 +80,31 @@ pub struct ReachGrad {
     pub q: Vec<f32>,
 }
 
+/// Returned by `Objective::build` when a gauge has zero valid (finite,
+/// non-negative) observations in every configured window.
+///
+/// The run-level gauge filter (`gages_adjacency filter`) only guarantees
+/// observation coverage over the full configured training/testing window;
+/// a landscape study's `window_days`/`water_year` slice can be much shorter
+/// and land entirely in a gap. That is an expected per-gauge data
+/// condition, not a bug, so `run_arm` downcasts this error to log a
+/// `skipped` line and continue with the rest of the gauge population,
+/// instead of the whole arm panicking (`forward_loss`'s old
+/// `.expect("at least one window with valid observations")`).
+#[derive(Debug)]
+pub struct NoValidObservations {
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+}
+
+impl std::fmt::Display for NoValidObservations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no valid observations in the window {} .. {}", self.start, self.end)
+    }
+}
+
+impl std::error::Error for NoValidObservations {}
+
 impl<'a, I: Backend + 'static> Objective<'a, I>
 where
     I::FloatTensorPrimitive: 'static,
@@ -121,10 +147,21 @@ where
             section.learnable_parameters.iter().any(|s| s == "p_spatial"),
             section.learnable_parameters.iter().any(|s| s == "q_spatial"),
         ];
+        // The routed daily series `forward_loss` compares `obs` against has
+        // length `window_days - 2` regardless of `tau`: `n_hourly =
+        // (window_days - 1) * 24` (`RhoWindow::n_hourly`,
+        // src/data/dates.rs) and `tau_trim_and_downsample` trims exactly 24
+        // hours off that for any `tau in [0, 24)` (src/training/loss.rs:46-67).
+        // Mirrored here so a gauge with no observations in the window forward
+        // pass would actually score is caught before running the (expensive)
+        // routing forward, instead of surfacing as a panic deep inside `eval`.
+        let d = window_days.saturating_sub(2);
+        let mut any_valid_window = false;
         let mut windows = Vec::new();
         for &start in window_starts {
             let batch = ctx.collate_gauge(staid, start, window_days)?;
             let obs: Vec<f32> = batch.observations.column(0).to_vec();
+            any_valid_window |= has_valid_observation(&obs, ctx.warmup, d);
             let gauge_row = batch.outflow_idx[0][0];
             let comids: Vec<i64> = batch.divide_comids.iter().map(|c| c.0).collect();
             let tensors = batch.to_tensors::<AD<I>>(device);
@@ -167,6 +204,11 @@ where
                 .clamp_min(ctx.cfg.params.attribute_minimums.slope);
             let length = Tensor::<I, 1>::from_floats(tensors.adjacency.length_m.as_slice(), device);
             windows.push(WindowData { start_day: start, tensors, obs, n0, p0, q0, x_storage, q_prime, slope, length, gauge_row, comids });
+        }
+        if !any_valid_window {
+            let start = ctx.axis.start + Duration::days(window_starts[0] as i64);
+            let end = start + Duration::days(window_days.saturating_sub(1) as i64);
+            return Err(Box::new(NoValidObservations { start, end }));
         }
         Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active, objective: objective.to_string() })
     }
@@ -427,6 +469,16 @@ where
         }
         s
     }
+}
+
+/// True when `obs[i]` is finite and non-negative for at least one `i` in
+/// `warmup..d` (also bounded by `obs.len()`) -- the same predicate
+/// `forward_loss` uses to build its per-window `valid` day list. Used by
+/// `Objective::build` to detect, before running any routing forward, a
+/// gauge/window pair with zero valid observations (see `NoValidObservations`).
+/// Pure -- no I/O -- so it's unit-tested below without a trained checkpoint.
+fn has_valid_observation(obs: &[f32], warmup: usize, d: usize) -> bool {
+    (warmup..d).any(|i| i < obs.len() && obs[i].is_finite() && obs[i] >= 0.0)
 }
 
 /// Trained physical field for one channel parameter, length `n_active`.
@@ -712,6 +764,45 @@ mod tests {
         let f = trained_field::<TestBackend>(None, [0.0, 10.0], false, 21.0, 4, &device);
         let v: Vec<f32> = f.into_data().to_vec::<f32>().unwrap();
         assert_eq!(v, vec![21.0, 21.0, 21.0, 21.0]);
+    }
+
+    #[test]
+    fn has_valid_observation_true_when_one_day_is_finite_and_nonnegative() {
+        let obs = vec![f32::NAN, f32::NAN, 3.5, f32::NAN];
+        assert!(has_valid_observation(&obs, 0, obs.len()));
+    }
+
+    #[test]
+    fn has_valid_observation_false_when_every_day_is_nan() {
+        let obs = vec![f32::NAN; 5];
+        assert!(!has_valid_observation(&obs, 0, obs.len()));
+    }
+
+    #[test]
+    fn has_valid_observation_false_when_valid_day_is_outside_the_warmup_bound() {
+        // The only finite day (index 0) is before `warmup`, mirroring a
+        // landscape window whose sub-slice of the gauge's record happens to
+        // land entirely in an observation gap after warmup -- this is the
+        // condition `Objective::build` turns into `NoValidObservations`
+        // instead of letting `forward_loss` panic on an empty valid set.
+        let obs = vec![3.5, f32::NAN, f32::NAN, f32::NAN];
+        assert!(!has_valid_observation(&obs, 1, obs.len()));
+    }
+
+    #[test]
+    fn has_valid_observation_false_for_negative_fill_values() {
+        // Negative observations (e.g. a -0.001 fill/sentinel) are not valid.
+        let obs = vec![-0.001, -1.0];
+        assert!(!has_valid_observation(&obs, 0, obs.len()));
+    }
+
+    #[test]
+    fn no_valid_observations_display_matches_the_skip_log_format() {
+        let e = NoValidObservations {
+            start: NaiveDate::from_ymd_opt(1996, 1, 1).unwrap(),
+            end: NaiveDate::from_ymd_opt(1996, 12, 31).unwrap(),
+        };
+        assert_eq!(e.to_string(), "no valid observations in the window 1996-01-01 .. 1996-12-31");
     }
 
     #[test]
