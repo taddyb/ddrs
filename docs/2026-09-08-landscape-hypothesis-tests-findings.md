@@ -580,3 +580,29 @@ attenuation, which both measure. Conclusion: the choice of objective does not ch
 gauges; it only relocates the optimum along the flat q direction, which is another demonstration that q is not
 identified. The wide-box reruns (n up to × 10) will give the true optima for both objectives.
 
+## 17. The ten gauges with the box widened to a factor ten in n (run `landscape-p21-top10-nse/merged`, box ln 10)
+
+All ten optima are now interior (none at the box edge, none range-bound). Overview
+`docs/figures/2026-09-10-top10_nse_wide_overview.png`; the box-1.5 results of §15 are kept at `merged-box1.5/`.
+
+| gauge | n* / n | q* / q | NSE 0 → * | KGE 0 → * |
+|---|---|---|---|---|
+| 01674500 Mattaponi | 4.7 | 6.2 | 0.470 → 0.837 | 0.691 → 0.862 |
+| 02223500 Oconee | 3.9 | 0.10 (floor) | 0.471 → 0.884 | 0.686 → 0.811 |
+| 02425000 Cahaba | 4.1 | 0.11 | 0.509 → 0.887 | 0.756 → 0.940 |
+| 03371500 East Fork White | 5.2 | 0.10 | 0.549 → 0.903 | 0.778 → 0.923 |
+| 03381500 Little Wabash | 8.6 | 0.24 | 0.439 → 0.803 | 0.711 → 0.882 |
+| 05458500 Shell Rock | 5.4 | 3.1 | 0.409 → 0.842 | 0.642 → 0.824 |
+| 05464500 Cedar | 5.3 | 0.10 | 0.438 → 0.885 | 0.700 → 0.871 |
+| 05465000 Iowa | 5.6 | 0.10 | 0.438 → 0.881 | 0.723 → 0.929 |
+| 05594100 Kaskaskia | 8.1 | 0.93 | 0.403 → 0.818 | 0.705 → 0.868 |
+| 06810000 Nishnabotna | 6.0 | 0.10 | 0.407 → 0.770 | 0.703 → 0.879 |
+
+The gauge-optimal roughness at these rivers is 4 to 9 times the trained value: with the trained basin median near
+0.03, that is n ≈ 0.12 to 0.26, at or beyond the physical range for a river channel (the parameter range ceiling is
+0.25). The median NSE at the optimum rises from 0.825 (box 1.5) to 0.861. q still runs to its floor at six of ten and
+to 3 to 6 at two others: sloppy, as before. Reading: a roughness of 0.2 on a main stem is not a channel property; it is
+the amount of delay and attenuation the model needs and cannot get from a 21 m wide channel by any other means. The
+target for the p-from-river-size experiment is precisely this: recover the same NSE with n in the 0.03 to 0.05 range
+and the width doing the work.
+
