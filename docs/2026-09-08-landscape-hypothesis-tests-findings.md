@@ -337,10 +337,23 @@ with the NSE at the trained point over the WY2000 windows:
 | q | 0.50 | 0.48 | 0.34 | 0.12 | 0.10 | 0.10 |
 | Newport NSE | 0.562 | 0.575 | 0.710 | 0.708 | 0.703 | 0.703 |
 
-n reaches 0.040 by epoch 10 (about 450 optimizer steps at 45 per epoch) and does not move for the remaining 20
-epochs, through two learning-rate decays. The area-balanced run made about 870 steps in its 30 epochs and left n at
-0.100. So the difference is not step count: the gages_3000 batch's gradient drives n to 0.04 and holds it there; the
-area-balanced batch's gradient does not. **Composition of the training population sets the batch's roughness.**
+n reaches 0.040 by epoch 10 and does not move for the remaining 20 epochs, through two learning-rate decays.
+
+**Correction 2026-09-10.** This section originally read "about 450 optimizer steps at 45 per epoch" for the
+gages_3000 run and "about 870 steps" for the area-balanced one. Both assumed one step per micro-batch and ignored
+gradient accumulation. Counted from the checkpoint directories, which are written one per optimizer step, **each
+run made exactly 60 updates**: 2,365 gauges give 37 micro-batches per epoch and 1,841 give 29, and at
+`grad_accum_steps: 20` both yield 2 steps per epoch over 30 epochs. So epoch 10 is **update 20**, not update 450.
+
+The conclusion is unchanged and in fact strengthened: the two runs made the *identical* number of updates, so step
+count cannot be the difference between them. The gages_3000 batch's gradient drives n to 0.04 and holds it there;
+the area-balanced batch's gradient does not. **Composition of the training population sets the batch's roughness.**
+
+What the corrected count does change is the reading of "holds it there". n stops moving at epoch 10, which is
+exactly where the learning rate drops from 0.005 to 0.001 (`learning_rate: {1: 0.005, 11: 0.001, 21: 0.0005}`).
+With only 20 updates spent before that drop and 40 much smaller ones after, "the gradient went to zero" and "the
+steps became too small to see" are not distinguishable from this trajectory alone. §21 settles it from the other
+side: the gradient had not gone to zero, on either window.
 
 Across the four gauges checked (Juniata pair, White River pair) the trained n at epoch 30 is 0.040 to 0.058: the
 head's output is close to CONUS-uniform, so "the batch's n" is nearly a single number set by the aggregate gradient.
