@@ -39,10 +39,6 @@ pub struct SeriesData {
     /// daily resolution -- not pooled from the inner hourly `q_prime`),
     /// m3/s, length `d`.
     pub summed_qprime_daily: Vec<f32>,
-    /// Eval-axis start date (`InfluenceContext.axis.start`), "%Y-%m-%d".
-    /// Combined with `window_start_day[0]` and the `day` index, this dates
-    /// every entry of the four series above.
-    pub axis_start_date: String,
 }
 
 pub struct LandscapeResult {
@@ -137,6 +133,13 @@ pub struct LandscapeResult {
     pub kge_star_windows: Vec<f32>,
     /// Window-0 daily series; `Some` only when `landscape.series: true`.
     pub series: Option<SeriesData>,
+    /// `LandscapeSpec::period` resolved for this run: "testing" or "training".
+    pub period: String,
+    /// Eval-axis start date (`InfluenceContext.axis.start`), "%Y-%m-%d" --
+    /// the Testing- or Training-window axis selected by `period`. Combined
+    /// with `window_start_day[0]` and (when `series` is set) the `day`
+    /// index, this dates every window and every series entry.
+    pub axis_start_date: String,
 }
 
 pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> {
@@ -165,6 +168,8 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("gauge_reach_row", r.gauge_reach_row as i64)?;
     f.add_attribute("obs_mean_q_m3s", r.obs_mean_q_m3s as f64)?;
     f.add_attribute("obs_n_valid_days", r.obs_n_valid_days as i64)?;
+    f.add_attribute("period", r.period.as_str())?;
+    f.add_attribute("axis_start_date", r.axis_start_date.as_str())?;
     const PARAM_NAMES: [&str; 3] = ["n", "p_spatial", "q_spatial"];
     let active_params: Vec<&str> = PARAM_NAMES.iter().zip(r.active.iter()).filter(|(_, &a)| a).map(|(&n, _)| n).collect();
     f.add_attribute("active_params", active_params.join(","))?;
@@ -183,7 +188,6 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     }
     if let Some(s) = &r.series {
         f.add_dimension("day", s.obs_daily.len())?;
-        f.add_attribute("axis_start_date", s.axis_start_date.as_str())?;
     }
 
     let active_i: Vec<i32> = r.active.iter().map(|&a| a as i32).collect();
@@ -328,6 +332,8 @@ mod tests {
             kge_star: 0.7,
             kge_star_windows: vec![0.7],
             series: None,
+            period: "testing".into(),
+            axis_start_date: "1995-10-01".into(),
         }
     }
 
@@ -421,7 +427,12 @@ mod tests {
         let f = netcdf::open(&path).unwrap();
         assert!(f.dimension("day").is_none());
         assert!(f.variable("obs_daily").is_none());
-        assert!(f.attribute("axis_start_date").is_none());
+        // `axis_start_date` and `period` are always written (the resolved
+        // eval window), independent of `series`.
+        let axis_start_date: String = f.attribute("axis_start_date").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(axis_start_date, "1995-10-01");
+        let period: String = f.attribute("period").unwrap().value().unwrap().try_into().unwrap();
+        assert_eq!(period, "testing");
 
         std::fs::remove_file(&path).unwrap();
     }
@@ -430,12 +441,12 @@ mod tests {
     fn series_writes_day_dim_and_four_series() {
         let path = std::env::temp_dir().join(format!("ddrs-landscape-series-{}.nc", std::process::id()));
         let mut r = minimal_result(Vec::new());
+        r.axis_start_date = "1980-01-01".into();
         r.series = Some(SeriesData {
             obs_daily: vec![1.0, f32::NAN, 3.0],
             routed_daily_trained: vec![1.1, 2.1, 2.9],
             routed_daily_star: vec![1.05, 2.05, 2.95],
             summed_qprime_daily: vec![0.9, 1.9, 2.8],
-            axis_start_date: "1980-01-01".into(),
         });
         write_landscape_netcdf(&path, &r).unwrap();
 

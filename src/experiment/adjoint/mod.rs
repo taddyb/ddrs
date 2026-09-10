@@ -243,20 +243,29 @@ pub fn select_anchors(
 /// days) of the given water year. `window_days: 0` ("span to the eval axis
 /// end", see `resolve_window_days`) skips the fixed-length overflow check
 /// here — its actual length is resolved later, per start index, by the
-/// caller.
+/// caller. The fixed-length overflow check itself only applies to the first
+/// `n_check` (clamped 1..=4) of the four offsets — the ones a caller with
+/// fewer than 4 windows (e.g. `LandscapeSpec::n_windows`) will actually use.
+/// Without this bound, a window sized to reach exactly to the axis end from
+/// offset 0 (e.g. the last N years of a short Training-period axis) would
+/// spuriously fail on the later, unused offsets running past the same end.
+/// All 4 start dates are still computed and returned regardless of
+/// `n_check` (cheap: `TimeAxis::day_index` is not the overflow check).
 pub fn seasonal_window_starts(
     axis: &TimeAxis,
     water_year: i32,
     window_days: usize,
+    n_check: usize,
 ) -> Result<Vec<(usize, NaiveDate)>, BoxError> {
+    let n_check = n_check.clamp(1, 4);
     let oct1 = NaiveDate::from_ymd_opt(water_year - 1, 10, 1).ok_or("bad water_year")?;
     let mut out = Vec::new();
-    for off in [0i64, 92, 182, 273] {
+    for (i, off) in [0i64, 92, 182, 273].into_iter().enumerate() {
         let date = oct1 + Duration::days(off);
         let idx = axis
             .day_index(date)
             .ok_or_else(|| format!("window start {date} outside the eval axis [{}, {}]", axis.start, axis.end))?;
-        if window_days > 0 && idx + window_days > axis.num_days {
+        if window_days > 0 && i < n_check && idx + window_days > axis.num_days {
             return Err(format!("window starting {date} (+{window_days} d) runs past the eval axis end {}", axis.end).into());
         }
         out.push((idx, date));
@@ -349,7 +358,7 @@ where
                 .ok_or("gauges.source: nested-reference requires gauges.gages_ii_dbf")?;
             let class = read_gages_ii_class(dbf)?;
             println!("GAGES-II classes: {} gauges read from {}", class.len(), dbf.display());
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, influence::PERIOD_TESTING)?;
             let list = nested_reference_selection(&ctx.dataset, &class, adjoint.gauges.max_downstream)?;
             let n_down = list.iter().filter(|g| g.role == "downstream").count();
             println!(
@@ -360,7 +369,7 @@ where
             list
         }
         GaugeSource::All => {
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, influence::PERIOD_TESTING)?;
             let list = all_gauges_selection(&ctx.dataset);
             println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
             list
@@ -451,10 +460,14 @@ where
 {
     let t_arm = Instant::now();
     println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
-    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu)?;
+    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu, influence::PERIOD_TESTING)?;
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
-    let seasonal = seasonal_window_starts(&ctx.axis, adjoint.water_year, adjoint.window_days)?;
+    // No `n_windows` concept here (see `AdjointSpec::window_days`'s doc);
+    // only `seasonal[0]` is ever read below, but every offset must still be
+    // valid on the axis — pass 4 to check all of them, matching behavior
+    // before `n_check` existed.
+    let seasonal = seasonal_window_starts(&ctx.axis, adjoint.water_year, adjoint.window_days, 4)?;
     // Resolve `window_days: 0` from the earliest seasonal window's start
     // (see the field doc on `AdjointSpec::window_days` for the residual-
     // functional caveat this implies for the later three seasonal starts).
@@ -963,8 +976,20 @@ mod tests {
         let axis = TimeAxis::new(NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(), NaiveDate::from_ymd_opt(2001, 9, 30).unwrap());
         // A fixed 365-day window starting on the later seasonal offsets
         // would run past this one-year axis; window_days: 0 does not.
-        let seasonal = seasonal_window_starts(&axis, 2001, 0).unwrap();
+        let seasonal = seasonal_window_starts(&axis, 2001, 0, 4).unwrap();
         assert_eq!(seasonal.len(), 4);
-        assert!(seasonal_window_starts(&axis, 2001, 365).is_err());
+        assert!(seasonal_window_starts(&axis, 2001, 365, 4).is_err());
+    }
+
+    #[test]
+    fn seasonal_window_starts_n_check_bounds_the_overflow_check() {
+        // Same one-year axis and 365-day window as the test above: with
+        // n_check 4 every seasonal offset must fit and it errors, but with
+        // n_check 1 only the first (unused-offsets-not-checked) is
+        // validated and it succeeds, reaching exactly the axis end.
+        let axis = TimeAxis::new(NaiveDate::from_ymd_opt(2000, 10, 1).unwrap(), NaiveDate::from_ymd_opt(2001, 9, 30).unwrap());
+        let seasonal = seasonal_window_starts(&axis, 2001, 365, 1).unwrap();
+        assert_eq!(seasonal.len(), 4);
+        assert_eq!(seasonal[0], (0, NaiveDate::from_ymd_opt(2000, 10, 1).unwrap()));
     }
 }

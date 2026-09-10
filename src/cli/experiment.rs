@@ -149,6 +149,7 @@ fn dispatch(
                 jobs: input.jobs.unwrap_or(arms.len().max(1)),
                 dry_run: input.dry_run,
                 shard,
+                period: ls.period.clone(),
             };
             match input.backend.as_str() {
                 "cpu" => {

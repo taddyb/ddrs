@@ -1,0 +1,20 @@
+# Measures the aggregate gradient on the TRAINING period (not testing), to
+# ask whether training converged on the data the model actually saw. Same
+# arm, gauges, and settings as experiments/landscape-p21-all-5yr-diag, with `period: training`.
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    source: all
+  period: training     # score on the config's training window (experiment: block), not testing
+  window_days: 1826  # five water years, WY1991 to WY1995 -- the last five years of training (ends 1995-09-30)
+  water_year: 1991   # window starts 1990-10-01
+  n_windows: 1     # one window covering the five water years
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0
+  newton_iters: 0     # no search: gradient, Hessian and series at the trained point only
+  series: true        # obs, routed, summed q_prime daily series for the why-analysis

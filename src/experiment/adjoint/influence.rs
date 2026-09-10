@@ -30,7 +30,16 @@ use super::super::{BoxError, ResolvedArm};
 
 type AD<I> = Autodiff<I>;
 
-/// Per-arm state: the arm's config (Testing mode), dataset, and frozen head.
+/// Which of the config's two eval windows `InfluenceContext::open` loads:
+/// `TESTING` (the `testing:` block overlay — the default for every study)
+/// or `TRAINING` (the un-overlaid `experiment:` block). Plain string
+/// constants rather than an enum, matching how `LandscapeSpec::slice_center`
+/// and `::objective` are validated as strings.
+pub const PERIOD_TESTING: &str = "testing";
+pub const PERIOD_TRAINING: &str = "training";
+
+/// Per-arm state: the arm's config (Testing mode by default; `period`
+/// selects Training), dataset, and frozen head.
 pub struct InfluenceContext<I: Backend> {
     pub cfg: Config,
     pub dataset: MeritGagesDataset,
@@ -46,8 +55,14 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
-    pub fn open(arm: &ResolvedArm, device: &I::Device, force_cpu: bool) -> Result<Self, BoxError> {
-        let mut cfg = Config::from_yaml_file_with_mode(&arm.config_path, ConfigMode::Testing)
+    /// `period`: `PERIOD_TESTING` (default — the config's `testing:` window,
+    /// matching every study before this option existed) or
+    /// `PERIOD_TRAINING` (the un-overlaid `experiment:` window, so the
+    /// dataset's time axis and every window resolved against it cover the
+    /// period the model was actually trained on).
+    pub fn open(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str) -> Result<Self, BoxError> {
+        let mode = if period == PERIOD_TRAINING { ConfigMode::Training } else { ConfigMode::Testing };
+        let mut cfg = Config::from_yaml_file_with_mode(&arm.config_path, mode)
             .map_err(|e| format!("arm `{}`: {e}", arm.name))?;
         if force_cpu {
             cfg.params.sparse_solver = SparseSolver::Cpu;

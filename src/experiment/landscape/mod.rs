@@ -8,11 +8,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use burn::tensor::backend::Backend;
+use chrono::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::data::ids::Staid;
 use crate::experiment::adjoint::gauges::{all_gauges_selection, gauge_list_from_pairs, gauge_list_from_staids, nested_reference_selection, read_gages_ii_class, write_gauges_csv, GaugeEntry};
-use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext};
+use crate::experiment::adjoint::influence::{dist_to_gauge, InfluenceContext, PERIOD_TESTING, PERIOD_TRAINING};
 use crate::experiment::adjoint::{resolve_window_days, seasonal_window_starts, GaugeSource, GaugeSpec};
 use crate::experiment::{shard_gauges, BoxError, ExperimentManifest, ResolvedArm, Shard};
 
@@ -108,6 +109,16 @@ pub struct LandscapeSpec {
     /// extra forward passes (`Objective::daily_series`).
     #[serde(default)]
     pub series: bool,
+    /// Which of the config's two eval windows to score on: "testing"
+    /// (default — the config's `testing:` block, 1995-10-01..2010-09-30 for
+    /// the p21 arm) or "training" (the un-overlaid `experiment:` block).
+    /// "training" lets a study ask whether the aggregate gradient has
+    /// vanished on the data the model was actually trained on, rather than
+    /// on held-out data. Checked against `VALID_PERIODS` at the top of
+    /// `run_landscape`. Threaded to `InfluenceContext::open` via
+    /// `LandscapeOptions::period`.
+    #[serde(default = "d_period")]
+    pub period: String,
 }
 fn d_window_days() -> usize { 365 }
 fn d_water_year() -> i32 { 2000 }
@@ -139,6 +150,9 @@ fn d_slice_center() -> String {
 fn d_objective() -> String {
     "nse-batch".to_string()
 }
+fn d_period() -> String {
+    PERIOD_TESTING.to_string()
+}
 
 /// The four slices `run_gauge` knows how to compute.
 pub const VALID_PLANES: [&str; 4] = ["n-p", "n-q", "p-q", "stiff-sloppy"];
@@ -146,6 +160,8 @@ pub const VALID_PLANES: [&str; 4] = ["n-p", "n-q", "p-q", "stiff-sloppy"];
 pub const VALID_SLICE_CENTERS: [&str; 2] = ["optimum", "trained"];
 /// The two per-window losses accepted by `LandscapeSpec::objective`.
 pub const VALID_OBJECTIVES: [&str; 2] = ["nse-batch", "kge"];
+/// The two eval windows accepted by `LandscapeSpec::period`.
+pub const VALID_PERIODS: [&str; 2] = [PERIOD_TESTING, PERIOD_TRAINING];
 
 impl LandscapeSpec {
     /// Reject any `planes` entry that isn't one of `VALID_PLANES`.
@@ -200,6 +216,18 @@ impl LandscapeSpec {
         }
         Ok(())
     }
+
+    /// Reject a `period` that isn't one of `VALID_PERIODS`.
+    pub fn validate_period(&self) -> Result<(), BoxError> {
+        if !VALID_PERIODS.contains(&self.period.as_str()) {
+            return Err(format!(
+                "unknown landscape period `{}`; valid periods are {VALID_PERIODS:?}",
+                self.period
+            )
+            .into());
+        }
+        Ok(())
+    }
 }
 
 pub struct LandscapeOptions {
@@ -210,6 +238,9 @@ pub struct LandscapeOptions {
     /// Keep only every K-th gauge (sorted by staid), for parallel sharding
     /// across processes. `None` runs the whole selected population.
     pub shard: Option<Shard>,
+    /// `LandscapeSpec::period`, threaded from the bundle spec to every
+    /// `InfluenceContext::open` call this study makes.
+    pub period: String,
 }
 
 pub fn run_landscape<I: Backend + 'static>(
@@ -228,6 +259,7 @@ where
     spec.validate_slice_center()?;
     spec.validate_window_days()?;
     spec.validate_objective()?;
+    spec.validate_period()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -236,11 +268,11 @@ where
         GaugeSource::NestedReference => {
             let dbf = spec.gauges.gages_ii_dbf.as_ref().ok_or("nested-reference requires gages_ii_dbf")?;
             let class = read_gages_ii_class(dbf)?;
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, &opts.period)?;
             nested_reference_selection(&ctx.dataset, &class, spec.gauges.max_downstream)?
         }
         GaugeSource::All => {
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu)?;
+            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, &opts.period)?;
             let list = all_gauges_selection(&ctx.dataset);
             println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
             list
@@ -300,23 +332,34 @@ where
 {
     let t_arm = Instant::now();
     println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
-    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu)?;
+    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu, &opts.period)?;
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
-    let seasonal = seasonal_window_starts(&ctx.axis, spec.water_year, spec.window_days)?;
-    let starts: Vec<usize> = seasonal.iter().take(spec.n_windows.clamp(1, 4)).map(|(s, _)| *s).collect();
+    let n_windows = spec.n_windows.clamp(1, 4);
+    // Only the first `n_windows` seasonal offsets are actually used below
+    // (`starts`), so only those need the fixed-length overflow check — see
+    // `seasonal_window_starts`'s `n_check` doc.
+    let seasonal = seasonal_window_starts(&ctx.axis, spec.water_year, spec.window_days, n_windows)?;
+    let starts: Vec<usize> = seasonal.iter().take(n_windows).map(|(s, _)| *s).collect();
     // Resolve `window_days: 0` from the (only, per `validate_window_days`)
     // window's start.
     let window_days = resolve_window_days(spec.window_days, ctx.axis.num_days, starts[0])?;
-    println!(
-        "  [{}] resolved window_days: {window_days}{}",
+    // `seasonal[0].1` is the first window's calendar start date on this
+    // arm's axis (Training or Testing, per `opts.period`); the last day of
+    // the window is inclusive, so `window_days - 1` days after that.
+    let window_start_date = seasonal[0].1;
+    let window_end_date = window_start_date + Duration::days(window_days.saturating_sub(1) as i64);
+    let window_note = format!(
+        "[{}] period {}: resolved window_days {window_days}{} — {window_start_date} .. {window_end_date}",
         arm.name,
+        opts.period,
         if spec.window_days == 0 { format!(" (spec 0 -> full axis from day {})", starts[0]) } else { String::new() }
     );
+    println!("  {window_note}");
+    let mut notes = vec![window_note];
     if opts.dry_run {
-        return Ok(Vec::new());
+        return Ok(notes);
     }
-    let mut notes = Vec::new();
     for (gi, g) in gauges.iter().enumerate() {
         let t_g = Instant::now();
         match run_gauge::<I>(&ctx, spec, arm, g, &arm_dir, &starts, window_days) {
@@ -629,18 +672,14 @@ where
             .to_vec::<f32>()
             .unwrap();
         summed_qprime_daily.truncate(d);
-        Some(SeriesData {
-            obs_daily,
-            routed_daily_trained,
-            routed_daily_star,
-            summed_qprime_daily,
-            axis_start_date: ctx.axis.start.format("%Y-%m-%d").to_string(),
-        })
+        Some(SeriesData { obs_daily, routed_daily_trained, routed_daily_star, summed_qprime_daily })
     } else {
         None
     };
 
     let r = LandscapeResult {
+        period: spec.period.clone(),
+        axis_start_date: ctx.axis.start.format("%Y-%m-%d").to_string(),
         staid: g.staid.clone(),
         arm: arm.name.clone(),
         run_id: arm.run_id.clone(),
@@ -925,5 +964,28 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("optimum"));
         assert!(err.to_string().contains("trained"));
+    }
+
+    #[test]
+    fn default_period_is_testing() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.period, "testing");
+        assert!(spec.validate_period().is_ok());
+    }
+
+    #[test]
+    fn training_period_parses_and_validates() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nperiod: training\n").unwrap();
+        assert_eq!(spec.period, "training");
+        assert!(spec.validate_period().is_ok());
+    }
+
+    #[test]
+    fn unknown_period_errors_with_valid_list() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nperiod: bogus\n").unwrap();
+        let err = spec.validate_period().unwrap_err();
+        assert!(err.to_string().contains("bogus"));
+        assert!(err.to_string().contains("testing"));
+        assert!(err.to_string().contains("training"));
     }
 }
