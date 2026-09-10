@@ -165,14 +165,6 @@ def train_kan(
 
     lo, hi = n_bounds
     model = make_kan_model(hidden_size, num_hidden_layers, grid, k, X_train.shape[1], seed)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-
-    Xt = torch.tensor(X_train, dtype=torch.float32)
-    yt = torch.tensor(y_train, dtype=torch.float32)
-    wt = torch.tensor(w_train, dtype=torch.float32)
-    Xv = torch.tensor(X_val, dtype=torch.float32)
-    yv = torch.tensor(y_val, dtype=torch.float32)
-    wv = torch.tensor(w_val, dtype=torch.float32)
 
     def forward_ln_n(model, X):
         # DDR's kan.py forward() already applies F.sigmoid internally before
@@ -182,6 +174,39 @@ def train_kan(
         frac = model(inputs=X)[N_ARCH]
         n = lo + frac * (hi - lo)
         return torch.log(n)
+
+    # Warm-start the output bias so the untrained model's prediction already
+    # equals the (curvature-)weighted mean of ln n* on this fold's training
+    # set: invert ln n -> n -> frac in [0,1] -> logit, leave the output
+    # layer's weights at their random init. This removes the constant offset
+    # from what Adam has to discover -- the original bug (see History in
+    # docs/why-analysis/G-head-capacity.md) was every arm getting stuck at
+    # exactly that constant because epoch 0 (with a zero-initialised bias,
+    # i.e. frac=0.5) was never beaten before patience fired.
+    mean_y = float(np.average(y_train, weights=w_train))
+    frac0 = float(np.clip((np.exp(mean_y) - lo) / (hi - lo), 1e-6, 1 - 1e-6))
+    logit0 = float(np.log(frac0 / (1 - frac0)))
+    with torch.no_grad():
+        model.output.bias.fill_(logit0)
+
+    Xt = torch.tensor(X_train, dtype=torch.float32)
+    yt = torch.tensor(y_train, dtype=torch.float32)
+    wt = torch.tensor(w_train, dtype=torch.float32)
+    Xv = torch.tensor(X_val, dtype=torch.float32)
+    yv = torch.tensor(y_val, dtype=torch.float32)
+    wv = torch.tensor(w_val, dtype=torch.float32)
+
+    model.eval()
+    with torch.no_grad():
+        r2_warm = weighted_r2(y_train, forward_ln_n(model, Xt).numpy(), w_train)
+    assert abs(r2_warm) < 0.01, (
+        f"warm-start bias check failed (seed={seed}): untrained weighted train "
+        f"R2 = {r2_warm:.4f}, expected within 0.01 of the constant-at-weighted-mean "
+        "baseline (0.0) before any optimiser step"
+    )
+
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=30)
 
     best_val = float("inf")
     best_state = None
@@ -198,6 +223,7 @@ def train_kan(
         with torch.no_grad():
             ln_n_val = forward_ln_n(model, Xv)
             val_loss = (torch.sum(wv * (ln_n_val - yv) ** 2) / wv.sum()).item()
+        sched.step(val_loss)
         if val_loss < best_val - 1e-6:
             best_val = val_loss
             best_state = {k_: v.clone() for k_, v in model.state_dict().items()}
@@ -214,7 +240,8 @@ def train_kan(
 
 
 def run_kan_arch(
-    hidden_size, num_hidden_layers, grid, k, X, y, w_curv, w_gain, folds, n_seeds, max_epochs, patience, lr, n_bounds, val_frac, base_seed
+    hidden_size, num_hidden_layers, grid, k, X, y, w_curv, w_gain, folds, n_seeds, max_epochs, patience, lr, n_bounds, val_frac, base_seed,
+    model_name="kan",
 ):
     import torch
     from sklearn.model_selection import train_test_split
@@ -241,8 +268,63 @@ def run_kan_arch(
             seed_metrics["r2_unw"].append(weighted_r2(y[test_idx], pred_test, np.ones_like(w_curv[test_idx])))
             seed_metrics["r2_train"].append(weighted_r2(y[train_idx], pred_train, w_curv[train_idx]))
 
-        fold_rows.append({k_: float(np.mean(v)) for k_, v in seed_metrics.items()})
+        fold_row = {k_: float(np.mean(v)) for k_, v in seed_metrics.items()}
+        # Guard against a repeat of the original failure: a model that never
+        # left initialisation has a train R2 at or below the constant-at-
+        # weighted-mean baseline (0.0), so require it to clear a small margin
+        # above that before trusting the fold at all.
+        fold_row["failed"] = fold_row["r2_train"] <= 0.02
+        if fold_row["failed"]:
+            print(
+                f"WARNING: {model_name} fold {fold_idx} did not train "
+                f"(weighted train R2 = {fold_row['r2_train']:.4f}, guard requires > 0.02); "
+                "excluding this fold from the model's mean.",
+                file=sys.stderr,
+            )
+        fold_rows.append(fold_row)
     return fold_rows
+
+
+def lr_probe(X, y, w_curv, w_gain, fold, hidden_size, num_hidden_layers, grid, k, n_bounds, val_frac, max_epochs, patience, base_seed, n_seeds, lrs):
+    """Learning-rate probe on a single fold (current architecture) -- run
+    before the full sweep so an lr choice is evidence-based, not guessed."""
+    import torch
+    from sklearn.model_selection import train_test_split
+
+    train_idx, test_idx = fold
+    rows = []
+    for lr in lrs:
+        r2_train_list, r2_curv_list, pred_std_list = [], [], []
+        for s in range(n_seeds):
+            seed = base_seed + s
+            torch.manual_seed(seed)
+            tr_idx, val_idx = train_test_split(train_idx, test_size=val_frac, random_state=100 + s)
+            model, forward_ln_n = train_kan(
+                X[tr_idx], y[tr_idx], w_curv[tr_idx],
+                X[val_idx], y[val_idx], w_curv[val_idx],
+                hidden_size, num_hidden_layers, grid, k, seed, max_epochs, patience, lr, n_bounds,
+            )
+            with torch.no_grad():
+                pred_test = forward_ln_n(model, torch.tensor(X[test_idx], dtype=torch.float32)).numpy()
+                pred_train = forward_ln_n(model, torch.tensor(X[train_idx], dtype=torch.float32)).numpy()
+            r2_train_list.append(weighted_r2(y[train_idx], pred_train, w_curv[train_idx]))
+            r2_curv_list.append(weighted_r2(y[test_idx], pred_test, w_curv[test_idx]))
+            pred_std_list.append(float(np.std(pred_test)))
+        rows.append({
+            "lr": lr,
+            "r2_train_mean": float(np.mean(r2_train_list)),
+            "r2_curv_mean": float(np.mean(r2_curv_list)),
+            "pred_std_mean": float(np.mean(pred_std_list)),
+        })
+    return rows
+
+
+def print_lr_probe(rows):
+    print("\nLearning-rate probe (fold 0, H=21 L=2, current max_epochs/patience defaults, 3 seeds):")
+    print(f"{'lr':>8}  {'train R2':>10}  {'held-out R2':>12}  {'pred std (ln n)':>16}")
+    for r in rows:
+        print(f"{r['lr']:>8}  {r['r2_train_mean']:>10.4f}  {r['r2_curv_mean']:>12.4f}  {r['pred_std_mean']:>16.4f}")
+    print()
 
 
 def run_reference_models(X, y, w_curv, w_gain, folds, seed):
@@ -314,9 +396,17 @@ def _metrics_row(y, pred_te, pred_tr, train_idx, test_idx, w_curv, w_gain):
 
 
 def summarize(fold_rows: list[dict]) -> dict:
-    out = {}
+    valid = [r for r in fold_rows if not r.get("failed", False)]
+    n_failed = len(fold_rows) - len(valid)
+    if not valid:
+        out = {"failed_all": True, "n_failed": n_failed, "n_folds": len(fold_rows)}
+        for key in ("r2_curv", "r2_gain", "r2_unw", "r2_train"):
+            out[f"{key}_mean"] = float("nan")
+            out[f"{key}_std"] = float("nan")
+        return out
+    out = {"failed_all": False, "n_failed": n_failed, "n_folds": len(fold_rows)}
     for key in ("r2_curv", "r2_gain", "r2_unw", "r2_train"):
-        vals = np.array([r[key] for r in fold_rows])
+        vals = np.array([r[key] for r in valid])
         out[f"{key}_mean"] = float(vals.mean())
         out[f"{key}_std"] = float(vals.std())
     return out
@@ -333,9 +423,9 @@ def main():
     ap.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     ap.add_argument("--n-folds", type=int, default=5)
     ap.add_argument("--n-seeds", type=int, default=3)
-    ap.add_argument("--max-epochs", type=int, default=400)
-    ap.add_argument("--patience", type=int, default=60)
-    ap.add_argument("--lr", type=float, default=0.01)
+    ap.add_argument("--max-epochs", type=int, default=2000)
+    ap.add_argument("--patience", type=int, default=100)
+    ap.add_argument("--lr", type=float, default=0.002)
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
@@ -373,6 +463,7 @@ def main():
         "r2_gain_mean": weighted_r2(y, y0, w_gain), "r2_gain_std": np.nan,
         "r2_unw_mean": weighted_r2(y, y0, np.ones_like(w_curv)), "r2_unw_std": np.nan,
         "r2_train_mean": np.nan, "r2_train_std": np.nan,
+        "failed_all": False, "n_failed": 0, "n_folds": 0,
     }
 
     rows = [baseline_row]
@@ -383,6 +474,27 @@ def main():
         summ = summarize(ref_results[name])
         rows.append({"model": name, "spec": spec, **summ})
 
+    # Learning-rate probe (current architecture, fold 0 only) before
+    # committing to a full 5-fold x 3-seed x 4-arch sweep: the original bug
+    # was an un-probed lr=0.02 that overshot on the first Adam step, so pick
+    # the full-run lr from evidence rather than repeating that guess.
+    probe_lrs = [0.02, 0.005, 0.002, 0.0005]
+    print("running learning-rate probe (fold 0, H={} L={})...".format(hidden_size, num_hidden_layers))
+    probe_rows = lr_probe(
+        X, y, w_curv, w_gain, folds[0], hidden_size, num_hidden_layers, grid, k,
+        (n_lo, n_hi), args.val_frac, args.max_epochs, args.patience, args.seed, args.n_seeds, probe_lrs,
+    )
+    print_lr_probe(probe_rows)
+    best_probe = max(probe_rows, key=lambda r: r["r2_curv_mean"])
+    full_run_lr = best_probe["lr"]
+    if full_run_lr != args.lr:
+        print(
+            f"lr probe: best held-out R2 at lr={full_run_lr} (R2={best_probe['r2_curv_mean']:.4f}), "
+            f"overriding --lr default ({args.lr}) for the full sweep.",
+        )
+    else:
+        print(f"lr probe: default lr={args.lr} is also the probe winner; using it for the full sweep.")
+
     kan_archs = [
         (hidden_size, num_hidden_layers, "current"),
         (hidden_size, num_hidden_layers + 1, "+1 layer"),
@@ -390,13 +502,17 @@ def main():
         (hidden_size * 2, num_hidden_layers, "2x width"),
     ]
     for H, L, spec in kan_archs:
+        model_name = f"kan_h{H}_l{L}"
         print(f"running KAN H={H} L={L} ({spec})...")
         fold_rows = run_kan_arch(
             H, L, grid, k, X, y, w_curv, w_gain, folds, args.n_seeds,
-            args.max_epochs, args.patience, args.lr, (n_lo, n_hi), args.val_frac, args.seed,
+            args.max_epochs, args.patience, full_run_lr, (n_lo, n_hi), args.val_frac, args.seed,
+            model_name=model_name,
         )
         summ = summarize(fold_rows)
-        rows.append({"model": f"kan_h{H}_l{L}", "spec": f"H={H},L={L} ({spec})", **summ})
+        if summ["failed_all"]:
+            print(f"WARNING: {model_name} did not train in ANY fold ({summ['n_failed']}/{summ['n_folds']} failed).", file=sys.stderr)
+        rows.append({"model": model_name, "spec": f"H={H},L={L} ({spec})", **summ})
 
     results_df = pd.DataFrame(rows)
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -404,7 +520,7 @@ def main():
     print(results_df.to_string(index=False))
 
     make_figure(results_df, args.out_dir / "G_capacity.png")
-    write_report(args, results_df, n)
+    write_report(args, results_df, n, probe_rows, full_run_lr)
 
 
 def make_figure(results_df: pd.DataFrame, out_path: Path):
@@ -444,24 +560,55 @@ def make_figure(results_df: pd.DataFrame, out_path: Path):
     print(f"wrote {out_path}")
 
 
-def write_report(args, results_df: pd.DataFrame, n: int):
+def write_report(args, results_df: pd.DataFrame, n: int, probe_rows: list[dict], full_run_lr: float):
     gbm_row = results_df[results_df["model"] == "gbm"].iloc[0]
     baseline_row = results_df[results_df["model"] == "current head (n0_med)"].iloc[0]
     kan_rows = results_df[results_df["model"].str.startswith("kan_")]
 
     def fmt(row, key):
+        if bool(row.get("failed_all", False)):
+            return "did not train"
         m = row[f"{key}_mean"]
         s = row[f"{key}_std"]
         if pd.isna(s):
             return f"{m:.3f}"
         return f"{m:.3f} +/- {s:.3f}"
 
+    def excluded_str(row):
+        n_failed = row.get("n_failed", 0)
+        n_folds = row.get("n_folds", 0)
+        if not n_folds or not n_failed:
+            return "-"
+        return f"{n_failed}/{n_folds}"
+
     lines = []
     lines.append("# G. Does head capacity (KAN depth/width) let n reach where each gauge wants it?")
     lines.append("")
+    lines.append("## History")
+    lines.append("")
     lines.append(
-        f"**Data.** `covariates.csv` p=21 census (config `{args.config.name}`, run "
-        f"`2026-09-08T15-55-52Z-conus-train-and-test`), filtered to well-fit gauges (nse0 > 0.3), "
+        "The first run of this script (2026-09-09) reported all four KAN variants at weighted R2 "
+        "between -0.595 and -0.596 (curvature weights) with a train R2 of -0.581, identical across "
+        "depth and width. A constant predictor at the sigmoid midpoint (frac=0.5, i.e. "
+        "`n = lo + 0.5*(hi-lo)`) scores exactly -0.581 against this target and weight vector: every "
+        "KAN arm restored its epoch-0 weights. `best_val` starts at infinity so epoch 0 is always "
+        "saved as `best_state`; with the un-probed lr=0.02 the first Adam step overshot, validation "
+        "loss never improved again, and `patience=15` broke the loop before the splines moved. Only "
+        "120 full-batch steps were available in any case, far too few for grid-50 spline "
+        "coefficients. `train_kan` has since been fixed: the output linear layer's bias is now "
+        "warm-started to the weighted-mean training target before any optimiser step (verified below "
+        "to be within 0.01 R2 of the constant-at-weighted-mean baseline, i.e. the offset is removed "
+        "from the optimisation entirely), the learning rate is chosen from a probe (see below) rather "
+        "than an un-probed guess, `max_epochs`/`patience` were raised to 2000/100, a "
+        "`ReduceLROnPlateau` scheduler (factor 0.5, patience 30) was added, and a post-fold guard "
+        "(train R2 > 0.02) now catches a repeat of this failure per fold instead of silently reporting "
+        "a wrong number. The reference rows (ridge, kNN, GBM) never depended on `train_kan` and are "
+        "unaffected by this bug or its fix."
+    )
+    lines.append("")
+    lines.append(
+        f"**Data.** `covariates.csv` p=21 census (config snapshot "
+        f"`.ddrs/runs/2026-09-08T15-55-52Z-conus-train-and-test/config.yaml`), filtered to well-fit gauges (nse0 > 0.3), "
         f"excluding box_edge == 1 and hit_range_bound == 1: n = {n} gauges. Target ln n* = "
         f"ln(n0_med) + alpha_n_star. Inputs: the 10 attributes in `kan_head.input_var_names` "
         f"(SoilGrids1km_clay, aridity, meanelevation, meanP, NDVI, meanslope, log10_uparea, "
@@ -485,21 +632,41 @@ def write_report(args, results_df: pd.DataFrame, n: int):
         "**Protocol.** 5-fold CV, same folds for every model. Ridge: `RidgeCV` over "
         "alpha in {0.01,0.1,1,10,100}. kNN: k=10, unweighted. GBM: LightGBM, 500 trees, early-stopped "
         "on a 20% inner validation split (30-round patience). KAN: DDR's own `ddr.nn.kan.kan` "
-        "(`Linear(F,H) -> KanLayer(H,H) x L -> Linear(H,1) -> sigmoid -> denormalize(n)`), Adam "
-        f"(lr={args.lr}), early-stopped on a {int(args.val_frac*100)}% inner validation split "
+        "(`Linear(F,H) -> KanLayer(H,H) x L -> Linear(H,1) -> sigmoid -> denormalize(n)`), output bias "
+        "warm-started to the weighted-mean training target (see History), Adam "
+        f"(lr={full_run_lr}, chosen by the probe below), `ReduceLROnPlateau` (factor 0.5, patience 30) "
+        f"on the validation loss, early-stopped on a {int(args.val_frac*100)}% inner validation split "
         f"(patience={args.patience}, max {args.max_epochs} epochs), {args.n_seeds} seeds averaged per "
-        "fold. n is NOT in `params.log_space_parameters` for this config, so denormalize is the LINEAR "
-        "branch (n = lo + sigmoid*(hi-lo)); the loss is weighted MSE on ln(n)."
+        "fold. Any fold whose weighted train R2 does not exceed 0.02 after training is excluded from "
+        "that model's cross-fold mean (printed as a warning); a model with every fold excluded reports "
+        "\"did not train\". n is NOT in `params.log_space_parameters` for this config, so denormalize is "
+        "the LINEAR branch (n = lo + sigmoid*(hi-lo)); the loss is weighted MSE on ln(n)."
     )
+    lines.append("")
+    lines.append("## Learning-rate probe")
+    lines.append("")
+    lines.append(
+        "Single fold (fold 0), current architecture, 3 seeds, run before committing to the full sweep "
+        "(the original bug was an un-probed lr; this picks the full-run lr from evidence instead):"
+    )
+    lines.append("")
+    lines.append("| lr | R2 (train) | R2 (held-out, curvature w) | held-out pred std (ln n) |")
+    lines.append("|---|---|---|---|")
+    for r in probe_rows:
+        marker = " <- used for full run" if r["lr"] == full_run_lr else ""
+        lines.append(
+            f"| {r['lr']} | {r['r2_train_mean']:.3f} | {r['r2_curv_mean']:.3f} | "
+            f"{r['pred_std_mean']:.3f}{marker} |"
+        )
     lines.append("")
     lines.append("## Results")
     lines.append("")
-    lines.append("| model | depth/width | R2 (curvature w) | R2 (gain w) | R2 (unweighted) | R2 (train) |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| model | depth/width | R2 (curvature w) | R2 (gain w) | R2 (unweighted) | R2 (train) | folds excluded |")
+    lines.append("|---|---|---|---|---|---|---|")
     for _, row in results_df.iterrows():
         lines.append(
             f"| {row['model']} | {row['spec']} | {fmt(row,'r2_curv')} | {fmt(row,'r2_gain')} | "
-            f"{fmt(row,'r2_unw')} | {fmt(row,'r2_train')} |"
+            f"{fmt(row,'r2_unw')} | {fmt(row,'r2_train')} | {excluded_str(row)} |"
         )
     lines.append("")
 
@@ -512,20 +679,63 @@ def write_report(args, results_df: pd.DataFrame, n: int):
         f"the signal fraction any model of these inputs can reach; the complement "
         f"(1 - R2_gbm = {1 - floor_frac:.2f}) is the fraction attributed to unmodelled noise plus "
         f"information genuinely absent from the 10 attributes. This is a working definition, not a "
-        f"calibrated bound -- state it as such if reused."
+        f"calibrated bound: state it as such if reused."
     )
     lines.append("")
     lines.append("## Observations")
     lines.append("")
 
     kan_current_row = results_df[results_df["spec"].str.contains("current", na=False)].iloc[0]
-    kan_best = kan_rows.loc[kan_rows["r2_curv_mean"].idxmax()]
     ridge_row = results_df[results_df["model"] == "ridge"].iloc[0]
     knn_row = results_df[results_df["model"] == "knn10"].iloc[0]
 
+    if kan_rows["r2_curv_mean"].notna().any():
+        kan_best = kan_rows.loc[kan_rows["r2_curv_mean"].idxmax()]
+    else:
+        kan_best = None
+
+    if kan_best is None:
+        lines.append(
+            f"- The trained head's own n (alpha=0) reaches weighted R2 = {baseline_row['r2_curv_mean']:.3f} "
+            f"(curvature) / {baseline_row['r2_gain_mean']:.3f} (gain) against ln n* directly."
+        )
+        lines.append(
+            f"- Ridge (linear in the 10 attributes) reaches {fmt(ridge_row,'r2_curv')}; kNN-10 reaches "
+            f"{fmt(knn_row,'r2_curv')}; GBM (nonparametric ceiling) reaches {fmt(gbm_row,'r2_curv')}."
+        )
+        lines.append(
+            "- Every KAN variant reports \"did not train\" (all folds failed the train-R2 > 0.02 guard). "
+            "See the console warnings for per-fold train R2 values; the capacity comparison below cannot "
+            "be made from this run."
+        )
+        lines.append("")
+        lines.append("## Interpretation")
+        lines.append("")
+        lines.append(
+            "No KAN variant trained in this run, so no depth/width comparison is possible. The reference "
+            "models still bound the information content of the 10 attributes (see the Verdict below), but "
+            "the capacity question is untested; re-run after diagnosing why every fold failed the guard "
+            "(check the per-fold train R2 printed to stderr)."
+        )
+        lines.append("")
+        lines.append("## Verdict")
+        lines.append("")
+        lines.append(
+            f"**KAN arms did not train; only the information-content question is answered.** The "
+            f"nonparametric ceiling (GBM) reaches held-out weighted R2 = {fmt(gbm_row,'r2_curv')} on the "
+            "10 attributes, so that much (and no more, on this evidence) of ln n* is recoverable from "
+            "them by any function class. Whether more KAN depth/width helps remains untested; fix the "
+            "training failure (see console warnings) and re-run before drawing a capacity conclusion."
+        )
+        lines.append("")
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text("\n".join(lines) + "\n")
+        print(f"wrote {args.report}")
+        return
+
     lines.append(
         f"- The trained head's own n (alpha=0) reaches weighted R2 = {baseline_row['r2_curv_mean']:.3f} "
-        f"(curvature) / {baseline_row['r2_gain_mean']:.3f} (gain) against ln n* directly -- this is what "
+        f"(curvature) / {baseline_row['r2_gain_mean']:.3f} (gain) against ln n* directly: this is what "
         f"30 epochs of training already achieved on this population, with zero degrees of freedom spent "
         f"fitting alpha_n_star itself."
     )
@@ -551,7 +761,7 @@ def write_report(args, results_df: pd.DataFrame, n: int):
     lines.append(
         f"- Train-vs-held-out gap for the best KAN variant: {kan_best['r2_train_mean']:.3f} (train) vs "
         f"{kan_best['r2_curv_mean']:.3f} (held out), gap = {train_gap:.3f} "
-        f"({'small, not overfitting' if train_gap < 0.1 else 'material -- capacity is fitting fold-specific noise, not signal'})."
+        f"({'small, not overfitting' if train_gap < 0.1 else 'material: capacity is fitting fold-specific noise, not signal'})."
     )
     lines.append("")
     lines.append("## Interpretation")
@@ -574,26 +784,34 @@ def write_report(args, results_df: pd.DataFrame, n: int):
     lines.append("")
     lines.append("## Verdict")
     lines.append("")
-    best_close_to_current = abs(kan_best["r2_curv_mean"] - kan_current_row["r2_curv_mean"]) < 0.05
-    if best_close_to_current and kan_best["r2_curv_mean"] <= gbm_row["r2_curv_mean"] + 0.02:
+    if pd.isna(kan_current_row["r2_curv_mean"]):
         verdict = (
-            "**INFORMATION, not capacity.** More KAN layers/width do not move the held-out fit to ln n* "
-            "materially beyond the current architecture or the GBM ceiling on the same inputs. The head "
-            "cannot place n where a gauge wants it because the 10 attributes it sees do not carry that "
-            "signal, not because the function class is too small."
+            "**Current-depth KAN did not train (see folds excluded); capacity comparison is partial.** "
+            f"The current architecture's row reports \"did not train\", but {kan_best['spec']} did, at "
+            f"{fmt(kan_best,'r2_curv')}. Re-run once the current-depth arm also trains cleanly before "
+            "drawing a capacity conclusion; treat the comparison below as provisional."
         )
     else:
-        verdict = (
-            "**Capacity plays a role.** A deeper/wider KAN measurably beats the current architecture "
-            "out of sample without a matching overfit gap, so some of the shortfall is the head being "
-            "too small for even the information already present in its 10 inputs."
-        )
+        best_close_to_current = abs(kan_best["r2_curv_mean"] - kan_current_row["r2_curv_mean"]) < 0.05
+        if best_close_to_current and kan_best["r2_curv_mean"] <= gbm_row["r2_curv_mean"] + 0.02:
+            verdict = (
+                "**INFORMATION, not capacity.** More KAN layers/width do not move the held-out fit to ln n* "
+                "materially beyond the current architecture or the GBM ceiling on the same inputs. The head "
+                "cannot place n where a gauge wants it because the 10 attributes it sees do not carry that "
+                "signal, not because the function class is too small."
+            )
+        else:
+            verdict = (
+                "**Capacity plays a role.** A deeper/wider KAN measurably beats the current architecture "
+                "out of sample without a matching overfit gap, so some of the shortfall is the head being "
+                "too small for even the information already present in its 10 inputs."
+            )
     lines.append(verdict)
     lines.append("")
     lines.append(
         "**Decisive follow-up.** Retrain the real KAN head (ddrs, on-graph, with routing) at the best "
         "capacity variant found here on the same gages_3000 population and re-run the census "
-        "(`covariates.py`) to see whether alpha_n_star and gain actually shrink -- this offline test only "
+        "(`covariates.py`) to see whether alpha_n_star and gain actually shrink. This offline test only "
         "checks whether the function class *could* separate the training signal from noise on frozen "
         "inputs; it cannot rule out optimisation or batch-compromise effects that only appear when many "
         "gauges share one gradient (see finding E)."
