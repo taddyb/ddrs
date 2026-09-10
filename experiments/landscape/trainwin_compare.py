@@ -110,11 +110,54 @@ def well_fit(df: pd.DataFrame) -> pd.DataFrame:
 
 def alignment(g: np.ndarray) -> float:
     """|mean(g)| / mean(|g|). 0 = per-gauge gradients cancel (a converged
-    batch compromise); 1 = they all point the same way (descent unfinished)."""
+    batch compromise); 1 = they all point the same way (descent unfinished).
+    Not robust: see docs/2026-09-08-landscape-hypothesis-tests-findings.md
+    §21.3 -- per-gauge gradients are heavy-tailed, so this ratio of means is
+    set by a handful of gauges. Kept for continuity; prefer the robust
+    statistics in robust_alignment_lines()."""
     g = g[np.isfinite(g)]
     if len(g) == 0 or np.mean(np.abs(g)) == 0:
         return float("nan")
     return float(abs(np.mean(g)) / np.mean(np.abs(g)))
+
+def sign_share_z(g: np.ndarray) -> tuple[float, float]:
+    """Share of gauges with g < 0, as a percentage, and the normal-approximation
+    z-statistic against a null of 50/50 (z = (k - n/2) / sqrt(n/4))."""
+    n = len(g)
+    k = int(np.sum(g < 0))
+    share_pct = 100.0 * k / n
+    z = (k - n / 2) / np.sqrt(n / 4)
+    return share_pct, float(z)
+
+def median_based_alignment(g: np.ndarray) -> float:
+    """|median(g)| / median(|g|) -- robust to the heavy-tailed outliers that
+    break the mean-based alignment statistic (§21.3)."""
+    denom = np.median(np.abs(g))
+    if denom == 0:
+        return float("nan")
+    return float(abs(np.median(g)) / denom)
+
+def trimmed_alignment(g: np.ndarray, lo_pct: float = 10.0, hi_pct: float = 90.0) -> float:
+    """|mean(g_t)| / mean(|g_t|) where g_t keeps only values between the
+    lo_pct and hi_pct percentiles of g (default 10/90)."""
+    lo, hi = np.percentile(g, [lo_pct, hi_pct])
+    g_t = g[(g >= lo) & (g <= hi)]
+    if len(g_t) == 0 or np.mean(np.abs(g_t)) == 0:
+        return float("nan")
+    return float(abs(np.mean(g_t)) / np.mean(np.abs(g_t)))
+
+def robust_alignment_lines(g: np.ndarray, indent: str, prefix: str = "") -> list[str]:
+    """The three §21.3 robust convergence statistics, in report order."""
+    g = g[np.isfinite(g)]
+    if len(g) == 0:
+        return [f"{indent}{prefix}n=0 -- skipping robust stats"]
+    share_pct, z = sign_share_z(g)
+    p_suffix = ", p < 1e-12" if abs(z) > 7 else ""
+    return [
+        f"{indent}{prefix}share where loss falls if n rises = {share_pct:.1f}% (z = {z:.1f}{p_suffix})",
+        f"{indent}{prefix}median-based alignment = {median_based_alignment(g):.3f}",
+        f"{indent}{prefix}10% trimmed alignment = {trimmed_alignment(g):.3f}",
+    ]
 
 def three_line_block(g: np.ndarray, indent: str) -> list[str]:
     g = g[np.isfinite(g)]
@@ -127,8 +170,9 @@ def three_line_block(g: np.ndarray, indent: str) -> list[str]:
     lines = [
         f"{indent}n={n}  median={med:.6g}  mean={mean:.6g}  sd={sd:.6g}",
         f"{indent}frac(grad0_n < 0) = {frac_neg:.4f}",
-        f"{indent}alignment |mean(g)|/mean(|g|) = {alignment(g):.4f}",
     ]
+    lines += robust_alignment_lines(g, indent)
+    lines.append(f"{indent}alignment, mean-based (not robust, see 21.3) |mean(g)|/mean(|g|) = {alignment(g):.4f}")
     return lines
 
 
@@ -168,8 +212,10 @@ def joint_report(wf_test: pd.DataFrame, wf_train: pd.DataFrame) -> tuple[list[st
 
     a = shared["grad0_n_test"].to_numpy(dtype=float)
     b = shared["grad0_n_train"].to_numpy(dtype=float)
-    lines.append(f"  alignment, testing window  = {alignment(a):.4f}")
-    lines.append(f"  alignment, training window = {alignment(b):.4f}")
+    lines += robust_alignment_lines(a, "  ", "testing window: ")
+    lines.append(f"  alignment, testing window, mean-based (not robust, see 21.3)  = {alignment(a):.4f}")
+    lines += robust_alignment_lines(b, "  ", "training window: ")
+    lines.append(f"  alignment, training window, mean-based (not robust, see 21.3) = {alignment(b):.4f}")
     lines.append(f"  pearson  r(grad0_n_test, grad0_n_train)  = {np.corrcoef(a, b)[0, 1]:.4f}")
     lines.append(f"  spearman r(grad0_n_test, grad0_n_train)  = {spearman_corr(a, b):.4f}")
     sign_agree = float(np.mean(np.sign(a) == np.sign(b)))
