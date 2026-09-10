@@ -992,3 +992,26 @@ and labelled as not robust.
 §19 and in §21's first two tables as superseded, including the 0.813 and 0.974 that motivated this whole line of
 work. Their qualitative reading survives; their values do not.
 
+### 21.4 What the training-window run cannot answer, and the trap in trying
+
+`landscape-p21-all-trainwin-diag` is a gradient-only run: `grid: 0`, `newton_iters: 0`. It measures the gradient,
+Hessian and daily series at the trained point and performs **no optimum search**, so its `alpha_n_star` column is
+identically 0 for every gauge. That is by design and it is what §21 needs, but it means the run cannot answer the
+natural follow-up question, "where would a single global roughness multiplier go if it were chosen on the training
+window rather than the test window?"
+
+Attempting it anyway produces confident nonsense: reading the zero column as a per-gauge optimum gives a median
+displacement of 0.000, a cross-window sign agreement of 27.7 %, and the conclusion that the training-window
+optimum realises 0 % of the achievable test gain at 0 % of gauges. All four numbers are artifacts of an unpopulated
+column. Anything joining the two censuses on `alpha_n_star` must check that both sides ran a Newton search.
+
+**What is answerable from the gradient alone, and is already in §21.3:** direction. Both windows point the same way
+at 79 to 80 % of gauges and agree with each other gauge by gauge 85.5 % of the time, so more optimizer updates move
+roughness toward what the test period also wants at roughly six gauges in seven. That is enough to justify the
+training change.
+
+**What would be needed for the quantitative version:** the same all-gauge bundle with `period: training` and
+`newton_iters: 12`, which costs what the five-year testing census cost (about 40 core-hours) rather than what the
+gradient-only run costs. Worth running only if the transfer magnitude, not the direction, becomes load-bearing for
+the paper.
+
