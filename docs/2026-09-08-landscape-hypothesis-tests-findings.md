@@ -802,9 +802,30 @@ mean displacement gave +0.004 and was discarded for the same reason: with 95 % o
 gauges, that number describes the tail and not the population.
 
 What closes it: a real grid, not a two-point fit. `landscape-p21-report38` runs 25 x 25 grids at 37 gauges
-spanning the gain range, which is enough to measure the true curve shape away from the optimum and calibrate or
-replace the surrogate. Until then quote the ranges and the two surrogate-free results (the flatness under a
-factor 2.7, and the 68/32 split at c = +0.25).
+spanning the gain range. **The first six have landed and they confirm the diagnosis directly.** Taking the n axis
+of each grid at the trained q and comparing it against that gauge's two-point parabola:
+
+| staid | n_reach | a*, census | a*, grid | k | NSE at c=+0.5, parabola | grid | NSE at c=+1.0, parabola | grid |
+|---|---|---|---|---|---|---|---|---|
+| 01362500 | 13 | +1.436 | +1.535 | 0.011 | 0.674 | 0.670 | 0.681 | 0.679 |
+| 01447720 | 5 | +1.011 | +1.151 | 0.010 | 0.771 | 0.771 | 0.774 | 0.773 |
+| 04160600 | 7 | +0.941 | +0.959 | 0.013 | 0.556 | 0.544 | 0.559 | 0.552 |
+| 05458000 | 13 | +1.273 | +1.343 | 0.195 | 0.545 | 0.416 | 0.647 | 0.559 |
+| 01532000 | 9 | +0.249 | +0.192 | 0.008 | 0.585 | 0.583 | 0.581 | 0.571 |
+| **02120780** | 7 | **-0.022** | **+0.384** | **25.7** | **-6.29** | **0.702** | **-26.13** | **0.640** |
+
+For the five gauges with a well-separated optimum the surrogate is good: median absolute error 0.008 NSE at a
+half-log-unit shift, worst 0.13 at the one gauge with strong curvature. At 02120780, the single gauge in this
+sample from the pathological class (`|a*| < 0.05`, k in the hundreds or beyond), the parabola is wrong by 7.0 NSE
+at `c = +0.5` and by 26.8 at `c = +1.0`, and wrong in the pessimistic direction every time. The grid also puts that
+gauge's true optimum at +0.384 with a gain of 0.0044, not at -0.022 with a gain of 0.0125: on a nearly flat
+surface the Newton search settled on a spurious nearby point, which is what manufactured the divergent k.
+
+**This makes the filtered column the better estimate, not merely the upper end of a range.** The unfiltered 9 %
+and 31 % are artifacts of parabolas that predict an NSE collapse the model does not actually suffer. Pending the
+other 31 grids, quote **38 % for the global fix and 59 % for the one-year transfer**, and treat 9 % / 31 % as
+superseded. One pathological gauge is a small sample, but the mechanism was predicted in advance from the
+definition of k and the measurement matches it in sign, location and magnitude.
 
 **Remaining caveats.** The transfer test in 20.2 is nested and therefore optimistic. Both calculations are on
 `nse-batch` optima with NSE scoring; KGE was checked separately (§16) and agrees on the direction. The stiff
