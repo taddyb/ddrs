@@ -37,13 +37,16 @@ DEFAULT_CENSUS = Path(".ddrs/experiments/landscape-p21-all-5yr/merged")
 
 
 # --------------------------------------------------------------- section 1
-def global_shift(census_dir: Path, out: list[str]) -> None:
+def global_shift(census_dir: Path, min_abs_astar: float, out: list[str]) -> None:
     f = census_dir / "figures" / "covariates.csv"
     d = pd.read_csv(f, dtype={"staid": str, "HUC02": str})
     out.append(f"rows {len(d)}")
     m = (d.nse0 > 0.3) & d.alpha_n_star.notna() & d.nse_star.notna() & (d.box_edge == 0)
     d = d[m].copy()
     out.append(f"well-fit, not on box edge: {len(d)}")
+
+    d = d[d.alpha_n_star.abs() >= min_abs_astar].copy()
+    out.append(f"min |a*| filter: {min_abs_astar:g}  -> {len(d)} gauges")
 
     # per-gauge quadratic in log-multiplier c around the gauge optimum:
     #   NSE(c) = nse_star - k (c - a*)^2 ,  k = (nse_star - nse0) / a*^2   (>=0)
@@ -72,6 +75,22 @@ def global_shift(census_dir: Path, out: list[str]) -> None:
     for c in [-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25]:
         out.append(f"   c={c:+.2f}  n x{np.exp(c):5.2f}   median NSE {med_nse(c):.4f}   mean NSE {np.mean(nstar-k*(c-a)**2):.4f}")
     out.append("")
+    out.append("surrogate-free: who ends up nearer their own optimum")
+    for c in [0.25, 0.50, 0.75, 1.00]:
+        closer = (np.abs(a - c) < np.abs(a)).mean() * 100
+        further = 100 - closer
+        out.append(f"   c={c:.2f}  moved closer {closer:.0f} %   moved further {further:.0f} %")
+    out.append("")
+    out.append("k diagnostics (see section 20.4)")
+    out.append(f"   median k : {np.median(k):.4f}")
+    out.append(f"   p90 k    : {np.percentile(k, 90):.4f}")
+    out.append(f"   p99 k    : {np.percentile(k, 99):.4f}")
+    out.append(f"   p99.9 k  : {np.percentile(k, 99.9):.4f}")
+    out.append(f"   max k    : {np.max(k):.4f}")
+    order = np.argsort(k)[::-1]
+    top1 = max(1, int(np.ceil(len(k) * 0.01)))
+    out.append(f"   share of total k held by the top 1 % of gauges: {k[order[:top1]].sum() / k.sum() * 100:.1f} %")
+    out.append("")
     out.append("distribution of the per-gauge optimum log-multiplier a*:")
     for q in [5, 25, 50, 75, 95]:
         out.append(f"   p{q:>2}: {np.percentile(a,q):+.3f}  (n x{np.exp(np.percentile(a,q)):.2f})")
@@ -93,13 +112,15 @@ def global_shift(census_dir: Path, out: list[str]) -> None:
 
 
 # --------------------------------------------------------------- section 2
-def astar_stability(census_dir: Path, compare_census_dir: Path, out: list[str]) -> None:
+def astar_stability(census_dir: Path, compare_census_dir: Path, min_abs_astar: float, out: list[str]) -> None:
     c1 = pd.read_csv(compare_census_dir / "figures" / "covariates.csv", dtype={"staid": str})
     c5 = pd.read_csv(census_dir / "figures" / "covariates.csv", dtype={"staid": str})
     k = ["staid", "alpha_n_star", "nse0", "nse_star", "box_edge", "n_reach", "gain"]
     d = c1[k].merge(c5[k], on="staid", suffixes=("_1y", "_5y"))
     d = d[(d.nse0_5y > 0.3) & (d.nse0_1y > 0.3) & (d.box_edge_1y == 0) & (d.box_edge_5y == 0)]
     d = d.dropna(subset=["alpha_n_star_1y", "alpha_n_star_5y"])
+    d = d[d.alpha_n_star_5y.abs() >= min_abs_astar].copy()
+    out.append(f"min |a*| filter (five-year, primary census): {min_abs_astar:g}  -> {len(d)} gauges")
     a1 = d.alpha_n_star_1y.values
     a5 = d.alpha_n_star_5y.values
     out.append(f"gauges compared: {len(d)}   (WY2000 alone vs WY1996-2000, the 1y window is nested in the 5y)")
@@ -128,16 +149,17 @@ def main() -> None:
     ap.add_argument("--census", type=Path, default=DEFAULT_CENSUS, help="primary census merged-dir (default: the 5-year WY1996-2000 census)")
     ap.add_argument("--compare-census", type=Path, default=None, help="second census merged-dir; when given, also runs the cross-window stability and transfer analysis")
     ap.add_argument("--out", type=Path, default=None, help="directory to write the report to as recoverability.txt")
+    ap.add_argument("--min-abs-astar", type=float, default=0.0, help="drop gauges with |alpha_n_star| below this from both sections (five-year a* for the transfer section); default 0.0 drops nothing")
     args = ap.parse_args()
 
     out: list[str] = []
     out.append("== global shift ==")
-    global_shift(args.census, out)
+    global_shift(args.census, args.min_abs_astar, out)
 
     if args.compare_census is not None:
         out.append("")
         out.append("== a* stability across windows ==")
-        astar_stability(args.census, args.compare_census, out)
+        astar_stability(args.census, args.compare_census, args.min_abs_astar, out)
 
     report = "\n".join(out)
     print(report)
