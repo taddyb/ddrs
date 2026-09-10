@@ -157,6 +157,11 @@ paper's R1–R5.
 | alpha_q_star or q half-widths as a reported optimum | The Hessian at the optimum is a saddle along q at 53 % of well-fit gauges (§Why gauges are not at their roughness optimum, F). Confirm with the 1-D line scan at n\* before quoting a q optimum |
 | The integer `lag_days_*` columns of `covariates.csv` | Coarse to the day; use the fractional lags in analyst D's `D_wellfit_with_fractional_lags.csv` (`early_r`, `early_q`, `delay_channel`, positive = early) instead |
 | The 15-year all-gauge census, cited as a result | Held at launch (12 shards would need about 140 GB); scope pending the user, see §Landscape census, all 2,365 test gauges |
+| `\|mean(g)\| / mean(\|g\|)` as a gradient-alignment statistic | Not robust on heavy-tailed per-gauge gradients: swung 0.990 to 0.149 at large basins between two samples of the same run while the sign share moved under a point. Use the share of gauges with `grad0_n < 0` and the 10 % trimmed alignment (findings §21.3) |
+| The recoverability figures "9 % global fix" and "31 % one-year transfer" | Artifacts of the two-point curvature `k = gain / a*^2` diverging where a gauge's optimum sits on its trained point; 32 real 25 x 25 grids show those parabolas predicting NSE falls of 7 to 26 that do not occur. Use **about a third at n x 1.5, worth +0.009 median NSE** (findings §20.4) |
+| "median NSE 0.700 against 0.720" for the two p = 21 models | Each model scored on its OWN test set, derived from its own training list. On the 1,323 shared gauges over the same 15 years it is **0.7384 area-balanced against 0.7330 gages_3000**, a 0.005 gap running the other way (findings §22) |
+| "statistically indistinguishable skill" for those two models | The paired sign test is z = -9.1. Say "practically identical median skill" (findings §22) |
+| A landscape summary.csv from a study whose `window_days` slice is narrower than the run's configured window, on a binary before `eb3f159` | A gauge empty in the slice panicked the whole arm thread, silently truncating the population (720 of 1,841 in one case). Now skipped with a logged count in `manifest.notes` |
 
 ## Structural constants (stable)
 
@@ -717,3 +722,61 @@ n was already converged by update 20 of 60.
   10.1029/2021GL092999) are defined in that paper's Table S4; the SI was not retrievable, so
   the regional breakdown currently uses a provisional geographic grouping
   (`experiments/landscape/region_breakdown.py`), flagged pending the published table.
+
+## Training convergence: the p = 21 CONUS model had not converged (2026-09-10, SETTLED)
+
+Authority: `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §19, §21, §21.3, §21.4.
+Reproduce: `experiments/landscape/trainwin_compare.py <testing-merged> <training-merged> --out <dir>`.
+
+Run `2026-09-08T15-55-52Z-conus-train-and-test`, checkpoint `epoch_30_mb_1`. Measured at 2,124 (testing) and
+2,170 (training) well-fit gauges; paired on the 2,059 well-fit in both.
+
+| | testing WY1996-2000 | training WY1991-1995 |
+|---|---|---|
+| share where the loss falls if n rises | 78.4 % (z = 25.8) | **78.9 %** (z = 26.2) |
+| 10 % trimmed gradient alignment | 0.941 | **0.959** |
+| share negative, n_reach > 200 | 90.0 % | 87.1 % |
+| sign agreement between the windows | - | 84.2 % |
+
+**Nonstationarity is refuted**: the training period wants more roughness exactly as the test period does, so the
+trained point is not a stationary point of the objective the model was fitted to. Mechanism: gradient accumulation
+over 20 micro-batches at 2 updates per epoch gives **60 optimizer updates in the whole 30-epoch run**, and n was
+stationary from update 20 while the learning rate decayed 0.005 to 0.001 to 0.0005.
+
+**What it is worth (§20):** a single global multiplier of n x 1.5 recovers about a third of the available 0.028
+NSE, worth **+0.009** at the population median; a factor 2.7 on every channel in the CONUS moves the median by
+under 0.01 in either direction. So more optimizer updates is the right change for **parameter defensibility, not
+skill**. The exception is `n_reach > 200`, where the displacement is coherent and the gain is about 0.045. Moving
+to the NSE optimum also raises KGE at 81 % of gridded gauges (§24), so it does not trade one metric for the other.
+
+**Ranked consequence:** more optimizer updates (smaller accumulation, more epochs, or a flatter lr schedule) moves
+to the top of `docs/2026-09-09-why-not-at-optimum-findings.md` §4, ahead of the attribute and architecture changes.
+
+**Gotcha:** `landscape-p21-all-trainwin-diag` runs `newton_iters: 0`, so its `alpha_n_star` is identically zero.
+Never join it to another census on that column; doing so yields a confident-looking 27.7 % sign agreement and an
+apparent 0 % transfer, both artifacts (§21.4). Any study needing per-gauge optima on the training window must run
+`period: training` WITH `newton_iters: 12`, at roughly the cost of the five-year testing census.
+
+## Two p = 21 models: identical skill, roughness a factor 2.4 apart (2026-09-10)
+
+Authority: findings §22 (skill) and §23 (roughness). The paper's central equifinality claim.
+
+Arms: `2026-09-08T14-06-12Z-train-and-test` (gages_2000_area_balanced, 1,841 gauges) and
+`2026-09-08T15-55-52Z-conus-train-and-test` (gages_3000, 2,365). Same config, seed and architecture; only the
+gauge list differs. **Both comparisons use the same 1,323 shared gauges**, which is what makes the pair citable.
+
+| on the 1,323 shared gauges | area-balanced | gages_3000 |
+|---|---|---|
+| median NSE, 1995-10-01 to 2010-09-30 | 0.7384 | 0.7330 |
+| median KGE | 0.7695 | 0.7711 |
+| median basin-median Manning n | **0.1036** | **0.0435** |
+| median basin-median width exponent q | 0.402 | 0.121 |
+
+Roughness ratio: median **2.39**, geometric mean 2.10, same direction at **96.6 %** of gauges, and flat across
+basin size (2.38 / 2.40 / 2.39 for <=50, 51-200, >200 reaches), which is what distinguishes a population effect
+from a composition artifact. Skill gap 0.005 against a median gauge-to-gauge difference of 0.021.
+
+Harvest the trained field cheaply with bundle `landscape-pfixed-all-nfield`: the field is a KAN forward pass and
+does not depend on the evaluation window, so it runs a one-year window with `newton_iters: 0`, `grid: 0`,
+`series: false`. **Its loss and NSE columns are one water year and must not be compared to the five-year
+censuses**; that mismatch is exactly what produced the withdrawn 0.700-against-0.720 figure.
