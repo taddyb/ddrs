@@ -830,3 +830,87 @@ definition of k and the measurement matches it in sign, location and magnitude.
 **Remaining caveats.** The transfer test in 20.2 is nested and therefore optimistic. Both calculations are on
 `nse-batch` optima with NSE scoring; KGE was checked separately (§16) and agrees on the direction. The stiff
 direction is n-dominated at every basin size, so both bounds were computed on n alone.
+
+---
+
+## 21. The training-window control: the model had not converged on its own training data
+
+§19 measured the per-gauge loss gradient at the trained point on the test window (WY1996 to 2000) and found the
+population gradients do not cancel: 78 % point the same way and the alignment `|mean(g)| / mean(|g|)` is 0.81. The
+confound named there was nonstationarity. Training used 1981 to 1995; a model perfectly converged on that period
+could still show a gradient on a later one, and that would say nothing about the optimizer.
+
+`landscape.period: training` (commit 674d50b) lets the study score on the training window. `landscape-p21-all-trainwin-diag`
+re-runs the trained-point gradient over WY1991 to WY1995, the last five training years, matching the test run's
+window length exactly.
+
+**Interim result, 806 well-fit gauges of the eventual ~2,100.** The run is about a third complete. Because shards
+walk a staid-sorted list, the finished gauges are HUC 01, 02 and part of 03: New England, the Mid-Atlantic, the
+Southeast and part of the Ohio. The per-window marginals below are therefore an eastern sample, not a continental
+one. **The paired comparison is not affected by that**, since both windows are evaluated on the identical gauges.
+
+| statistic | testing window (WY1996-2000) | training window (WY1991-1995) |
+|---|---|---|
+| well-fit gauges | 2,124 (full run) | 806 (partial, eastern) |
+| median dL/d ln n | -0.0130 | -0.0149 |
+| mean | -0.0519 | -0.0299 |
+| share negative (loss falls if n rises) | 78.3 % | **84.0 %** |
+| alignment &#124;mean&#124;/mean&#124;g&#124; | 0.813 | **0.781** |
+| alignment, n_reach <= 50 | 0.559 | 0.638 |
+| alignment, 51 to 200 | 0.793 | 0.904 |
+| alignment, n_reach > 200 | 0.974 | **0.990** (98 % negative) |
+
+Paired, on the 793 gauges well-fit in both:
+
+| | value |
+|---|---|
+| alignment, testing window | 0.759 |
+| alignment, training window | **0.764** |
+| Spearman r of the two gradients | 0.748 |
+| Pearson r | 0.220 |
+| sign agreement | 87.9 % |
+
+### 21.1 What it settles
+
+**Nonstationarity is refuted as the explanation.** On the same gauges the training-window alignment (0.764) is
+indistinguishable from the test-window alignment (0.759). The training period wants more roughness just as the test
+period does, and it wants it at 84 % of gauges rather than 78 %. The trained point is not a stationary point of the
+objective the model was actually fitted to.
+
+**The user's hypothesis is supported.** Stated on 2026-09-07 as "each gauge's loss isn't at its absolute minimum but
+a local minimum achieved when training in a large batch", and on 2026-09-10 as "we didn't finish training and we
+never correctly converged on our parameters". The second reading is the one the data support: this is not a batch
+compromise among gauges pulling in different directions, because they are not pulling in different directions. At
+large basins 98 % of them pull the same way and the aggregate is 99 % as large as the mean absolute gradient. A
+converged batch optimum would show alignment near zero. Descent simply stopped.
+
+The mechanism was identified in §19 and needs no new evidence: gradient accumulation over 20 micro-batches at 2
+updates per epoch gives **60 optimizer updates in the entire 30-epoch run**, and §10's trajectory shows n stationary
+from update 20 while the learning rate decayed 0.005 to 0.001 to 0.0005. n stopped moving when the steps became
+small, not when the gradient did.
+
+Pearson 0.22 against Spearman 0.75 is not a contradiction: the test-window gradients have a heavy tail (sd 0.736
+versus 0.059 on the training window), so a handful of extreme gauges destroy the linear correlation while the rank
+structure holds. Sign agreement of 88 % is the practical statement.
+
+### 21.2 What it does not settle, and what it is worth
+
+It does not make the model meaningfully more skillful. §20 bounds the prize: the recoverable part of the
+displacement is of order 0.01 NSE, and a single global roughness level captures about 38 % of it. So "run more
+optimizer updates" is the right fix for the right reason, and the reason is that the learned parameters should be
+the ones the objective actually asks for, not that the hydrographs will visibly improve. The exception remains
+`n_reach > 200`, where alignment is 0.99, the displacement is coherent, and the gain is about 0.045.
+
+It also does not touch the identifiability results. q stays unidentified at 85 % of gauges and n stays
+unidentifiable below one day of channel travel time whatever the optimizer does. Those are properties of daily
+discharge as an observation, not of the fit.
+
+**Ranked consequence.** More optimizer updates (a smaller accumulation factor, more epochs, or a flatter learning
+rate schedule) moves to the top of `docs/2026-09-09-why-not-at-optimum-findings.md` §4, ahead of the attribute and
+architecture changes. The width-from-river-size retrain becomes a test of whether a converged n is physical rather
+than a test of whether n can move at all.
+
+**To confirm.** The run completes the remaining two thirds, which adds the West and the arid interior. Watch
+whether the alignment holds up where snow and aridity dominate; the eastern sample is precisely where earlier
+sections put the largest displacement, so the continental figure could come in lower. The paired comparison should
+be re-read on the full set. Reproduce with `experiments/landscape/trainwin_compare.py <testing-merged> <training-merged>`.
