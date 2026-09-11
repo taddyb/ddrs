@@ -131,6 +131,71 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 `meanP`, `NDVI`, `meanslope`, `log10_uparea`, `SoilGrids1km_sand`, `ETPOT_Hargr`,
 `Porosity`.
 
+### Head topology knobs (added 2026-09-11) — all default to the current head
+
+These exist to test §31 of `docs/2026-09-08-landscape-hypothesis-tests-findings.md`:
+the head's learnable outputs came out as one latent direction relabelled
+(`logit(q) = 3.979 · logit(n) + 2.752`, R² = 0.987 over 346,321 reaches), which
+is also why `q_spatial` saturated both bounds while `n` never touched its own.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `parameter_groups` | `[]` | Partition `learnable_parameters` into independently parameterized trunks, e.g. `[[n], [p_spatial, q_spatial]]`. Must cover every name exactly once. Group 0 keeps the config `seed`; later groups are offset. |
+| `input_layer_kan` | `false` | `Linear(F,H)` → `KanLayer(F,H)`: per-attribute splines instead of a linear mixing applied before any nonlinearity. |
+| `output_layer_kan` | `false` | `Linear(H,P)` → `KanLayer(H,P)`: each output gets its own spline coefficients per edge. |
+| `kan_grid_range` | `[-3.0, 3.0]` | B-spline grid range for the two boundary KanLayers only. Inner trunk layers keep rskan's `[-1, 1]`. Widened because the boundary layers see z-scored attributes (±4) and unnormalised activations; outside the grid the spline term flattens and only `scale_base · SiLU` survives, which is affine and would quietly reinstate the coupling `output_layer_kan` exists to remove. |
+
+**Both KanLayer knobs break DDR `kan.py` parity by construction** (invariant 5).
+They are experiment arms, not defaults; a config that sets either one cannot be
+compared to a DDR parity fixture.
+
+**The mechanism, stated correctly.** A `Linear(H,P)` read-out does not force
+affinity between outputs on its own — it does so only when `h` is effectively
+rank 1 across reaches, which is the measured §31 regime. And `output_layer_kan`
+breaks the *affinity* but not the *functional dependence*: two different
+nonlinear functions of one scalar latent still move in lockstep (rank
+correlation stays at 1). Decoupling the outputs needs a trunk that carries more
+than one direction, which is what `parameter_groups` tests. Both halves are
+pinned in `tests/kan_head_groups.rs`.
+
+**Checkpoint compatibility.** burn's `Module` derive emits a serde record with
+no `#[serde(default)]`, so these three fields broke every pre-2026-09-11
+checkpoint with `missing field \`extra\``. `load_kan_head` now falls back to an
+explicit `LegacyKanHead` mirror of the old layout, and refuses that fallback for
+a split-trunk or KAN-boundary template (the old file carries no weights for
+those, and leaving them at init would be worse than failing). Gate:
+
+```bash
+DDRS_LEGACY_HEAD_CKPT=.ddrs/runs/<pre-change-id>/checkpoints/epoch_9_mb_9 \
+  cargo test --test kan_head_record_compat -- --nocapture
+```
+
+Remember this whenever you add a field to any `Module` — the same trap applies
+to `DisaggHead` and to anything else with checkpoints on disk.
+
+### Screening a head topology without training
+
+`src/bin/head_arch_screen.rs` compares topologies in minutes rather than ~1.8 h
+of CONUS training per arm, because the head is a pure per-reach function of the
+attributes. It writes init fields over all of CONUS, the trunk activations, and
+a supervised capacity control against two targets that are uncorrelated by
+construction and exactly recoverable from the inputs.
+
+```bash
+cargo run --release --bin head_arch_screen -- \
+  --config .ddrs/runs/<id>/config.yaml \
+  --out-dir .ddrs/experiments/head-arch/<ts> --sample 4000 --fit-steps 400
+experiments/head_arch/analyze.py .ddrs/experiments/head-arch/<ts>
+```
+
+Budget: roughly 40 s per arm per 200 Adam steps at 4,000 reaches on CPU, plus
+~25 s to load attributes. `--sample 20000 --fit-steps 2000` is far too slow to
+sweep seven arms; it is not more informative, because the targets are exact
+functions of the inputs and the fit converges early.
+
+`experiments/head_arch/attribute_rank.py <run-config.yaml>` needs no Rust at all
+and bounds every topology from above.
+
 ### `kan_head.disaggregation:` — the real fields
 
 > **There is no `use_precip`, `use_attributes`, or `use_temp` key.** They were

@@ -106,6 +106,17 @@ struct Cli {
     /// Restrict to these arm names (default: all).
     #[arg(long, value_delimiter = ',')]
     arms: Vec<String>,
+
+    /// Number of initialisation seeds to sweep per arm, starting at the
+    /// config's `seed`.
+    ///
+    /// A single seed cannot rank topologies: for two random read-out rows over
+    /// a latent of effective rank `r`, chance alone gives |rho| of order
+    /// `1/sqrt(r)`, which is ~0.48 at the measured r = 4.4. Any claim that one
+    /// topology inherits less coupling than another needs the spread across
+    /// seeds, not one draw.
+    #[arg(long, default_value_t = 8)]
+    init_seeds: usize,
 }
 
 /// One head topology under test.
@@ -220,16 +231,17 @@ where
     // overrides `learnable_parameters` (a required Config field, so there is no
     // `with_` setter) and has no use for the disaggregation head: the question
     // is about the per-reach parameter map, not the forcing.
-    let base = KanHeadConfig::new(
-        section.input_var_names.clone(),
-        cli.params.clone(),
-        cfg.seed,
-    )
-    .with_hidden_size(section.hidden_size)
-    .with_num_hidden_layers(section.num_hidden_layers)
-    .with_grid(section.grid)
-    .with_k(section.k)
-    .with_kan_grid_range(section.kan_grid_range);
+    // `seed` is a required Config field, so there is no `with_` setter; the
+    // seed sweep needs a fresh base per seed.
+    let mk_base = |seed: u64| {
+        KanHeadConfig::new(section.input_var_names.clone(), cli.params.clone(), seed)
+            .with_hidden_size(section.hidden_size)
+            .with_num_hidden_layers(section.num_hidden_layers)
+            .with_grid(section.grid)
+            .with_k(section.k)
+            .with_kan_grid_range(section.kan_grid_range)
+    };
+    let base = mk_base(cfg.seed);
 
     let mut manifest = serde_json::Map::new();
     for arm in arms() {
@@ -266,6 +278,32 @@ where
             idx.len(),
         )?;
 
+        // 4. seed sweep for the init prior, on the subsample. Written stacked
+        // as [n_seeds, n_sub, P] so all the statistics stay in one place.
+        let mut sweep: Vec<f32> = Vec::with_capacity(cli.init_seeds * idx.len() * cli.params.len());
+        for s in 0..cli.init_seeds {
+            let seeded = (arm.apply)(
+                mk_base(cfg.seed.wrapping_add(s as u64)),
+                &cli.params,
+            );
+            let h: KanHead<B> = seeded.init(&device);
+            let out = h.valid().forward(x_sub.clone().inner());
+            let cols: Vec<Vec<f32>> = cli
+                .params
+                .iter()
+                .map(|k| out[k].clone().into_data().to_vec::<f32>().expect("f32"))
+                .collect();
+            for i in 0..idx.len() {
+                for c in &cols {
+                    sweep.push(c[i]);
+                }
+            }
+        }
+        write_f32(
+            &cli.out_dir.join(format!("{}.seedsweep.bin", arm.name)),
+            &sweep,
+        )?;
+
         manifest.insert(
             arm.name.to_string(),
             serde_json::json!({
@@ -279,6 +317,7 @@ where
                 "fit_loss_first": loss_trace.first(),
                 "fit_loss_last": loss_trace.last(),
                 "loss_trace": loss_trace,
+                "init_seeds": cli.init_seeds,
             }),
         );
         eprintln!(
@@ -298,6 +337,7 @@ where
         "fit_steps": cli.fit_steps,
         "lr": cli.lr,
         "target_corr": target_corr,
+        "init_seeds": cli.init_seeds,
         "input_var_names": section.input_var_names,
         "arms": manifest,
     });

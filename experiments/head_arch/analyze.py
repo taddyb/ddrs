@@ -120,9 +120,28 @@ def main() -> int:
         # were told to be uncorrelated.
         f0, f1 = fitted[:, 0], fitted[:, 1]
 
+        sweep = None
+        sw_path = out / f"{name}.seedsweep.bin"
+        if sw_path.exists():
+            n_seeds = info.get("init_seeds", meta.get("init_seeds", 1))
+            a = np.fromfile(sw_path, dtype=np.float32).reshape(n_seeds, -1, np_)
+            rhos, r2s = [], []
+            for k in range(n_seeds):
+                rhos.append(abs(spearmanr(a[k, :, i_n], a[k, :, i_q]).statistic))
+                r2s.append(affine_r2(logit(a[k, :, i_n]), logit(a[k, :, i_q])))
+            sweep = {
+                "abs_rho": np.array(rhos),
+                "affine_r2": np.array(r2s),
+                # Chance level for two random functionals of a rank-r latent.
+                "chance": float(1.0 / np.sqrt(max(spec["pr"], 1.0))),
+                "frac_gt_half": float((np.array(rhos) > 0.5).mean()),
+                "n_seeds": int(n_seeds),
+            }
+
         rows.append(
             {
                 "arm": name,
+                "sweep": sweep,
                 "rationale": info["rationale"],
                 "init_rho_nq": spearmanr(init[:, i_n], init[:, i_q]).statistic,
                 "init_affine_r2": affine_r2(ln, lq),
@@ -158,6 +177,27 @@ def main() -> int:
         )
     print()
 
+    print("INIT ACROSS SEEDS — is the difference between arms bigger than chance?")
+    print("  chance |rho| for two random read-out rows over a rank-r latent is ~1/sqrt(r),")
+    print("  so an arm only counts as decoupled if it sits well BELOW its own chance line.")
+    print(
+        f"{'arm':<{w}} {'median |rho|':>12} {'IQR':>14} {'chance':>7} "
+        f"{'median R2':>10} {'frac>0.5':>9}"
+    )
+    for r in rows:
+        sw = r["sweep"]
+        if sw is None:
+            print(f"{r['arm']:<{w}} {'(no sweep)':>12}")
+            continue
+        lo, hi = np.percentile(sw["abs_rho"], [25, 75])
+        print(
+            f"{r['arm']:<{w}} {np.median(sw['abs_rho']):>12.3f} "
+            f"{f'[{lo:.3f},{hi:.3f}]':>14} {sw['chance']:>7.3f} "
+            f"{np.median(sw['affine_r2']):>10.4f} {sw['frac_gt_half']:>9.3f}"
+        )
+    print(f"  ({meta.get('init_seeds', 1)} seeds per arm, on the {meta['subsample_len']:,}-reach subsample)")
+    print()
+
     print("CAPACITY CONTROL — can it decorrelate two outputs when TOLD the answer?")
     print(f"{'arm':<{w}} {'loss0':>9} {'loss1':>9} {'fit rho':>9} {'affine R2':>10}")
     for r in rows:
@@ -175,6 +215,12 @@ def main() -> int:
     print("  if its ROUTING-trained fields still collapse, the cause is upstream of")
     print("  the architecture — the attributes, or what daily discharge can identify.")
 
+    for r in rows:
+        if r["sweep"] is not None:
+            r["sweep"] = {
+                k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                for k, v in r["sweep"].items()
+            }
     (out / "summary.json").write_text(json.dumps(rows, indent=2, default=float))
     print(f"\nwrote {out / 'summary.json'}")
     return 0
