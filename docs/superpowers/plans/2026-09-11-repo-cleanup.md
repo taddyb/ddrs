@@ -663,23 +663,44 @@ EOF
 
 ### Task 5: Compress the two closed workstreams in `CLAUDE.md`
 
-Leakance is 84 lines and reach subdivision is 54, both describing campaigns that closed NO-GO, both loaded on every turn. The verdict stays in always-loaded context; the operational detail moves to `ddrs-dev`, which loads on trigger.
+Leakance is 84 lines and reach subdivision is 54, both describing campaigns that closed NO-GO, both loaded on every turn. The verdict stays in always-loaded context. The operational detail is almost entirely duplicated in the skills already, so this is mostly a deletion: see Step 1's table for what is already elsewhere and Step 2 for the only two items that genuinely move.
 
 **Files:**
-- Modify: `CLAUDE.md` (lines 426-509 and 510-563 as of `571e2f6`)
-- Modify: `.claude/skills/ddrs-dev/references/config.md` (receives the enable steps and parameter ranges)
-- Modify: `.claude/skills/ddrs-dev/references/testing.md` (receives the gate command lists)
+- Modify: `CLAUDE.md` (the Leakance and Reach subdivision sections; re-grep, they moved to 445 and 529 after Task 4)
+- Modify: `.claude/skills/ddrs-dev/references/config.md` (receives ONLY the eval zeta recipe, extending its existing leakance section)
+- Modify: `.claude/skills/ddrs-dev/references/testing.md` (receives ONLY a Subdivision coverage row)
 
 **Interfaces:**
 - Produces: two `## ` sections in `CLAUDE.md` of about 10 and 8 lines, each ending in a pointer to `ddrs-dev/references/config.md` and to the closing findings doc. Task 7 edits the same two reference files, so do Task 5 before Task 7 or resolve by hand.
 
-- [ ] **Step 1: Move the leakance operational detail into `ddrs-dev/references/config.md`**
+- [ ] **Step 1: Establish what is ALREADY elsewhere before moving anything**
 
-Append a `## Leakance (closed, off by default)` section containing, verbatim from `CLAUDE.md`: the three required config changes, the three parameter ranges with units, the four gate commands, and the eval-time zeta diagnostic paragraph including the `target/release/eval --zeta-output` invocation. Nothing is lost, it changes address.
+The plan originally said to append both sections' operational detail into the skills.
+Checked during execution, and most of it is already there, often stated better. Do NOT
+append a second copy: that would be duplication, which is the thing this task exists to
+remove. Verify each row yourself before relying on it:
 
-- [ ] **Step 2: Move the subdivision operational detail the same way**
+| CLAUDE.md content | Already lives at | So |
+|---|---|---|
+| The three leakance enable changes (`use_leakance: true` forcing `use_cuda_graphs: false`, the three `learnable_parameters`, matching `parameter_ranges`) | `ddrs-dev/references/config.md` §"Leakance: enabling it" | DELETE from CLAUDE.md, move nothing |
+| The three leakance parameter ranges with units | `config.md` §`parameter_ranges`, and the `params:` table's `use_leakance` / `leakance_losing_only` / `leakance_impervious_threshold` rows | DELETE, move nothing |
+| All four leakance gate commands | `testing.md` Tier A (`leakance_gradcheck`, `leakance_off_parity`, `zeta_accum`) and its "What covers what" Leakance row | DELETE, move nothing |
+| The `zeta` / `zeta_net` netCDF schema and which writer produces it | `ddrs-eval-plots/SKILL.md` output table and `references/parameter_map.md`, both of which additionally give the `COMID_eval` dimension and its 64,892 reaches, which CLAUDE.md never stated | DELETE, move nothing |
+| All seven subdivision fields, the `Δx_target` formula, and the three enable preconditions | `.claude/REACH-SUBDIVISION.md` | DELETE, move nothing |
+| The subdivision NO-GO measurements | `.claude/REACH-SUBDIVISION.md` | DELETE, keep only the headline numbers in the status block |
 
-Append `## Reach subdivision (NO-GO, off by default)` carrying the three enable preconditions, all seven config fields with their defaults, and the gate command list. Keep the pointer to `.claude/REACH-SUBDIVISION.md`, which already holds the measurements.
+- [ ] **Step 2: Move the two things that are genuinely unique, and only those**
+
+1. **The eval-time zeta recipe for an existing checkpoint.** `ddrs-eval-plots` names
+   the `eval --zeta-output` flag but not the full invocation. Move the complete
+   command block (`cargo build --release --bin eval`, then `target/release/eval
+   --config … --checkpoint … --output … --zeta-output …`) plus the "~10 min, no
+   retrain" note into `config.md`, extending the EXISTING §"Leakance: enabling it"
+   rather than opening a new section.
+2. **The subdivision gate list.** Add `subdivide`, `subdivision_integration` and
+   `gauge_mass_conservation` to `testing.md`'s "What covers what" table as a
+   Subdivision row, noting `compare_ddr_sandbox` must stay an ABSOLUTE MATCH.
+   Confirm first with `ls tests/` that all three files exist.
 
 - [ ] **Step 3: Replace the `CLAUDE.md` leakance section**
 
@@ -731,7 +752,21 @@ cat CLAUDE.md .claude/skills/ddrs-dev/references/config.md \
 comm -23 /tmp/old.toks /tmp/new.toks
 ```
 
-Expected: empty, meaning every code-quoted token from the old sections still exists somewhere. Any token listed must be either restored or deliberately dropped with a note in the commit message.
+Expected: mostly empty. A token that appears only in the old CLAUDE.md sections and
+nowhere else must be either restored or deliberately dropped with a note in the commit
+message. Because Step 1 established that the skills already carry this material, widen
+the comparison set to include the files that actually hold it:
+
+```bash
+cat CLAUDE.md \
+    .claude/skills/ddrs-dev/references/config.md \
+    .claude/skills/ddrs-dev/references/testing.md \
+    .claude/REACH-SUBDIVISION.md \
+    .claude/skills/ddrs-eval-plots/SKILL.md \
+    .claude/skills/ddrs-eval-plots/references/parameter_map.md \
+  | grep -oE '`[^`]+`' | sort -u > /tmp/new.toks
+comm -23 /tmp/old.toks /tmp/new.toks
+```
 
 ```bash
 wc -l CLAUDE.md
