@@ -312,7 +312,8 @@ src/
 ├── pretrain/             Disaggregation-head pretraining
 ├── experiment/           Paper studies: adjoint/ and landscape/
 ├── cli/                  plan, run, show, status, gc, sources, import, experiment
-├── bin/                  ddrs (primary) + legacy train/eval/train_and_test
+├── bin/                  ddrs (primary CLI); legacy train/eval/train_and_test;
+│                         dump_parameters; the pretrain_disagg* and probe_* families
 └── data/                 Live readers for DDR's training data (no export step)
     ├── ids.rs            Comid, Staid newtypes; IdIndex<T>
     ├── error.rs          DataError with source-path context
@@ -424,8 +425,10 @@ which preserves prior behavior exactly — omit the block and nothing changes):
   `(sim - obs)² / (σ_gauge + eps)²`, with σ fixed over the training period.
   Pairs with `experiment.optimizer: adadelta`, which is scale-free and ignores
   the `learning_rate` schedule by design. Gradient accumulation
-  (`experiment.use_grad_accum`, `grad_accum_steps`) is also available; it is
-  rejected at load unless `grad_accum_steps >= 2`.
+  (`experiment.use_grad_accum`, `grad_accum_steps`) is also
+  available. Config load rejects `grad_accum_steps: 0` outright, and rejects
+  `use_grad_accum: true` paired with fewer than two steps, since accumulating a
+  single micro-batch is a silent no-op.
 
 The `nnse-kge` option exists because L1 and NSE are both maximized at a
 simulated variance *below* observed (NSE's optimum is at `α = r < 1`), so they
