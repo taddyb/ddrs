@@ -7,29 +7,9 @@ landed forward CUDA Graphs in SP-10 with a measured V7a wall-time ratio
 of **0.385** — CUDA finishes a 3-batch smoke train in 1.96 minutes versus
 CPU's 5.09 minutes, a 2.6× speed-up.
 
-**The chapters of this book are the canonical documentation.** The
-condensed agent-readable notes under `.claude/references/ddrs-*.md` are
-an older back-port of the same material (last updated 2026-06-10) kept
-for in-repo agent lookups; where the two disagree, the chapter here
-wins. If you find a discrepancy between a chapter and the source code
-it documents, the source code is the truth — file an issue.
-
-If you arrive from a `.claude/references/` note, its counterpart chapter is:
-
-| `.claude/references/` | Chapter |
-|---|---|
-| `ddrs-algorithm.md` | [Algorithm](algorithm.md) |
-| `ddrs-architecture.md` | [Architecture](architecture.md) |
-| `ddrs-baseline.md` | [The summed Q' baseline](reference/baseline.md) |
-| `ddrs-burn-autograd.md` | [BURN autograd recipe](reference/burn-autograd.md) |
-| `ddrs-comparing-to-ddr.md` | [Comparing to DDR](reference/ddr-comparison.md) |
-| `ddrs-formatting-inputs.md` | [Formatting inputs](usage/inputs-formatting.md) |
-| `ddrs-graph-objects.md` | [Graph objects](usage/graph-objects.md) |
-| `ddrs-perf-and-cuda-graphs.md` | [Performance & CUDA Graphs](reference/perf.md) |
-| `ddrs-reading-inputs.md` | [Reading inputs](usage/inputs-reading.md) |
-| `ddrs-reading-outputs.md` | [Reading outputs](usage/outputs.md) |
-| `ddrs-running-the-code.md` | [Running the code](usage/running.md) |
-| `ddrs-setup.md` | [Setup](setup.md) |
+**The chapters of this book are the canonical documentation.** If you find a
+discrepancy between a chapter and the source code it documents, the source code is
+the truth, file an issue.
 
 ## Dataflow
 

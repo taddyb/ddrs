@@ -257,6 +257,24 @@ consumed by `prepare`. If a future BURN release makes `NodeRef` public,
 nothing in ddrs needs to change; if it tightens `.node`, the whole recipe
 breaks and the port would need a different registration path.
 
+### BURN-0.21 API pitfalls at the primitive level
+
+These three cost real time during the original port spike. They apply
+only if you drop to the `FloatTensorOps` primitives directly; the routing
+core itself works at the `Tensor` level and never calls them, so you will
+meet these only when writing a new op from scratch.
+
+- **`<NdArray<f32> as Backend>::float_mul` does not resolve.** `float_mul`
+  lives on `FloatTensorOps`, a supertrait of `Backend`. Call it as bare
+  `B::float_mul(...)` with `FloatTensorOps` in scope, which dispatches
+  through the supertrait, or qualify it through that trait instead.
+- **Scalars are not `.elem()`.** `float_mul_scalar` wants a `Scalar` enum,
+  so `2.0f32.elem()` is the wrong conversion here. Use `(2.0f32).into()`,
+  which goes through the `From<f32> for Scalar` impl.
+- **Methods that take `self` move the tensor.** `Tensor::sum`,
+  `into_primitive`, and friends consume the receiver, so clone defensively
+  when the tensor is still needed: `y.clone().sum()`.
+
 ### Why a hand-written backward (the O(nnz)-tape rationale)
 
 The point of writing these adjoints by hand is **tape size**. Letting
@@ -277,7 +295,8 @@ with autograd-tape unrolling.
 ## Verification
 
 The sparse op's backward is checked against DDR's own
-`TriangularSparseSolver` adjoint at f32 precision:
+`TriangularSparseSolver` (`~/projects/ddr/src/ddr/routing/utils.py:515`)
+adjoint at f32 precision:
 
 ```bash
 cargo test --test sparse_gradcheck
