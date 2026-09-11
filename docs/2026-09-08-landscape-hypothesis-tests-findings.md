@@ -1314,3 +1314,66 @@ with basin size (4.35 at `n_reach <= 50`, 9.23 at 51 to 200, 15.05 above 200).
 `landscape-p21b-all-testwin-diag`, which supplies the `nse-batch` baseline. No retraining: this measures whether
 the valley is deeper under the candidate objective before any training run is spent on it. If it passes, the term
 goes into `src/training/loss.rs` and gets a retrain; if it fails, the cost was a few hours.
+
+---
+
+## 27. The retrain converged: §21 is closed
+
+§21 measured that the 60-update model was not at a stationary point, on either window. The fix it implied was
+optimizer budget, and §20 predicted the prize was about +0.009 median NSE concentrated in large basins. Both were
+tested by the 2026-09-10 retrain (`grad_accum_steps` 20 to 4, `epochs` 30 to 50, lr flattened to 0.005 through
+epoch 20, giving **500 optimizer updates against 60**). Everything else held fixed: same data, architecture, seed
+and population.
+
+### The convergence test, before and after
+
+Paired on the gauges well-fit in both windows, using the robust statistics of §21.3:
+
+| | 60 updates (§21) | **500 updates** |
+|---|---|---|
+| shared gauges | 2,059 | 2,076 |
+| share where the loss falls if n rises, **testing** | 78.4 % (z = 25.8) | **53.6 %** (z = 3.2) |
+| share where the loss falls if n rises, **training** | 78.9 % (z = 26.2) | **53.1 %** (z = 2.8) |
+| 10 % trimmed alignment, testing | 0.941 | **0.008** |
+| 10 % trimmed alignment, training | 0.959 | **0.057** |
+
+Per window across all well-fit gauges, by basin size (testing window):
+
+| basin size | share negative | trimmed alignment | z |
+|---|---|---|---|
+| all (2,138) | 53.9 % | 0.017 | 3.6 |
+| n_reach <= 50 | 53.9 % | 0.047 | 3.1 |
+| 51 to 200 | 53.9 % | 0.223 | 1.6 |
+| > 200 | 53.1 % | 0.355 | **0.7** |
+
+**The aggregate gradient has essentially vanished.** The population sign share moved from 78 % to 54 %, and the
+trimmed alignment from 0.94 to 0.008, which is what a batch optimum looks like: the per-gauge gradients now
+cancel. At basins over 200 reaches, where the 60-update model was most lopsided (90 % negative, alignment 1.000),
+the retrained model is at z = 0.7, statistically indistinguishable from a stationary point.
+
+A residual tilt remains, 54 % rather than 50 %, at z = 3.2. On 2,076 gauges that is detectable but it is 1/8 the
+effect size of before, and it is the scale at which "not exactly stationary" stops being the dominant story.
+
+### What this settles
+
+1. **The undertraining diagnosis was right, and the fix worked.** This is the instrument's first genuine
+   out-of-sample prediction: the landscape said the model had not converged, the prescribed change was made, and
+   the landscape now says it has.
+2. **§20's magnitude prediction also held.** Predicted about +0.009 median NSE with the gain concentrated in large
+   basins; measured +0.0062 paired median, +0.018 in the medians (0.7200 to 0.7376), improved at 70.7 % of gauges,
+   with the gain rising from +0.005 below 1,000 km2 to +0.020 at 10,000 to 30,000 km2.
+3. **It changes what the remaining displacement means.** Before, "gauges sit away from their own optima" was
+   ambiguous between an unfinished descent and a genuine batch compromise. That ambiguity is now resolved: the
+   descent is finished, so what remains **is** the compromise. Selective equifinality is the correct reading of
+   the residual, not undertraining.
+4. **It reopens §10.** "Composition, not step count" was concluded from two runs that had both made exactly 60
+   updates (see the §10 correction). With 500 updates the same gages_3000 population lands at median trained
+   n = 0.080 rather than 0.049, wandering between 0.073 and 0.100 over the last 40 epochs without the loss
+   objecting. Whether the two populations still differ by a factor of two once BOTH are properly trained is now
+   an open question, and it bears directly on the abstract's central claim (§22, §23).
+
+### Caveat
+
+The residual z of 3.2 is small but real, and the trimmed alignment at large basins (0.355 testing, 0.172 training)
+is higher than the population value, so the biggest basins are the least settled even though their sign share is
+closest to 50 %. That is consistent with them having the most curvature and therefore the most to say.
