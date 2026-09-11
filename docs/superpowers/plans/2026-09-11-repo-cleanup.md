@@ -976,7 +976,15 @@ EOF
 ### Task 8: Correct the book pages and README
 
 **Files:**
-- Modify: `docs/reference/perf.md`, `docs/reference/baseline.md`, `docs/usage/inputs-formatting.md`, `docs/usage/running.md`, `docs/architecture.md`, `README.md`
+- Modify: `docs/reference/perf.md`, `docs/reference/baseline.md`, `docs/usage/inputs-formatting.md`, `docs/usage/running.md`, `docs/architecture.md`, `docs/intro.md`, `docs/setup.md`, `README.md`
+
+**Scope correction, made during execution.** The audit graded `docs/setup.md` and
+`docs/intro.md` CLEAN and `docs/usage/running.md` MINOR. On the `use_cuda_graphs`
+axis all three are wrong, and `setup.md` carries five stale claims. The auditors were
+checking against the 2026-07-30 follow-up list and for newly-landed features; none of
+them swept for the **2026-08-19 default flip**, so that correction's blast radius was
+undercounted. Work from the verified table in Step 2 below, not from the audit's
+per-file verdicts.
 
 - [ ] **Step 1: Confirm the two wrong table cells against source**
 
@@ -987,31 +995,68 @@ grep -n "tau = r.tau.unwrap_or" src/config.rs
 
 Expected: `use_cuda_graphs: false` at line 143, and `p.tau = r.tau.unwrap_or(9)`.
 
-- [ ] **Step 2: Fix `docs/reference/perf.md`**
+- [ ] **Step 2: Fix every stale `use_cuda_graphs` claim, in all five files**
+
+`config/merit_training.yaml:143` is `use_cuda_graphs: false`. It flipped on 2026-08-19
+with the `ddr_match` deprecation, because the captured kernel hardcodes the legacy
+celerity and cannot be used with the corrected physics that is now default.
+`docs/reference/ddr-comparison.md:155-164` documents that event correctly; the fix
+never propagated anywhere else. Every row below was verified by grep against the YAML
+during execution:
+
+| File and line | Current claim | Correct to |
+|---|---|---|
+| `docs/intro.md:64-66` | "Defaults in `config/merit_training.yaml` are now `sparse_solver: cuda` + `use_cuda_graphs: true`" | `sparse_solver: cuda` with `use_cuda_graphs: false`, noting the 2026-08-19 flip |
+| `docs/intro.md:69` | calls it "the `DDRS_FORCE_GRAPHS=1` CUDA-capture path" | It is the CUDA **backend** path. The env var selects `Cuda<f32, i32>` and does not enable capture |
+| `docs/setup.md:67-68` | "current `config/merit_training.yaml` defaults to `sparse_solver: cuda` and `use_cuda_graphs: true`, so the GPU path is exercised on every default training run" | `use_cuda_graphs: false`; the cuSPARSE solver is still exercised, the capture path is not |
+| `docs/setup.md:311-312` | "ships with `sparse_solver: cuda` and `use_cuda_graphs: true`" | same correction |
+| `docs/setup.md:389-390` | "routes the example through the `Cuda<f32, i32>` inner backend with `use_cuda_graphs=true` regardless of the YAML" | Drop the `use_cuda_graphs=true` clause. The env var only swaps the inner backend |
+| `docs/usage/running.md:12-14` | "ships with `sparse_solver: cuda` and `use_cuda_graphs: true`" | same correction |
+| `docs/usage/inputs-formatting.md:147` | a `config/merit_training.yaml` excerpt showing `use_cuda_graphs: true  # SP-10: forward CUDA Graph capture+replay` | `use_cuda_graphs: false` with a comment saying why it flipped |
+| `docs/usage/inputs-formatting.md:637-640` | "`use_cuda_graphs` flipped to `true` in SP-10 … Don't hard-code the assumption that either is `false`" | Now backwards. Record both flips: `true` in SP-10, back to `false` on 2026-08-19, and keep the read-the-YAML advice |
+| `docs/reference/perf.md:48` | merit-YAML column says `true` (line 141) | `false` (line 143) |
+| `docs/reference/perf.md:59` | `use_cuda_graphs: true  # YAML value since the SP-10 close commit (e35af29)` | `false`, with the 2026-08-19 reason, cross-referencing `docs/reference/ddr-comparison.md` |
+
+Leave alone every other `use_cuda_graphs` mention the grep finds. Most describe the
+flag's semantics or the capture precondition (`use_cuda_graphs && sparse_solver == Cuda`)
+and are correct. Only a claim about the **shipped YAML value**, or about
+`DDRS_FORCE_GRAPHS` enabling capture, is wrong.
+
+- [ ] **Step 3: Fix the obsolete desktop-DDR caveat in `docs/setup.md`**
+
+`docs/setup.md:91-93` and `:309-310` tell the reader a valid V1 fixture "currently
+requires the desktop's DDR working tree" and point at
+`docs/reference/ddr-comparison.md` for the caveat. That target marks the caveat
+**OBSOLETE since 2026-08-19** at its line 155, and CLAUDE.md invariant 1 says any DDR
+checkout at or past #192 is a valid reference. So setup.md is routing readers to an
+obsolete warning as though it were live. Remove both, and point at
+`docs/reference/ddr-comparison.md` §Regenerating fixtures instead.
+
+- [ ] **Step 4: Fix the rest of `docs/reference/perf.md`**
 
 Line 48's merit-YAML column says `true` (line 141); it is `false` at line 143, flipped 2026-08-19 when the captured kernel became incompatible with the corrected physics that is now default. Line 59's example block says `use_cuda_graphs: true  # YAML value since the SP-10 close commit (e35af29)`; replace the value with `false` and the comment with a note that it flipped on 2026-08-19 with the `ddr_match` deprecation, cross-referencing `docs/reference/ddr-comparison.md`, which documents that event correctly. Lines 47-48 also cite `src/config.rs:407-410` and `:454`; replace with symbol citations.
 
-- [ ] **Step 3: Fix `docs/usage/inputs-formatting.md`**
+- [ ] **Step 5: Fix `docs/usage/inputs-formatting.md`**
 
-Line 474: `tau` default is 9, not 3, since `54cd386` (2026-08-08); 3 is on the retired, wrong-direction scale. Line 476: same `use_cuda_graphs` correction as Step 2. Then add the three missing rows to the `params:` table: `ddr_match`, `enforce_positivity`, `subdivision`. Add a note that `ddr_match` changes other defaults, since its absence is the reason the `use_cuda_graphs` cell went stale.
+Line 474: `tau` default is 9, not 3, since `54cd386` (2026-08-08); 3 is on the retired, wrong-direction scale. Line 476's `use_cuda_graphs` cell is already handled by Step 2; do not edit it twice. Then add the three missing rows to the `params:` table: `ddr_match`, `enforce_positivity`, `subdivision`. Add a note that `ddr_match` changes other defaults, since its absence is the reason the `use_cuda_graphs` cell went stale.
 
-- [ ] **Step 4: Fix `docs/reference/baseline.md`**
+- [ ] **Step 6: Fix `docs/reference/baseline.md`**
 
 Lines 147 and 386 describe an `init → plan → run` lifecycle. `ddrs init` is a stub that exits 2; `setup.md` and `running.md` already say so. Change both to `plan → run`.
 
-- [ ] **Step 5: Fix `docs/architecture.md`**
+- [ ] **Step 7: Fix `docs/architecture.md`**
 
 The `src/adjacency/` file table at lines 147-155 omits `gridded.rs` (DDM30 sub-reach network relabelling) and `subdivide.rs` (the off-by-default length normalization). Add both rows.
 
-- [ ] **Step 6: Fix `docs/usage/running.md`**
+- [ ] **Step 8: Fix `docs/usage/running.md`**
 
 The CLI reference documents `plan`, `run`, `show`, `status`, `gc`, `sources` and `import` exhaustively and never mentions `ddrs experiment`. Add it, listing the flags from `src/bin/ddrs.rs` (name, bundle, backend, arms, max_gauges, skip_validate, jobs, dry_run, shard) and naming the two studies. Also add `use_grad_accum` and `grad_accum_steps` wherever the training configuration is covered.
 
-- [ ] **Step 7: Fix `README.md`**
+- [ ] **Step 9: Fix `README.md`**
 
 Lines 211-213 frame `nse-batch` and `optimizer: adadelta` as "once PR #31 lands". Both merged 2026-07-30 as `24cb4d0`, with passing tests `nse_batch_loss_kind_parses` and `optimizer_defaults_to_adam_and_parses_adadelta`. Rewrite as shipped features.
 
-- [ ] **Step 8: Verify**
+- [ ] **Step 10: Verify**
 
 ```bash
 mdbook build
@@ -1021,7 +1066,7 @@ grep -rn "PR #31\|init → plan → run\|unwrap_or(3)" docs/ README.md
 
 Expected: `mdbook build` succeeds; the verifier's warn count drops; the grep returns nothing.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add docs/ README.md
