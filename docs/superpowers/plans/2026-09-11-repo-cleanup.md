@@ -737,7 +737,10 @@ Expected: empty, meaning every code-quoted token from the old sections still exi
 wc -l CLAUDE.md
 ```
 
-Expected: about 480 to 500, down from 663.
+Task 4 grew the file to **681** lines, because the rebuilt architecture diagram names
+eight subsystems the old one omitted. Compressing leakance (84 lines to about 10) and
+subdivision (54 to about 8) removes roughly 120, so expect about **555 to 575**.
+Report the measured number: later steps quote it and must not quote a prediction.
 
 - [ ] **Step 6: Commit**
 
@@ -1635,9 +1638,11 @@ broken *after* that audit: `merit_training.yaml` ships
 `use_cuda_graphs: false` (flipped 2026-08-19), and `tau`'s default is 9,
 not 3 (changed 2026-08-08, with 3 on the retired scale).
 
-`CLAUDE.md` drops from 663 lines to about 490. Two closed NO-GO campaigns
-keep their verdict and their do-not-reopen reasoning in always-loaded
-context; their enable steps and gate commands move into `ddrs-dev`.
+`CLAUDE.md` sheds the two closed NO-GO campaigns' operational detail,
+which keeps their verdict and do-not-reopen reasoning in always-loaded
+context while the enable steps and gate commands move into `ddrs-dev`.
+Quote the MEASURED before and after line counts here, from Task 5's
+report. Do not quote a predicted number.
 
 New gate: `scripts/verify_doc_paths.py` fails on any unresolved citation
 in agent-loaded context. It is seeded against the known-bad set, so a

@@ -208,7 +208,7 @@ case configs fall inside this design's scope, and neither changes a finding.
 
 ## 4. Phase 1: truth pass
 
-### 4.1 `CLAUDE.md`, 663 lines to roughly 480
+### 4.1 `CLAUDE.md`, 663 lines to roughly 560
 
 Correct every row of §2.1. Compress the two closed workstreams to status blocks:
 
@@ -229,7 +229,9 @@ Reach subdivision gets the same shape: the NO-GO verdict, the reason (both
 Muskingum coefficients are non-negative only inside a window 1.4 % wide at the
 measured CONUS median X), the do-not-reopen line, and pointers to
 `.claude/REACH-SUBDIVISION.md` and the skill. Leakance goes from 84 lines to about
-10, subdivision from 54 to about 8. The enable instructions, the seven subdivision
+10, subdivision from 54 to about 8. Note the rebuilt architecture diagram adds back
+about 18 lines by naming eight subsystems the old one omitted, so the net landing
+point is near 560 rather than 480. The enable instructions, the seven subdivision
 fields, the parameter ranges and the gate command lists move into
 `ddrs-dev/references/config.md` and `testing.md`.
 
