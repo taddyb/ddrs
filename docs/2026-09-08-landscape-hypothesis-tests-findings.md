@@ -1377,3 +1377,60 @@ effect size of before, and it is the scale at which "not exactly stationary" sto
 The residual z of 3.2 is small but real, and the trimmed alignment at large basins (0.355 testing, 0.172 training)
 is higher than the population value, so the biggest basins are the least settled even though their sign share is
 closest to 50 %. That is consistent with them having the most curvature and therefore the most to say.
+
+---
+
+## 28. The curvature probe: the derivative term deepens the valley, as predicted
+
+The prediction registered in §26 was tested by running the landscape with `objective: nse-deriv`,
+`deriv_weight: 0.5` at the **same checkpoint, gauges and window** as `landscape-p21b-all-testwin-diag`, so the
+only difference between the two censuses is the objective. 2,365 paired gauges.
+
+### Result
+
+| quantity | predicted (§26) | **measured** |
+|---|---|---|
+| median stiffening of &#124;H_nn&#124; | 3.7x | **3.04x** |
+| p25 / p75 | 2.4x / 7.6x | 1.89x / 5.98x |
+| share of gauges stiffer | essentially all | **92.8 %** |
+| `n_reach <= 50` | 3.2x | 2.71x |
+| 51 to 200 | 5.6x | 4.16x |
+| `n_reach > 200` | 8.5x | 4.92x |
+
+Absolute curvature, median `|H_nn|`: **0.0455 to 0.1670**. The share of gauges flat enough that a factor of two in
+roughness costs under 0.005 of loss falls from **35 % to 16 %**.
+
+**The registered prediction passes.** The median is 82 % of the predicted value, comfortably above the 1.5x
+refutation bar, and the direction of the size scaling is right. The magnitude of that scaling is over-predicted at
+the largest basins (4.92x measured against 8.5x), which is the one place the simple time-shift argument is weakest:
+at long travel times the routing also attenuates rather than purely translating, so `<Q''^2>` over-states the
+available leverage.
+
+### The term sharpens the existing valley, it does not choose a different one
+
+This was the third refutation condition in §26, and it is the one that decides whether the term is usable. Gradient
+at the identical parameter point under each objective:
+
+| | share where the loss falls if n rises | 10 % trimmed alignment |
+|---|---|---|
+| nse-batch | 54.1 % | 0.059 |
+| nse-deriv | 54.5 % | 0.024 |
+
+Sign agreement between the two objectives, gauge by gauge: **88.7 %**. Both objectives agree that the converged
+model is close to stationary, and they agree gauge by gauge about which way to move. So the derivative term is
+adding **confidence, not disagreement**: the minimum stays where it was and the surface around it becomes steeper.
+That is exactly the property needed for it to sharpen identifiability without changing the answer.
+
+### Caveats
+
+- Both censuses ran `newton_iters: 0`, so this compares curvature and gradient at the trained point, not the
+  location of the two optima directly. The gradient agreement above is the proxy, and it is a good one at a point
+  this close to stationary, but a Newton run under each objective would be the direct measurement.
+- The probe measures the objective's curvature at a point reached by training on a *different* objective. For a
+  quadratic the Hessian does not depend on where it is evaluated, and the model is near-stationary, so this is a
+  small correction, but it is not zero.
+- `lambda = 0.5` makes the two terms roughly co-equal in magnitude, since the median gauge's realised derivative
+  contribution is 2.5x its level contribution. That is a deliberate choice and not a tuned one; no other value was
+  tried.
+- The derivative term concentrates the batch somewhat more than the level term (effective sample size 151 of 2,365
+  gauges against 295 by realised contribution), which is the same regime, not a new pathology.
