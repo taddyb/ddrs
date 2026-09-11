@@ -1526,3 +1526,83 @@ intrinsically unidentifiable from daily discharge and should be fixed rather tha
 
 **Practical consequence either way:** do not ship `nse-batch-deriv` with q learnable. The term's benefit is on n,
 and n is where the curvature result applies; q should be pinned the way p is until this is resolved.
+
+---
+
+## 30. n and q live in different information channels, which decides what objective can identify what
+
+### The measurement
+
+What predicts each parameter's identifiability, Spearman rank correlation against the curvature at the trained
+point (2,124 well-fit gauges):
+
+| predictor | &#124;H_nn&#124; (roughness) | &#124;H_qq&#124; (width exponent) |
+|---|---|---|
+| flashiness (daily dQ/dt) | **+0.314** | **-0.045** |
+| gauge reach slope | **-0.435** | -0.109 |
+| depth at mean flow | | **+0.312** |
+| width | | +0.242 |
+| mean flow | +0.183 | +0.221 |
+| channel length | +0.314 | +0.213 |
+| peak ratio | +0.116 | +0.158 |
+
+**They are governed by different things.** Roughness identifiability is a TIMING quantity: it tracks the
+hydrograph's time derivative and is destroyed by steep, fast reaches. Width-exponent identifiability is a SCALE
+quantity: it tracks depth, width and size, and flashiness tells you nothing about it (-0.045).
+
+Two supporting numbers: `|H_qq|` is a median **6.2 %** of `|H_nn|` at the same gauge, so q is roughly sixteen
+times less determined than n; and the two curvatures correlate only +0.353 across gauges, so a gauge that pins
+down roughness is not thereby pinning down width.
+
+### Why this decides the objective question
+
+The derivative term of §26 to §28 works by amplifying the `dQ/dt` channel. That is exactly the channel roughness
+lives in, which is why it deepened the n valley 3.04x. It is exactly the channel the width exponent does **not**
+live in, which is why it amplified q's gradient by a nearly identical 2.77x while leaving q no better determined,
+and so drove it off the ridge of §29 into the bounds.
+
+**RMSE and MSE would not help either, and for a more basic reason.** `nse-batch` already is a mean squared error,
+normalised per gauge by that gauge's observed variance. RMSE is its monotone square root: identical minimiser,
+different gradient scaling. Unnormalised MSE differs only in how gauges are weighted against each other, trading
+the per-gauge normalisation for a size weighting. None of the three opens a new information channel about channel
+geometry; they reweight the same residuals. An objective can only identify a parameter if the data carries
+information about it, and for q, daily discharge barely does.
+
+**What would actually identify q** is an observation of the thing q parameterises. `W = p * d^q` is a width-depth
+relation, and remotely sensed river widths (Landsat-derived, SWOT) constrain it directly, at the scale where the
+measurement above says the signal already lives: large, deep rivers. Short of that, a flow-stratified objective
+is the best proxy available from discharge alone, since q controls how celerity changes between low and high
+flow; but note that the dynamic-range proxy we have (peak ratio) correlates with `|H_qq|` at only +0.158, so
+expectations should be modest.
+
+### On learning p and q together rather than n
+
+This changes what is learned but not how much is identified, and it is still the better choice.
+
+- **It does not add constraint.** §8 established that a gauge identifies the ratio n/p, not n and p separately, so
+  "learn p with n fixed" and "learn n with p fixed" are the same model reparameterised. The stiff direction is the
+  same direction either way.
+- **It relocates the free parameter to something checkable.** Reach-scale Manning's n cannot be measured. Channel
+  width can. Putting the learned degree of freedom in `p` and `q` makes the learned field falsifiable against
+  external width data instead of being an unfalsifiable friction factor, which is worth more than the identifiability
+  it does not gain.
+- **The pair is genuinely coupled, and the standard fix applies.** `log W = log p + q log d` makes p and q the
+  intercept and slope of a line, and intercept and slope are strongly correlated unless the predictor is centred.
+  The reparameterisation `W = p_ref * (d / d_ref)^q`, with `d_ref` a per-reach reference depth (bankfull, or the
+  median routed depth), decorrelates them by construction and makes `p_ref` directly comparable to a measured
+  width. Without that centring, learning p and q together will reproduce the ridge behaviour of §29 in a rotated
+  frame.
+- **Measured coupling, for what it is worth:** the n-q Hessian correlation has median 0.336 with 21 % of gauges
+  above 0.9, so n and q are not generally degenerate. p could not be measured here because no landscape census has
+  p as an active axis, and no learned-p model is on disk; that is the gap to close.
+
+### Recommended next experiments, in order
+
+1. **Census with p active** on a p-learnable arm, to measure `H_pp`, `H_pq` and the p-q coupling directly. Nothing
+   in this document constrains p, and every claim about it above is inference from §8 plus the algebra.
+2. **Centred geometry**: implement `W = p_ref * (d/d_ref)^q` and repeat the census. Prediction to register in
+   advance: the p-q Hessian correlation drops well below 0.9 at most gauges, and q stops running to its bounds
+   under any objective.
+3. **Fix n, learn p and q** with the centred parameterisation, against the current model. Expect equal skill
+   (§20: the whole channel is worth about 0.09 NSE and roughness about a third of it), and judge it on whether the
+   learned widths agree with observed river widths, not on NSE.
