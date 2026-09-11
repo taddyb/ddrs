@@ -1611,6 +1611,16 @@ This changes what is learned but not how much is identified, and it is still the
 
 ## 31. The KAN head is emitting one latent direction relabelled as two parameters
 
+> **PARTLY SUPERSEDED BY §32 (2026-09-11).** The measurements below on the *trained* fields stand. Three of the
+> inferences drawn from them do not, and should not be cited:
+> (a) that the head is structurally unable to represent independent patterns for its outputs — every topology,
+> the current one included, decorrelates two supervised targets to affine R^2 = 0.0000 (§32.3);
+> (b) that the trunk delivers "essentially one direction" — measured directly, its effective rank is 4.36 of 21
+> (§32.2);
+> (c) that the 10 attributes "carry roughly one usable direction" — their effective rank is 6.11 of 10 (§32.1).
+> The correct statement is that the collapse is an inductive bias under the routing gradient acting on a capable
+> architecture, and that the trunk is narrower than its inputs. See §32.5 for the three questions re-answered.
+
 The architecture is `Linear(F, H) -> KanLayer(H, H) x 2 -> Linear(H, P) -> Sigmoid` with `F = 10` attributes and
 `H = 21`. All learned parameters come from **one shared trunk**, separated only by the final `Linear(H, P)`.
 Measured on the learned fields over all 346,321 CONUS reaches (500-update `nse-batch` model):
@@ -1626,7 +1636,9 @@ Measured on the learned fields over all 346,321 CONUS reaches (500-update `nse-b
 The two learnable outputs are **the same spatial field read twice with different gains**. If the trunk's output
 were full rank, two independent rows of the final Linear layer would produce two unrelated combinations of 21
 hidden units. A near-perfect line on the pre-sigmoid scale means the trunk is delivering essentially one
-direction.
+direction. **(Superseded: the trunk's effective rank, measured directly at initialisation rather than inferred
+from outputs, is 4.36 of 21 — §32.2. The near-perfect line is a property of the trained state, not of the
+architecture's capacity.)**
 
 Across models: rho(n, q) is 0.727 at epoch 1 (near initialisation), **0.999** after 60 updates, **0.997** after
 500, and 0.869 for the derivative-loss model. Training makes the collapse worse, not better.
@@ -1642,17 +1654,21 @@ then multiplies.
 
 ### What this means for the three questions
 
-1. **"Is our KAN the problem?"** Yes, demonstrably, and this is the first architectural defect the study has
+1. **"Is our KAN the problem?"** ~~Yes, demonstrably, and this is the first architectural defect the study has
    found that is not about identifiability. A model whose two geometry-and-friction outputs are 98.7 % the same
-   latent direction cannot represent independent spatial patterns for them, whatever the data or the loss allows.
+   latent direction cannot represent independent spatial patterns for them, whatever the data or the loss
+   allows.~~ **WITHDRAWN — see §32.3.** The head *can* represent independent patterns; it does not under this
+   gradient. Read §32.5.
 2. **"A separate KAN for p and q?"** This is now the evidence-backed fix rather than an intuition. Separate trunks
    (or at minimum a wider trunk with a decorrelation penalty on the output heads) are what allow the fields to
    differ at all. Note the likely cause of the collapse: 10 attributes with a gradient-boosted ceiling of
    R^2 = 0.160 on the targets carry roughly one usable direction of information, and a 21-unit trunk trained on
    near-unanimous gradients has no reason to preserve more than that.
 3. **"A loss that assists p and q outside n?"** Still worth having, for the reasons in §30, but it is now clearly
-   the SECOND problem. **No objective can separate two outputs that are reading the same latent direction.** Fix
-   the architecture first, then re-ask whether the loss needs changing.
+   the SECOND problem. ~~**No objective can separate two outputs that are reading the same latent direction.**~~
+   **The premise is withdrawn (§32.2): at initialisation the outputs are not reading the same direction, because
+   the trunk carries 4.36 of them.** The §30 case for such an objective stands on its own merits. Fix the
+   architecture first, then re-ask whether the loss needs changing.
 
 ### Caveats
 
@@ -1666,9 +1682,195 @@ then multiplies.
 
 ### Suggested order of work
 
+**Steps 1 and 2 were carried out on 2026-09-11; see §32. Step 1 refuted the rank-1 reading.**
+
 1. Dump the trunk activations and compute their singular-value spectrum. One dominant singular value confirms
-   rank-1 outright.
+   rank-1 outright. **DONE — it does not: effective rank 4.36 of 21 (§32.2).**
 2. Separate heads or trunks per parameter group, retrain, and re-measure rho(n, q). Registered prediction: rho
    falls well below 0.9 and q stops reaching its bounds under the ordinary objective, with no skill change
    (§20 bounds the whole channel at about 0.09 NSE).
 3. Only then revisit the objective question of §30.
+
+## 32. The head is capable; the collapse is an inductive bias, not a wall
+
+§31 concluded "is our KAN the problem? Yes, demonstrably". That was too strong, and this section corrects it
+with three measurements §31 called for and one it did not anticipate. The apparatus is
+`src/bin/head_arch_screen.rs` plus `experiments/head_arch/analyze.py`, which compare head topologies in minutes
+rather than the ~2 h a CONUS training arm costs, because the head is a pure per-reach function of the attributes:
+no routing, no observations, no optimizer schedule. Seven topologies, `n` + `p_spatial` + `q_spatial` emitted by
+each, evaluated over the real CONUS attribute distribution.
+
+### 32.1 The inputs are not one-dimensional
+
+§31 guessed that "10 attributes with a gradient-boosted ceiling of R^2 = 0.160 carry roughly one usable
+direction". They do not. PCA of the ten z-scored production attributes over all 2,939,404 MERIT reaches
+(`experiments/head_arch/attribute_rank.py`, no Rust needed):
+
+| quantity | value |
+|---|---|
+| effective rank (participation ratio) | **6.11 of 10** |
+| directions holding 90 % of variance | 6 |
+| directions holding 99 % of variance | 10 |
+| PC1 share | 0.274 |
+
+PC1 is a wetness-and-vegetation axis (`meanP` −0.540, `SoilGrids1km_clay` −0.512, `NDVI` −0.503; the strongest
+pair is `meanP`–`NDVI` at r = +0.795). The two attributes §30 identified as carrying the identifiable channels
+load essentially zero on it: `log10_uparea` at −0.000 and `meanslope` at −0.040. **The scale channel and the
+timing channel are available to the head as separate directions.** So a collapse to one direction is not
+inherited from the data.
+
+The GBM ceiling of R^2 = 0.160 is a statement about how much of the *target* the attributes explain, not about
+how many directions they span. Conflating the two was the error.
+
+### 32.2 The trunk is rank 4.4, not rank 1
+
+§31's stated caveat was that it inferred the trunk's rank from the output fields rather than measuring it.
+`KanHead::trunk_activations` now exposes the penultimate activations directly. Singular spectrum of the centred
+`[N, H]` activation matrix, at initialisation, over a 4,027-reach stride sample of CONUS:
+
+| topology | H | effective rank | PC1 share | dims for 90 % |
+|---|---|---|---|---|
+| shared, Linear read-out (current) | 21 | **4.36** | 0.412 | 6 |
+| separate trunk per group | 21 | 4.36 | 0.412 | 6 |
+| KAN read-out | 21 | 4.36 | 0.412 | 6 |
+| KAN embedding + KAN read-out | 21 | **3.03** | 0.524 | 4 |
+| **depth 2 -> 4** | 21 | **3.41** | 0.450 | 5 |
+| **H 21 -> 64** | 64 | **6.41** | 0.249 | 10 |
+
+Two facts follow immediately, and neither was expected.
+
+**The H = 21 trunk throws away input directions.** The attributes carry 6.11; the trunk delivers 4.36. Three
+outputs reading a rank-4.4 latent through three rows of a `Linear(21, 3)` have to overlap. At H = 64 the trunk
+carries 6.41, essentially everything the inputs have.
+
+**Depth is the wrong knob, and it is actively harmful.** Two extra `KanLayer` blocks *reduce* effective rank from
+4.36 to 3.41. Each block applies per-edge splines on a `[-1, 1]` grid and sums over inputs; stacking them
+contracts the representation rather than enriching it. The KAN embedding arm is worse still at 3.03, because a
+`KanLayer(F, H)` on z-scored attributes puts much of its input outside the spline grid where only the
+`scale_base · SiLU` path survives.
+
+### 32.3 Every topology passes a supervised capacity control, including the current one
+
+This is the measurement that overturns §31's verdict. Two targets were built from the real attributes, one from
+`meanslope` and one from `log10_uparea` Gram-Schmidt orthogonalised against the first, then squashed into the
+head's own output range: each is exactly recoverable from the inputs and their mutual correlation is
++1.3e-3 by construction. Each topology was fitted to both, supervised, with Adam for 400 steps.
+
+| topology | loss, start -> end | rank corr between outputs | affine R^2 |
+|---|---|---|---|
+| shared, Linear read-out (current) | 0.0767 -> 0.000016 | +0.028 | **0.0000** |
+| separate trunk for {n} vs {p, q} | 0.0746 -> 0.000011 | +0.028 | 0.0000 |
+| one trunk per parameter | 0.0752 -> 0.000012 | +0.028 | 0.0000 |
+| KAN read-out | 0.0746 -> 0.000004 | +0.028 | 0.0000 |
+| KAN embedding + KAN read-out | 0.0769 -> 0.000001 | +0.027 | 0.0000 |
+| depth 2 -> 4 | 0.0767 -> 0.000002 | +0.028 | 0.0000 |
+| H 21 -> 64 | 0.0768 -> 0.000005 | +0.028 | 0.0000 |
+
+**The current head can emit two independent spatial fields.** It is not structurally incapable, and a separate
+KAN adds no capability it lacks. §31's claim that "a model whose two geometry-and-friction outputs are 98.7 %
+the same latent direction cannot represent independent spatial patterns for them" is false as stated: it cannot
+*under the routing gradient*, which is a different and weaker claim.
+
+The control does not discriminate between topologies, and that is the finding. It converts the question from
+"what restores a missing capability" into "what removes a bias", which is a question only a training arm can
+answer.
+
+### 32.4 What a KAN read-out does and does not fix
+
+Worth stating precisely, because the intuition that a nonlinear read-out decouples the outputs is half right.
+
+With `Linear(H, P)` the outputs are `logit(param_j) = w_j · h + b_j`. Two of them are *exactly* affinely related
+if and only if `h` is effectively rank 1 across reaches. A Linear read-out therefore does not force affinity on
+its own; it forces it in combination with a rank-1 latent, which is the §31 regime and not a property of the
+layer. `tests/kan_head_groups.rs` pins this at `hidden_size = 1`, where the relative residual of one logit column
+regressed on the other is at the f32 floor.
+
+With `KanLayer(H, P)` each output carries its own spline coefficients on every edge
+(`y[o] = sum_i sb[i,o]·SiLU(h[i]) + sp[i,o]·spline_{i,o}(h[i])`), so the affinity breaks. **It does not break the
+functional dependence.** Two different nonlinear functions of one scalar latent remain in lockstep: the same test
+asserts the rank correlation stays above 0.999 in the rank-1 case. A KAN read-out changes the shape of the
+coupling, not the fact of it.
+
+Decoupling the outputs requires a trunk that carries more than one direction. That is why `H 21 -> 64` is now an
+arm, and why it is the one to watch.
+
+### 32.5 What this licenses, and what still needs a training arm
+
+Answering the three questions of §31 again, corrected:
+
+1. **"Is our KAN the problem?"** Partly, and not in the way §31 said. It is not incapable. It is *narrower than
+   its inputs* (rank 4.36 against 6.11) and it hands training a coupling to start from. "Architectural defect"
+   should read "architectural bias".
+2. **"A separate KAN for p and q?"** It removes the inherited coupling but adds no capability. Whether removing
+   the bias changes where the routing gradient lands is exactly the open question, and it needs the CONUS arms.
+3. **"A loss that assists p and q outside n?"** §31 said no objective can separate two outputs reading the same
+   latent direction. With the trunk at rank 4.4 rather than 1, they are *not* reading the same direction at
+   initialisation, so that argument does not hold as stated. The §30 reasons for wanting such an objective
+   stand on their own.
+4. **"Is the KAN deep enough?"** No, and depth is the wrong question. Depth reduces the rank the trunk carries
+   (4.36 -> 3.41) and raises the coupling it inherits. Width does the opposite.
+
+### 32.6 The seed sweep: splitting and widening both decouple, depth does not
+
+A single initialisation cannot rank these topologies. For two random read-out rows over a latent of effective
+rank r, chance alone gives |rho| of order 1/sqrt(r). Eight seeds per arm, Spearman |rho(n, q)| on the
+4,027-reach sample, with each arm's own chance line from its own measured rank:
+
+| topology | median \|rho\| | IQR | chance line | median affine R^2 | share of seeds \|rho\| > 0.5 |
+|---|---|---|---|---|---|
+| shared, Linear read-out (current) | 0.466 | [0.328, 0.505] | **0.479** | 0.2065 | 0.375 |
+| depth 2 -> 4 | 0.488 | [0.160, 0.602] | **0.541** | 0.2476 | 0.500 |
+| KAN embedding + KAN read-out | 0.297 | [0.125, 0.750] | 0.575 | 0.0525 | 0.375 |
+| KAN read-out | 0.217 | [0.154, 0.406] | 0.479 | 0.0333 | 0.125 |
+| H 21 -> 64 | **0.105** | [0.077, 0.328] | 0.395 | 0.0413 | 0.125 |
+| separate trunk for {n} vs {p, q} | **0.091** | [0.068, 0.322] | 0.479 | 0.0334 | 0.250 |
+| one trunk per parameter | **0.086** | [0.037, 0.219] | 0.479 | 0.0139 | 0.250 |
+
+**The current head sits exactly on its chance line: 0.466 against 0.479.** Its output coupling at
+initialisation is fully accounted for by two arbitrary rows reading a rank-4.4 latent. There is nothing
+pathological in the initialisation, and equally nothing working in its favour.
+
+**Depth is at chance too, with the worst affine R^2 of any arm (0.2476) and the highest share of seeds above
+0.5.** Combined with its lower trunk rank this is the clearest negative result of the screen: adding
+`KanLayer` blocks does not help and plausibly hurts.
+
+**Splitting trunks and widening the trunk both land far below chance**, and they are not distinguishable from
+each other at eight seeds: medians 0.086 to 0.105 with heavily overlapping IQRs. They get there by different
+mechanisms, which is why both are training arms. Splitting gives each output group its own latent, so the
+shared-rank argument stops applying. Widening lowers the chance line itself, from 0.479 to 0.395, by carrying
+more of the input's 6.11 directions, and then lands well under it.
+
+**The KAN read-out roughly halves the coupling (0.217 against a 0.479 chance line) without touching the
+trunk**, which is consistent with §32.4: it breaks the affine tie but leaves the outputs reading the same
+latent. The KAN embedding arm is the least reliable of all, with an IQR reaching 0.750, and it has the lowest
+trunk rank; it is not promoted.
+
+### Registered predictions for the CONUS arms
+
+Four arms, differing only in `kan_head`, all learning `n` + `p_spatial` + `q_spatial`, all derived from the
+500-update `nse-batch` baseline `2026-09-10T21-21-48Z-conus-train-and-test`
+(`config/experiments/head_{shared_linear,split_trunk,wider,kan_readout}.yaml`):
+
+- **`head_shared_linear`** reproduces the §31 collapse with three outputs: Spearman rho(n, q) above 0.95 after
+  500 updates, and `q_spatial` piling up at both bounds.
+- **`head_wider` and `head_split_trunk` both fall well below the control.** §32.6 cannot separate them at
+  initialisation, and that is precisely what the training arms are for: they decouple by different mechanisms
+  (more directions to read, versus each group reading its own latent) and the routing gradient may reward one
+  and not the other.
+- **`head_kan_readout`** barely moves rho(n, q) at all. This is the discriminating prediction: if it *does* move,
+  the read-out was the binding constraint after all; if it does not, the trunk's capacity is.
+- **No arm changes median skill by more than about 0.01 NSE**, since §20 bounds the whole channel at roughly
+  0.09 NSE and §24 showed the NSE optimum costs no KGE.
+
+### Caveats
+
+- Every number in §32.1 to §32.4 is at **initialisation**. §31 measured rho(n, q) rising from 0.727 near
+  initialisation to 0.999 at 60 updates, so the trained outcome is not implied by the prior. The arms are the
+  test.
+- The capacity control's targets are near-linear functions of the inputs, which is a far easier ask than the
+  routing problem. It bounds capability from below; it says nothing about what a weak gradient will find.
+- The trunk spectra of §32.2 are measured at one seed. The eight-seed sweep of §32.6 corroborates the ordering
+  indirectly but does not re-measure rank per seed.
+- Eight seeds is enough to separate the control from the split and wide arms (0.466 against 0.086 to 0.105) and
+  not enough to separate those two from each other.
+- The trunk spectrum is measured on a 4,027-reach stride sample, not all 346,321 reaches.

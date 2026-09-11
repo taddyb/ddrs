@@ -162,6 +162,43 @@ paper's R1–R5.
 | "median NSE 0.700 against 0.720" for the two p = 21 models | Each model scored on its OWN test set, derived from its own training list. On the 1,323 shared gauges over the same 15 years it is **0.7384 area-balanced against 0.7330 gages_3000**, a 0.005 gap running the other way (findings §22) |
 | "statistically indistinguishable skill" for those two models | The paired sign test is z = -9.1. Say "practically identical median skill" (findings §22) |
 | A landscape summary.csv from a study whose `window_days` slice is narrower than the run's configured window, on a binary before `eb3f159` | A gauge empty in the slice panicked the whole arm thread, silently truncating the population (720 of 1,841 in one case). Now skipped with a logged count in `manifest.notes` |
+| "the KAN is the problem" / "the head cannot represent independent patterns for its outputs" (findings §31) | WITHDRAWN 2026-09-11. All seven head topologies, the current one included, decorrelate two supervised targets to affine R^2 = 0.0000 (findings §32.3). The head is capable; the collapse is an inductive bias under the routing gradient. |
+| "the trunk delivers essentially one direction" / any rank-1 reading of the trunk | Inferred from output fields, not measured. Measured directly, the H=21 trunk's effective rank is **4.36 of 21** at init, PC1 holding 41 % (findings §32.2) |
+| "10 attributes carry roughly one usable direction" | Their effective rank over 2,939,404 reaches is **6.11 of 10**, six directions for 90 % of variance (findings §32.1). The GBM ceiling R^2 = 0.160 measures how much of the target they explain, not how many directions they span — do not conflate the two |
+| "no objective can separate two outputs reading the same latent direction" as a reason to skip the objective question | The premise is withdrawn: at init the outputs are not reading the same direction. The §30 case for a geometry-aware objective stands on its own |
+| A single-seed init rho(n, q) as evidence that one head topology decouples better than another | Chance alone gives \|rho\| of order 1/sqrt(effective rank), which is 0.479 at the measured rank 4.36 — and the current head measures 0.466, i.e. exactly chance. Use the 8-seed sweep and compare each arm against its OWN chance line (findings §32.6) |
+| A CUDA wall-clock for CONUS training, or a CUDA-vs-CPU skill comparison | CUDA runs this model ~6x slower than CPU (~20 s vs ~3.5 s per micro-batch, GPU at 7 % utilisation) and is non-deterministic in scatter-add. Every reference CONUS result was produced on CPU — check `head -1 <run>/run.log`. See traps.md T13 |
+
+## Head topology (2026-09-11)
+
+The KAN head is `(Linear|KanLayer)(F,H) -> KanLayer(H,H) x L -> (Linear|KanLayer)(H,P) -> Sigmoid`, with the two
+`KanLayer` boundary options and `parameter_groups` added 2026-09-11 (all default off; see `config.md`).
+
+Measured at initialisation over CONUS attributes, 8 seeds per arm
+(`.ddrs/experiments/head-arch/2026-09-11-screen`, findings §32):
+
+| topology | trunk eff. rank | median \|rho(n,q)\| | its chance line |
+|---|---|---|---|
+| shared, Linear read-out (**current**) | 4.36 / 21 | 0.466 | 0.479 |
+| depth L=2 -> 4 | **3.41** | 0.488 | 0.541 |
+| KAN embedding + KAN read-out | **3.03** | 0.297 | 0.575 |
+| KAN read-out only | 4.36 | 0.217 | 0.479 |
+| **H 21 -> 64** | **6.41** | **0.105** | 0.395 |
+| separate trunk {n} vs {p,q} | 4.36 | **0.091** | 0.479 |
+| one trunk per parameter | 4.36 | **0.086** | 0.479 |
+
+Three things to carry forward:
+
+- **Depth is the wrong knob.** More `KanLayer` blocks *lower* the rank the trunk carries (4.36 -> 3.41) and
+  leave the coupling at chance. Do not propose depth as a fix for output collapse.
+- **The trunk is narrower than its inputs** (4.36 against the attributes' 6.11), so `hidden_size` is a live
+  knob and H=64 is the only change that raises the rank.
+- **Capacity is not the constraint.** Every topology passes the supervised decorrelation control at affine
+  R^2 = 0.0000, so any collapse observed after training is about the gradient, not the architecture.
+
+Arms in training: `config/experiments/head_{shared_linear,split_trunk,wider,kan_readout}.yaml`, all learning
+`n` + `p_spatial` + `q_spatial`, all off the 500-update `nse-batch` baseline
+`2026-09-10T21-21-48Z-conus-train-and-test`, `--backend cpu`.
 
 ## Structural constants (stable)
 
