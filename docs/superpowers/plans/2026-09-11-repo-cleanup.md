@@ -58,7 +58,7 @@ Built first because every later task uses it as its gate. The spec requires it b
 - Create: `scripts/test_verify_doc_paths.py`
 
 **Interfaces:**
-- Produces: CLI `python3 scripts/verify_doc_paths.py [--warn-only <glob>...]`, exit 0 when every strict citation resolves, exit 1 otherwise, printing one `file:line: unresolved <token>` per failure. Later tasks invoke it with no arguments.
+- Produces: CLI `python3 scripts/verify_doc_paths.py`, exit 0 when every strict citation resolves, exit 1 otherwise, printing one `file:line: unresolved <token>` per failure. `--root <dir>` retargets it (tests only) and `--list` prints every citation found. Later tasks invoke it with no arguments. There is deliberately no `--warn-only` flag: the strict and warn glob sets are constants in the script, and nothing needs them overridden.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -352,9 +352,16 @@ git commit -m "$(cat <<'EOF'
 scripts: verify_doc_paths, a gate for citations in agent-loaded context
 
 CLAUDE.md and .claude/skills/** are in context on every turn, so a dead
-path or a drifted line number there is the most expensive wrong line in
-the repo. The 2026-09-11 audit found six drifted file:line citations and
-four dead paths across those files, every one of which this catches.
+path there is the most expensive wrong line in the repo. This catches the
+four dead paths the 2026-09-11 audit found, and it verifies that every
+file.rs::symbol citation names a real item.
+
+What it deliberately does NOT do is validate a line number. A citation
+that drifted from line 1066 to 1202 still points at a line that exists,
+so existence checking cannot see the drift, and bounds checking would
+only catch a citation past EOF while implying a guarantee it does not
+give. The remedy for drift is the symbol-citation policy, which this
+tool can and does enforce.
 
 Book pages are scanned in warn mode: their line citations are a reading
 aid, not a contract, and failing on them would get the gate switched off.
@@ -792,24 +799,48 @@ Add to "Conventions specific to this repo":
   every `file.rs::symbol` citation resolves.
 ```
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 4: Make the verifier enforce the policy, not merely tolerate it**
+
+A policy nothing checks decays. Now that the strict files carry no `src/**.rs:NN`
+citations, teach the verifier to refuse new ones. In `scripts/verify_doc_paths.py`,
+`PATH_RE` already captures the line suffix; add a second capture group for it and,
+in `check_file`, report a strict failure when a token under `src/` carries a `:NN`
+suffix:
+
+```python
+    if kind == "path" and line_suffix and token.startswith("src/"):
+        failures.append(
+            f"{rel}:{line_no}: line citation into src/ is not allowed, "
+            f"cite file.rs::symbol instead of {token}:{line_suffix}"
+        )
+        continue
+```
+
+Add a test case to `scripts/test_verify_doc_paths.py` asserting that
+``See `src/config.rs:9999`.`` now FAILS in a strict file, and amend the existing
+"line suffix stripped" case so it covers a non-`src/` path, where line citations
+remain legal (a fixture or config line number is the content).
+
+This is the step that makes the tool's claim about drift true: it cannot detect a
+citation that drifted to a different valid line, so instead it forbids the form that
+can drift.
+
+- [ ] **Step 5: Verify**
 
 ```bash
 grep -rnoE 'src/[A-Za-z0-9_/]+\.rs:[0-9]+' CLAUDE.md .claude/skills/
-```
-
-Expected: no output.
-
-```bash
+python3 scripts/test_verify_doc_paths.py
 python3 scripts/verify_doc_paths.py
 ```
 
-Expected: exit 0 for the new `::symbol` citations, meaning every one resolved to a real item.
+Expected: the grep returns nothing; the test suite passes including the two amended
+cases; the verifier exits 0, meaning every new `::symbol` citation resolved to a real
+item and no banned line citation remains.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add CLAUDE.md .claude/skills/
+git add CLAUDE.md .claude/skills/ scripts/
 git commit -m "$(cat <<'EOF'
 docs: cite symbols, not line numbers, inside src/
 
