@@ -190,6 +190,53 @@ pub struct StreamflowStore {
     #[allow(dead_code)]
     storage: Arc<IcZarrStorage>,
     qr: ZarrArray<dyn ReadableStorageTraits>,
+    /// `true` when `Qr` is stored `(time, divide_id)` — DDR's gridded (DDM30)
+    /// stores; `false` for the contract's `(divide_id, time)`. Decided at open
+    /// from the array's dimension names, falling back to its shape.
+    pub time_major: bool,
+}
+
+/// Which axis of `Qr` is the divide axis. The contract
+/// (`docs/nh-qprime-store-contract.md`) is `(divide_id, time)`, but DDR's
+/// `build_gridded_qprime.py` writes `(time, divide_id)`, and zarrs answers an
+/// out-of-range subset with fill values rather than an error — so a layout
+/// guess that is wrong reads NaN silently. Dimension names decide when present;
+/// otherwise the shape does, and a shape matching neither is refused.
+fn detect_time_major(
+    qr: &ZarrArray<dyn ReadableStorageTraits>,
+    n_divide: usize,
+    n_time: usize,
+    path: &Path,
+) -> Result<bool> {
+    let shape = qr.shape();
+    if shape.len() != 2 {
+        return Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!("Qr must be 2-D, got shape {shape:?}"),
+        });
+    }
+    if let Some(names) = qr.dimension_names() {
+        let named: Vec<&str> = names.iter().map(|n| n.as_deref().unwrap_or("")).collect();
+        match named.as_slice() {
+            ["divide_id", "time"] => return Ok(false),
+            ["time", "divide_id"] => return Ok(true),
+            _ => {} // unnamed or unexpected names: fall through to the shape
+        }
+    }
+    let (a, b) = (shape[0] as usize, shape[1] as usize);
+    if a == n_divide && b == n_time {
+        Ok(false)
+    } else if a == n_time && b == n_divide {
+        Ok(true)
+    } else {
+        Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!(
+                "Qr shape {shape:?} matches neither (divide_id, time) = ({n_divide}, {n_time}) \
+                 nor (time, divide_id)"
+            ),
+        })
+    }
 }
 
 impl StreamflowStore {
@@ -239,8 +286,9 @@ impl StreamflowStore {
         // 3. Open the `/Qr` data var (Task 3 will actually read from it).
         let qr = ZarrArray::open(readable.clone(), "/Qr")
             .map_err(|e| ic_err(&path, e))?;
+        let time_major = detect_time_major(&qr, index.len(), n_time, &path)?;
 
-        Ok(Self { path, index, time_start, n_time, resolution, storage, qr })
+        Ok(Self { path, index, time_start, n_time, resolution, storage, qr, time_major })
     }
 }
 
@@ -508,17 +556,28 @@ impl StreamflowStore {
         let div_range_end = max_pos + 1;
         let div_count = div_range_end - min_pos;
 
-        // Qr is stored as (divide_id, time). Subset: axis 0 = divide, axis 1 = time.
-        let subset = zarrs::array::ArraySubset::new_with_ranges(&[
-            (min_pos as u64)..(div_range_end as u64),
-            (start_step as u64)..(end_step as u64),
-        ]);
+        // Contract layout is (divide_id, time): axis 0 = divide, axis 1 = time.
+        // Time-major stores (DDR's gridded Q') swap the axes; the raw buffer is
+        // then (n_steps, div_count) row-major and is addressed accordingly.
+        let div_axis = (min_pos as u64)..(div_range_end as u64);
+        let time_axis = (start_step as u64)..(end_step as u64);
+        let subset = if self.time_major {
+            zarrs::array::ArraySubset::new_with_ranges(&[time_axis, div_axis])
+        } else {
+            zarrs::array::ArraySubset::new_with_ranges(&[div_axis, time_axis])
+        };
         let raw_f32: Vec<f32> = self
             .qr
             .retrieve_array_subset(&subset)
             .map_err(|e| ic_err(&self.path, e))?;
-        // raw_f32 is row-major: shape (div_count, n_steps).
         debug_assert_eq!(raw_f32.len(), div_count * n_steps);
+        let raw_idx = |local_div: usize, t: usize| -> usize {
+            if self.time_major {
+                t * div_count + local_div
+            } else {
+                local_div * n_steps + t
+            }
+        };
 
         // Scatter into the output. Walk `comids` in order; for each
         // non-missing entry consume the next element of `positions`.
@@ -531,8 +590,7 @@ impl StreamflowStore {
             next_present += 1;
             let local_div = div_pos - min_pos;
             for t in 0..n_steps {
-                let raw_idx = local_div * n_steps + t;
-                out[(t, out_col)] = raw_f32[raw_idx];
+                out[(t, out_col)] = raw_f32[raw_idx(local_div, t)];
             }
         }
 

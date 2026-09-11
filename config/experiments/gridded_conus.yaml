@@ -1,0 +1,94 @@
+# Gridded (ISIMIP DDM30, 0.5°) CONUS training — the ddrs counterpart of DDR's
+# examples/juniata_gridded/train_conus.py (DeepGroundwater/ddr PR #194).
+#
+# Data: config/sources/conus-gridded.yaml (inlined below). 620 gages_3000
+# gauges above 2,000 km² snapped to cells (scripts/snap_gridded_gauges.py),
+# routed over DDR's 91,867-sub-reach Courant≈1 network.
+#
+# Run from the repo root — pass --workspace, or .ddrs lands beside this file:
+#
+#   ddrs --config config/experiments/gridded_conus.yaml --workspace .ddrs plan
+#   ddrs --config config/experiments/gridded_conus.yaml --workspace .ddrs run --workflow train-and-test
+#
+# Deviations from train_conus.py (see the 2026-09-08 gridded design spec §7):
+# the KAN runs per cell (not per sub-reach), and predictions are NOT divided
+# by the gauge's drainage-area ratio (`da_ratio` in the gauge CSV is
+# informational). DDR's reference: 45 epochs, median NSE 0.542 vs summed 0.390.
+
+mode: training
+workflow: train-and-test
+geodataset: ddm30
+device: 0
+seed: 42
+np_seed: 42
+
+data_sources:
+  gridded_network: /home/tbindas/projects/ddr/data/ddm30/ddm30_subreach_adjacency.zarr
+  attributes: /mnt/ssd1/data/icechunk/ddm30_conus_attributes.nc
+  streamflow: /mnt/ssd1/data/icechunk/ddm30_conus_uh_retrospective_regridded.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  gages: /home/tbindas/projects/ddr/references/gage_info/ddm30_conus_gauges.csv
+
+experiment:
+  # train_conus.py defaults: batch 16 gauges, rho 90, warmup 5, lr 1e-3
+  # halved at epoch max(2, epochs // 2).
+  batch_size: 16
+  start_time: 1981/10/01
+  end_time: 1995/09/30
+  epochs: 10
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    5: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+
+params:
+  parameter_ranges:
+    n: [0.02, 0.2]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  tau: 9
+  subdivision:
+    enabled: false
+  sparse_solver: cuda
+  use_cuda_graphs: false
+
+# train_conus.py's default test window (two water years).
+testing:
+  start_time: 1995/10/01
+  end_time: 1997/09/30
+  batch_size: 15
+  rho: null

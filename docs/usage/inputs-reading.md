@@ -73,7 +73,19 @@ Adjacency is an either/or, enforced at config load by
   `.ddrs/adjacency/<key>/{conus,gages}`. Subsequent plans are cache hits.
 - **Pre-built zarr** — set *both* `conus_adjacency` and `gages_adjacency`
   and omit `geospatial_fabric`.
-- Exactly one adjacency key, or neither key and no fabric, is a load-time
+- **Gridded (ISIMIP DDM30) network** — set `gridded_network` to DDR's
+  sub-reach adjacency zarr (DeepGroundwater/ddr PR #194,
+  `scripts/build_subdivided_adjacency.py`: `order`, `parent_cell`,
+  `indices_0/1`, `length_m`, `slope`) and omit the other two. `ddrs plan`
+  relabels it into the subdivided store layout below — parent = grid cell,
+  pieces = the cell's contiguous sub-reaches, gauge read at the last piece —
+  and cuts per-gauge subgraphs from it
+  (`adjacency::gridded::GriddedNetwork`, `cache::resolve_or_build_gridded`).
+  Attributes and Q′ stay keyed on the cell id, so nothing downstream changes;
+  the gauge CSV may name the outlet under `cell` (DDR's column) instead of
+  `COMID`. See `examples/juniata_gridded/` and the 2026-09-08 design spec.
+- Exactly one adjacency key, neither key and no fabric or gridded network,
+  or `gridded_network` combined with either of the others, is a load-time
   error.
 
 The cache key is `blake3(fabric_fingerprint ∥ gages_fingerprint ∥

@@ -200,7 +200,11 @@ the first dual win on the dHBV2-UH store. Previous best was 0.7152 / 0.7106
 +0.037 NSE and −0.007 KGE). Full table and the 2026-07-30 KGE qualification:
 `ddrs-dev` → `references/research-status.md`.
 
-`ddrs show <id> | grep -E "nse|kge|loss"` is the cheap pre-plot triage.
+`ddrs show <id>` is the cheap pre-plot triage: since 2026-09-09 it prints the
+`metrics` block and, for a `train-and-test` run, the summed-Q' baseline median with
+the routed value and delta beside it, so "did it beat the baseline" is answered
+without opening a notebook. On a binary older than that, text mode printed no
+metrics at all and you need `--json`. See skill `ddrs-run`.
 
 ### Have the parameters converged?
 

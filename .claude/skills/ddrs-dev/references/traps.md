@@ -18,6 +18,8 @@ is what a future session needs, not the narrative.
 | Mid-eval `object not found` from icechunk | T8 |
 | `.ddrs/` appeared somewhere unexpected | T9 |
 | Resumed run trains zero batches | T10 |
+| Baseline predicts ~0 (FHV −100 %) on a new Q′ store, no error | T11 |
+| Fresh checkout/worktree fails in `cudarc`'s build script: `Unsupported cuda toolkit version` | T12 |
 
 ---
 
@@ -194,6 +196,31 @@ itself**, not its parent. Always pass
 Resume additionally requires `experiment.epochs > E` or the resumed run trains zero
 batches. Stored weights are f16, so a resumed trajectory drifts slowly — expected,
 not a bug.
+
+## T11 — Time-major `Qr(time, divide_id)` read as fill values (fixed 2026-09-09)
+
+DDR's gridded (DDM30) `build_gridded_qprime.py` writes `Qr(time, divide_id)`;
+the MERIT stores and the contract are `Qr(divide_id, time)`. zarrs answers an
+out-of-range `retrieve_array_subset` with **fill values, not an error**, so the
+old fixed-axis `read_slab` returned NaN for every cell and the summed-Q′
+baseline scored NSE −0.655 with FHV −100 % — no message anywhere. `open` now
+decides the axis order from the array's `dimension_names`, falling back to its
+shape against the coordinate lengths, and refuses a shape matching neither
+(`detect_time_major`, `src/data/store/icechunk.rs`). Fixture:
+`tests/fixtures/qr_daily_time_major.ic`. A baseline that is *deterministic and
+matches DDR* is the check that catches this class of bug; that is why both
+acceptance tests band the baseline tightly.
+
+## T12 — CUDA toolkit newer than `cudarc` knows (2026-09-09)
+
+`cudarc 0.19.7` (via `cuda-version-from-build-system`) parses `nvcc --version`
+and panics on a version outside its table (max 13.2). This host moved to CUDA
+13.3.1 in 2026-09; the main tree's `target/` still carried the 13.2 build-script
+output, so only a fresh worktree/checkout hit it. Fix: `CUDARC_CUDA_VERSION=13020`
+(gitignored `.cargo/config.toml` `[env]` block, or export it). 13.3 is
+driver/ABI-compatible with 13.2 for the dynamic-loading path ddrs uses. The
+main tree will hit the same panic the next time its cudarc build script reruns
+(any `CUDA_*` env change or a `cargo clean`).
 
 ## Exit codes
 

@@ -48,6 +48,15 @@ debug_assertions** (a debug train takes minutes), so it only runs with
 readers when you want end-to-end confirmation. Verified 2026-09-02:
 NSE 0.7903 / KGE 0.8810 / baseline 0.6947 in 18.3 s.
 
+```bash
+cargo test --release --test gridded_acceptance -- --nocapture   # ~30 s after build
+```
+
+The gridded (DDM30) twin on `examples/juniata_gridded/`: floors NSE ≥ 0.70 /
+KGE ≥ 0.69 (seed-42 reference 0.751 / 0.730; seeds {42, 7, 123} span
+0.744–0.758 / 0.728–0.732), baseline NSE ∈ [0.57, 0.62] (deterministic 0.594,
+matches DDR). The baseline band is the one that catches a wrong `Qr` axis order.
+
 ### Tier B — KAN head
 `src/nn/`, `Cargo.toml` rskan tag
 
@@ -77,12 +86,12 @@ Exit 0, no drift warnings.
 
 `.github/workflows/ci.yml`, on every PR and master push (no path filters:
 required checks must never be skipped): job `test` = debug
-`cargo test --features fixtures --no-fail-fast` (13 min warm, 12–17 min
-cold); job `acceptance` = release `compare_ddr_sandbox` +
-`juniata_acceptance` (17 min warm, ~25 min cold). Warm is only modestly
-faster because `rust-cache` keeps dependency artifacts only: the ddrs
-crate and every test binary rebuild on each run (measured 2026-09-04,
-runs 33817851139 cold and 33830503587 warm). The acceptance job
+`cargo test --features fixtures --no-fail-fast` (~12–17 min cold; warm is
+shorter); job `acceptance` = release `compare_ddr_sandbox` +
+`juniata_acceptance` + `gridded_acceptance` (~25 min cold; warm is shorter;
+both acceptance tests self-skip under `debug_assertions`, so the debug `test`
+job never runs them — the release job is their only CI coverage). The
+acceptance job
 builds with `CARGO_PROFILE_RELEASE_LTO=false` (env override in the workflow
 only): the thin-LTO link of the test binary was 30 of 40 minutes on the
 2-core runner while the 30 training epochs took ~13 s, so the training is
@@ -97,8 +106,10 @@ local tier gates.
 
 Both jobs install a CUDA toolkit only because compilation requires it
 (build-and-env.md). Local hook: `git config core.hooksPath .githooks`
-enables `.githooks/pre-push` (runs `ddr_sandbox_match`; bypass with
-`git push --no-verify`).
+enables `.githooks/pre-push`, which runs `ddr_sandbox_match` +
+`gridded_bundle` in one cargo invocation (~0.4 s warm; both never skip, so a
+broken checkout fails locally rather than in CI). Bypass with
+`git push --no-verify`.
 
 ## What covers what
 
@@ -106,7 +117,8 @@ enables `.githooks/pre-push` (runs `ddr_sandbox_match`; bypass with
 |---|---|
 | Routing | `mmc`, `routing_utils`, `geometry` |
 | DDR parity (invariant 1) | `ddr_sandbox_match` (in-process, plain `cargo test`) + `compare_ddr_sandbox` example (diagnostics, exits 1 on mismatch) |
-| End-to-end acceptance | `juniata_acceptance` (release-only; metric floors + beats-baseline on the committed bundle) |
+| End-to-end acceptance | `juniata_acceptance`, `gridded_acceptance` (release-only; metric floors + beats-baseline on the committed bundles) |
+| Gridded (DDM30) ingestion | `gridded_bundle` (sub-reach store → subdivided layout, gauge at the cell's last piece, cache hit, dataset opens), `cargo test --lib adjacency::gridded` (synthetic-store validation), `hourly_streamflow::time_major_store_reads_identically_to_divide_major`, `cargo test --lib zarr::tests::upstream_comids_names_each_subdivided_parent_once` |
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
 | Leakance | `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` |

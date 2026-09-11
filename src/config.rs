@@ -94,6 +94,7 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DataSources {
     #[serde(deserialize_with = "deserialize_one_or_many_paths")]
     pub attributes: Vec<std::path::PathBuf>,
@@ -127,9 +128,20 @@ pub struct DataSources {
     /// `.shp`/`.dbf` fabrics.
     #[serde(default)]
     pub geospatial_fabric_layer: Option<String>,
+    /// Path to a DDR gridded (ISIMIP DDM30) **sub-reach** adjacency zarr —
+    /// the output of DDR's `scripts/build_subdivided_adjacency.py` (`order`,
+    /// `parent_cell`, `indices_0/1`, `length_m`, `slope`). A third,
+    /// mutually-exclusive adjacency source next to `geospatial_fabric` and
+    /// the explicit zarr pair: `ddrs plan` turns it into ddrs's subdivided
+    /// store layout (parent = grid cell, pieces = sub-reaches) plus per-gauge
+    /// subgraphs under `.ddrs/adjacency/<key>/`. See
+    /// `docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md`.
+    #[serde(default)]
+    pub gridded_network: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Experiment {
     pub batch_size: usize,
     pub start_time: String,
@@ -218,6 +230,7 @@ pub enum OptimizerKind {
 /// component weights. See `src/training/loss.rs`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
+#[serde(deny_unknown_fields)]
 pub struct LossConfig {
     /// Which objective to optimize.
     pub kind: LossKind,
@@ -289,6 +302,7 @@ pub enum LossKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KanHeadConfigSection {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
@@ -677,6 +691,7 @@ impl Default for Params {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 struct ParamsRaw {
     parameter_ranges: HashMap<String, [f32; 2]>,
     attribute_minimums: HashMap<String, f32>,
@@ -813,6 +828,7 @@ pub struct Config {
 /// Fields are all optional so absent keys inherit from `experiment:`.
 #[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 struct TestingOverridesRaw {
     pub start_time: Option<String>,
     pub end_time: Option<String>,
@@ -839,6 +855,7 @@ where
 /// YAML-shaped intermediate; the public `Config` has nicer types.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 struct ConfigRaw {
     mode: Option<String>,
     geodataset: Option<String>,
@@ -858,13 +875,25 @@ struct ConfigRaw {
 
 impl From<ConfigRaw> for Config {
     fn from(r: ConfigRaw) -> Self {
+        // Resolved before the struct literal moves `data_sources` out of `r`.
+        let geodataset = r.geodataset.clone().unwrap_or_else(|| {
+            match r.data_sources.as_ref() {
+                Some(ds) if ds.gridded_network.is_some() => "ddm30".to_string(),
+                _ => "merit".to_string(),
+            }
+        });
         Self {
             params: r.params.into(),
             data_sources: r.data_sources,
             experiment: r.experiment,
             kan_head: r.kan_head,
             mode: r.mode.unwrap_or_else(|| "training".to_string()),
-            geodataset: r.geodataset.unwrap_or_else(|| "merit".to_string()),
+            // Absent `geodataset:` is INFERRED from the adjacency source rather
+            // than defaulting blindly to "merit", so a gridded config that
+            // omits the key is labelled `ddm30` instead of being mislabelled.
+            // An explicitly wrong value is then a real disagreement, which
+            // `validate_geodataset` rejects.
+            geodataset,
             seed: r.seed.unwrap_or(42),
             np_seed: r.np_seed.unwrap_or(42),
             workflow: r.workflow,
@@ -912,6 +941,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_data_sources(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_geodataset(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -963,6 +996,26 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
     let has_conus = ds.conus_adjacency.is_some();
     let has_gages = ds.gages_adjacency.is_some();
     let has_fabric = ds.geospatial_fabric.is_some();
+    let has_gridded = ds.gridded_network.is_some();
+
+    // The gridded network is its own managed-build input; combining it with
+    // either other adjacency source would leave one of them silently unused.
+    if has_gridded && has_fabric {
+        return Err(
+            "data_sources: `gridded_network` and `geospatial_fabric` are both set; \
+             they are alternative adjacency sources — keep exactly one."
+                .to_string(),
+        );
+    }
+    if has_gridded && (has_conus || has_gages) {
+        return Err(
+            "data_sources: `gridded_network` is set alongside explicit \
+             `conus_adjacency`/`gages_adjacency` paths; the gridded store is built \
+             into the managed cache by `ddrs plan` — remove the explicit paths \
+             (or drop `gridded_network` to use them as-is)."
+                .to_string(),
+        );
+    }
 
     // Layer selection is a gpkg-only concept; reject it for dBASE fabrics
     // (or with no fabric at all) at load time rather than silently ignoring.
@@ -982,10 +1035,10 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
         }
     }
 
-    match (has_conus, has_gages, has_fabric) {
+    match (has_conus, has_gages, has_fabric || has_gridded) {
         // Both explicit zarr paths: valid.
         (true, true, _) => Ok(()),
-        // Managed build: neither zarr, fabric present: valid.
+        // Managed build: neither zarr, fabric or gridded network present: valid.
         (false, false, true) => Ok(()),
         // Partial adjacency: exactly one of the two zarr keys provided.
         (true, false, _) => Err(
@@ -998,14 +1051,57 @@ fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
              provide both adjacency paths or remove both and set `geospatial_fabric`."
             .to_string(),
         ),
-        // Neither zarr and no fabric.
+        // Neither zarr and no fabric / gridded network.
         (false, false, false) => Err(
             "data_sources: adjacency sources are missing — either set both \
              `conus_adjacency` and `gages_adjacency`, or set `geospatial_fabric` \
-             for a managed adjacency build."
+             (MERIT) or `gridded_network` (DDM30) for a managed adjacency build."
             .to_string(),
         ),
     }
+}
+
+/// `geodataset:` must agree with the adjacency source it is labelling.
+///
+/// Nothing in the routing path reads `geodataset` — it is provenance, written
+/// into the managed-build zarr attrs and copied into the run's `config.yaml`
+/// snapshot. That is exactly why a wrong value is dangerous: the run succeeds
+/// and its audit trail names the wrong network. `ddrs sources use` replaces the
+/// `data_sources:` block only, so switching MERIT ↔ gridded leaves a stale label
+/// behind unless the user remembers to edit it. This turns that silent
+/// mislabelling into a load-time error.
+///
+/// Only the two managed-build sources are decidable. Explicit
+/// `conus_adjacency`/`gages_adjacency` paths can point at either kind of
+/// pre-built store, so any label is accepted there.
+fn validate_geodataset(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(ds) = cfg.data_sources.as_ref() else {
+        return Ok(());
+    };
+    let label = cfg.geodataset.trim();
+    let expected = if ds.gridded_network.is_some() {
+        "ddm30"
+    } else if ds.geospatial_fabric.is_some() {
+        "merit"
+    } else {
+        return Ok(()); // explicit adjacency paths: undecidable, allow any label
+    };
+    if label.eq_ignore_ascii_case(expected) {
+        return Ok(());
+    }
+    let (source_key, other) = if expected == "ddm30" {
+        ("gridded_network", "merit")
+    } else {
+        ("geospatial_fabric", "ddm30")
+    };
+    Err(format!(
+        "geodataset: `{label}` contradicts `data_sources.{source_key}` — that source \
+         builds a `{expected}` network. Nothing reads `geodataset` at runtime, so this \
+         would not fail the run; it would only mislabel the run's config snapshot and \
+         the adjacency store attrs. Fix: set `geodataset: {expected}` (or omit the key \
+         and it is inferred). If you meant to route the {other} network, change \
+         `data_sources` instead — `ddrs sources use <group>` swaps the block for you."
+    ))
 }
 
 fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
@@ -1068,6 +1164,22 @@ fn validate_subdivision(cfg: &Config) -> std::result::Result<(), String> {
         );
     }
     if s.enabled {
+        if cfg
+            .data_sources
+            .as_ref()
+            .is_some_and(|ds| ds.gridded_network.is_some())
+        {
+            // The DDM30 sub-reach store arrives already split (DDR sizes its
+            // pieces from celerity at mean flow); ddrs's MERIT reach plan has
+            // no `catchsize`/fabric to work from and would be silently inert.
+            return Err(
+                "params.subdivision: `enabled: true` does not apply to \
+                 `data_sources.gridded_network` — the DDM30 sub-reach store is \
+                 already subdivided by DDR's build_subdivided_adjacency.py. \
+                 Set `enabled: false` (or resize the sub-reaches in DDR)."
+                    .to_string(),
+            );
+        }
         validate_subdivision_reaches_the_builder(cfg)?;
     }
     Ok(())
@@ -1521,9 +1633,12 @@ workflow: train
 
     // ── data_sources validation matrix ──────────────────────────────────────
 
+    /// `geodataset:` is deliberately omitted so it is inferred from the block
+    /// under test: stamping `merit` here would contradict any gridded
+    /// `data_sources` and trip `validate_geodataset`.
     fn write_yaml_with_data_sources(name: &str, ds_block: &str) -> std::path::PathBuf {
         let yaml = format!(
-            "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n{ds_block}"
+            "mode: training\nseed: 1\nnp_seed: 1\n{ds_block}"
         );
         let path = std::env::temp_dir().join(name);
         std::fs::write(&path, yaml).unwrap();
@@ -1585,6 +1700,224 @@ data_sources:
         assert!(
             msg.contains("adjacency sources are missing"),
             "expected missing-adjacency error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gridded_network_alone_is_a_valid_managed_build() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_only.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("gridded_network alone must be valid");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert!(ds.gridded_network.is_some());
+        assert!(ds.conus_adjacency.is_none() && ds.gages_adjacency.is_none());
+    }
+
+    /// A misspelled key used to take its default in silence, which the docs
+    /// call the single most common cause of "my config change did nothing".
+    /// Every config section now sets `deny_unknown_fields`, so it is a load
+    /// error naming the key.
+    #[test]
+    fn typod_keys_are_rejected_in_every_section() {
+        let base = |extra: &str| {
+            format!(
+                "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n\
+                 data_sources:\n  attributes: /dev/null/a.nc\n  \
+                 conus_adjacency: /dev/null/c.zarr\n  gages_adjacency: /dev/null/g.zarr\n  \
+                 streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
+                 gages: /dev/null/g.csv\n{extra}"
+            )
+        };
+        // (label, yaml fragment, the misspelled key that must be named)
+        let cases = [
+            ("top level", "epocs: 5\n", "epocs"),
+            ("experiment", "experiment:\n  epocs: 5\n", "epocs"),
+            ("kan_head", "kan_head:\n  hidden_sizes: 21\n", "hidden_sizes"),
+            ("params", "params:\n  taus: 9\n", "taus"),
+            ("testing", "testing:\n  batchsize: 15\n", "batchsize"),
+        ];
+        for (label, extra, key) in cases {
+            let path = std::env::temp_dir()
+                .join(format!("ddrs_typo_{}.yaml", label.replace(' ', "_")));
+            std::fs::write(&path, base(extra)).unwrap();
+            let err = Config::from_yaml_file(&path)
+                .expect_err(&format!("{label}: typo `{key}` must be rejected"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(key),
+                "{label}: error should name the offending key `{key}`, got: {msg}"
+            );
+        }
+    }
+
+    /// The guard must not reject keys that really exist, including the
+    /// `mlp:` backward-compat alias for `kan_head:`.
+    #[test]
+    fn known_keys_and_the_mlp_alias_still_parse() {
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n\
+                    data_sources:\n  attributes: /dev/null/a.nc\n  \
+                    conus_adjacency: /dev/null/c.zarr\n  gages_adjacency: /dev/null/g.zarr\n  \
+                    streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
+                    gages: /dev/null/g.csv\n\
+                    mlp:\n  hidden_size: 21\n  num_hidden_layers: 2\n  grid: 50\n  k: 2\n  \
+                    input_var_names: [meanP]\n  learnable_parameters: [n]\n";
+        let path = std::env::temp_dir().join("ddrs_mlp_alias.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("mlp alias must still parse");
+        assert_eq!(cfg.kan_head.as_ref().unwrap().hidden_size, 21);
+    }
+
+    #[test]
+    fn absent_geodataset_is_inferred_from_the_adjacency_source() {
+        // Gridded source, no `geodataset:` key → inferred `ddm30`, not the
+        // blind "merit" default that used to mislabel every gridded run.
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let yaml = format!("mode: training\nseed: 1\nnp_seed: 1\n{ds_block}");
+        let path = std::env::temp_dir().join("ddrs_geodataset_infer.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).expect("infers ddm30");
+        assert_eq!(cfg.geodataset, "ddm30");
+
+        // Fabric source, no key → merit.
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let yaml = format!("mode: training\nseed: 1\nnp_seed: 1\n{ds_block}");
+        let path = std::env::temp_dir().join("ddrs_geodataset_infer_merit.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        assert_eq!(Config::from_yaml_file(&path).unwrap().geodataset, "merit");
+    }
+
+    #[test]
+    fn geodataset_contradicting_the_source_is_rejected() {
+        // The `ddrs sources use conus` footgun: block swapped to MERIT, stale
+        // `geodataset: ddm30` left behind above it.
+        let yaml = "mode: training\ngeodataset: ddm30\nseed: 1\nnp_seed: 1\n
+data_sources:
+  attributes: /dev/null/attrs.nc
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+";
+        let path = std::env::temp_dir().join("ddrs_geodataset_stale.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("geodataset") && msg.contains("geospatial_fabric"),
+            "expected the mislabel error, got: {msg}"
+        );
+
+        // And the mirror: gridded source labelled merit.
+        let yaml = "mode: training\ngeodataset: merit\nseed: 1\nnp_seed: 1\n
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+";
+        let path = std::env::temp_dir().join("ddrs_geodataset_stale2.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(msg.contains("ddm30"), "expected the mislabel error, got: {msg}");
+    }
+
+    #[test]
+    fn geodataset_is_unconstrained_with_explicit_adjacency_paths() {
+        // A pre-built store can be either network, so the label is undecidable
+        // and must not be second-guessed.
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  conus_adjacency: /dev/null/conus.zarr
+  gages_adjacency: /dev/null/gages.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_geodataset_explicit.yaml", ds_block);
+        // write_yaml_with_data_sources stamps `geodataset: merit`.
+        assert!(Config::from_yaml_file(&path).is_ok());
+    }
+
+    #[test]
+    fn gridded_network_with_fabric_rejected() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  geospatial_fabric: /dev/null/rivers.shp
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_fabric.yaml", ds_block);
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("gridded_network") && msg.contains("geospatial_fabric"),
+            "expected the both-sources error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gridded_network_with_explicit_adjacency_rejected() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  conus_adjacency: /dev/null/conus.zarr
+  gages_adjacency: /dev/null/gages.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_explicit.yaml", ds_block);
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("gridded_network") && msg.contains("conus_adjacency"),
+            "expected the explicit-paths error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn gridded_network_with_subdivision_enabled_rejected() {
+        let block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+params:
+  use_cuda_graphs: false
+  subdivision:
+    enabled: true
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_gridded_subdiv.yaml", block);
+        let msg = format!("{}", Config::from_yaml_file(&path).unwrap_err());
+        assert!(
+            msg.contains("params.subdivision") && msg.contains("gridded_network"),
+            "expected the subdivision-vs-gridded error, got: {msg}"
         );
     }
 

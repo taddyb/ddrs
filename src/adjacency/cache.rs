@@ -37,8 +37,12 @@ use serde::{Deserialize, Serialize};
 use crate::adjacency::build::{build_conus_adjacency, BuildError, ConusAdjacency};
 use crate::adjacency::fabric::{read_fabric_records, resolve_fabric};
 use crate::adjacency::gauges::build_gauge_subgraphs;
+use crate::adjacency::gridded::GriddedNetwork;
 use crate::adjacency::subdivide::{plan_reaches, subdivide, ReachPlan, SubdividedAdjacency};
-use crate::adjacency::zarr_write::{write_conus_store_subdivided, write_gauges_store};
+use crate::adjacency::zarr_write::{
+    write_conus_store_subdivided, write_conus_store_subdivided_as, write_gauges_store,
+    write_gauges_store_as,
+};
 use crate::adjacency::BUILDER_VERSION;
 use crate::config::Subdivision;
 use crate::data::error::DataError;
@@ -117,6 +121,14 @@ struct CacheManifest {
     build_duration_secs: f64,
     /// `git rev-parse HEAD` at build time, empty string if not available.
     ddrs_git_sha: String,
+    /// `"merit"` (fabric builder) or `"ddm30"` (`gridded_network`). Defaulted
+    /// for manifests written before the gridded path existed.
+    #[serde(default = "default_network_kind")]
+    network_kind: String,
+}
+
+fn default_network_kind() -> String {
+    "merit".to_string()
 }
 
 // ── public API ───────────────────────────────────────────────────────────────
@@ -268,21 +280,12 @@ pub fn resolve_or_build(
         dropped_comids,
         build_duration_secs,
         ddrs_git_sha: capture_git_sha(),
+        network_kind: "merit".to_string(),
     };
     let json = serde_json::to_string_pretty(&manifest)?;
     fs::write(tmp_dir.join("manifest.json"), json)?;
 
-    // Atomic rename into place.  If the target already exists (lost race
-    // between two concurrent builds) treat it as a hit and discard the tmp.
-    match fs::rename(&tmp_dir, &cache_dir) {
-        Ok(()) => {}
-        Err(_) if is_cache_hit(&cache_dir)
-            && store_paths(&cache_dir, &fabric_stem).conus.is_dir() => {
-            // Another process won the race; discard our tmp.
-            let _ = fs::remove_dir_all(&tmp_dir);
-        }
-        Err(e) => return Err(AdjacencyCacheError::Io(e)),
-    }
+    commit_build(&tmp_dir, &cache_dir, &fabric_stem)?;
 
     println!(
         "  adjacency cache written to {} ({:.1}s)",
@@ -295,6 +298,148 @@ pub fn resolve_or_build(
         key,
         cache_hit: false,
     })
+}
+
+/// Resolve the adjacency cache for a **gridded** (DDM30 sub-reach) network,
+/// building if necessary — the `data_sources.gridded_network` counterpart of
+/// [`resolve_or_build`].
+///
+/// The store is DDR's sub-reach adjacency zarr (`gridded::GriddedNetwork`).
+/// It is already a subdivided graph, so there is no fabric read and no reach
+/// plan: the build relabels it into ddrs's parent/piece layout, writes it as
+/// `<stem>_adjacency.zarr`, and cuts the per-gauge subgraphs from the sub-reach
+/// rows — `position_lookup` maps a cell id to its **last** row, which is the
+/// cell's outlet piece, so a gauge snapped to a cell is read where DDR's
+/// trainers read it (`outlet_of_cell`). `<stem>` is the store's file stem with
+/// a trailing `_adjacency` dropped (`juniata_subreach_adjacency.zarr` →
+/// `juniata_subreach_{,gages_}adjacency.zarr`).
+///
+/// Key: blake3(store fingerprint ∥ gages fingerprint ∥ "gridded" ∥
+/// BUILDER_VERSION). The store fingerprint hashes every file under the zarr
+/// directory (sorted relative path ∥ NUL ∥ bytes), so any array edit rebuilds.
+pub fn resolve_or_build_gridded(
+    workspace_root: &Path,
+    gridded: &Path,
+    gages_csv: &Path,
+) -> Result<AdjacencyCacheOutcome, AdjacencyCacheError> {
+    let stem = gridded
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ddm30".into());
+    let stem = stem.strip_suffix("_adjacency").unwrap_or(&stem).to_string();
+
+    let store_fp = dir_fingerprint(gridded)?;
+    let gages_fp = gages_fingerprint(gages_csv)?;
+    let key = content_key_gridded(&store_fp, &gages_fp);
+
+    let cache_dir = adjacency_cache_dir(workspace_root, &key);
+    if is_cache_hit(&cache_dir) {
+        let paths = store_paths(&cache_dir, &stem);
+        if paths.conus.is_dir() && paths.gages.is_dir() {
+            return Ok(AdjacencyCacheOutcome { paths, key, cache_hit: true });
+        }
+        eprintln!(
+            "  adjacency cache {} is incomplete (manifest without stores) — rebuilding",
+            cache_dir.display()
+        );
+        fs::remove_dir_all(&cache_dir)?;
+    }
+
+    println!(
+        "  building DDM30 sub-reach adjacency from {}",
+        gridded.display()
+    );
+    let tmp_dir = workspace_root
+        .join("adjacency")
+        .join(format!(".tmp-{}", key));
+    let _ = fs::remove_dir_all(&tmp_dir);
+    fs::create_dir_all(&tmp_dir)?;
+    let t0 = Instant::now();
+
+    let network = GriddedNetwork::open(gridded).map_err(AdjacencyCacheError::Data)?;
+    let expanded = network.to_subdivided();
+    let n = expanded.order.len();
+    let n_parent = expanded.parent_order.len();
+    let nnz = expanded.rows.len();
+    println!(
+        "  gridded network: {n_parent} cells → {n} sub-reaches ({:.2}x), {nnz} edges",
+        n as f64 / n_parent as f64
+    );
+
+    let conus_dest = tmp_dir.join(format!("{stem}_adjacency.zarr"));
+    write_conus_store_subdivided_as(&expanded, &conus_dest, GRIDDED_GEODATASET)
+        .map_err(AdjacencyCacheError::Data)?;
+
+    // Same sub-reach-space view as the fabric path: a gauge's cell resolves to
+    // that cell's outlet piece (last row).
+    let expanded_view = ConusAdjacency {
+        order: expanded.order.clone(),
+        rows: expanded.rows.clone(),
+        cols: expanded.cols.clone(),
+        length_m: expanded.length_m.clone(),
+        slope: expanded.slope.clone(),
+        dropped_comids: Vec::new(),
+    };
+    let subgraphs = build_gauge_subgraphs(&expanded_view, gages_csv)
+        .map_err(AdjacencyCacheError::Data)?;
+    let n_gauges = subgraphs.len();
+    let gages_dest = tmp_dir.join(format!("{stem}_gages_adjacency.zarr"));
+    write_gauges_store_as(&subgraphs, n, &gages_dest, GRIDDED_GEODATASET)
+        .map_err(AdjacencyCacheError::Data)?;
+
+    let build_duration_secs = t0.elapsed().as_secs_f64();
+    let manifest = CacheManifest {
+        key: key.clone(),
+        builder_version: BUILDER_VERSION,
+        fabric_path: gridded.to_path_buf(),
+        fabric_resolved_path: gridded.to_path_buf(),
+        fabric_layer: None,
+        fabric_fingerprint: store_fp,
+        gages_path: gages_csv.to_path_buf(),
+        gages_fingerprint: gages_fp,
+        n,
+        n_parent,
+        nnz,
+        n_gauges,
+        dropped_comids: Vec::new(),
+        build_duration_secs,
+        ddrs_git_sha: capture_git_sha(),
+        network_kind: GRIDDED_GEODATASET.to_string(),
+    };
+    fs::write(
+        tmp_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+
+    commit_build(&tmp_dir, &cache_dir, &stem)?;
+
+    println!(
+        "  adjacency cache written to {} ({:.1}s)",
+        cache_dir.display(),
+        build_duration_secs
+    );
+    Ok(AdjacencyCacheOutcome {
+        paths: store_paths(&cache_dir, &stem),
+        key,
+        cache_hit: false,
+    })
+}
+
+/// `geodataset` attr / manifest `network_kind` for the gridded path.
+const GRIDDED_GEODATASET: &str = "ddm30";
+
+/// Atomically move a finished build into place. If the target already exists
+/// (lost race between two concurrent builds) treat it as a hit and discard the
+/// temp dir.
+fn commit_build(tmp_dir: &Path, cache_dir: &Path, stem: &str) -> Result<(), AdjacencyCacheError> {
+    match fs::rename(tmp_dir, cache_dir) {
+        Ok(()) => Ok(()),
+        Err(_) if is_cache_hit(cache_dir) && store_paths(cache_dir, stem).conus.is_dir() => {
+            let _ = fs::remove_dir_all(tmp_dir);
+            Ok(())
+        }
+        Err(e) => Err(AdjacencyCacheError::Io(e)),
+    }
 }
 
 /// Resolve `<workspace_root>/adjacency/<key>/` for a given key.
@@ -493,6 +638,69 @@ fn content_key(
     h.update(s.max_clamp_factor.to_bits().to_le_bytes().as_ref());
     let hex = h.finalize().to_hex();
     hex.as_str()[..16].to_string()
+}
+
+/// Content key for [`resolve_or_build_gridded`]: blake3(store_fp ∥ gages_fp ∥
+/// "gridded" ∥ BUILDER_VERSION)[..16]. The literal separates the namespace
+/// from fabric keys; `params.subdivision` is absent because config validation
+/// rejects it with `gridded_network`.
+fn content_key_gridded(store_fp: &str, gages_fp: &str) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(store_fp.as_bytes());
+    h.update(b"\n");
+    h.update(gages_fp.as_bytes());
+    h.update(b"\ngridded\n");
+    h.update(BUILDER_VERSION.to_le_bytes().as_ref());
+    let hex = h.finalize().to_hex();
+    hex.as_str()[..16].to_string()
+}
+
+#[doc(hidden)]
+pub fn content_key_gridded_for_test(store_fp: &str, gages_fp: &str) -> String {
+    content_key_gridded(store_fp, gages_fp)
+}
+
+/// blake3 over every regular file under `dir`, recursively, in sorted
+/// relative-path order (path ∥ NUL ∥ bytes). The fingerprint of a zarr store:
+/// metadata and chunks alike, so editing any array — or a store attribute —
+/// changes the key.
+pub fn dir_fingerprint(dir: &Path) -> Result<String, AdjacencyCacheError> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let p = entry?.path();
+            if p.is_dir() {
+                walk(root, &p, out)?;
+            } else if p.is_file() {
+                out.push(p);
+            }
+        }
+        Ok(())
+    }
+    if !dir.is_dir() {
+        return Err(AdjacencyCacheError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("gridded_network store is not a directory: {}", dir.display()),
+        )));
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files).map_err(AdjacencyCacheError::Io)?;
+    files.sort();
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 65536];
+    for f in &files {
+        let rel = f.strip_prefix(dir).unwrap_or(f);
+        hasher.update(rel.to_string_lossy().as_bytes());
+        hasher.update(&[0]);
+        let mut reader = BufReader::new(fs::File::open(f).map_err(AdjacencyCacheError::Io)?);
+        loop {
+            let n = reader.read(&mut buf).map_err(AdjacencyCacheError::Io)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// Test hook for [`content_key`]. Integration tests live in their own crate and

@@ -143,6 +143,40 @@ fn streamflow_source_reports_resolution() {
     assert_eq!(hourly.resolution(), Frequency::Hourly);
 }
 
+/// DDR's gridded (DDM30) Q' stores are written `Qr(time, divide_id)`; the
+/// reader must detect the layout and return the same values as the
+/// `(divide_id, time)` contract layout. Before this, the wrong-axis subset
+/// came back as fill values (zarrs does not error on an out-of-range read),
+/// so the summed-Q' baseline on the gridded Juniata bundle summed nothing.
+#[test]
+fn time_major_store_reads_identically_to_divide_major() {
+    let a = StreamflowStore::open(fixture("qr_daily.ic")).expect("open divide-major");
+    let b = StreamflowStore::open(fixture("qr_daily_time_major.ic")).expect("open time-major");
+    assert!(!a.time_major);
+    assert!(b.time_major);
+    assert_eq!(b.resolution, Frequency::Daily);
+    assert_eq!(b.n_time, 10);
+
+    let w = RhoWindow {
+        start_day_idx: 2,
+        rho_days: 4,
+        window_start: d(1981, 1, 3),
+    };
+    // Reversed and partial COMID list, so the divide-axis span is not the
+    // whole array and the scatter order differs from storage order.
+    let comids = [Comid(104), Comid(102), Comid(101)];
+    let qa = a.read_window(&w, &comids).expect("read_window divide-major");
+    let qb = b.read_window(&w, &comids).expect("read_window time-major");
+    assert_eq!(qa, qb);
+    assert_eq!(qb[(0, 0)], 402.0); // divide 104 (j=3), day 2
+    assert_eq!(qb[(71, 2)], 104.0); // divide 101 (j=0), day 4
+
+    let da = a.read_window_daily(d(1981, 1, 2), 5, &COMIDS).expect("daily divide-major");
+    let db = b.read_window_daily(d(1981, 1, 2), 5, &COMIDS).expect("daily time-major");
+    assert_eq!(da, db);
+    assert_eq!(db[(4, 1)], 205.0); // divide 102, day 5
+}
+
 #[test]
 fn daily_fixture_read_window_keeps_repeat24_semantics() {
     // Pins the daily path: values repeat 24x per day with the trailing-day trim.

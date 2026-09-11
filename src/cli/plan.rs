@@ -205,6 +205,9 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
     if let Some(p) = &data_sources.geospatial_fabric {
         pairs.push(("geospatial_fabric".into(), p.clone()));
     }
+    if let Some(p) = &data_sources.gridded_network {
+        pairs.push(("gridded_network".into(), p.clone()));
+    }
     let mut sources = BTreeMap::new();
     for (key, path) in pairs {
         let live = match prior_lock.as_ref().and_then(|l| l.sources.get(&key)) {
@@ -323,13 +326,35 @@ pub(crate) fn resolve_adjacency(
                 cache_hit: None,
             })
         }
+        // Gridded (DDM30 sub-reach zarr) managed build. Validation has already
+        // rejected it alongside a fabric or explicit paths.
+        _ if ds.gridded_network.is_some() => {
+            let gridded = ds.gridded_network.as_ref().expect("checked by guard");
+            let outcome = crate::adjacency::cache::resolve_or_build_gridded(
+                workspace.root(),
+                gridded,
+                &ds.gages,
+            )
+            .map_err(|e| CliError::ConfigInvalid {
+                path: config_path.into(),
+                source: Box::new(e),
+            })?;
+            Ok(ResolvedAdjacency {
+                conus: outcome.paths.conus,
+                gages: outcome.paths.gages,
+                cache_key: Some(outcome.key),
+                cache_hit: Some(outcome.cache_hit),
+            })
+        }
         // Fabric-only (managed build). `validate_data_sources` (config.rs) has
         // already rejected the partial-adjacency and neither-source cases at
         // load time, so a missing fabric here is an internal invariant break.
         _ => {
             let fabric = ds.geospatial_fabric.as_ref().ok_or_else(|| CliError::ConfigInvalid {
                 path: config_path.into(),
-                source: "data_sources: no adjacency paths and no geospatial_fabric".into(),
+                source: "data_sources: no adjacency paths and no geospatial_fabric \
+                         or gridded_network"
+                    .into(),
             })?;
             let outcome = crate::adjacency::cache::resolve_or_build(
                 workspace.root(),

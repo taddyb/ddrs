@@ -51,7 +51,10 @@ struct RawRow {
     lat_gage: f64,
     #[serde(rename = "LNG_GAGE")]
     lng_gage: f64,
-    #[serde(rename = "COMID", default)]
+    /// Outlet reach id. DDR's gridded (DDM30) gauge CSVs write the snapped
+    /// grid cell under `cell` instead of `COMID`; the value plays the same role
+    /// (the id the adjacency `order` is keyed on), so it is accepted as an alias.
+    #[serde(rename = "COMID", alias = "cell", default)]
     comid: Option<i64>,
     #[serde(rename = "COMID_DRAIN_SQKM", default)]
     comid_drain_sqkm: Option<f64>,
@@ -228,6 +231,21 @@ STAID,STANAME,DRAIN_SQKM,LAT_GAGE,LNG_GAGE,COMID,COMID_DRAIN_SQKM,COMID_UNITAREA
         assert!(r0.flow_scale.is_some());
         let r1 = &m.rows[1];
         assert_eq!(r1.da_valid, Some(false));
+    }
+
+    /// DDR's gridded gauge CSV (`examples/juniata_gridded/data/juniata_gage.csv`
+    /// layout): the snapped DDM30 cell is under `cell`, and there is no COMID,
+    /// DA_VALID or FLOW_SCALE column.
+    #[test]
+    fn gridded_csv_cell_column_is_read_as_comid() {
+        let csv = "STAID,STANAME,DRAIN_SQKM,LAT_GAGE,LNG_GAGE,cell,da_ratio\n\
+                   01567000,\"JUNIATA RIVER AT NEWPORT, PA\",8657.0,40.4785,-77.1294,138445,1.088\n";
+        let m = GageMetadata::from_reader(csv.as_bytes(), std::path::PathBuf::from("<inline>"))
+            .expect("parse gridded csv");
+        let r = &m.rows[0];
+        assert_eq!(r.comid, Some(138445));
+        assert_eq!(r.da_valid, None);
+        assert_eq!(r.flow_scale, None);
     }
 
     #[test]
