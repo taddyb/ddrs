@@ -92,7 +92,7 @@ fn n_movement_after(kind: OptimizerKind, lr: f64, steps: usize) -> f32 {
     let before = n_of(&h);
     let mut optim: HeadOptimizer<KanHead<B>, B> = build_head_optimizer(kind);
     for _ in 0..steps {
-        let loss = batch_loss(predictions(&h, x.clone()), o.clone(), &cfg, Some(sig.clone()));
+        let loss = batch_loss(predictions(&h, x.clone()), o.clone(), &cfg, Some(sig.clone()), None);
         let grads = GradientsParams::from_grads(loss.backward(), &h);
         h = optim.step(lr, h, grads);
     }
@@ -142,7 +142,7 @@ fn batch_nse_loss_is_wired_through_batch_loss_and_differentiable() {
     let o = observations();
     let cfg = LossConfig { kind: LossKind::NseBatch, ..LossConfig::default() };
     let p = predictions(&h, x);
-    let loss = batch_loss(p, o.clone(), &cfg, Some(sigma(vec![1.0; G])));
+    let loss = batch_loss(p, o.clone(), &cfg, Some(sigma(vec![1.0; G])), None);
     let v: f32 = loss.clone().into_scalar();
     assert!(v.is_finite() && v > 0.0, "loss not finite/positive: {v}");
     let grads = GradientsParams::from_grads(loss.backward(), &h);
@@ -180,6 +180,7 @@ fn batch_nse_stays_exact_under_gradient_accumulation() {
         o.clone(),
         &cfg,
         Some(sig_all.clone()),
+        None,
     );
     let pooled_v: f32 = pooled.clone().into_scalar();
     let ref_grads = GradientsParams::from_grads(pooled.backward(), &h);
@@ -191,7 +192,7 @@ fn batch_nse_stays_exact_under_gradient_accumulation() {
         let gm = hi - lo;
         let p = predictions(&h, x.clone().slice([lo..hi, 0..F]));
         let sg = sig_all.clone().slice([lo..hi]);
-        let l = batch_loss(p, o.clone().slice([lo..hi, 0..T]), &cfg, Some(sg));
+        let l = batch_loss(p, o.clone().slice([lo..hi, 0..T]), &cfg, Some(sg), None);
         let lv: f32 = l.clone().into_scalar();
         let n_i = loss_denominator(&cfg, gm, T);
         acc.accumulate(&h, GradientsParams::from_grads(l.mul_scalar(n_i as f32).backward(), &h));
@@ -250,7 +251,7 @@ fn adadelta_optimizer_state_round_trips_and_refuses_cross_kind_resume() {
     let sig = sigma(vec![1.0; G]);
     let mut optim: HeadOptimizer<KanHead<B>, B> = build_head_optimizer(OptimizerKind::Adadelta);
     for _ in 0..3 {
-        let loss = batch_loss(predictions(&h, x.clone()), o.clone(), &cfg, Some(sig.clone()));
+        let loss = batch_loss(predictions(&h, x.clone()), o.clone(), &cfg, Some(sig.clone()), None);
         let grads = GradientsParams::from_grads(loss.backward(), &h);
         h = optim.step(1.0, h, grads);
     }

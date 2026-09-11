@@ -259,6 +259,12 @@ pub struct LossConfig {
     /// denominator so near-constant gauges don't produce NaN gradients.
     /// Matches DDR `hydrograph_loss`'s `eps=0.1`.
     pub eps: f32,
+    /// `lambda` on the time-derivative term of [`LossKind::NseBatchDeriv`]
+    /// (`L = L_nse_batch + lambda * L_deriv`). Ignored — never read — by
+    /// every other objective, so an `l1` / `nnse-kge` / `kge` / `nse-batch`
+    /// run is byte-identical to one from before this field existed.
+    /// `0.0` reduces `nse-batch-deriv` to exactly `nse-batch`.
+    pub deriv_weight: f32,
 }
 
 impl Default for LossConfig {
@@ -273,6 +279,7 @@ impl Default for LossConfig {
             beta_weight: 1.0,
             kge_clamp: 10.0,
             eps: 0.1,
+            deriv_weight: 0.5,
         }
     }
 }
@@ -299,6 +306,21 @@ pub enum LossKind {
     /// way raw L1 does — the conditioning half of the dHBV recipe that
     /// pairs with the AdaDelta optimizer.
     NseBatch,
+    /// [`LossKind::NseBatch`] plus `deriv_weight` times the same quantity on
+    /// CONSECUTIVE-DAY DIFFERENCES, each gauge normalized by its own observed
+    /// difference std over the training period:
+    /// `L = L_nse_batch + lambda * mean over adjacent valid (day, gauge) pairs
+    /// of ((dsim - dobs)^2 / (sigma_d_gauge + eps)^2)`.
+    ///
+    /// Why: the landscape study's curvature probe measured the loss curvature
+    /// in Manning's `n` to be governed by the mean square of the hydrograph's
+    /// TIME DERIVATIVE (findings §25), so a level-only objective leaves the
+    /// `n` valley nearly flat. Scoring the derivative directly deepens it
+    /// (§26 predicted ~3.7x at `lambda = 0.5`, hence that default). The level
+    /// term is the unchanged `nse_batch_loss`; this is the mirror of the
+    /// landscape's `nse-deriv` measurement objective
+    /// (`src/experiment/landscape/objective.rs`), promoted to a trainable loss.
+    NseBatchDeriv,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -972,6 +994,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_loss(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         if mode == ConfigMode::Testing {
             apply_testing_overlay(&mut cfg, testing_raw);
         }
@@ -1272,6 +1298,23 @@ fn validate_grad_accum(cfg: &Config) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Validate `experiment.loss`.
+///
+/// `deriv_weight` multiplies a squared-error term, so a negative value would
+/// turn the objective into a maximization of hydrograph roughness and a
+/// non-finite one would poison every gradient — both silently, since the
+/// term only shows up as a scalar addend. Reject them at load time.
+fn validate_loss(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(exp) = cfg.experiment.as_ref() else { return Ok(()); };
+    let w = exp.loss.deriv_weight;
+    if !w.is_finite() || w < 0.0 {
+        return Err(format!(
+            "experiment.loss: `deriv-weight: {w}` is invalid — it must be a finite,              non-negative lambda on the time-derivative term of              `kind: nse-batch-deriv` (0.0 reduces that objective to `nse-batch`)."
+        ));
+    }
+    Ok(())
+}
+
 fn validate_mode_workflow(cfg: &Config) -> std::result::Result<(), String> {
     use Workflow::*;
     let Some(wf) = cfg.workflow else { return Ok(()); };
@@ -1426,6 +1469,63 @@ mod tests {
         )
         .expect("parse experiment");
         assert_eq!(exp.loss.kind, LossKind::NseBatch);
+    }
+
+    #[test]
+    fn nse_batch_deriv_loss_kind_parses_with_default_weight() {
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\nloss:\n  kind: nse-batch-deriv\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.loss.kind, LossKind::NseBatchDeriv);
+        // §26's predicted ~3.7x valley deepening is at lambda 0.5.
+        assert!((exp.loss.deriv_weight - 0.5).abs() < 1e-9);
+        // An omitted `loss:` block keeps L1 with the same default lambda,
+        // which that objective never reads.
+        let exp: Experiment = serde_yaml::from_str(
+            "batch_size: 4\nstart_time: 2000/01/01\nend_time: 2000/01/02\n\
+             epochs: 1\nrho: 10\nwarmup: 1\n",
+        )
+        .expect("parse experiment");
+        assert_eq!(exp.loss.kind, LossKind::L1);
+        assert!((exp.loss.deriv_weight - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nse_batch_deriv_weight_parses_kebab_case() {
+        let lc: LossConfig =
+            serde_yaml::from_str("kind: nse-batch-deriv\nderiv-weight: 1.25\n").expect("parse loss");
+        assert_eq!(lc.kind, LossKind::NseBatchDeriv);
+        assert!((lc.deriv_weight - 1.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn negative_deriv_weight_rejected() {
+        let yaml = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+experiment:
+  batch_size: 4
+  start_time: 2000/01/01
+  end_time: 2000/01/02
+  epochs: 1
+  rho: 10
+  warmup: 1
+  loss:
+    kind: nse-batch-deriv
+    deriv-weight: -0.5
+"#;
+        let path = std::env::temp_dir().join("ddrs_config_deriv_weight_test.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("deriv-weight") && msg.contains("non-negative"),
+            "expected a deriv-weight rejection, got: {msg}"
+        );
     }
 
     #[test]

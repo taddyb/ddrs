@@ -57,6 +57,11 @@ pub struct RoutingBatch {
     /// `gauge_staids`. Empty unless `loss.kind: nse-batch`. See
     /// `MeritGagesDataset::gauge_obs_std`.
     pub gauge_obs_std: Vec<f32>,
+    /// Per-gauge observed CONSECUTIVE-DAY DIFFERENCE std over the training
+    /// period, aligned to `gauge_staids`. Empty unless
+    /// `loss.kind: nse-batch-deriv`. See
+    /// `MeritGagesDataset::gauge_obs_diff_std`.
+    pub gauge_obs_diff_std: Vec<f32>,
     /// For each gauge in `gauge_staids`, list of compressed-cols whose row
     /// equals the gauge's outlet position. SP-4 reads gauge predictions
     /// out of the engine's `(N, T)` output via these indices.
@@ -330,8 +335,18 @@ pub struct MeritGagesDataset {
     /// would make the objective drift between micro-batches and break
     /// gradient-accumulation exactness. Mirrors dHBV's `stdarray`.
     gauge_std: OnceCell<std::collections::HashMap<Staid, f32>>,
-    /// Whether the configured loss needs `gauge_std` (`loss.kind: nse-batch`).
+    /// Whether the configured loss needs `gauge_std` (`loss.kind: nse-batch`
+    /// or `nse-batch-deriv`, whose level term IS the batch-NSE loss).
     want_gauge_std: bool,
+    /// Per-gauge observed consecutive-day DIFFERENCE std over the FULL
+    /// training period, keyed by STAID. Sibling of `gauge_std`: same full-window
+    /// read, same `OnceCell`, same fixed-over-training-period rationale — only
+    /// the statistic differs. Populated only when `want_gauge_diff_std`, since
+    /// it costs its own full-window observation read.
+    gauge_diff_std: OnceCell<std::collections::HashMap<Staid, f32>>,
+    /// Whether the configured loss needs `gauge_diff_std`
+    /// (`loss.kind: nse-batch-deriv` only).
+    want_gauge_diff_std: bool,
     /// `params.ddr_match`, captured at open. Selects the `outflow_idx`
     /// convention in `collate::compress`: `true` (default) reproduces DDR's
     /// upstream-cols behaviour, `false` reads the gauge's own reach.
@@ -566,7 +581,19 @@ impl MeritGagesDataset {
             want_gauge_std: cfg
                 .experiment
                 .as_ref()
-                .map(|e| e.loss.kind == crate::config::LossKind::NseBatch)
+                .map(|e| {
+                    matches!(
+                        e.loss.kind,
+                        crate::config::LossKind::NseBatch
+                            | crate::config::LossKind::NseBatchDeriv
+                    )
+                })
+                .unwrap_or(false),
+            gauge_diff_std: OnceCell::new(),
+            want_gauge_diff_std: cfg
+                .experiment
+                .as_ref()
+                .map(|e| e.loss.kind == crate::config::LossKind::NseBatchDeriv)
                 .unwrap_or(false),
             ddr_match: cfg.params.ddr_match,
             state_cache,
@@ -629,6 +656,65 @@ impl MeritGagesDataset {
             let _ = self.gauge_std.set(m);
         }
         let map = self.gauge_std.get().expect("populated above");
+        Ok(staids.iter().map(|s| map.get(s).copied().unwrap_or(0.0)).collect())
+    }
+
+    /// Per-gauge standard deviation of the observed CONSECUTIVE-DAY
+    /// DIFFERENCES over the full training period, in the order of `staids`.
+    /// Empty vec when the configured loss doesn't need it (every kind but
+    /// `nse-batch-deriv`), so no other objective pays for the extra
+    /// full-window read.
+    ///
+    /// Structure mirrors `gauge_obs_std` exactly: one full-window read, cached
+    /// in a `OnceCell`, population std (divide by `n`), and gauges with fewer
+    /// than 2 finite consecutive pairs get `0.0` — the loss adds `eps` to the
+    /// denominator, so they stay finite. Only pairs where BOTH days are finite
+    /// contribute, matching the adjacent-pair rule of
+    /// `training::loss::obs_diff_term`.
+    ///
+    /// Fixed across windows for the same reason as `gauge_obs_std`: a
+    /// per-window `sigma_d` would make the objective drift between
+    /// micro-batches and break gradient-accumulation exactness.
+    pub fn gauge_obs_diff_std(&self, staids: &[Staid]) -> Result<Vec<f32>> {
+        if !self.want_gauge_diff_std {
+            return Ok(Vec::new());
+        }
+        if self.gauge_diff_std.get().is_none() {
+            let full = crate::data::dates::RhoWindow {
+                start_day_idx: 0,
+                rho_days: self.time_axis.num_days,
+                window_start: self.time_axis.start,
+            };
+            let obs = self.observations.read_window(&full, &self.gauges)?;
+            let mut m = std::collections::HashMap::with_capacity(self.gauges.len());
+            for (j, s) in self.gauges.iter().enumerate() {
+                let col = obs.column(j);
+                let diffs: Vec<f32> = col
+                    .windows(2)
+                    .into_iter()
+                    .filter(|w| w[0].is_finite() && w[1].is_finite())
+                    .map(|w| w[1] - w[0])
+                    .collect();
+                let std = if diffs.len() < 2 {
+                    0.0
+                } else {
+                    let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+                    (diffs.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / diffs.len() as f32)
+                        .sqrt()
+                };
+                m.insert(s.clone(), std);
+            }
+            let mut sorted: Vec<f32> = m.values().copied().collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            eprintln!(
+                "gauge obs diff std (training period, {} days): {} gauges, median {:.3} m3/s/day",
+                self.time_axis.num_days,
+                m.len(),
+                sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
+            );
+            let _ = self.gauge_diff_std.set(m);
+        }
+        let map = self.gauge_diff_std.get().expect("populated above");
         Ok(staids.iter().map(|s| map.get(s).copied().unwrap_or(0.0)).collect())
     }
 
@@ -766,6 +852,7 @@ impl MeritGagesDataset {
             precip_hourly,
             temp_hourly,
             gauge_obs_std: self.gauge_obs_std(&gauge_staids)?,
+            gauge_obs_diff_std: self.gauge_obs_diff_std(&gauge_staids)?,
             observations,
             outflow_idx: compressed.outflow_idx,
             gauge_staids,
@@ -1019,6 +1106,7 @@ impl MeritGagesDataset {
             temp_hourly,
             observations: obs,
             gauge_obs_std: Vec::new(),
+            gauge_obs_diff_std: Vec::new(),
             outflow_idx: cache.outflow_idx.clone(),
             gauge_staids: cache.gauge_staids.clone(),
             divide_comids: cache.divide_comids.clone(),

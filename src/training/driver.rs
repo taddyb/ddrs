@@ -111,6 +111,9 @@ fn run_micro_batch<I: Backend>(
     let batch = dataset.collate(staids, window)?;
     let num_gauges = batch.gauge_staids.len();
     let batch_gauge_std = batch.gauge_obs_std.clone();
+    // Sibling of `gauge_obs_std`, computed ONCE per run behind the dataset's
+    // `OnceCell` (empty for every loss kind but `nse-batch-deriv`).
+    let batch_gauge_diff_std = batch.gauge_obs_diff_std.clone();
 
     // Save observations before consuming `batch` in to_tensors.
     // SP-3 layout: observations shape is (rho_days, G) — rows are daily
@@ -182,15 +185,20 @@ fn run_micro_batch<I: Backend>(
 
     // Per-gauge training-period std for the SURVIVING gauges, in the same
     // row order as `p_filt` (empty unless `loss.kind: nse-batch`).
-    let sigma = if batch_gauge_std.is_empty() {
-        None
-    } else {
-        let vals: Vec<f32> = keep_indices.iter().map(|&gi| batch_gauge_std[gi as usize]).collect();
+    let mut subset = |src: &[f32]| -> Option<Tensor<Autodiff<I>, 1>> {
+        if src.is_empty() {
+            return None;
+        }
+        let vals: Vec<f32> = keep_indices.iter().map(|&gi| src[gi as usize]).collect();
         Some(Tensor::<Autodiff<I>, 1>::from_data(
             TensorData::new(vals, [surviving_g]),
             device,
         ))
     };
+    let sigma = subset(&batch_gauge_std);
+    // Per-gauge observed-DIFFERENCE std, same rows (empty unless
+    // `loss.kind: nse-batch-deriv`).
+    let sigma_d = subset(&batch_gauge_diff_std);
 
     let keep_t: Tensor<Autodiff<I>, 1, burn::tensor::Int> =
         Tensor::from_data(TensorData::new(keep_indices, [surviving_g]), device);
@@ -198,7 +206,7 @@ fn run_micro_batch<I: Backend>(
     let o_filt = o_post.select(0, keep_t);
 
     // Config-selected objective (default L1); autograd alive on `p_filt`.
-    let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss, sigma);
+    let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss, sigma, sigma_d);
     let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
 
     Ok(Some(MicroBatchOutcome {

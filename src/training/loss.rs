@@ -176,7 +176,13 @@ pub fn l1_loss_post_warmup(
 /// objectives compute per-gauge scores then average over GAUGES.
 pub fn loss_denominator(cfg: &LossConfig, g_kept: usize, t_post: usize) -> usize {
     match cfg.kind {
-        LossKind::L1 | LossKind::NseBatch => g_kept * t_post,
+        // `nse-batch-deriv` shares `nse-batch`'s denominator: its level term
+        // IS that mean, and its derivative term is a mean over the
+        // `g_kept * (t_post - 1)` adjacent pairs, which scales with the same
+        // count. Recombination is therefore exact to `O(1/t_post)` rather
+        // than exact, so prefer single-batch training with this objective if
+        // micro-batches differ in surviving-gauge count.
+        LossKind::L1 | LossKind::NseBatch | LossKind::NseBatchDeriv => g_kept * t_post,
         LossKind::NnseKge | LossKind::Kge => g_kept,
     }
 }
@@ -188,12 +194,15 @@ pub fn loss_denominator(cfg: &LossConfig, g_kept: usize, t_post: usize) -> usize
 /// calling). Returns the scalar batch loss with the autograd graph intact.
 /// `gauge_std` is the per-gauge observed-discharge standard deviation over the
 /// TRAINING period, shape `(G,)`, aligned to `p`'s rows. Required by
-/// [`LossKind::NseBatch`]; ignored by every other objective (pass `None`).
+/// [`LossKind::NseBatch`] and [`LossKind::NseBatchDeriv`]; ignored by every
+/// other objective (pass `None`). `gauge_diff_std` is its consecutive-day
+/// DIFFERENCE counterpart, required by [`LossKind::NseBatchDeriv`] alone.
 pub fn batch_loss<B: Backend>(
     p: Tensor<B, 2>,
     o: Tensor<B, 2>,
     cfg: &LossConfig,
     gauge_std: Option<Tensor<B, 1>>,
+    gauge_diff_std: Option<Tensor<B, 1>>,
 ) -> Tensor<B, 1> {
     match cfg.kind {
         LossKind::L1 => (p - o).abs().mean(),
@@ -204,6 +213,20 @@ pub fn batch_loss<B: Backend>(
                 "loss.kind: nse-batch requires per-gauge std — the driver must pass \
                  RoutingBatch::gauge_obs_std for the surviving gauges",
             ),
+            cfg.eps,
+        ),
+        LossKind::NseBatchDeriv => nse_batch_deriv_loss(
+            p,
+            o,
+            gauge_std.expect(
+                "loss.kind: nse-batch-deriv requires per-gauge std — the driver must pass \
+                 RoutingBatch::gauge_obs_std for the surviving gauges",
+            ),
+            gauge_diff_std.expect(
+                "loss.kind: nse-batch-deriv requires per-gauge observed-DIFFERENCE std — \
+                 the driver must pass RoutingBatch::gauge_obs_diff_std for the surviving gauges",
+            ),
+            cfg.deriv_weight,
             cfg.eps,
         ),
         LossKind::NnseKge => nnse_kge_loss(p, o, cfg.nnse_weight, cfg.kge_weight, cfg.eps),
@@ -247,6 +270,120 @@ pub fn nse_batch_loss<B: Backend>(
     let resid = p - o;
     let sq = resid.clone() * resid;
     (sq / (denom.clone() * denom)).mean()
+}
+
+/// [`nse_batch_loss`] plus `deriv_weight` times the same quantity evaluated on
+/// CONSECUTIVE-DAY DIFFERENCES:
+///
+/// ```text
+/// L = L_nse_batch + lambda * mean over valid adjacent (day, gauge) pairs of
+///       ((sim_{t+1} - sim_t) - (obs_{t+1} - obs_t))^2 / (sigma_d_gauge + eps)^2
+/// ```
+///
+/// Why: the landscape study's curvature probe found the loss curvature in
+/// Manning's `n` to be governed by the mean square of the hydrograph's TIME
+/// DERIVATIVE (findings §25), so a level-only objective leaves the `n` valley
+/// nearly flat and the aggregate gradient vanishes long before `n` is
+/// identified. Scoring the derivative directly deepens that valley (§26
+/// predicted ~3.7x at `lambda = 0.5`).
+///
+/// This mirrors the landscape MEASUREMENT objective
+/// `experiment::landscape::objective::deriv_window_loss` term for term — same
+/// adjacent-pair rule, same population `sigma_d`, same dense masking — so a
+/// model trained here is optimizing exactly what that instrument plots.
+///
+/// `sigma` / `sigma_d` are `(G,)`, fixed over the training period (see
+/// `MeritGagesDataset::gauge_obs_std` / `gauge_obs_diff_std`); `p` / `o` are
+/// `(G, T)` with autograd alive on `p`. At `deriv_weight == 0.0` this is
+/// numerically identical to [`nse_batch_loss`] — the derivative term is
+/// always finite (never NaN/Inf), so `x + 0.0 * term == x` exactly.
+pub fn nse_batch_deriv_loss<B: Backend>(
+    p: Tensor<B, 2>,
+    o: Tensor<B, 2>,
+    sigma: Tensor<B, 1>,
+    sigma_d: Tensor<B, 1>,
+    deriv_weight: f32,
+    eps: f32,
+) -> Tensor<B, 1> {
+    let level = nse_batch_loss(p.clone(), o.clone(), sigma, eps);
+    let deriv = obs_diff_term(p, o, sigma_d, eps);
+    level + deriv.mul_scalar(deriv_weight)
+}
+
+/// The derivative term of [`nse_batch_deriv_loss`], alone:
+/// `sum over adjacent valid pairs (g, j) of w * (dsim - dobs)^2 /
+/// (sigma_d_g + eps)^2` with `w = 1 / n_pairs_total` — i.e. one global mean
+/// over every valid pair in the batch, exactly as [`nse_batch_loss`]'s
+/// `.mean()` is one global mean over every valid (day, gauge).
+///
+/// A pair `(j, j+1)` counts for gauge `g` only when BOTH days are valid for
+/// that gauge, under the same rule `nse_batch_loss` relies on (the driver's
+/// per-gauge NaN filter). A gap therefore BREAKS the chain: `N` valid days
+/// with a hole in the middle give strictly fewer than `N - 1` pairs. Mirrors
+/// `landscape::objective::adjacent_valid_pairs`.
+///
+/// Masking is dense — a `(G, T-1)` weight tensor that is zero at invalid
+/// pairs, and an observed-difference tensor that is zero there too — so no
+/// gather is needed, the term stays differentiable in `p`, and a NaN
+/// observation can never reach the arithmetic. Returns an exact zero when the
+/// batch has no valid pair at all (`T < 2`, or every pair broken), so the
+/// composite degrades to the level term instead of to NaN.
+///
+/// A gauge with constant observations has `sigma_d = 0`; as in
+/// `nse_batch_loss` the `+ eps` is what keeps it finite (dHBV's convention,
+/// and `gauge_obs_diff_std` returns `0.0` for degenerate gauges on purpose).
+fn obs_diff_term<B: Backend>(
+    p: Tensor<B, 2>,
+    o: Tensor<B, 2>,
+    sigma_d: Tensor<B, 1>,
+    eps: f32,
+) -> Tensor<B, 1> {
+    let dims = p.dims();
+    let (g, t) = (dims[0], dims[1]);
+    let device = p.device();
+    if t < 2 {
+        return Tensor::<B, 1>::zeros([1], &device);
+    }
+    let n_pair = t - 1;
+    // Observations carry no autograd, so reading them host-side to build the
+    // mask is free of graph consequences (same trick the driver's NaN filter
+    // and `landscape::objective` use).
+    let ov: Vec<f32> = o.into_data().into_vec().unwrap(); // row-major (G, T)
+    let mut wts = vec![0.0f32; g * n_pair];
+    let mut dobs = vec![0.0f32; g * n_pair];
+    let mut n_valid = 0usize;
+    for gi in 0..g {
+        for j in 0..n_pair {
+            let a = ov[gi * t + j];
+            let b = ov[gi * t + j + 1];
+            if a.is_finite() && b.is_finite() {
+                wts[gi * n_pair + j] = 1.0;
+                dobs[gi * n_pair + j] = b - a;
+                n_valid += 1;
+            }
+        }
+    }
+    if n_valid == 0 {
+        return Tensor::<B, 1>::zeros([1], &device);
+    }
+    let scale = 1.0 / n_valid as f32;
+    for w in wts.iter_mut() {
+        *w *= scale;
+    }
+    let w_t = Tensor::<B, 1>::from_data(
+        burn::tensor::TensorData::new(wts, [g * n_pair]),
+        &device,
+    )
+    .reshape([g, n_pair]);
+    let dobs_t = Tensor::<B, 1>::from_data(
+        burn::tensor::TensorData::new(dobs, [g * n_pair]),
+        &device,
+    )
+    .reshape([g, n_pair]);
+    let dsim = p.clone().slice([0..g, 1..t]) - p.slice([0..g, 0..n_pair]);
+    let resid = dsim - dobs_t;
+    let denom = sigma_d.add_scalar(eps).reshape([g, 1]); // (G, 1), broadcasts over pairs
+    ((resid.clone() * resid) * w_t / (denom.clone() * denom)).sum()
 }
 
 /// Per-gauge `λ_nnse·(1 - NNSE) + λ_kge·(1 - KGE)`, averaged over gauges.
@@ -550,6 +687,186 @@ mod tests {
         assert!(gv[1] < 0.0 && gv[3] < 0.0, "under-pred grads not negative: {gv:?}");
     }
 
+    /// `(G, T)` from ragged rows (unlike `mk`, which is fixed at 4 days).
+    fn mk_n<B: Backend>(rows: &[&[f32]]) -> Tensor<B, 2> {
+        let g = rows.len();
+        let t = rows[0].len();
+        let flat: Vec<f32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
+        Tensor::<B, 1>::from_data(TensorData::new(flat, [g * t]), &Default::default())
+            .reshape([g, t])
+    }
+
+    fn sig<B: Backend>(v: &[f32]) -> Tensor<B, 1> {
+        Tensor::<B, 1>::from_data(TensorData::new(v.to_vec(), [v.len()]), &Default::default())
+    }
+
+    /// CRITICAL GUARD: `deriv_weight = 0.0` must make `nse-batch-deriv`
+    /// numerically IDENTICAL to `nse-batch` — not merely close. This is what
+    /// lets an existing `nse-batch` result be reproduced bit-for-bit under
+    /// the new kind, and it only holds because `obs_diff_term` is always
+    /// finite (`0.0 * NaN` would be NaN).
+    #[test]
+    fn nse_batch_deriv_at_zero_weight_is_identical_to_nse_batch() {
+        let p = mk::<Bp>(&[[2.0, 0.0, 2.0, 0.0], [5.0, 5.0, 5.0, 5.0]]);
+        let o = mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0], [3.0, 3.0, 3.0, 3.0]]);
+        let sigma = sig::<Bp>(&[1.0, 2.0]);
+        let sigma_d = sig::<Bp>(&[0.5, 3.0]);
+        let base: f32 = nse_batch_loss(p.clone(), o.clone(), sigma.clone(), 0.1).into_scalar();
+        let composite: f32 =
+            nse_batch_deriv_loss(p.clone(), o.clone(), sigma, sigma_d.clone(), 0.0, 0.1)
+                .into_scalar();
+        assert_eq!(composite, base, "lambda = 0 must reproduce nse-batch exactly");
+        // ...and the same through the config dispatcher.
+        let mut cfg = LossConfig { kind: LossKind::NseBatchDeriv, ..LossConfig::default() };
+        cfg.deriv_weight = 0.0;
+        let dispatched: f32 =
+            batch_loss(p, o, &cfg, Some(sig::<Bp>(&[1.0, 2.0])), Some(sigma_d)).into_scalar();
+        assert_eq!(dispatched, base);
+        // A nonzero lambda must actually change the answer (no silent no-op).
+        let mut cfg2 = cfg.clone();
+        cfg2.deriv_weight = 0.5;
+        let with_deriv: f32 = batch_loss(
+            mk::<Bp>(&[[2.0, 0.0, 2.0, 0.0], [5.0, 5.0, 5.0, 5.0]]),
+            mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0], [3.0, 3.0, 3.0, 3.0]]),
+            &cfg2,
+            Some(sig::<Bp>(&[1.0, 2.0])),
+            Some(sig::<Bp>(&[0.5, 3.0])),
+        )
+        .into_scalar();
+        assert!(with_deriv > base, "lambda 0.5 did nothing: {with_deriv} vs {base}");
+    }
+
+    /// Hand-computed two-gauge case (eps = 0, lambda = 0.5).
+    ///
+    /// gauge 0: obs [1, 2, 4, 4]  sim [1.5, 2.0, 3.0, 5.0]
+    /// gauge 1: obs [0, 1, 3, 6]  sim [0.0, 2.0, 2.0, 6.0]
+    /// sigma = [2, 1], sigma_d = [1, 0.5]
+    ///
+    /// LEVEL (mean over 8 (day, gauge) entries of resid^2 / sigma_g^2):
+    ///   g0 resid [0.5, 0, -1, 1] -> sq sum 2.25; / 2^2 = 0.5625
+    ///   g1 resid [0, 1, -1, 0]   -> sq sum 2.00; / 1^2 = 2.0
+    ///   L_nse = (0.5625 + 2.0) / 8 = 2.5625 / 8 = 0.3203125
+    ///
+    /// DERIV (mean over all 6 adjacent pairs of (dsim - dobs)^2 / sigma_d_g^2):
+    ///   g0 dsim [0.5, 1, 2], dobs [1, 2, 0] -> diff [-0.5, -1, 2] -> sq sum 5.25; / 1^2   = 5.25
+    ///   g1 dsim [2, 0, 4],   dobs [1, 2, 3] -> diff [1, -2, 1]    -> sq sum 6.00; / 0.5^2 = 24.0
+    ///   L_deriv = (5.25 + 24.0) / 6 = 29.25 / 6 = 4.875
+    ///
+    /// TOTAL: 0.3203125 + 0.5 * 4.875 = 0.3203125 + 2.4375 = 2.7578125
+    #[test]
+    fn nse_batch_deriv_matches_hand_computation() {
+        let p = mk::<Bp>(&[[1.5, 2.0, 3.0, 5.0], [0.0, 2.0, 2.0, 6.0]]);
+        let o = mk::<Bp>(&[[1.0, 2.0, 4.0, 4.0], [0.0, 1.0, 3.0, 6.0]]);
+        let sigma = sig::<Bp>(&[2.0, 1.0]);
+        let sigma_d = sig::<Bp>(&[1.0, 0.5]);
+        let level: f32 = nse_batch_loss(p.clone(), o.clone(), sigma.clone(), 0.0).into_scalar();
+        assert!((level - 0.3203125).abs() < 1e-5, "L_nse = {level}");
+        let deriv: f32 = obs_diff_term(p.clone(), o.clone(), sigma_d.clone(), 0.0).into_scalar();
+        assert!((deriv - 4.875).abs() < 1e-5, "L_deriv = {deriv}");
+        let total: f32 = nse_batch_deriv_loss(p, o, sigma, sigma_d, 0.5, 0.0).into_scalar();
+        assert!((total - 2.7578125).abs() < 1e-5, "L = {total}");
+    }
+
+    /// A gap BREAKS the pair chain: 4 valid days split 2+2 give 2 adjacent
+    /// pairs, not `n_valid - 1 = 3` — and the NaN never reaches the
+    /// arithmetic. Mirrors `landscape::objective::adjacent_valid_pairs`.
+    #[test]
+    fn obs_diff_term_counts_adjacent_valid_pairs_only() {
+        // obs day 2 missing -> pairs {(0,1), (3,4)} only.
+        let o = mk_n::<Bp>(&[&[1.0, 2.0, f32::NAN, 4.0, 6.0]]);
+        let p = mk_n::<Bp>(&[&[1.0, 3.0, 10.0, 4.0, 5.0]]);
+        let sigma_d = sig::<Bp>(&[1.0]);
+        // pair 0: dsim 2, dobs 1 -> 1 ; pair 3: dsim 1, dobs 2 -> 1
+        // mean over the 2 valid pairs = 1.0 (the wild day-2 prediction is
+        // invisible, because every pair touching it is masked out).
+        let v: f32 = obs_diff_term(p.clone(), o, sigma_d.clone(), 0.0).into_scalar();
+        assert!(v.is_finite(), "NaN obs leaked into the term: {v}");
+        assert!((v - 1.0).abs() < 1e-5, "got {v}, want 1.0");
+        // Same series with the hole filled: 4 pairs, and day 2's prediction
+        // now costs a great deal — proof the mask is doing the work.
+        let o_full = mk_n::<Bp>(&[&[1.0, 2.0, 3.0, 4.0, 6.0]]);
+        let v_full: f32 = obs_diff_term(p, o_full, sigma_d, 0.0).into_scalar();
+        assert!((v_full - 21.75).abs() < 1e-4, "got {v_full}, want 21.75");
+    }
+
+    /// A gauge with constant observations has `sigma_d = 0`. As in
+    /// `nse_batch_loss`, `+ eps` is what keeps the denominator finite — the
+    /// term must not be NaN or Inf.
+    #[test]
+    fn zero_sigma_d_gauge_stays_finite() {
+        let p = mk::<Bp>(&[[1.0, 2.0, 4.0, 8.0]]);
+        let o = mk::<Bp>(&[[5.0, 5.0, 5.0, 5.0]]);
+        // dsim [1, 2, 4], dobs [0, 0, 0] -> mean sq 21/3 = 7; / (0 + 0.1)^2 = 700
+        let v: f32 = obs_diff_term(p.clone(), o.clone(), sig::<Bp>(&[0.0]), 0.1).into_scalar();
+        assert!(v.is_finite(), "sigma_d = 0 produced {v}");
+        assert!((v - 700.0).abs() < 1e-2, "got {v}, want 700");
+        // ...and the composite, with a degenerate sigma too (the same gauge
+        // is constant, so `gauge_obs_std` would return 0.0 as well).
+        let total: f32 =
+            nse_batch_deriv_loss(p, o, sig::<Bp>(&[0.0]), sig::<Bp>(&[0.0]), 0.5, 0.1)
+                .into_scalar();
+        assert!(total.is_finite(), "composite was {total}");
+    }
+
+    /// Gradient sanity: central-difference check of `dL/dp` on a small
+    /// two-gauge tensor. The loss is quadratic in `p`, so the central
+    /// difference has zero truncation error and `h = 1e-2` sits well above
+    /// the f32 round-off floor of the loss (~1e-7). Tolerances follow the
+    /// repo's gradcheck convention: accept on rel < 5e-3 OR abs < 1e-4.
+    #[test]
+    fn nse_batch_deriv_gradient_matches_finite_differences() {
+        const H: f32 = 1e-2;
+        const REL_TOL: f32 = 5e-3;
+        const ABS_TOL: f32 = 1e-4;
+        let base = [[1.5f32, 2.0, 3.0, 5.0], [0.0, 2.0, 2.0, 6.0]];
+        let obs = [[1.0f32, 2.0, 4.0, 4.0], [0.0, 1.0, 3.0, 6.0]];
+        let sigma = [2.0f32, 1.0];
+        let sigma_d = [1.0f32, 0.5];
+        let lam = 0.5;
+
+        let p_ad = mk::<Ad>(&base).require_grad();
+        let loss = nse_batch_deriv_loss(
+            p_ad.clone(),
+            mk::<Ad>(&obs),
+            sig::<Ad>(&sigma),
+            sig::<Ad>(&sigma_d),
+            lam,
+            0.1,
+        );
+        let grads = loss.backward();
+        let analytic: Vec<f32> = p_ad.grad(&grads).unwrap().into_data().to_vec().unwrap();
+
+        let eval = |rows: &[[f32; 4]; 2]| -> f32 {
+            nse_batch_deriv_loss(
+                mk::<Bp>(rows),
+                mk::<Bp>(&obs),
+                sig::<Bp>(&sigma),
+                sig::<Bp>(&sigma_d),
+                lam,
+                0.1,
+            )
+            .into_scalar()
+        };
+
+        for gi in 0..2 {
+            for ti in 0..4 {
+                let mut up = base;
+                up[gi][ti] += H;
+                let mut dn = base;
+                dn[gi][ti] -= H;
+                let fd = (eval(&up) - eval(&dn)) / (2.0 * H);
+                let got = analytic[gi * 4 + ti];
+                let abs = (got - fd).abs();
+                let rel = abs / fd.abs().max(1e-12);
+                assert!(
+                    rel < REL_TOL || abs < ABS_TOL,
+                    "grad mismatch at ({gi}, {ti}): analytic {got}, fd {fd} (rel {rel}, abs {abs})"
+                );
+                assert!(got != 0.0, "gradient is dead at ({gi}, {ti})");
+            }
+        }
+    }
+
     #[test]
     fn loss_denominator_matches_each_objective_mean() {
         use crate::config::LossConfig;
@@ -578,7 +895,7 @@ mod tests {
         let cfg = LossConfig::default();
         let p_all = mk::<Bp>(&[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [0.0, 0.0, 0.0, 0.0]]);
         let o_all = mk::<Bp>(&[[1.0, 1.0, 1.0, 1.0], [8.0, 8.0, 8.0, 8.0], [1.0, 2.0, 3.0, 4.0]]);
-        let pooled: f32 = batch_loss(p_all.clone(), o_all.clone(), &cfg, None).into_scalar();
+        let pooled: f32 = batch_loss(p_all.clone(), o_all.clone(), &cfg, None, None).into_scalar();
 
         // Micro 1 = gauges {0, 1}; micro 2 = gauge {2}.
         let p1 = p_all.clone().slice([0..2, 0..4]);
@@ -587,8 +904,8 @@ mod tests {
         let o2 = o_all.slice([2..3, 0..4]);
         let n1 = loss_denominator(&cfg, 2, 4) as f32;
         let n2 = loss_denominator(&cfg, 1, 4) as f32;
-        let l1_: f32 = batch_loss(p1, o1, &cfg, None).into_scalar();
-        let l2_: f32 = batch_loss(p2, o2, &cfg, None).into_scalar();
+        let l1_: f32 = batch_loss(p1, o1, &cfg, None, None).into_scalar();
+        let l2_: f32 = batch_loss(p2, o2, &cfg, None, None).into_scalar();
         let recombined = (l1_ * n1 + l2_ * n2) / (n1 + n2);
         assert!(
             (recombined - pooled).abs() <= 1e-6 * pooled.abs().max(1.0),

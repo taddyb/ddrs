@@ -81,8 +81,8 @@ mini-batches.
 ### `experiment.loss:`
 
 `LossConfig::default()`: `kind: l1`, `nnse_weight 1.0`, `kge_weight 1.0`,
-`r_weight 1.0`, `alpha_weight 1.0`, `beta_weight 1.0`, `kge_clamp 10.0`, `eps 0.1`.
-Sub-keys are kebab-case in YAML.
+`r_weight 1.0`, `alpha_weight 1.0`, `beta_weight 1.0`, `kge_clamp 10.0`, `eps 0.1`,
+`deriv_weight 0.5`. Sub-keys are kebab-case in YAML (`deriv-weight:`).
 
 | `kind` | Objective |
 |---|---|
@@ -90,6 +90,19 @@ Sub-keys are kebab-case in YAML.
 | `nnse-kge` | Per-gauge `nnse_weight·(1−NNSE) + kge_weight·(1−KGE)` |
 | `kge` | KGE term alone |
 | `nse-batch` | dHBV `NSELossBatch`: mean over valid (day, gauge) of `(sim−obs)²/(σ_gauge+eps)²`, σ fixed over the training period |
+| `nse-batch-deriv` | `nse-batch` + `deriv_weight` × the same mean over ADJACENT valid (day, gauge) pairs of `((dsim−dobs)²/(σ_d,gauge+eps)²)`, `σ_d` = per-gauge observed consecutive-day-difference std, fixed over the training period |
+
+`nse-batch-deriv` exists because the landscape curvature probe measured the loss
+curvature in Manning's `n` to be governed by the mean square of the hydrograph's
+TIME DERIVATIVE (findings §25); §26 predicted a derivative term deepens that
+valley ~3.7× at `deriv-weight: 0.5` (the default). `deriv-weight: 0.0` reduces it
+to exactly `nse-batch` (guarded by
+`nse_batch_deriv_at_zero_weight_is_identical_to_nse_batch`); a negative or
+non-finite weight is a config-load error. It is the trainable twin of the
+LANDSCAPE study's `nse-deriv` measurement objective — same adjacent-pair rule
+(a gap BREAKS the chain), same population `σ_d`. It costs one extra full-window
+observation read at open (`MeritGagesDataset::gauge_obs_diff_std`, gated so no
+other kind pays for it).
 
 `kge_clamp` exists because a single near-constant gauge once drove batch loss to
 ~1e4.
