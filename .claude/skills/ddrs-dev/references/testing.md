@@ -77,9 +77,12 @@ Exit 0, no drift warnings.
 
 `.github/workflows/ci.yml`, on every PR and master push (no path filters:
 required checks must never be skipped): job `test` = debug
-`cargo test --features fixtures --no-fail-fast` (~12–17 min cold; warm is
-shorter); job `acceptance` = release `compare_ddr_sandbox` +
-`juniata_acceptance` (~25 min cold; warm is shorter). The acceptance job
+`cargo test --features fixtures --no-fail-fast` (13 min warm, 12–17 min
+cold); job `acceptance` = release `compare_ddr_sandbox` +
+`juniata_acceptance` (17 min warm, ~25 min cold). Warm is only modestly
+faster because `rust-cache` keeps dependency artifacts only: the ddrs
+crate and every test binary rebuild on each run (measured 2026-09-04,
+runs 33817851139 cold and 33830503587 warm). The acceptance job
 builds with `CARGO_PROFILE_RELEASE_LTO=false` (env override in the workflow
 only): the thin-LTO link of the test binary was 30 of 40 minutes on the
 2-core runner while the 30 training epochs took ~13 s, so the training is

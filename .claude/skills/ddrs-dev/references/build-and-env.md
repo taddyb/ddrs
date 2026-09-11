@@ -14,6 +14,14 @@ Verified against `Cargo.toml` and source on 2026-07-30.
   `src/routing/mmc.rs`, `src/cli/run.rs`, `src/training/driver.rs`,
   `src/cli/system.rs`. CPU *execution* is supported via `--backend cpu`; CPU-only
   *compilation* is not. (`docs/setup.md` claims otherwise — it is wrong.)
+  Two facts from the 2026-09-03 CI bring-up that apply to any CPU-only box:
+  the toolkit must be **CUDA 12.4 or newer** (`src/sparse/cusparse.rs` calls
+  `cusparseSpSV_updateMatrix`, absent from Ubuntu's `nvidia-cuda-toolkit`
+  12.0 package: link error), and **`libcuda.so` must be loadable at test
+  runtime** even with no GPU: `cudarc` dlopens it and panics outright when the
+  library is missing, before any `Result`-based "no device" handling runs.
+  With it present (`libnvidia-compute-<driver>` on Ubuntu, no DKMS needed),
+  `cuInit()` fails gracefully and the CUDA tests skip.
 
 If a system HDF5 leaks into the static build: `unset HDF5_DIR; unset NETCDF_DIR`.
 
