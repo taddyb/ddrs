@@ -51,9 +51,14 @@ pub struct Objective<'a, I: Backend> {
     /// false when it is fixed at `params.defaults` for this arm. See
     /// `Objective::active`.
     active: [bool; 3],
-    /// Which per-window loss `forward_loss` builds: "nse-batch" or "kge".
-    /// Validated against `landscape::VALID_OBJECTIVES` before this is built.
+    /// Which per-window loss `forward_loss` builds: "nse-batch", "kge" or
+    /// "nse-deriv". Validated against `landscape::VALID_OBJECTIVES` before
+    /// this is built.
     objective: String,
+    /// `lambda` on the time-derivative term of the `"nse-deriv"` objective.
+    /// Ignored (never read) for every other objective, so an `nse-batch` or
+    /// `kge` study is byte-identical to one built before this field existed.
+    deriv_weight: f32,
 }
 
 /// Result of one objective evaluation.
@@ -116,6 +121,7 @@ where
         window_starts: &[usize],
         window_days: usize,
         objective: &str,
+        deriv_weight: f32,
     ) -> Result<Self, BoxError> {
         let device = &ctx.device;
         let ranges = [
@@ -210,7 +216,7 @@ where
             let end = start + Duration::days(window_days.saturating_sub(1) as i64);
             return Err(Box::new(NoValidObservations { start, end }));
         }
-        Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active, objective: objective.to_string() })
+        Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active, objective: objective.to_string(), deriv_weight })
     }
 
     pub fn n_reach(&self) -> usize {
@@ -328,17 +334,20 @@ where
                     crate::training::loss::nnse_kge_loss(p_valid, o_valid, 0.0, 1.0, self.eps)
                 }
                 _ => {
-                    let mut wts = vec![0.0f32; d];
-                    let mut obs_f = vec![0.0f32; d];
-                    for &i in &valid {
-                        wts[i] = 1.0 / valid.len() as f32;
-                        obs_f[i] = w.obs[i];
+                    // "nse-batch" (the `_` arm proper) and "nse-deriv",
+                    // which is the same level term plus `lambda` times the
+                    // time-derivative term. At `lambda = 0` — or on a window
+                    // with too few adjacent valid pairs for `sigma_d` —
+                    // `nse-deriv` reduces to exactly `nse-batch`.
+                    let level = nse_batch_window_loss::<AD<I>>(daily.clone(), &w.obs, &valid, self.sigma, self.eps, device);
+                    if self.objective == crate::experiment::landscape::OBJECTIVE_NSE_DERIV {
+                        match deriv_window_loss::<AD<I>>(daily.clone(), &w.obs, &valid, self.eps, device) {
+                            Some(deriv) => level + deriv.mul_scalar(self.deriv_weight),
+                            None => level,
+                        }
+                    } else {
+                        level
                     }
-                    let w_t = Tensor::<AD<I>, 1>::from_floats(wts.as_slice(), device).reshape([1, d]);
-                    let o_t = Tensor::<AD<I>, 1>::from_floats(obs_f.as_slice(), device).reshape([1, d]);
-                    let denom = (self.sigma + self.eps) * (self.sigma + self.eps);
-                    let sq = (daily.clone() - o_t).powf_scalar(2.0) * w_t;
-                    sq.sum() / denom
                 }
             };
             total = Some(match total {
@@ -469,6 +478,97 @@ where
         }
         s
     }
+}
+
+/// NSE-batch level loss for one window: `sum_i w_i (sim_i - obs_i)^2 /
+/// (sigma + eps)^2` with `w_i = 1/n_valid` on the valid days and `0`
+/// elsewhere. `daily` is `(1, d)`; masking is a dense elementwise multiply
+/// rather than a gather so the whole thing stays differentiable in `daily`.
+/// Pure tensor algebra — no I/O — so it's unit-tested below without a
+/// trained checkpoint.
+fn nse_batch_window_loss<B: Backend>(
+    daily: Tensor<B, 2>,
+    obs: &[f32],
+    valid: &[usize],
+    sigma: f32,
+    eps: f32,
+    device: &B::Device,
+) -> Tensor<B, 1> {
+    let d = daily.dims()[1];
+    let mut wts = vec![0.0f32; d];
+    let mut obs_f = vec![0.0f32; d];
+    for &i in valid {
+        wts[i] = 1.0 / valid.len() as f32;
+        obs_f[i] = obs[i];
+    }
+    let w_t = Tensor::<B, 1>::from_floats(wts.as_slice(), device).reshape([1, d]);
+    let o_t = Tensor::<B, 1>::from_floats(obs_f.as_slice(), device).reshape([1, d]);
+    let denom = (sigma + eps) * (sigma + eps);
+    let sq = (daily - o_t).powf_scalar(2.0) * w_t;
+    sq.sum() / denom
+}
+
+/// Indices `j` in `0..d-1` where BOTH day `j` and day `j+1` are valid — the
+/// pair set of the `"nse-deriv"` derivative term. Derived from the same
+/// `valid` day list the level term uses, so the two terms can never
+/// disagree about which days count. With non-contiguous valid days (a NaN
+/// in the middle of the window) this is strictly fewer than
+/// `valid.len() - 1` pairs. Pure — unit-tested below.
+fn adjacent_valid_pairs(valid: &[usize], d: usize) -> Vec<usize> {
+    let mut is_valid = vec![false; d];
+    for &i in valid {
+        is_valid[i] = true;
+    }
+    (0..d.saturating_sub(1)).filter(|&j| is_valid[j] && is_valid[j + 1]).collect()
+}
+
+/// Time-derivative term for one window: `sum_j wd_j (dsim_j - dobs_j)^2 /
+/// (sigma_d + eps)^2` over the ADJACENT valid pairs `j` (both `j` and `j+1`
+/// in `valid`), with `wd_j = 1/n_pairs` and `dx_j = x_{j+1} - x_j` on the
+/// daily series. `sigma_d` is the population standard deviation of the
+/// OBSERVED differences over those pairs — observations only, so it is
+/// constant in `alpha` and the landscape stays a fixed objective (same
+/// convention as `dataset::gauge_obs_std`, which divides by `n`).
+///
+/// Returns `None` — meaning "contribute only the level term for this
+/// window", never a NaN — when the window has fewer than two valid pairs or
+/// `sigma_d` is not finite and positive.
+///
+/// Like `nse_batch_window_loss` the masking is dense (`(1, d-1)` weight and
+/// observed-difference vectors, zero at invalid pairs) so no gather is
+/// needed and the term is differentiable in `daily`.
+fn deriv_window_loss<B: Backend>(
+    daily: Tensor<B, 2>,
+    obs: &[f32],
+    valid: &[usize],
+    eps: f32,
+    device: &B::Device,
+) -> Option<Tensor<B, 1>> {
+    let d = daily.dims()[1];
+    if d < 2 {
+        return None;
+    }
+    let pairs = adjacent_valid_pairs(valid, d);
+    if pairs.len() < 2 {
+        return None;
+    }
+    let dobs: Vec<f32> = pairs.iter().map(|&j| obs[j + 1] - obs[j]).collect();
+    let mean_d = dobs.iter().sum::<f32>() / pairs.len() as f32;
+    let sigma_d = (dobs.iter().map(|v| (v - mean_d).powi(2)).sum::<f32>() / pairs.len() as f32).sqrt();
+    if !sigma_d.is_finite() || sigma_d <= 0.0 {
+        return None;
+    }
+    let mut wts = vec![0.0f32; d - 1];
+    let mut obs_d = vec![0.0f32; d - 1];
+    for (&j, &o) in pairs.iter().zip(dobs.iter()) {
+        wts[j] = 1.0 / pairs.len() as f32;
+        obs_d[j] = o;
+    }
+    let w_t = Tensor::<B, 1>::from_floats(wts.as_slice(), device).reshape([1, d - 1]);
+    let o_t = Tensor::<B, 1>::from_floats(obs_d.as_slice(), device).reshape([1, d - 1]);
+    let dsim = daily.clone().slice([0..1, 1..d]) - daily.slice([0..1, 0..d - 1]);
+    let denom = (sigma_d + eps) * (sigma_d + eps);
+    Some(((dsim - o_t).powf_scalar(2.0) * w_t).sum() / denom)
 }
 
 /// True when `obs[i]` is finite and non-negative for at least one `i` in
@@ -764,6 +864,87 @@ mod tests {
         let f = trained_field::<TestBackend>(None, [0.0, 10.0], false, 21.0, 4, &device);
         let v: Vec<f32> = f.into_data().to_vec::<f32>().unwrap();
         assert_eq!(v, vec![21.0, 21.0, 21.0, 21.0]);
+    }
+
+    /// Scalar value of a `(1,)` loss tensor.
+    fn scalar(t: Tensor<TestBackend, 1>) -> f32 {
+        t.into_data().to_vec::<f32>().unwrap()[0]
+    }
+
+    /// Critical regression guard: at `lambda = 0` the `nse-deriv` objective
+    /// must be numerically identical to `nse-batch` on the same input, so a
+    /// bundle can be re-run with the new objective and a zero weight and
+    /// reproduce the existing landscape exactly.
+    #[test]
+    fn deriv_term_at_zero_weight_is_identical_to_nse_batch() {
+        let device = Default::default();
+        let obs = [1.0f32, 2.0, 4.0, 4.0, 3.0, 5.0];
+        let sim = [1.5f32, 2.0, 3.0, 5.0, 3.5, 4.0];
+        let valid: Vec<usize> = (0..obs.len()).collect();
+        let daily = Tensor::<TestBackend, 1>::from_floats(sim.as_slice(), &device).reshape([1, obs.len()]);
+        let level = scalar(nse_batch_window_loss::<TestBackend>(daily.clone(), &obs, &valid, 2.0, 0.1, &device));
+        let deriv = deriv_window_loss::<TestBackend>(daily, &obs, &valid, 0.1, &device).expect("valid pairs exist");
+        let total = level + scalar(deriv) * 0.0;
+        assert_eq!(total, level, "lambda = 0 must reproduce nse-batch exactly");
+    }
+
+    /// Hand-computed window (sigma = 2, eps = 0, lambda = 0.5):
+    ///   sim  = [1.5, 2.0, 3.0, 5.0], obs = [1.0, 2.0, 4.0, 4.0]
+    ///   L_nse   = mean(0.25, 0, 1, 1) / 2^2 = 0.5625 / 4 = 0.140625
+    ///   dsim = [0.5, 1.0, 2.0], dobs = [1.0, 2.0, 0.0]
+    ///   mean(dobs) = 1, sigma_d^2 = (0 + 1 + 1)/3 = 2/3
+    ///   L_deriv = mean(0.25, 1, 4) / (2/3) = 1.75 * 1.5 = 2.625
+    ///   L       = 0.140625 + 0.5 * 2.625 = 1.453125
+    #[test]
+    fn deriv_objective_matches_hand_computed_window() {
+        let device = Default::default();
+        let obs = [1.0f32, 2.0, 4.0, 4.0];
+        let sim = [1.5f32, 2.0, 3.0, 5.0];
+        let valid: Vec<usize> = (0..obs.len()).collect();
+        let daily = Tensor::<TestBackend, 1>::from_floats(sim.as_slice(), &device).reshape([1, obs.len()]);
+        let level = scalar(nse_batch_window_loss::<TestBackend>(daily.clone(), &obs, &valid, 2.0, 0.0, &device));
+        let deriv = scalar(deriv_window_loss::<TestBackend>(daily, &obs, &valid, 0.0, &device).expect("3 valid pairs"));
+        assert!((level - 0.140625).abs() < 1e-5, "L_nse = {level}");
+        assert!((deriv - 2.625).abs() < 1e-5, "L_deriv = {deriv}");
+        let total = level + 0.5 * deriv;
+        assert!((total - 1.453125).abs() < 1e-5, "L = {total}");
+    }
+
+    /// A NaN in the middle breaks the pair chain: 5 valid days with a gap
+    /// give 3 ADJACENT pairs, not `n_valid - 1 = 4`.
+    #[test]
+    fn pair_set_counts_adjacent_valid_days_only() {
+        let obs = [1.0f32, 2.0, f32::NAN, 4.0, 5.0, 6.0];
+        let valid: Vec<usize> = (0..obs.len()).filter(|&i| obs[i].is_finite()).collect();
+        assert_eq!(valid, vec![0, 1, 3, 4, 5]);
+        let pairs = adjacent_valid_pairs(&valid, obs.len());
+        assert_eq!(pairs, vec![0, 3, 4]);
+        assert_eq!(pairs.len(), 3, "must not be n_valid - 1 = 4");
+    }
+
+    /// Fewer than two adjacent valid pairs (here: one) leaves `sigma_d`
+    /// undefined, so the window contributes only its level term instead of
+    /// a NaN.
+    #[test]
+    fn deriv_term_is_skipped_when_too_few_pairs() {
+        let device = Default::default();
+        let obs = [1.0f32, 2.0, f32::NAN, 4.0];
+        let sim = [1.5f32, 2.0, 3.0, 5.0];
+        let valid = vec![0usize, 1, 3];
+        let daily = Tensor::<TestBackend, 1>::from_floats(sim.as_slice(), &device).reshape([1, obs.len()]);
+        assert!(deriv_window_loss::<TestBackend>(daily, &obs, &valid, 0.1, &device).is_none());
+    }
+
+    /// Constant observed differences give `sigma_d = 0`, which would divide
+    /// by `eps^2` (or by zero at `eps = 0`); the term is skipped instead.
+    #[test]
+    fn deriv_term_is_skipped_when_sigma_d_is_zero() {
+        let device = Default::default();
+        let obs = [1.0f32, 2.0, 3.0, 4.0];
+        let sim = [1.5f32, 2.0, 3.0, 5.0];
+        let valid: Vec<usize> = (0..obs.len()).collect();
+        let daily = Tensor::<TestBackend, 1>::from_floats(sim.as_slice(), &device).reshape([1, obs.len()]);
+        assert!(deriv_window_loss::<TestBackend>(daily, &obs, &valid, 0.1, &device).is_none());
     }
 
     #[test]
