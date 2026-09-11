@@ -1051,6 +1051,15 @@ Lines 147 and 386 describe an `init → plan → run` lifecycle. `ddrs init` is 
 
 The `src/adjacency/` file table at lines 147-155 omits `gridded.rs` (DDM30 sub-reach network relabelling) and `subdivide.rs` (the off-by-default length normalization). Add both rows.
 
+Also fix its `src/bin/` inventory near line 100, found during Task 4's review. It says
+`src/bin/` holds **ten** binaries and lists ten, but `ls src/bin/` returns **twelve**:
+`probe_courant.rs` and `probe_n_slope.rs` are missing. Rather than correcting the count
+to twelve, which drifts again on the next binary, name the families the way Task 4's
+diagram now does: `ddrs` (primary CLI), the three legacy binaries
+(`train`/`eval`/`train_and_test`), `dump_parameters`, the `pretrain_disagg*` family,
+and the `probe_*` family. Adding a binary to an existing family then cannot falsify the
+text, while a genuinely new family stays visible.
+
 - [ ] **Step 8: Fix `docs/usage/running.md`**
 
 The CLI reference documents `plan`, `run`, `show`, `status`, `gc`, `sources` and `import` exhaustively and never mentions `ddrs experiment`. Add it, listing the flags from `src/bin/ddrs.rs` (name, bundle, backend, arms, max_gauges, skip_validate, jobs, dry_run, shard) and naming the two studies. Also add `use_grad_accum` and `grad_accum_steps` wherever the training configuration is covered.
