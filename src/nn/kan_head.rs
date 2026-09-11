@@ -46,6 +46,10 @@ use burn::tensor::TensorData;
 const XAVIER_GAIN_OUTPUT: f64 = 0.1;
 /// pykan MultKAN default; matches DDR's `KAN([H, H], ...)` noise_scale default.
 const KAN_NOISE_SCALE: f64 = 0.3;
+/// Seed offset between parameter-group trunks. Arbitrary large odd number;
+/// group 0 keeps `seed` unchanged so a one-group config is bit-identical to
+/// the shared head.
+const GROUP_SEED_STRIDE: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Configuration for the KAN head.
 #[derive(Config, Debug)]
@@ -61,6 +65,64 @@ pub struct KanHeadConfig {
     /// **every** inner KanLayer (DDR-Python quirk: same seed all blocks,
     /// `kan.py:24-34`).
     pub seed: u64,
+
+    /// Optional partition of `learnable_parameters` into independently
+    /// parameterized trunks. Empty (the default) = one shared trunk feeding
+    /// every output, which is the historical architecture and is preserved
+    /// byte-for-byte.
+    ///
+    /// When non-empty the groups must partition `learnable_parameters`
+    /// exactly (every name once, no extras). Each group gets its own
+    /// `Linear(F, H) -> KanLayer(H, H) x num_hidden_layers -> Linear(H, P_g)`,
+    /// so no weight is shared between groups and the outputs of one group
+    /// cannot be an affine relabelling of another group's latent direction.
+    ///
+    /// Group 0 is seeded with `seed` (so a single group reproduces the shared
+    /// head exactly); group `i > 0` with `seed + i * GROUP_SEED_STRIDE`.
+    #[config(default = "Vec::new()")]
+    pub parameter_groups: Vec<Vec<String>>,
+
+    /// Replace the `Linear(F, H)` input projection with a `KanLayer(F, H)`.
+    ///
+    /// `false` (default) is the DDR-parity architecture. `true` makes the
+    /// first layer a true Kolmogorov-Arnold layer: each raw attribute gets
+    /// its own learned univariate spline per edge instead of being linearly
+    /// mixed before any nonlinearity is applied.
+    ///
+    /// Breaks DDR `kan.py` parity by construction — an experiment arm, not a
+    /// default. The dead `Linear(F, H)` is still allocated so the record
+    /// layout stays additive; it receives no gradient.
+    #[config(default = false)]
+    pub input_layer_kan: bool,
+
+    /// Replace the `Linear(H, P)` read-out with a `KanLayer(H, P)`.
+    ///
+    /// `false` (default) is the DDR-parity architecture, under which every
+    /// output is an affine functional of one shared latent `h`:
+    /// `logit(param_j) = w_j · h + b_j`. When the informative part of `h` is
+    /// effectively one direction, any two outputs are then *exactly* affinely
+    /// related — the mechanism measured in
+    /// `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §31
+    /// (`logit(q) = 3.979 · logit(n) + 2.752`, R² = 0.987).
+    ///
+    /// `true` gives every output its own spline coefficients on every edge
+    /// (`y[o] = Σ_i sb[i,o]·SiLU(h[i]) + sp[i,o]·spline_{i,o}(h[i])`), so two
+    /// outputs reading the same `h` are no longer forced into an affine
+    /// relationship. Also breaks DDR parity.
+    #[config(default = false)]
+    pub output_layer_kan: bool,
+
+    /// B-spline grid range for the *boundary* KanLayers only (the optional
+    /// KAN input embedding and KAN read-out). Inner trunk KanLayers keep
+    /// rskan's `[-1, 1]` default for DDR parity.
+    ///
+    /// Widened from `[-1, 1]` because the boundary layers see z-scored
+    /// attributes (roughly ±4) and unnormalised trunk activations. Outside
+    /// the grid the spline term flattens and only the `scale_base · SiLU`
+    /// path survives, which is affine-in-SiLU(h) and would quietly reinstate
+    /// the very coupling `output_layer_kan` exists to remove.
+    #[config(default = "[-3.0, 3.0]")]
+    pub kan_grid_range: [f64; 2],
 
     /// Hidden layer width. `21` per `config/merit_training.yaml`.
     #[config(default = 21)]
@@ -108,31 +170,58 @@ pub struct KanHeadConfig {
 }
 
 impl KanHeadConfig {
-    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe
-    /// using a project-controlled `StdRng` seeded from `self.seed`. See
-    /// `src/nn/init.rs` for the sampling formulas.
+    /// Resolve `parameter_groups` into the concrete partition this head will
+    /// build, validating that it covers `learnable_parameters` exactly.
     ///
-    /// The same `self.seed` is also passed to every inner `KanLayer` — see
-    /// the module-level docstring for why.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> KanHead<B> {
+    /// Empty `parameter_groups` (the default) yields a single group holding
+    /// every parameter in config order — the historical shared trunk.
+    fn resolved_groups(&self) -> Vec<Vec<String>> {
+        if self.parameter_groups.is_empty() {
+            return vec![self.learnable_parameters.clone()];
+        }
+        let flat: Vec<&String> = self.parameter_groups.iter().flatten().collect();
+        let mut seen = std::collections::HashSet::new();
+        for name in &flat {
+            assert!(
+                seen.insert((*name).clone()),
+                "kan_head.parameter_groups: `{name}` appears in more than one group"
+            );
+            assert!(
+                self.learnable_parameters.contains(name),
+                "kan_head.parameter_groups: `{name}` is not in learnable_parameters"
+            );
+        }
+        for name in &self.learnable_parameters {
+            assert!(
+                seen.contains(name),
+                "kan_head.parameter_groups: `{name}` is in learnable_parameters \
+                 but not assigned to any group"
+            );
+        }
         assert!(
-            !self.input_var_names.is_empty(),
-            "input_var_names must be non-empty"
+            self.parameter_groups.iter().all(|g| !g.is_empty()),
+            "kan_head.parameter_groups: groups must be non-empty"
         );
-        assert!(
-            !self.learnable_parameters.is_empty(),
-            "learnable_parameters must be non-empty"
-        );
+        self.parameter_groups.clone()
+    }
 
+    /// Build one independent trunk emitting `p` outputs, seeded with `seed`.
+    ///
+    /// With `input_layer_kan` / `output_layer_kan` both false and
+    /// `seed == self.seed` this is bit-identical to the pre-2026-09-11 head:
+    /// the same single `StdRng` draws the input Kaiming weight then the output
+    /// Xavier weight, in that order.
+    fn init_trunk<B: Backend>(&self, p: usize, seed: u64, device: &B::Device) -> Trunk<B> {
         let f = self.input_var_names.len();
         let h = self.hidden_size;
-        let p = self.learnable_parameters.len();
 
         // Single StdRng controls both Linears so their bytes are reproducible
         // at fixed `seed`. The inner KanLayers each get the same `seed`
         // directly (rskan reseeds internally) — they do NOT consume from this
-        // RNG.
-        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
+        // RNG. The Linears are built even when their KAN replacements are
+        // active: they then carry no gradient, but keeping them unconditional
+        // keeps the record layout additive and the RNG stream stable.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
         let input_weight = crate::nn::init::sample_kaiming_normal_relu(&mut rng, f, h);
         let output_weight =
@@ -151,11 +240,66 @@ impl KanHeadConfig {
         // constructor. See migration spec §8.3.
         let hidden: Vec<KanLayer<B>> = (0..self.num_hidden_layers)
             .map(|_| {
-                KanLayerConfig::new(self.hidden_size, self.hidden_size, self.seed)
+                KanLayerConfig::new(h, h, seed)
                     .with_num(self.grid)
                     .with_k(self.k)
                     .with_noise_scale(KAN_NOISE_SCALE)
                     .init(device)
+            })
+            .collect();
+
+        // Boundary KanLayers get the widened grid range — see
+        // `KanHeadConfig::kan_grid_range`.
+        let boundary = |i: usize, o: usize| {
+            KanLayerConfig::new(i, o, seed)
+                .with_num(self.grid)
+                .with_k(self.k)
+                .with_noise_scale(KAN_NOISE_SCALE)
+                .with_grid_range(self.kan_grid_range)
+                .init::<B>(device)
+        };
+        let input_kan = self.input_layer_kan.then(|| boundary(f, h));
+        let output_kan = self.output_layer_kan.then(|| boundary(h, p));
+
+        Trunk {
+            input,
+            hidden,
+            output,
+            input_kan,
+            output_kan,
+        }
+    }
+
+    /// Build the KAN head, initializing parameters per the DDR `kan.py` recipe
+    /// using a project-controlled `StdRng` seeded from `self.seed`. See
+    /// `src/nn/init.rs` for the sampling formulas.
+    ///
+    /// The same `self.seed` is also passed to every inner `KanLayer` — see
+    /// the module-level docstring for why.
+    pub fn init<B: Backend>(&self, device: &B::Device) -> KanHead<B> {
+        assert!(
+            !self.input_var_names.is_empty(),
+            "input_var_names must be non-empty"
+        );
+        assert!(
+            !self.learnable_parameters.is_empty(),
+            "learnable_parameters must be non-empty"
+        );
+
+        let groups = self.resolved_groups();
+
+        // Group 0 keeps `self.seed` so a one-group config reproduces the
+        // shared head exactly; later groups are offset so their trunks are
+        // independent rather than identical copies.
+        let trunk0 = self.init_trunk::<B>(groups[0].len(), self.seed, device);
+        let extra: Vec<Trunk<B>> = groups[1..]
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let seed = self
+                    .seed
+                    .wrapping_add((i as u64 + 1).wrapping_mul(GROUP_SEED_STRIDE));
+                self.init_trunk::<B>(g.len(), seed, device)
             })
             .collect();
 
@@ -177,12 +321,69 @@ impl KanHeadConfig {
         };
 
         KanHead {
-            input,
-            hidden,
-            output,
-            learnable_parameters: self.learnable_parameters.clone(),
+            input: trunk0.input,
+            hidden: trunk0.hidden,
+            output: trunk0.output,
+            // Column order follows the group partition, so the HashMap split
+            // in `forward` stays a straight index walk.
+            learnable_parameters: groups.concat(),
             disagg,
+            input_kan: trunk0.input_kan,
+            output_kan: trunk0.output_kan,
+            extra,
         }
+    }
+}
+
+/// One independent parameter-group trunk:
+/// `(Linear | KanLayer)(F, H) -> KanLayer(H, H) x num_hidden_layers ->
+/// (Linear | KanLayer)(H, P_g)`.
+///
+/// Group 0's fields are held flat on [`KanHead`] rather than in a `Trunk`, so
+/// that checkpoints written before parameter groups existed still load.
+#[derive(Module, Debug)]
+pub struct Trunk<B: Backend> {
+    pub input: Linear<B>,
+    pub hidden: Vec<KanLayer<B>>,
+    pub output: Linear<B>,
+    /// `Some` replaces `input` with a true KAN embedding layer.
+    pub input_kan: Option<KanLayer<B>>,
+    /// `Some` replaces `output` with a KAN read-out.
+    pub output_kan: Option<KanLayer<B>>,
+}
+
+/// Forward one trunk: attributes `[N, F]` -> pre-sigmoid logits `[N, P_g]`.
+fn trunk_forward<B: Backend>(
+    input: &Linear<B>,
+    input_kan: &Option<KanLayer<B>>,
+    hidden: &[KanLayer<B>],
+    output: &Linear<B>,
+    output_kan: &Option<KanLayer<B>>,
+    inputs: Tensor<B, 2>,
+) -> Tensor<B, 2> {
+    let mut x = match input_kan {
+        Some(k) => k.forward(inputs),
+        None => input.forward(inputs),
+    };
+    for layer in hidden {
+        x = layer.forward(x);
+    }
+    match output_kan {
+        Some(k) => k.forward(x),
+        None => output.forward(x),
+    }
+}
+
+impl<B: Backend> Trunk<B> {
+    fn forward(&self, inputs: Tensor<B, 2>) -> Tensor<B, 2> {
+        trunk_forward(
+            &self.input,
+            &self.input_kan,
+            &self.hidden,
+            &self.output,
+            &self.output_kan,
+            inputs,
+        )
     }
 }
 
@@ -194,11 +395,22 @@ pub struct KanHead<B: Backend> {
     pub output: Linear<B>,
     /// Names of output parameters in column order — used to build the output
     /// HashMap. Carried as state so the head round-trips through a record
-    /// without requiring callers to re-supply the keys.
-    learnable_parameters: Vec<String>,
-    /// Optional learnable daily→hourly forcing disaggregation (None = flat
+    /// without requiring callers to re-supply the keys. When
+    /// `kan_head.parameter_groups` is set this is the group concatenation,
+    /// not the raw config order.
+    ///
+    /// `pub(crate)` so the legacy-record upgrade path in
+    /// `training::checkpoint` can carry it across with struct-update syntax.
+    pub(crate) learnable_parameters: Vec<String>,
+    /// Optional learnable daily->hourly forcing disaggregation (None = flat
     /// `repeat-24`). Trained/checkpointed/loaded with the rest of the head.
     pub disagg: Option<DisaggHead<B>>,
+    /// `Some` replaces `input` with a true KAN embedding layer (group 0).
+    pub input_kan: Option<KanLayer<B>>,
+    /// `Some` replaces `output` with a KAN read-out (group 0).
+    pub output_kan: Option<KanLayer<B>>,
+    /// Trunks for parameter groups 1.., empty for the shared-trunk head.
+    pub extra: Vec<Trunk<B>>,
 }
 
 impl<B: Backend> KanHead<B> {
@@ -212,13 +424,33 @@ impl<B: Backend> KanHead<B> {
     ///
     /// **No inter-block ReLU**, matching DDR's `kan.py:53` direct chaining
     /// of `KAN([H, H])` modules.
+    ///
+    /// With extra parameter-group trunks the groups are forwarded
+    /// independently and their logits concatenated in group order, which is
+    /// the order `learnable_parameters` already carries.
     pub fn forward(&self, inputs: Tensor<B, 2>) -> HashMap<String, Tensor<B, 1>> {
-        let mut x = self.input.forward(inputs);
-        for layer in &self.hidden {
-            x = layer.forward(x);
-        }
-        let logits = self.output.forward(x); // [N, P]
-        let probs = sigmoid(logits); // [N, P] ∈ (0, 1)
+        let logits0 = trunk_forward(
+            &self.input,
+            &self.input_kan,
+            &self.hidden,
+            &self.output,
+            &self.output_kan,
+            inputs.clone(),
+        );
+        // Skip the concat entirely in the single-trunk case: `Tensor::cat` of
+        // one tensor should be a no-op, but not going through it at all is a
+        // stronger guarantee that the historical path is untouched.
+        let logits = if self.extra.is_empty() {
+            logits0
+        } else {
+            let mut parts = Vec::with_capacity(self.extra.len() + 1);
+            parts.push(logits0);
+            for t in &self.extra {
+                parts.push(t.forward(inputs.clone()));
+            }
+            Tensor::cat(parts, 1)
+        };
+        let probs = sigmoid(logits); // [N, P] in (0, 1)
 
         let dims = probs.dims();
         let n = dims[0];
@@ -241,6 +473,22 @@ impl<B: Backend> KanHead<B> {
             out.insert(key.clone(), row);
         }
         out
+    }
+
+    /// Trunk activations `h` for group 0: attributes `[N, F]` -> `[N, H]`,
+    /// i.e. everything up to but excluding the read-out layer.
+    ///
+    /// Exposed for the head-architecture diagnostics (§31): the collapse
+    /// question is about the rank of `h` and how the read-out reads it.
+    pub fn trunk_activations(&self, inputs: Tensor<B, 2>) -> Tensor<B, 2> {
+        let mut x = match &self.input_kan {
+            Some(k) => k.forward(inputs),
+            None => self.input.forward(inputs),
+        };
+        for layer in &self.hidden {
+            x = layer.forward(x);
+        }
+        x
     }
 
     /// Names of output parameters in column order. Useful for tests + callers
@@ -380,6 +628,11 @@ mod fixture {
                 output,
                 learnable_parameters: cfg.learnable_parameters.clone(),
                 disagg: None,
+                // The DDR fixture is the shared-trunk, all-Linear head by
+                // construction — parity is defined against that architecture.
+                input_kan: None,
+                output_kan: None,
+                extra: Vec::new(),
             })
         }
     }

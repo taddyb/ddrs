@@ -98,6 +98,63 @@ fn dump_load_merged_stats(
 /// into physical units, and write `(COMID, n, q_spatial, p_spatial, slope)`
 /// NetCDF4 to `output_path`. Returns the number of reaches written.
 ///
+/// Load the z-scored CONUS attribute matrix the KAN head consumes, in
+/// `parent_order` (per-COMID) order.
+///
+/// Factored out of [`dump`]/[`dump_init`] so head-architecture diagnostics can
+/// evaluate candidate heads over the real attribute distribution without
+/// running a routing forward pass. Returns `((N, F) attributes, COMID order)`.
+pub fn load_conus_attributes(
+    cfg: &Config,
+    input_var_names: &[String],
+) -> Result<(Array2<f32>, Vec<i64>), CliError> {
+    let ds = cfg
+        .data_sources
+        .as_ref()
+        .expect("data_sources section required");
+
+    let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "<config>".into(),
+        source: "conus_adjacency not resolved — invoke via `ddrs run --plot` \
+                 (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                 explicitly"
+            .into(),
+    })?;
+    eprintln!("opening CONUS adjacency: {}", conus_path.display());
+    let conus = ConusAdjacencyStore::open(conus_path).map_err(|e| CliError::Other(Box::new(e)))?;
+    let n_reaches = conus.n_parent();
+    eprintln!("CONUS reaches: {n_reaches}");
+
+    eprintln!("opening attributes: {} file(s)", ds.attributes.len());
+    let (attrs, means, stds) = open_attrs_and_stats(ds, input_var_names, &conus.parent_order)
+        .map_err(|e| CliError::Other(Box::new(e)))?;
+
+    let f = input_var_names.len();
+    let mut a: Array2<f32> = Array2::zeros((f, n_reaches));
+    for (out_col, comid) in conus.parent_order.iter().enumerate() {
+        if let Some(src_col) = attrs.index.position(comid) {
+            for fi in 0..f {
+                a[(fi, out_col)] = attrs.attrs[(fi, src_col)];
+            }
+        } else {
+            for fi in 0..f {
+                a[(fi, out_col)] = f32::NAN;
+            }
+        }
+    }
+    fill_nans(a.view_mut(), &attrs.row_means);
+    for fi in 0..f {
+        let (m, sd) = (means[fi], stds[fi]);
+        for col in 0..n_reaches {
+            a[(fi, col)] = (a[(fi, col)] - m) / sd;
+        }
+    }
+    Ok((
+        a.reversed_axes().into_owned(),
+        conus.parent_order.iter().map(|c| c.0).collect(),
+    ))
+}
+
 /// `checkpoint` is the base path (no `.mpk` suffix).
 pub fn dump<I>(
     cfg: &Config,

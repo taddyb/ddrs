@@ -54,22 +54,99 @@ pub fn save_kan_head<B: Backend>(path: &Path, head: &KanHead<B>) -> Result<()> {
         })
 }
 
+/// The `KanHead` layout as it stood before `parameter_groups`,
+/// `input_layer_kan` and `output_layer_kan` added the `extra`, `input_kan` and
+/// `output_kan` fields (2026-09-11).
+///
+/// burn's `Module` derive emits a serde record with no `#[serde(default)]`, so
+/// a checkpoint written against the old layout fails to deserialize into the
+/// new one with `missing field \`extra\``. Every landscape study re-loads old
+/// run checkpoints, so that would have silently retired the instrument along
+/// with the training path. This mirror type is the explicit upgrade path: it
+/// is never written, only read.
+#[derive(Module, Debug)]
+struct LegacyKanHead<B: Backend> {
+    input: burn::nn::Linear<B>,
+    hidden: Vec<rskan::KanLayer<B>>,
+    output: burn::nn::Linear<B>,
+    learnable_parameters: Vec<String>,
+    disagg: Option<DisaggHead<B>>,
+}
+
 /// Load KAN head weights from `path` (`.mpk` extension appended by the recorder).
 ///
 /// `head_template` must be constructed with the same architecture as the
 /// saved checkpoint; its parameter values are discarded.
+///
+/// Falls back to the pre-2026-09-11 record layout when the file predates the
+/// parameter-group fields — see [`LegacyKanHead`].
 pub fn load_kan_head<B: Backend>(
     path: &Path,
     head_template: KanHead<B>,
     device: &B::Device,
 ) -> Result<KanHead<B>> {
+    let io_err = |e: &dyn std::fmt::Display| DataError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
+    };
+
+    match CompactRecorder::new().load(path.to_path_buf(), device) {
+        Ok(record) => Ok(head_template.load_record(record)),
+        Err(e) if format!("{e}").contains("missing field") => {
+            load_legacy_kan_head(path, head_template, device)
+        }
+        Err(e) => Err(io_err(&e)),
+    }
+}
+
+/// Read a pre-parameter-groups checkpoint into the current [`KanHead`].
+///
+/// Only valid for a template that is itself the shared, all-Linear head: a
+/// split-trunk or KAN-boundary head has weights the old file simply does not
+/// contain, and quietly leaving those at their init values would be worse than
+/// failing.
+fn load_legacy_kan_head<B: Backend>(
+    path: &Path,
+    head_template: KanHead<B>,
+    device: &B::Device,
+) -> Result<KanHead<B>> {
+    if !head_template.extra.is_empty()
+        || head_template.input_kan.is_some()
+        || head_template.output_kan.is_some()
+    {
+        return Err(DataError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "checkpoint predates kan_head.parameter_groups / input_layer_kan / \
+                 output_layer_kan and carries no weights for them; a split-trunk or \
+                 KAN-boundary head cannot resume from it",
+            ),
+        });
+    }
+
+    let legacy_template = LegacyKanHead {
+        input: head_template.input.clone(),
+        hidden: head_template.hidden.clone(),
+        output: head_template.output.clone(),
+        learnable_parameters: head_template.learnable_parameters().to_vec(),
+        disagg: head_template.disagg.clone(),
+    };
     let record = CompactRecorder::new()
         .load(path.to_path_buf(), device)
         .map_err(|e| DataError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
         })?;
-    Ok(head_template.load_record(record))
+    let legacy: LegacyKanHead<B> = legacy_template.load_record(record);
+
+    Ok(KanHead {
+        input: legacy.input,
+        hidden: legacy.hidden,
+        output: legacy.output,
+        disagg: legacy.disagg,
+        ..head_template
+    })
 }
 
 /// Load a standalone-pretrained [`DisaggHead`] checkpoint (e.g. from

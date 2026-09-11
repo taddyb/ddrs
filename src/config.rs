@@ -336,6 +336,27 @@ pub struct KanHeadConfigSection {
     pub k: usize,
     pub input_var_names: Vec<String>,
     pub learnable_parameters: Vec<String>,
+    /// Optional partition of `learnable_parameters` into independently
+    /// parameterized trunks, e.g. `[[n], [p_spatial, q_spatial]]`. Absent or
+    /// empty ⇒ one shared trunk feeding every output (historical
+    /// architecture, preserved byte-for-byte). Must partition
+    /// `learnable_parameters` exactly. See `src/nn/kan_head.rs`.
+    #[serde(default)]
+    pub parameter_groups: Vec<Vec<String>>,
+    /// Replace the `Linear(F, H)` input projection with a `KanLayer(F, H)`
+    /// (per-attribute splines instead of a linear mixing before any
+    /// nonlinearity). Breaks DDR `kan.py` parity — experiment arm only.
+    #[serde(default)]
+    pub input_layer_kan: bool,
+    /// Replace the `Linear(H, P)` read-out with a `KanLayer(H, P)`, so the
+    /// outputs stop being affine functionals of one shared latent (§31).
+    /// Breaks DDR `kan.py` parity — experiment arm only.
+    #[serde(default)]
+    pub output_layer_kan: bool,
+    /// B-spline grid range for the optional boundary KanLayers above. Inner
+    /// trunk layers keep rskan's `[-1, 1]`.
+    #[serde(default = "default_kan_grid_range")]
+    pub kan_grid_range: [f64; 2],
     /// Optional learnable daily→hourly forcing disaggregation. Absent ⇒ flat
     /// `repeat-24` (current behavior). See `src/nn/disagg_head.rs`.
     #[serde(default)]
@@ -414,7 +435,11 @@ pub fn kan_config(
     .with_hidden_size(section.hidden_size)
     .with_num_hidden_layers(section.num_hidden_layers)
     .with_grid(section.grid)
-    .with_k(section.k);
+    .with_k(section.k)
+    .with_parameter_groups(section.parameter_groups.clone())
+    .with_input_layer_kan(section.input_layer_kan)
+    .with_output_layer_kan(section.output_layer_kan)
+    .with_kan_grid_range(section.kan_grid_range);
     match &section.disaggregation {
         Some(d) => cfg
             .with_disagg_enabled(true)
@@ -430,6 +455,9 @@ pub fn kan_config(
 
 fn default_grid() -> usize {
     5
+}
+fn default_kan_grid_range() -> [f64; 2] {
+    [-3.0, 3.0]
 }
 fn default_k() -> usize {
     3
