@@ -4,7 +4,9 @@
 
 **Goal:** Make every claim in always-loaded agent context resolve against source, leave only the book under the book's source tree, and leave only live tooling in `scripts/` and `examples/`.
 
-**Architecture:** Two pull requests. PR 1 (Tasks 1-9) changes file *content* only and renames nothing, so it lands immediately without colliding with the in-flight `landscape-deriv-objective` branch. PR 2 (Tasks 10-15) does the `docs/book` + `research/` restructure and the campaign archive, and is gated on that branch merging first. A new stdlib-Python verifier, built test-first in Task 1, is the gate that makes "every citation resolves" mechanical rather than judged, and it is used by every subsequent task.
+**Architecture:** One pull request, two phases. Phase 1 (Tasks 1-9) changes file *content* only and renames nothing. Phase 2 (Tasks 10-15) does the `docs/book` + `research/` restructure. The phase order is a requirement, not a preference: Phase 1 puts the citation verifier in place and makes every claim true, so Phase 2's 414-reference rewrite operates on corrected text instead of racing it. A new stdlib-Python verifier, built test-first in Task 1, is what makes "every citation resolves" mechanical rather than judged, and every subsequent task uses it as a gate.
+
+An earlier revision split this across two PRs because `landscape-deriv-objective` was in flight over the same files. It merged as PR #42, so there is one PR.
 
 **Tech Stack:** Rust (cargo, BURN 0.21), mdBook 0.4.52 with `mdbook-katex` 0.9.4 and `mdbook-mermaid` 0.16.0, Python 3 stdlib only for repo scripts, GitHub Actions.
 
@@ -12,7 +14,7 @@
 
 ## Global Constraints
 
-- **Working directory is the worktree** `/home/tbindas/projects/ddrs/.claude/worktrees/repo-cleanup`, branch `worktree-repo-cleanup`, based on `origin/master` @ `571e2f6`. Never `cd` to the shared checkout.
+- **Working directory is the worktree** `/home/tbindas/projects/ddrs/.claude/worktrees/repo-cleanup`, branch `worktree-repo-cleanup`, rebased onto `origin/master` @ `3412a78`. Never `cd` to the shared checkout. Every line number in this plan was re-verified against `3412a78` after that rebase.
 - **`.cargo/config.toml` is required and gitignored.** It sets `CUDARC_CUDA_VERSION = "13020"` because the host runs CUDA 13.3.1 and `cudarc` 0.19.7 panics on an unknown `nvcc --version`. It is already in place in this worktree. A fresh worktree needs it copied before any cargo command.
 - **No behavior change anywhere in `src/`.** The only permitted source edits are doc-comment path strings. `cargo check --examples --tests` is the proof, and its baseline is green at 39.85 s.
 - **Python is stdlib only** and run with `python3`, matching `scripts/journal.py` and `scripts/test_journal.py`. Do not add dependencies and do not introduce `uv` for these two files, because the journal hooks that run alongside them are plain `python3`.
@@ -30,22 +32,22 @@
 
 ## File Structure
 
-**Created by PR 1:**
+**Created in Phase 1:**
 
 | Path | Responsibility |
 |---|---|
 | `scripts/verify_doc_paths.py` | Extract every path, `file:line`, and `file.rs::symbol` citation from a set of markdown files and report the ones that do not resolve. Strict mode for agent context, warn mode for book pages |
 | `scripts/test_verify_doc_paths.py` | Tests for the above, stdlib only, run as `python3 scripts/test_verify_doc_paths.py` |
 
-**Modified by PR 1:** `CLAUDE.md`, `.claude/skills/ddrs-dev/SKILL.md`, `.claude/skills/ddrs-dev/references/{config,testing,traps,gauge-population,build-and-env}.md`, `.claude/skills/ddrs-run/SKILL.md`, `.claude/skills/ddrs-eval-plots/SKILL.md`, `README.md`, `docs/intro.md`, `docs/architecture.md`, `docs/usage/{running,inputs-formatting}.md`, `docs/reference/{perf,baseline}.md`, `src/sparse/mod.rs` (one doc-comment line).
+**Modified in Phase 1:** `CLAUDE.md`, `.claude/skills/ddrs-dev/SKILL.md`, `.claude/skills/ddrs-dev/references/{config,testing,traps,gauge-population,build-and-env}.md`, `.claude/skills/ddrs-run/SKILL.md`, `.claude/skills/ddrs-eval-plots/SKILL.md`, `README.md`, `docs/intro.md`, `docs/architecture.md`, `docs/usage/{running,inputs-formatting}.md`, `docs/reference/{perf,baseline}.md`, `src/sparse/mod.rs` (one doc-comment line).
 
-**Deleted by PR 1:** `.claude/references/` (12 files), `.claude/2026-05-29-ddrs-docs-design.md`, `.claude/2026-05-29-ddrs-docs-plan.md`.
+**Deleted in Phase 1:** `.claude/references/` (12 files), `.claude/2026-05-29-ddrs-docs-design.md`, `.claude/2026-05-29-ddrs-docs-plan.md`.
 
-**Created by PR 2:** `docs/book/` (the moved book), `research/{findings,specs,plans,why-analysis,figures,journal,archive}/`, `research/archive/README.md`, `research/findings/2026-09-11-repo-cleanup-findings.md`.
+**Created in Phase 2:** `docs/book/` (the moved book), `research/{findings,specs,plans,why-analysis,figures,journal,archive}/`, `research/archive/README.md`, `research/findings/2026-09-11-repo-cleanup-findings.md`.
 
 ---
 
-# PR 1: truth pass
+# Phase 1: truth pass (Tasks 1-9)
 
 ### Task 1: The citation verifier
 
@@ -1019,13 +1021,13 @@ EOF
 
 ---
 
-### Task 9: PR 1 gates, findings doc, and open the PR
+### Task 9: Phase 1 gates and the findings doc
 
 **Files:**
-- Create: `docs/2026-09-11-repo-cleanup-findings.md`
+- Create: `docs/2026-09-11-repo-cleanup-findings.md` (Task 11 moves it to `research/findings/`)
 - Modify: `.claude/skills/ddrs-dev/references/testing.md` (record the new gate)
 
-- [ ] **Step 1: Run the full gate set**
+- [ ] **Step 1: Run the full Phase 1 gate set**
 
 ```bash
 python3 scripts/test_verify_doc_paths.py
@@ -1042,73 +1044,41 @@ Expected: all pass, verifier exits 0, the final grep is empty. If the verifier i
 
 - [ ] **Step 2: Write the findings doc**
 
-`docs/2026-09-11-repo-cleanup-findings.md`, following the shape of `docs/2026-07-30-docs-and-skills-audit.md`: method (three parallel auditors, every claim verified against source, highest-stakes findings re-verified by hand), the finding tables from the spec's §2, what was done, what PR 2 defers, and a reproduce section. Record two things the spec did not know:
+`docs/2026-09-11-repo-cleanup-findings.md`, following the shape of `docs/2026-07-30-docs-and-skills-audit.md`: method (three parallel auditors, every claim verified against source, highest-stakes findings re-verified by hand), the finding tables from the spec's §2, what was done, what Phase 2 will cover, and a reproduce section. Record two things the spec did not know:
 
 - One audit finding was misfiled. The `ddrs experiment` claim was reported at `ddrs-run/references/commands.md:245`; that file is 178 lines long and the text is at `ddrs-run/SKILL.md:245`. The finding held, the location did not. This is why every finding was re-checked by hand.
-- `examples/leak_probe.rs` was nearly archived as a leakance artifact. It is the autograd-tape-leak repro, named in `traps.md` as a live trap's discriminating test and cited from `src/experiment/landscape/objective.rs`. Name-matching would have removed a working diagnostic; the admission rule in PR 2 is written against the citing findings doc for exactly this reason.
+- `examples/leak_probe.rs` was nearly archived as a leakance artifact. It is the autograd-tape-leak repro, named in `traps.md` as a live trap's discriminating test and cited from `src/experiment/landscape/objective.rs`. Name-matching would have removed a working diagnostic; the admission rule in Task 13 is written against the citing findings doc for exactly this reason.
 
 - [ ] **Step 3: Record the new gate in `ddrs-dev/references/testing.md`**
 
 Add `python3 scripts/verify_doc_paths.py` to the gate list, with one line on what it catches and the note that it must exit 0 on any change to `CLAUDE.md` or `.claude/skills/`.
 
-- [ ] **Step 4: Commit and push**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add docs/2026-09-11-repo-cleanup-findings.md .claude/skills/
 git commit -m "$(cat <<'EOF'
-docs: repository cleanup findings, PR 1
+docs: repository cleanup findings, phase 1
 
 What was verified wrong in always-loaded context and what was corrected,
 plus the two things the audit itself got wrong: one finding was reported
 against the wrong file, and examples/leak_probe.rs was nearly archived as
 a leakance artifact when it is the autograd-tape-leak repro named by a
-live trap.
+live trap. Phase 2 appends what moved.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01EqnrtmU91yzuVpGnADnXLP
 EOF
 )"
-git push -u origin worktree-repo-cleanup
 ```
 
-- [ ] **Step 5: Open the PR**
-
-```bash
-gh pr create --title "Repository cleanup PR 1: truth pass over agent context and the book" --body "$(cat <<'EOF'
-Content-only. Renames nothing, so it merges cleanly alongside
-`landscape-deriv-objective`. The restructure is PR 2, gated on that branch.
-
-Three parallel auditors verified every concrete claim in `CLAUDE.md`, the
-four skills, and the 14 book pages against source. Nine claims in
-`CLAUDE.md` and seven in the skills were verified false, including two
-places where the library contradicted itself. Two items from the
-2026-07-30 audit's P1 list are fixed here and both had broken *after*
-that audit.
-
-New gate: `scripts/verify_doc_paths.py` fails on any unresolved citation
-in agent-loaded context, and is seeded against the known-bad set so a
-false negative cannot pass silently.
-
-`CLAUDE.md` drops from 663 lines to about 490: two closed NO-GO campaigns
-keep their verdict in always-loaded context and move their operational
-detail into `ddrs-dev`.
-
-Spec: `docs/superpowers/specs/2026-09-11-repo-cleanup-design.md`
-Plan: `docs/superpowers/plans/2026-09-11-repo-cleanup.md`
-Findings: `docs/2026-09-11-repo-cleanup-findings.md`
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-https://claude.ai/code/session_01EqnrtmU91yzuVpGnADnXLP
-EOF
-)"
-```
+No push and no PR here. This is a phase boundary inside one branch, and Task 15 Step 5 opens the single PR once Phase 2 is done. Leaving the branch unpushed until then keeps a half-restructured tree off the remote.
 
 ---
 
-# PR 2: restructure
+# Phase 2: restructure (Tasks 10-15)
 
-**Gate: do not start until `origin/landscape-deriv-objective` has merged to `master`.** It edits `docs/2026-09-08-landscape-hypothesis-tests-findings.md`, `docs/journal/2026-09.md` and `.claude/skills/ddrs-dev/references/config.md`, all of which PR 2 renames or rewrites. Start by rebasing this branch onto the updated `master`.
+No external gate: `landscape-deriv-objective` merged as PR #42 and the branch is already rebased onto `3412a78`. The only ordering requirement is internal, that Phase 1 completes first, so the link rewrite in Task 12 operates on text whose claims are already correct.
 
 ### Task 10: Split the book from the research record
 
@@ -1480,17 +1450,17 @@ EOF
 
 ---
 
-### Task 15: PR 2 gates, skill update, and open the PR
+### Task 15: Final gates, skill update, and open the single PR
 
 **Files:**
-- Modify: `.claude/skills/ddrs-dev/SKILL.md` and references (the new layout), `CLAUDE.md` ("When in doubt" paths)
-- Modify: `research/findings/2026-09-11-repo-cleanup-findings.md` (append the PR 2 section)
+- Modify: `.claude/skills/ddrs-dev/SKILL.md` and its references (the new layout), `CLAUDE.md` ("When in doubt" paths)
+- Modify: `research/findings/2026-09-11-repo-cleanup-findings.md` (append the Phase 2 section)
 
 - [ ] **Step 1: Update `ddrs-dev` and `CLAUDE.md` for the new layout**
 
-Per the repository's rule that the skills library is the reproducibility source of truth, record: findings live in `research/findings/`, specs and plans in `research/specs` and `research/plans`, the book is `docs/book/` with `mdbook build` reading `book.toml`'s `src = "docs/book"`, and closed-campaign tooling is in `research/archive/` under the stated admission rule.
+Per the repository's rule that the skills library is the reproducibility source of truth, record: findings live in `research/findings/`, specs and plans in `research/specs/` and `research/plans/`, the book is `docs/book/` with `mdbook build` reading `book.toml`'s `src = "docs/book"`, and closed-campaign tooling is in `research/archive/` under the admission rule stated in its README.
 
-- [ ] **Step 2: Run the full gate set**
+- [ ] **Step 2: Run the full gate set for the whole branch**
 
 ```bash
 python3 scripts/test_verify_doc_paths.py
@@ -1501,42 +1471,113 @@ mdbook build && find target/book -type f | sort > /tmp/book-final.txt
 diff /tmp/book-before.txt /tmp/book-final.txt
 ```
 
-Expected: every command passes, the verifier exits 0, and the book diff shows only removals of copied research assets.
+Expected: every command passes, the verifier exits 0 with `0 unresolved in agent context`, and the book diff shows only removals of copied research assets. `/tmp/book-before.txt` is the snapshot Task 10 Step 1 captured.
 
-- [ ] **Step 3: Append the PR 2 section to the findings doc, commit, push, open the PR**
+- [ ] **Step 3: Confirm no old path survives anywhere**
+
+```bash
+grep -rIn -e "docs/20" -e "docs/superpowers" -e "docs/why-analysis" \
+          -e "docs/figures" -e "docs/journal" -e "\.claude/references" \
+  --include=*.md --include=*.rs --include=*.yaml --include=*.toml \
+  --include=*.sh --include=*.py . \
+  | grep -v 2026-09-11-repo-cleanup \
+  | grep -v 2026-07-30-docs-and-skills-audit
+```
+
+Expected: no output. The two excluded files are this cleanup's own spec, plan and findings doc, and the 2026-07-30 audit, all of which name the old paths as history.
+
+- [ ] **Step 4: Append the Phase 2 section to the findings doc and commit**
 
 ```bash
 git add -A
 git commit -m "$(cat <<'EOF'
-docs: repository cleanup findings, PR 2
+docs: repository cleanup findings, phase 2
 
-What moved and what the verifier now prevents.
+What moved, what the verifier now prevents, and the admission rule the
+archive is held to.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01EqnrtmU91yzuVpGnADnXLP
 EOF
 )"
-git push
-gh pr create --title "Repository cleanup PR 2: docs/book and research/ split, campaign archive" --body "$(cat <<'EOF'
-Follows PR 1. Held until `landscape-deriv-objective` merged, because this
-renames files that branch was editing.
+```
 
-`book.toml` now points at `docs/book/`, so the published site stops
-carrying 9.3 MB of research narrative as unlinked assets. Published URLs
-are unchanged, proven by diffing the built file list.
+- [ ] **Step 5: Push and open the one PR**
+
+```bash
+git push -u origin worktree-repo-cleanup
+gh pr create --title "Repository cleanup: true agent context, a book-only docs tree, and an archived campaign record" --body "$(cat <<'EOF'
+Two phases in one PR. Phase 1 is content-only and renames nothing; Phase 2
+does the restructure. Reviewing them as separate commit ranges is easier
+than reviewing the combined diff: Phase 1 ends at the "repository cleanup
+findings, phase 1" commit.
+
+## Phase 1: every claim in agent context is now true
+
+Three parallel auditors verified every concrete claim in `CLAUDE.md`, the
+four skills, and the 14 book pages against source. Nine claims in
+`CLAUDE.md` and seven in the skills were verified false, including two
+places where the skill library contradicted itself:
+
+- `nse-batch`, `optimizer`, `use_grad_accum` and `grad_accum_steps` were
+  documented as unlanded work on branch `exp_train`; all four are on
+  master with passing tests
+- `ddrs-run` said `ddrs experiment` is not on master while `ddrs-dev`
+  documented the same command as working
+- a skill asserted `.claude/references/` had been deleted; its 12 files
+  were still there, and now are not
+- the architecture diagram showed `sparse.rs` as a file and
+  `spike_backward/` as present, and omitted eight subsystems
+- three `src/` line citations had drifted by 26, 2 and 136 lines
+
+Two items from the 2026-07-30 audit's P1 list are fixed here, and both had
+broken *after* that audit: `merit_training.yaml` ships
+`use_cuda_graphs: false` (flipped 2026-08-19), and `tau`'s default is 9,
+not 3 (changed 2026-08-08, with 3 on the retired scale).
+
+`CLAUDE.md` drops from 663 lines to about 490. Two closed NO-GO campaigns
+keep their verdict and their do-not-reopen reasoning in always-loaded
+context; their enable steps and gate commands move into `ddrs-dev`.
+
+New gate: `scripts/verify_doc_paths.py` fails on any unresolved citation
+in agent-loaded context. It is seeded against the known-bad set, so a
+false negative cannot pass silently. An earlier draft reported 288
+failures, almost all noise; the tuning that took it to 9 is recorded in
+the plan.
+
+## Phase 2: the book tree holds only the book
+
+`book.toml` had `src = "docs"`, so mdBook copied 36 findings docs,
+`docs/superpowers/` and `docs/figures/` (9.3 MB total) into the published
+site as unlinked assets beside a 14-page book. It now points at
+`docs/book/`. Published URLs are unchanged, proven by diffing
+`find target/book -type f` before and after.
 
 `research/` holds findings, specs, plans, why-analysis, figures, journal
-and archive. `.claude/specs/` folded in: same series, split only by date.
+and archive. `.claude/specs/` folds in: the same spec-and-plan series as
+`docs/superpowers/`, split only by the date the convention changed.
 
 26 scripts and 13 examples retired to `research/archive/` under a stated
-admission rule. `examples/leak_probe.rs` stays: it matches "leak" by name
-but is the autograd-tape-leak repro a live trap depends on.
+admission rule: an artifact lands there when the findings doc or plan
+citing it records its campaign closed, or when nothing cites it at all.
+Not name-matching, and that distinction caught a real mistake:
+`examples/leak_probe.rs` matches "leak" but is the autograd-tape-leak
+repro that `traps.md` names as a live trap's discriminating test. It stays.
 
-414 references repointed. The ~130 outside the moving set were read
-individually rather than swept.
+414 references repointed. The roughly 130 outside the moving set were read
+individually rather than swept, because a prefix substitution cannot tell
+a live pointer from a historical quotation.
+
+## Out of scope, deliberately
+
+`experiments/` is untouched. Its bundles are the active landscape and
+adjoint workstream, not residue. No behavior change anywhere in `src/`:
+the only source edits are doc-comment path strings, and
+`cargo check --examples --tests` is the proof.
 
 Spec: `research/specs/2026-09-11-repo-cleanup-design.md`
 Plan: `research/plans/2026-09-11-repo-cleanup.md`
+Findings: `research/findings/2026-09-11-repo-cleanup-findings.md`
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
@@ -1549,7 +1590,7 @@ EOF
 
 ## Self-review notes
 
-**Spec coverage.** §4.1 to Tasks 4 and 5; §4.2 to Task 6; §4.3 to Task 7; §4.4 to Task 8; §4.5 to Tasks 2 and 3; §4.6 to Tasks 1 and 9; §5.1 to Task 10; §5.2 to Task 11; §5.3 to Task 12; §5.4 to Task 13; §5.5 to Task 14; §5.6 is a constraint, enforced by no task touching `experiments/`; §5.7 to Task 15; §8 deliverables to Tasks 1, 9, 13 and 15.
+**Spec coverage.** §4.1 to Tasks 4 and 5; §4.2 to Task 6; §4.3 to Task 7; §4.4 to Task 8; §4.5 to Tasks 2 and 3; §4.6 to Tasks 1 and 9; §5.1 to Task 10; §5.2 to Task 11; §5.3 to Task 12; §5.4 to Task 13; §5.5 to Task 14; §5.6 is a constraint, enforced by no task touching `experiments/`; §5.7 to Task 15; §8 deliverables to Tasks 1, 9, 13 and 15. §3's one-PR sequencing to Task 15 Step 5, which is the only place a PR is opened.
 
 **One spec correction, made here.** §5.4 listed `examples/leak_probe.rs` for archiving. It is the autograd-tape-leak repro, named by `traps.md` as a live trap's discriminating test and cited from `src/experiment/landscape/objective.rs`. Task 13 keeps it and Step 1 asserts so.
 

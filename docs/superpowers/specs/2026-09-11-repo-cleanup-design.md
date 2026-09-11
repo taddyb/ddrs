@@ -1,6 +1,7 @@
 # Repository cleanup: stale context, split docs, archived campaigns (design, 2026-09-11)
 
-Branch: `worktree-repo-cleanup` (worktree off `origin/master` @ `571e2f6`).
+Branch: `worktree-repo-cleanup` (worktree off `origin/master` @ `3412a78`,
+rebased from `571e2f6` after PR #42 merged).
 Scope: `CLAUDE.md`, `.claude/` (skills, references, specs), the mdBook pages and
 `README.md`, `scripts/`, `examples/`, and the eight files tracked inside the
 gitignored `output/`.
@@ -176,22 +177,36 @@ build-output clutter and a `docs/` root that reads as a junk drawer.
 
 ---
 
-## 3. Sequencing: two pull requests
+## 3. Sequencing: one pull request, two phases
 
-`origin/landscape-deriv-objective` was pushed 2026-09-11 with ten commits editing
-`docs/2026-09-08-landscape-hypothesis-tests-findings.md`, `docs/journal/2026-09.md`,
-`.claude/skills/ddrs-dev/references/config.md` and nine source files. A rename of
-about 100 files plus 414 link rewrites would collide with it, so the work splits:
+An earlier revision of this design split the work across two pull requests, because
+`origin/landscape-deriv-objective` was in flight with ten commits editing
+`docs/2026-09-08-landscape-hypothesis-tests-findings.md`, `docs/journal/2026-09.md`
+and `.claude/skills/ddrs-dev/references/config.md`, all of which the restructure
+renames. A rename of about 100 files plus 414 link rewrites would have collided
+with it.
 
-**PR 1 changes content only, renames nothing.** It can land immediately and its only
-overlap with the active branch is a small text conflict in `config.md`.
+**That branch merged as PR #42, so the split is unnecessary** and the work is one
+pull request. `origin/skill/ddrs-eval-plots-global-runs` (2026-06-19) is the only
+remaining unmerged branch and it is three months stale.
 
-**PR 2 does the restructure** and lands after `landscape-deriv-objective` merges,
-when nothing else is in flight.
+The phase boundary is kept as an ordering constraint rather than a PR boundary:
+
+**Phase 1 changes content only and renames nothing.** Doing it first means the
+citation verifier is in place, and every claim is already true, before any path moves.
+
+**Phase 2 does the restructure**, so the link rewrite operates on corrected text
+rather than racing it.
+
+Re-verified against `origin/master` @ `3412a78` after the merge: `CLAUDE.md` is
+unchanged at 663 lines with every cited line number intact, the verifier reports the
+same nine strict failures, and the reference count is still 414. Of the nineteen new
+commits, only `ddrs-dev/references/config.md` and four new `examples/juniata/*.yaml`
+case configs fall inside this design's scope, and neither changes a finding.
 
 ---
 
-## 4. PR 1: truth pass
+## 4. Phase 1: truth pass
 
 ### 4.1 `CLAUDE.md`, 663 lines to roughly 480
 
@@ -268,7 +283,7 @@ the 2026-07-30 audit and `docs/` has been edited since. Before the delete, run a
 per-pair comparison across all 12 pairs and confirm no substantive claim exists only
 in a reference. If one does, it moves into the `docs/` counterpart first.
 
-### 4.6 PR 1 gates
+### 4.6 Phase 1 gates
 
 | Gate | Catches |
 |---|---|
@@ -276,11 +291,11 @@ in a reference. If one does, it moves into the `docs/` counterpart first.
 | `mdbook build` | a dangling `SUMMARY.md` entry (`create-missing = false`) |
 | path verifier (new, `scripts/verify_doc_paths.py`) | every path-shaped and `file::symbol`-shaped token in `CLAUDE.md`, `.claude/skills/**` and the book pages that does not resolve |
 | `grep -rn '\.claude/references'` | a missed inbound link. Must return nothing |
-| `cargo test --test ddr_sandbox_match --test gridded_bundle` | the pre-push hook's own gate. Nothing in PR 1 touches the solver, so this is a sanity check rather than a risk |
+| `cargo test --test ddr_sandbox_match --test gridded_bundle` | the pre-push hook's own gate. Nothing in Phase 1 touches the solver, so this is a sanity check rather than a risk |
 
 ---
 
-## 5. PR 2: restructure
+## 5. Phase 2: restructure
 
 ### 5.1 Split the book from the research record
 
@@ -356,13 +371,13 @@ seven PNGs and the notebook to `research/figures/synthetic-n/` and repointing
 `docs/2026-07-22-synthetic-n-recoverability-findings.md:36`. Delete
 `docs/images/.gitkeep`, referenced nowhere.
 
-### 5.6 What PR 2 does not touch
+### 5.6 What Phase 2 does not touch
 
 `experiments/` stays as it is. Its 37 bundles total 584 KB and the `landscape-*` and
 `adjoint-*` families are the active workstream, not residue. `src/`, `tests/`,
 `config/` and `fixtures/` change only where a doc comment names a moved path.
 
-### 5.7 PR 2 gates
+### 5.7 Phase 2 gates
 
 | Gate | Catches |
 |---|---|
@@ -384,7 +399,7 @@ proves every resulting path resolves, and the out-of-moving-set referrers are re
 rather than swept. Residual risk: a quotation that resolves after rewriting but has
 been silently falsified. Accepted, because the alternative is leaving 414 dead links.
 
-**PR 2 edits `src/`, which was scoped out.** Sixteen source files cite
+**Phase 2 edits `src/`, which was scoped out.** Sixteen source files cite
 `docs/superpowers/` in doc comments. The edits are comment-only and `cargo check`
 proves no semantic change, but `src/` will appear in that diff.
 
@@ -401,7 +416,7 @@ context.** An agent that never triggers `ddrs-dev` could re-open a closed questi
 Mitigated by keeping the verdict and the do-not-reopen sentence in `CLAUDE.md` and
 moving only enable steps and gate commands.
 
-**PR 1 touches `.claude/skills/ddrs-dev/references/config.md`,** which
+**Phase 1 touches `.claude/skills/ddrs-dev/references/config.md`,** which
 `landscape-deriv-objective` also edits. A small, hand-resolvable conflict, not zero.
 
 **The verifier is new code that could itself be wrong.** A verifier with a false
@@ -431,8 +446,8 @@ citations from §2 and requiring it to flag all of them before any are fixed.
 
 ## 8. Deliverables
 
-1. PR 1: the truth pass of §4, plus `scripts/verify_doc_paths.py`.
-2. PR 2: the restructure of §5.
+1. Phase 1: the truth pass of §4, plus `scripts/verify_doc_paths.py`.
+2. Phase 2: the restructure of §5.
 3. `research/findings/2026-09-11-repo-cleanup-findings.md`, recording what was
    verified wrong, what moved, and what the verifier now prevents.
 4. `ddrs-dev` updated with the new layout and the citation policy of §4.2.
