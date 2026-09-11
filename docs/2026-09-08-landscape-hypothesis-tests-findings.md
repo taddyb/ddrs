@@ -1434,3 +1434,30 @@ That is exactly the property needed for it to sharpen identifiability without ch
   tried.
 - The derivative term concentrates the batch somewhat more than the level term (effective sample size 151 of 2,365
   gauges against 295 by realised contribution), which is the same regime, not a new pathology.
+
+### 28.1 The same question at one gauge: does a derivative-trained model end up better placed?
+
+The probe measures the curvature of the new objective. The complementary question is whether a model *trained*
+with the term ends up nearer its own optimum. `experiments/juniata-deriv-compare` answers it at the Juniata
+(USGS 01567000, 213 reaches): two models identical apart from `experiment.loss.kind`, both at 300 optimizer steps,
+both scored under the **same** `nse-batch` objective with a 25 x 25 grid, so the comparison is of trained points
+and not of two different surfaces.
+
+| | trained NSE | NSE at its own optimum | displacement `alpha_n_star` | n factor from optimum |
+|---|---|---|---|---|
+| trained on `nse-batch` | 0.8653 | 0.8670 | **-0.268** | 1.31x |
+| trained on `nse-batch-deriv` | 0.8671 | 0.8672 | **-0.049** | **1.05x** |
+
+The derivative-trained model sits **5.4 times closer to its own optimum**, with essentially nothing left to gain
+(+0.0001 against +0.0017). Its skill is also marginally higher, though at 0.002 that is not the point and should
+not be quoted as one.
+
+This is one gauge, so it is an illustration rather than evidence: a single basin cannot show a population effect,
+and the Juniata is large enough (213 reaches) to be among the better-constrained gauges to begin with. The
+population version of this table is what the retrain now running will produce.
+
+**One number that does not fit the simple story.** The stiff eigenvalue at the optimum, measured under
+`nse-batch`, is *lower* for the derivative-trained model (0.457 against 0.593). That is not a contradiction, since
+the probe measured curvature under the derivative objective while this measures the `nse-batch` surface at a
+different point, but it is a reminder that "better placed" and "in a sharper basin" are separate claims. Only the
+first is demonstrated here.
