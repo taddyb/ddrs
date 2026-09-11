@@ -1246,3 +1246,58 @@ Ranked by the mechanism above, not by convenience:
 **Caveat.** The mechanism in 25.2 is inferred from correlations plus the Manning scaling, not from a controlled
 experiment. The direct test is to recompute `H_nn` on an hourly-resolution objective at the same gauges and check
 that it rises, most at the flashy small basins where daily curvature is lowest.
+
+---
+
+## 26. Pre-registered prediction: what a time-derivative loss term should do to the curvature
+
+Written **before** the probe was run, so the comparison is a test and not a post-hoc fit.
+
+§25 established that curvature in `ln n` is governed by the mean square of the hydrograph's time derivative:
+`d2L/d(ln n)^2 = 2 (0.6 tau)^2 <(dQ/dt)^2> / sigma^2`. Tested against the measured Hessian at 2,365 gauges
+(training window, series and Hessian from the same run) this parameter-free expression gives **Spearman +0.710**
+with a log-log slope of **0.82**, against a predicted slope of 1.0. The absolute scale is off by about 12x
+(median measured/predicted 0.086), which is expected: a pure time shift ignores attenuation, and the travel time
+is an order-of-magnitude proxy. The ranking is what the mechanism claims, and the ranking holds. Both factors
+carry weight independently: `<(dQ/dt)^2>/sigma^2` alone gives +0.533, `tau^2` alone +0.301.
+
+### The prediction
+
+Add to the objective a term on the series' time derivative,
+
+    L' = L_nse + lambda * mean_pairs( (dsim/dt - dobs/dt)^2 ) / sigma_d^2
+
+with `sigma_d` the standard deviation of the observed daily differences. Under the same time-shift argument the
+derivative term contributes curvature through `<(d2Q/dt2)^2>/sigma_d^2` where the level term contributes
+`<(dQ/dt)^2>/sigma^2`, so
+
+    stiffening = 1 + lambda * R,      R = [<Q''^2>/sigma_d^2] / [<Q'^2>/sigma^2]
+
+Measured from the stored daily series at 2,365 gauges: **R has median 5.33** (p25 2.79, p75 13.25), and it rises
+with basin size (4.35 at `n_reach <= 50`, 9.23 at 51 to 200, 15.05 above 200).
+
+**At `lambda = 0.5` the prediction is therefore:**
+
+| quantity | predicted |
+|---|---|
+| median stiffening of &#124;H_nn&#124; | **3.7x** (p25 2.4x, p75 7.6x) |
+| stiffening at `n_reach <= 50` | 3.2x |
+| stiffening at 51 to 200 | 5.6x |
+| stiffening at `n_reach > 200` | 8.5x |
+| direction | curvature rises at essentially every gauge; the gain rises with basin size |
+
+### What would refute it
+
+- Median stiffening below about 1.5x: the derivative term does not reach the mechanism the correlations implied.
+- Stiffening that does not increase with basin size: `tau^2` is not really the second factor, so the time-shift
+  picture is wrong even if the curvature happens to rise.
+- Curvature rising while the per-gauge optimum `alpha_n_star` moves a long way: then the term is not sharpening
+  the existing valley, it is choosing a different one, and the two objectives disagree about the answer rather
+  than about the confidence. Worth knowing either way, but it is a different claim from the one registered here.
+
+### Design of the probe
+
+`objective: nse-deriv`, `deriv_weight: 0.5`, run at the **same checkpoint, same gauges and same window** as
+`landscape-p21b-all-testwin-diag`, which supplies the `nse-batch` baseline. No retraining: this measures whether
+the valley is deeper under the candidate objective before any training run is spent on it. If it passes, the term
+goes into `src/training/loss.rs` and gets a retrain; if it fails, the cost was a few hours.
