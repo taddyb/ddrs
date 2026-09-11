@@ -59,6 +59,10 @@ def main() -> int:
         ("placeholder skipped", "Path `.ddrs/runs/<id>/head.mpk` holds weights.\n", 0, ""),
         ("external tree skipped", "Read `~/projects/ddr/src/ddr/routing/mmc.py`.\n", 0, ""),
         ("url skipped", "See `https://example.com/a.md`.\n", 0, ""),
+        ("markdown link, dead target is caught",
+         "See [gone](src/missing.rs) for detail.\n", 1, "src/missing.rs"),
+        ("markdown link, live target resolves",
+         "See [config](src/config.rs) for detail.\n", 0, ""),
     ]
     for i, (name, body, want_code, want_token) in enumerate(cases):
         with tempfile.TemporaryDirectory() as d:
@@ -71,6 +75,20 @@ def main() -> int:
             if want_token:
                 check(f"{name}: names the token",
                       want_token in proc.stdout, f"stdout={proc.stdout!r}")
+
+    # Pins the real interface: later tasks invoke the verifier with no
+    # arguments from the repository root, which run_on() above never
+    # exercises because it always passes --root.
+    repo_root = VERIFY.resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, str(VERIFY)], cwd=repo_root,
+        capture_output=True, text=True,
+    )
+    check("real tree, no args: exit 1", proc.returncode == 1,
+          f"got {proc.returncode}, stdout={proc.stdout!r}")
+    check("real tree, no args: reports agent-context count",
+          "unresolved in agent context" in proc.stdout,
+          f"stdout={proc.stdout!r}")
 
     print()
     if FAILURES:
