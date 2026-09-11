@@ -1461,3 +1461,68 @@ population version of this table is what the retrain now running will produce.
 the probe measured curvature under the derivative objective while this measures the `nse-batch` surface at a
 different point, but it is a reminder that "better placed" and "in a sharper basin" are separate claims. Only the
 first is demonstrated here.
+
+---
+
+## 29. Why the width exponent collapses to its bounds
+
+Training on `nse-batch-deriv` drove q to the boundaries: reaches with `q < 0.01` went from 3.5 % to 64.2 %, the
+share inside the Leopold and Maddock band 0.1 to 0.6 fell from 33.0 % to 9.3 %, and 7.9 % sit at the upper bound,
+so **72 % of reaches are pinned at one end or the other**. Manning's n, by contrast, stayed off both bounds
+entirely. Two candidate causes: p being fixed at 21 forcing q to compensate, or q sitting on a weak gradient path
+of the kind n was on.
+
+### The q direction is concave, not merely flat
+
+Measured at the same parameter point under both objectives (2,365 paired gauges, the `nse-batch`-trained
+500-update model):
+
+| | nse-batch | nse-deriv |
+|---|---|---|
+| share where the loss falls if q RISES | 54.2 % | 58.6 % |
+| trimmed alignment along q | 0.257 | 0.426 |
+| median &#124;H_qq&#124; | 0.00107 | 0.00366 |
+| **share with `H_qq <= 0`, i.e. NO interior minimum in q** | **50 %** | **53 %** |
+
+Sign agreement between the two objectives along q is 87.8 %, so they largely agree about direction.
+
+**At half the gauges the q direction is a ridge, not a valley.** That is true under the ordinary `nse-batch`
+objective and predates the derivative term entirely. A parameter sitting on a concave direction does not converge;
+gradient descent pushes it away from the stationary point toward whichever bound it started nearest.
+
+The 25 x 25 grids say the same thing from the other side: scanning q at the trained n, the minimum sits at an
+**edge of the search box at 62.5 % of gauges** (59.4 % upper, 3.1 % lower) and is interior at only 37.5 %, while
+the loss changes by a median of just **5.4 %** across a factor of ten either way in q.
+
+### The derivative term did not create this, it amplified it
+
+The term multiplies the q gradient by **2.77x** and the q curvature by 2.89x. For comparison it multiplies the n
+gradient by 2.68x. **It is not q-specific**: it amplifies both directions by essentially the same factor. On n,
+which has a genuine interior minimum at most gauges, amplification sharpens convergence. On q, which is concave
+at half of them, the same amplification accelerates divergence.
+
+The bimodal outcome is the signature. If q were simply being pushed down by a monotone preference, the result
+would pile up at one bound. Instead it splits, 64.2 % at the lower bound and 7.9 % at the upper, which is what
+divergence from a ridge looks like: each reach falls off toward whichever side it started on. The skew toward
+zero follows from where training starts and where it had already moved: q initialises near 0.49 and the
+`nse-batch` model had already carried it down to a median of 0.084 with a long low tail, so most reaches were
+below the crest before the amplified gradient arrived.
+
+### Verdict on the two hypotheses
+
+- **"Weak gradient path like n": SUPPORTED, with a correction.** It is not weak-but-monotone, it is concave. That
+  distinction matters, because a weak monotone gradient is fixed by more optimizer steps whereas a concave
+  direction is made worse by them.
+- **"Caused by fixing p at 21": NOT SUPPORTED by this evidence, and not refuted either.** The concavity is present
+  under `nse-batch` with p fixed, so it is not something the derivative term introduced, but every measurement
+  here has p fixed, so there is no control that isolates p's role. §8 established that what a gauge identifies is
+  the n/p ratio and that the gauge-optimal n scales with p, which makes p worth suspecting: with p frozen, the
+  width degree of freedom has only q to move in.
+
+**The experiment that settles it:** a landscape census on the learned-p arm with p active, comparing `H_qq` and the
+share of concave gauges against the p-fixed model. If concavity in q largely disappears when p is free, fixing p
+is the cause and the fix is to prescribe p from river size rather than to constrain q. If it persists, q is
+intrinsically unidentifiable from daily discharge and should be fixed rather than learned.
+
+**Practical consequence either way:** do not ship `nse-batch-deriv` with q learnable. The term's benefit is on n,
+and n is where the curvature result applies; q should be pinned the way p is until this is resolved.
