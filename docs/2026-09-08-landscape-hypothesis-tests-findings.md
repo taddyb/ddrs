@@ -1606,3 +1606,69 @@ This changes what is learned but not how much is identified, and it is still the
 3. **Fix n, learn p and q** with the centred parameterisation, against the current model. Expect equal skill
    (§20: the whole channel is worth about 0.09 NSE and roughness about a third of it), and judge it on whether the
    learned widths agree with observed river widths, not on NSE.
+
+---
+
+## 31. The KAN head is emitting one latent direction relabelled as two parameters
+
+The architecture is `Linear(F, H) -> KanLayer(H, H) x 2 -> Linear(H, P) -> Sigmoid` with `F = 10` attributes and
+`H = 21`. All learned parameters come from **one shared trunk**, separated only by the final `Linear(H, P)`.
+Measured on the learned fields over all 346,321 CONUS reaches (500-update `nse-batch` model):
+
+| quantity | value |
+|---|---|
+| Spearman rho(n, q_spatial) | **0.9967** |
+| Pearson rho(n, q_spatial) | 0.9640 |
+| Pearson on the PRE-SIGMOID (logit) scale | **0.9935** |
+| variance of q's pre-activation explained by a line in n's | **98.7 %** |
+| fitted relation | `logit(q) = 3.98 * logit(n) + 2.75` |
+
+The two learnable outputs are **the same spatial field read twice with different gains**. If the trunk's output
+were full rank, two independent rows of the final Linear layer would produce two unrelated combinations of 21
+hidden units. A near-perfect line on the pre-sigmoid scale means the trunk is delivering essentially one
+direction.
+
+Across models: rho(n, q) is 0.727 at epoch 1 (near initialisation), **0.999** after 60 updates, **0.997** after
+500, and 0.869 for the derivative-loss model. Training makes the collapse worse, not better.
+
+### This explains the boundary behaviour of §29 without any appeal to the loss
+
+The fitted gain is **3.98**. Whatever spread the trunk produces in `logit(n)`, q's pre-activation spans about four
+times as much, so q saturates its sigmoid at both ends while n stays comfortably interior. That is exactly what is
+measured: n occupies 0.031 to 0.213 inside a declared range of 0.01 to 0.35 and never reaches a bound, while q
+runs 0.0006 to 0.998 and piles up at both. **q hits its bounds because it is n's field amplified fourfold, not
+because of anything the objective does to q.** The derivative term made it worse by widening n's spread, which q
+then multiplies.
+
+### What this means for the three questions
+
+1. **"Is our KAN the problem?"** Yes, demonstrably, and this is the first architectural defect the study has
+   found that is not about identifiability. A model whose two geometry-and-friction outputs are 98.7 % the same
+   latent direction cannot represent independent spatial patterns for them, whatever the data or the loss allows.
+2. **"A separate KAN for p and q?"** This is now the evidence-backed fix rather than an intuition. Separate trunks
+   (or at minimum a wider trunk with a decorrelation penalty on the output heads) are what allow the fields to
+   differ at all. Note the likely cause of the collapse: 10 attributes with a gradient-boosted ceiling of
+   R^2 = 0.160 on the targets carry roughly one usable direction of information, and a 21-unit trunk trained on
+   near-unanimous gradients has no reason to preserve more than that.
+3. **"A loss that assists p and q outside n?"** Still worth having, for the reasons in §30, but it is now clearly
+   the SECOND problem. **No objective can separate two outputs that are reading the same latent direction.** Fix
+   the architecture first, then re-ask whether the loss needs changing.
+
+### Caveats
+
+- This measures the learned output fields, not the trunk activations directly. The rank-1 reading is an inference
+  from a 98.7 % linear relation on the pre-sigmoid scale, which is strong but indirect. Dumping the penultimate
+  activations and taking their singular values would settle it outright and is cheap.
+- `p_spatial` is constant at 21 and `x_storage` constant at 0.30 in this configuration, so this is a statement
+  about the two genuinely learned outputs. Whether a three-output head collapses the same way is untested.
+- The collapse is present but weaker at initialisation (0.727), so it is partly inherited from the initial
+  weights and partly learned. Which dominates is untested.
+
+### Suggested order of work
+
+1. Dump the trunk activations and compute their singular-value spectrum. One dominant singular value confirms
+   rank-1 outright.
+2. Separate heads or trunks per parameter group, retrain, and re-measure rho(n, q). Registered prediction: rho
+   falls well below 0.9 and q stops reaching its bounds under the ordinary objective, with no skill change
+   (§20 bounds the whole channel at about 0.09 NSE).
+3. Only then revisit the objective question of §30.
