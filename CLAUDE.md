@@ -148,21 +148,26 @@ ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 
 > **`ddrs run --workflow eval` does not work.** It returns
 > `"standalone --workflow eval needs a --from-run <run-id> flag"`
-> (`src/cli/run.rs:322`), and `--from-run` is unimplemented. Use
+> (`src/cli/run.rs`), and `--from-run` is unimplemented. Use
 > `--workflow train-and-test`, or the legacy `eval` binary against an existing
 > checkpoint. `ddrs init` is likewise a dead stub (exits 2,
-> `src/bin/ddrs.rs:167`) — use `ddrs plan`.
+> `src/bin/ddrs.rs`); use `ddrs plan`.
 
 **Paper studies** (`src/experiment/`, `src/cli/experiment.rs`): `ddrs --workspace
 .ddrs experiment <name>` runs a study from the checked-in bundle
 `experiments/<name>/` over already-trained runs (arms are run ids; latest
 directory checkpoint; flat `.mpk` refused) into `.ddrs/experiments/<name>/<ts>/`.
-First study: `adjoint` (inflow-gradient influence map). See the `ddrs-dev` skill
-and `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+Two studies ship: `adjoint` (inflow-gradient influence map) and `landscape`
+(loss-landscape and watershed-perturbation probes, `src/experiment/landscape/`).
+See the `ddrs-dev` skill and
+`docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
 **Data-source groups** (`src/cli/sources.rs`): named "save files" for the
 `data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
-`conus`, `conus-hourly`, `global`, `daily-lstm`, and `hourly-lstm` ship in-repo). Switching datasets never
+`conus`, `conus-hourly`, `conus-gridded`, `global`, `daily-lstm`, and
+`hourly-lstm` are the documented groups). `aorc_dhbv_distributed`,
+`conus-experimental`, and `conus-hydrodl2` also ship in-repo, so `ddrs sources
+list` output is never a surprise. Switching datasets never
 requires hand-editing `ddrs.yaml`:
 
 `conus-hourly` adds `aorc_precip:
@@ -289,14 +294,25 @@ Each prints a deprecation warning on entry pointing at the equivalent
 src/
 ├── routing/              Core MC solver (port of ddr/src/ddr/routing/)
 │   ├── mmc.rs            MuskingumCunge<I>: setup_inputs, forward, route_timestep
+│   ├── leakance.rs       Losing-stream zeta term (off by default, see below)
 │   ├── utils.rs          denormalize, hotstart, dense helpers
 │   └── mod.rs
-├── sparse.rs             CSR pattern + triangular solve + custom Backward
+├── sparse/               CSR pattern + triangular solve + custom Backward
 ├── geometry.rs           Trapezoidal channel geometry (Leopold & Maddock)
 ├── config.rs             Parameter ranges, attribute minimums, log-space flags
-├── nn/kan_head.rs        KAN head via rskan v0.1.3 — Linear→KanLayer×N→Linear
-│                         →Sigmoid, no inter-block ReLU (matches DDR `kan.py`).
-│                         Same I/O contract as the prior MLP placeholder.
+├── cuda_graph/           Captured-graph path for the CUDA backend
+├── nn/
+│   ├── kan_head.rs       KAN head via rskan v0.1.3: Linear→KanLayer×N→Linear
+│   │                     →Sigmoid, no inter-block ReLU (matches DDR `kan.py`)
+│   └── disagg_head.rs    Precip-conditioned daily→hourly disaggregation head
+├── adjacency/            Managed adjacency builder (fabric → zarr), incl.
+│                         gridded.rs (DDM30) and subdivide.rs (off by default)
+├── baseline/             Summed-Q' reference, cached under .ddrs/baselines/
+├── training/             Driver, loss, checkpointing, bootstrap
+├── pretrain/             Disaggregation-head pretraining
+├── experiment/           Paper studies: adjoint/ and landscape/
+├── cli/                  plan, run, show, status, gc, sources, import, experiment
+├── bin/                  ddrs (primary) + legacy train/eval/train_and_test
 └── data/                 Live readers for DDR's training data (no export step)
     ├── ids.rs            Comid, Staid newtypes; IdIndex<T>
     ├── error.rs          DataError with source-path context
@@ -306,7 +322,9 @@ src/
 tests/                    Integration tests; each file is its own crate
 examples/                 compare_ddr_sandbox (regression), benchmark_hydrograph
 scripts/                  Python helpers run under DDR's uv venv
-spike_backward/           Isolated Cargo project for BURN API exploration; ignore
+vendor/                   Why [patch.crates-io] points at the taddyb/burn and
+                          taddyb/cubecl forks (see vendor/README.md)
+ddrs-py/                  maturin/PyO3 bindings, read-only CPU inference
 ```
 
 `.claude/ARCHITECTURE.md` has the per-timestep dataflow diagram and cold-start
@@ -405,11 +423,9 @@ which preserves prior behavior exactly — omit the block and nothing changes):
 - `nse-batch` — dHBV's `NSELossBatch`: mean over valid (day, gauge) of
   `(sim - obs)² / (σ_gauge + eps)²`, with σ fixed over the training period.
   Pairs with `experiment.optimizer: adadelta`, which is scale-free and ignores
-  the `learning_rate` schedule by design.
-  **Not on `master` yet** — `nse-batch`, `optimizer`, `use_grad_accum`, and
-  `grad_accum_steps` land with the gradient-accumulation work (PR #31, branch
-  `exp_train`). On a commit without them, `nse-batch` fails config load with
-  `unknown variant 'nse-batch'`.
+  the `learning_rate` schedule by design. Gradient accumulation
+  (`experiment.use_grad_accum`, `grad_accum_steps`) is also available; it is
+  rejected at load unless `grad_accum_steps >= 2`.
 
 The `nnse-kge` option exists because L1 and NSE are both maximized at a
 simulated variance *below* observed (NSE's optimum is at `α = r < 1`), so they
@@ -535,7 +551,7 @@ non-negative" argument without reading `.claude/REACH-SUBDIVISION.md`.
 1. **Requires `geospatial_fabric`.** Subdivision runs inside the managed
    adjacency builder, which explicit `conus_adjacency`/`gages_adjacency` paths
    bypass — so `enabled: true` alongside them is a **config error**, not a
-   warning (`validate_subdivision_reaches_the_builder`, `src/config.rs:1066`).
+   warning (`src/config.rs::validate_subdivision_reaches_the_builder`).
    Otherwise the flag would be *silently inert* while the manifest claimed
    subdivision. The one allowed exception is an explicit path to a store already
    built subdivided, detected from zarr metadata (`n_parent < n`).
@@ -646,11 +662,13 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
 
 ## When in doubt
 
-- **Three skills cover this repo.** `ddrs-dev` — building, coding, configuring,
+- **Four skills cover this repo.** `ddrs-dev`: building, coding, configuring,
   testing, running, debugging; its `references/` carry the full config reference,
   the change→gate matrix, the trap catalog, and the authoritative research-status
   numbers. `ddrs-eval-plots` — evaluating and visualizing run output.
   `ddrs-journal` — recording what an experiment concluded (see §Research journal).
+  `ddrs-run`: the runbook for launching, watching, resuming, and auditing a
+  training or eval job.
   The other 16 skills were consolidated on 2026-07-30; see
   `docs/2026-07-30-docs-and-skills-audit.md`.
 - Sparse / autograd questions → `docs/reference/burn-autograd.md`
