@@ -1,0 +1,23 @@
+# Dense (n, q) terrain with p held at its trained value: is the landscape
+# reducible to just n and q, i.e. can p be prescribed rather than fit?
+# slice_center: trained pins the third (unswept) component -- here p -- at
+# its trained value (0 in log-multiplier space) instead of at alpha_star.
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-surface-nq --backend cpu
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  water_year: 2000
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 1.5
+  grid: 41
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-q"]
+  slice_center: trained

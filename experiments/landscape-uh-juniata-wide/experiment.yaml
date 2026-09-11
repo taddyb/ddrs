@@ -1,0 +1,19 @@
+# Per-gauge loss landscape in (n, p, q) log-multiplier space — sample case.
+# Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-juniata-wide --backend cpu
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+  - { name: uh-seed43, run: 2026-09-07T18-45-57Z-train-and-test }   # replicate seed: its trained point read in seed 42's eigenbasis is the tolerance
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  water_year: 2000
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 2.3025851     # ln 10 — the ln 3 box clipped both optima at its corner
+  grid: 13
+  fd_step: 0.05
+  newton_iters: 10
+  tolerances: [0.05, 0.10]

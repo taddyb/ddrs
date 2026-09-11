@@ -256,7 +256,7 @@ fn copy_cargo_lock_if_reachable(run_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn capture_git() -> GitInfo {
+pub(crate) fn capture_git() -> GitInfo {
     fn out(args: &[&str]) -> String {
         Command::new("git").args(args).output().ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())

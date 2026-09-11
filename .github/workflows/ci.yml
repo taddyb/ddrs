@@ -30,8 +30,12 @@ jobs:
   # paths; --features cuda tests are compiled out; juniata_acceptance
   # self-skips under debug_assertions. `fixtures` enables the KAN parity
   # sweep (tests/fixtures/ is tracked).
+  # Pinned to 24.04, not ubuntu-latest: the whole CUDA chain below is
+  # noble-specific (NVIDIA's ubuntu2404 apt repo, CUDA 12.6.3,
+  # libnvidia-compute-560). When GitHub moves ubuntu-latest to 26.04 this
+  # must be a deliberate re-bring-up, not a surprise red on an unrelated PR.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       # ubuntu-latest's default free space (~14 GB usable) is exhausted by
@@ -88,7 +92,7 @@ jobs:
   # Release routing-acceptance gates: DDR sandbox parity (example exits 1
   # unless ABSOLUTE MATCH) + Juniata end-to-end metric floors.
   acceptance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # see the pin note on `test`
     timeout-minutes: 90
     # Cargo.toml's release profile uses lto = "thin", and the thin-LTO link
     # of the juniata_acceptance test binary took 30 of the job's 40 minutes

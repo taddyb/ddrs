@@ -153,6 +153,13 @@ ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 > checkpoint. `ddrs init` is likewise a dead stub (exits 2,
 > `src/bin/ddrs.rs:167`) — use `ddrs plan`.
 
+**Paper studies** (`src/experiment/`, `src/cli/experiment.rs`): `ddrs --workspace
+.ddrs experiment <name>` runs a study from the checked-in bundle
+`experiments/<name>/` over already-trained runs (arms are run ids; latest
+directory checkpoint; flat `.mpk` refused) into `.ddrs/experiments/<name>/<ts>/`.
+First study: `adjoint` (inflow-gradient influence map). See the `ddrs-dev` skill
+and `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+
 **Data-source groups** (`src/cli/sources.rs`): named "save files" for the
 `data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
 `conus`, `conus-hourly`, `global`, `daily-lstm`, and `hourly-lstm` ship in-repo). Switching datasets never

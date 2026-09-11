@@ -239,3 +239,24 @@ plain `plan` reports drift then refreshes the lock.
 5. Smoke it: `ddrs run --workflow train --max-mini-batches 2`.
 6. Grep the smoke log for `streamflow resolution:` and the gauge-filter line.
 7. Check no other CUDA job is resident if you are using `--backend cuda`.
+
+## T11 Forward-only Autodiff evaluations retain the tape
+
+**Symptom.** A process that runs many routing forwards without training (grid sweeps, sensitivity scans) grows
+without bound: about 18 MB per forward on the 5-reach sandbox at 2,142 steps, 20 MB per eval at Newport (213
+reaches, 4 windows of 90 days); the 41x41 landscape grid reached 77 GB RSS.
+
+**Cause.** `MuskingumCunge<I>` is written only for `Autodiff<I>`; every forward builds a tape, and the tape is
+released only when a `.backward()` consumes it. Untracked tensors (no `require_grad`) do not help: the tape is
+still retained (`examples/leak_probe.rs`, modes `ad-notrack` 17.7 MB/iter, `ad-track-nobackward` 25.3 MB/iter,
+`ad-track-backward` 0.0). Training and the adjoint studies never see it because they always call backward.
+
+**Discriminating test.** `cargo run --release --example leak_probe -- ad-notrack 40` prints RSS per iteration and
+the slope; a leak-free path has a slope near 0 MB/iter.
+
+**Fix / rule.** Any forward-only evaluation on the Autodiff backend must end with a backward on the scalar it
+computed (mark one leaf `require_grad`, call `backward()`, discard the grads). `Objective::eval` in
+`src/experiment/landscape/objective.rs` does this since `658cbfc`; numerics are unchanged and the cost is one
+backward per eval (about 2x the forward-only time). Reading `.inner()` does not release anything. A tape-free
+forward would need the engine to be generic over the inner backend; not done.
+

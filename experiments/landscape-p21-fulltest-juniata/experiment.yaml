@@ -1,0 +1,19 @@
+# Full test period 1995-10-01 to 2010-09-30 (water_year: 1996, window_days: 0 -> resolved to the whole axis); grid: 0, so only the Newton optimum + Hessian eigenvalues, no landscape slices.
+# ~1.4 h per gauge at this window length; run as 2 shards (--shard 0/2, --shard 1/2).
+# Derived from experiments/landscape-p21-reachgrad/experiment.yaml (same arm and gauge pair), reach_grad off.
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 0    # resolved to the whole eval axis from the window start
+  water_year: 1996  # window start Oct 1 1995 == the test period's own start
+  n_windows: 1      # required whenever window_days: 0
+  alpha_max: 2.3025851     # ln 10, matches landscape-uh-juniata-wide
+  grid: 0                  # no slices, only the Newton optimum
+  fd_step: 0.05
+  newton_iters: 10
+  tolerances: [0.05, 0.10]
+  reach_grad: false

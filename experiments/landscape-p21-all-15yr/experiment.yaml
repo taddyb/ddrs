@@ -1,0 +1,21 @@
+# Full 15-year test-period variant of landscape-p21-all for the CONUS n-gap map (about 15 to 24 h across 16 shards).
+# p = 21 variant (user run 2026-09-08T15-55-52Z-conus-train-and-test, workspace ddrs.yaml with p_spatial not learnable). Derived from experiments/landscape-p21-census41.
+# All test gauges (source: all -- the population `evaluate` scores: has a
+# subgraph and observations), no pairing, one seed. Covers the full 2,365-gauge
+# population instead of the 41-gauge GAGES-II nested-reference subset.
+# Sharded via scripts/landscape_shards.sh for parallel coverage across processes.
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    source: all
+  window_days: 0     # 0 = span to the end of the eval axis: the full 15-year test period 1995-10-01 to 2010-09-30
+  water_year: 1996   # window starts 1995-10-01
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0

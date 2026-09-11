@@ -1,0 +1,24 @@
+# p = 21 variant (user run 2026-09-08T15-55-52Z-conus-train-and-test, workspace ddrs.yaml with p_spatial not learnable). Derived from experiments/landscape-uh-surface-nq.
+# Dense (n, q) terrain with p held at its trained value: is the landscape
+# reducible to just n and q, i.e. can p be prescribed rather than fit?
+# slice_center: trained pins the third (unswept) component -- here p -- at
+# its trained value (0 in log-multiplier space) instead of at alpha_star.
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-surface-nq --backend cpu
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  water_year: 2000
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 1.5
+  grid: 25   # 25x25: about 1 h per gauge with the per-eval backward; 41x41 would be 3 h
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-q"]
+  slice_center: trained

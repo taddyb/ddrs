@@ -1,6 +1,7 @@
 //! `ddrs` CLI implementation. Entrypoint lives at `src/bin/ddrs.rs`.
 
 pub mod error;
+pub mod experiment;
 pub mod fingerprint;
 pub mod gc;
 pub mod import;

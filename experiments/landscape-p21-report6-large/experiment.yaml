@@ -1,0 +1,22 @@
+# The six large, slow gauges deferred from landscape-p21-report38 on 2026-09-10 under memory pressure.
+# Same settings as report38. Run these alone (6 shards) so the 25 x 25 grids on big subgraphs do not compete for RAM.
+study: landscape
+arms:
+  - { name: p21-conus, run: 2026-09-08T15-55-52Z-conus-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned; gages_3000; pinned final checkpoint
+landscape:
+  gauges:
+    source: list
+    staids: ["01646500", "02226000", "03049500", "03340500", "03381500", "05458500"]
+  window_days: 1826   # 5 water years
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 2.3025851   # ln 10: the 1.5 box put nine of ten NSE optima on its edge (n x4.48)
+  grid: 25
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-q"]
+  slice_center: trained
+  objective: nse-batch
+  series: true

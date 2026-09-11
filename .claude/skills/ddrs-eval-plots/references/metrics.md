@@ -188,6 +188,7 @@ if GAUGES_CSV is not None and GAUGES_CSV.exists():
                 dpi=200, bbox_inches="tight")
 
     fig = plot_gauge_map(gages=g, metric_column=metric_cols[-1],
+                         basemap_source="Esri.WorldGrayCanvas",  # CartoDB tiles are watermarked since 2026-09-08
                          title=RUN_LABEL, colormap="plasma",
                          figsize=(16, 8), point_size=30,
                          path=PLOT_DIR / "metrics_gauge_map.png")

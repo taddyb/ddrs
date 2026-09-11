@@ -1,0 +1,21 @@
+# p = 21 on the area-balanced population (run 2026-09-08T14-06-12Z-train-and-test): the single-change twin of the learned-p arm.
+# Displacement census over the 41 GAGES-II nested reference gauges, both UH
+# seeds, Newton/Hessian only; the 8-gauge census had only two well-fit
+# gauges, this one asks whether the "route faster" displacement is
+# Appalachian or CONUS-wide.
+study: landscape
+arms:
+  - { name: uh-pfixed21, run: 2026-09-08T14-06-12Z-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned, gages_2000_area_balanced (clean twin of the learned-p seed-42 arm)
+landscape:
+  gauges:
+    source: nested-reference
+    gages_ii_dbf: /mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  water_year: 2000
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0
