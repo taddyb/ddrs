@@ -33,7 +33,7 @@ pub use forward::{
 };
 pub use loss::{
     batch_loss, filter_nan_gauges, l1_loss_post_warmup, loss_denominator, nnse_kge_loss,
-    nse_batch_loss,
+    nse_batch_deriv_loss, nse_batch_loss,
     tau_trim_and_downsample, FilteredPair,
 };
 pub use driver::{train, TrainState};

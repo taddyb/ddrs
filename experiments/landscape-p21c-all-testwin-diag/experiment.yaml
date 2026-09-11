@@ -1,0 +1,21 @@
+# Identifiability check on the DERIVATIVE-LOSS model (nse-batch-deriv, lambda 0.5, 500 updates),
+# scored under the SAME nse-batch objective as landscape-p21b-all-testwin-diag so the two trained
+# points are compared on one surface. Question: does the derivative-trained model sit closer to
+# each gauge optimum? newton_iters 12 so the displacement is actually searched for.
+study: landscape
+arms:
+  - { name: p21c-conus, run: 2026-09-11T06-38-49Z-conus-train-and-test, checkpoint: epoch_50_mb_9 }   # grad_accum_steps 4, 50 epochs, 500 optimizer updates
+landscape:
+  gauges:
+    source: all
+  period: testing
+  window_days: 1826
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12    # search for each gauge's optimum: the displacement is the quantity of interest
+  grid: 0
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  series: false

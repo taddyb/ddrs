@@ -1,0 +1,26 @@
+# Miniature of the whole question at one gauge: does training WITH the derivative
+# term leave Manning's n better determined than training without it?
+# Both arms are the Juniata bundle at 300 optimizer steps, identical apart from
+# experiment.loss.kind. Scored under the SAME objective (nse-batch) so the
+# comparison is of the trained points, not of two different loss surfaces.
+# Grid included so the curve shape is measured, not extrapolated from two points.
+study: landscape
+arms:
+  - { name: nse-batch,  run: 2026-09-11T03-30-47Z-train-and-test, checkpoint: epoch_300_mb_0 }
+  - { name: nse-deriv,  run: 2026-09-11T03-32-56Z-train-and-test, checkpoint: epoch_300_mb_0 }
+landscape:
+  gauges:
+    source: all
+  window_days: 1826
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 2.3025851
+  grid: 25
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-q"]
+  slice_center: trained
+  objective: nse-batch
+  series: true

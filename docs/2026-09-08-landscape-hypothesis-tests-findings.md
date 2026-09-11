@@ -337,10 +337,23 @@ with the NSE at the trained point over the WY2000 windows:
 | q | 0.50 | 0.48 | 0.34 | 0.12 | 0.10 | 0.10 |
 | Newport NSE | 0.562 | 0.575 | 0.710 | 0.708 | 0.703 | 0.703 |
 
-n reaches 0.040 by epoch 10 (about 450 optimizer steps at 45 per epoch) and does not move for the remaining 20
-epochs, through two learning-rate decays. The area-balanced run made about 870 steps in its 30 epochs and left n at
-0.100. So the difference is not step count: the gages_3000 batch's gradient drives n to 0.04 and holds it there; the
-area-balanced batch's gradient does not. **Composition of the training population sets the batch's roughness.**
+n reaches 0.040 by epoch 10 and does not move for the remaining 20 epochs, through two learning-rate decays.
+
+**Correction 2026-09-10.** This section originally read "about 450 optimizer steps at 45 per epoch" for the
+gages_3000 run and "about 870 steps" for the area-balanced one. Both assumed one step per micro-batch and ignored
+gradient accumulation. Counted from the checkpoint directories, which are written one per optimizer step, **each
+run made exactly 60 updates**: 2,365 gauges give 37 micro-batches per epoch and 1,841 give 29, and at
+`grad_accum_steps: 20` both yield 2 steps per epoch over 30 epochs. So epoch 10 is **update 20**, not update 450.
+
+The conclusion is unchanged and in fact strengthened: the two runs made the *identical* number of updates, so step
+count cannot be the difference between them. The gages_3000 batch's gradient drives n to 0.04 and holds it there;
+the area-balanced batch's gradient does not. **Composition of the training population sets the batch's roughness.**
+
+What the corrected count does change is the reading of "holds it there". n stops moving at epoch 10, which is
+exactly where the learning rate drops from 0.005 to 0.001 (`learning_rate: {1: 0.005, 11: 0.001, 21: 0.0005}`).
+With only 20 updates spent before that drop and 40 much smaller ones after, "the gradient went to zero" and "the
+steps became too small to see" are not distinguishable from this trajectory alone. §21 settles it from the other
+side: the gradient had not gone to zero, on either window.
 
 Across the four gauges checked (Juniata pair, White River pair) the trained n at epoch 30 is 0.040 to 0.058: the
 head's output is close to CONUS-uniform, so "the batch's n" is nearly a single number set by the aggregate gradient.
@@ -1158,3 +1171,504 @@ costs KGE. This agrees with §16, which found the two objectives pick the same d
 they over-represent large displacements. The median changes here are not population estimates; the population
 figures are in §20.
 
+
+---
+
+## 25. It is not a weak gradient, it is a flat valley: where roughness curvature lives
+
+"The gradient with respect to roughness is weak" is imprecise and sends the wrong fixes. Measured on the
+2,124 well-fit gauges of the five-year census:
+
+**The batch gradient is not noisy.** Per-gauge `dL/d ln n` has a 5-95 % trimmed effect size
+`|mean| / sd` of 0.734, so a batch of 256 gauges sees the direction at a signal-to-noise ratio of about **12**.
+Adam normalises by gradient magnitude, so a uniformly small but consistent gradient is not a problem for it.
+
+**Restricting to identifiable gauges does not help.** Keeping only travel times over one day changes the effect
+size from 0.734 to 0.717. Short-travel-time gauges actually have the *highest* effect size (1.66 below half a day,
+1.04 from half a day to one day, against 0.39 beyond four days): they sit far from their optima and push
+consistently, on a surface where moving buys nothing.
+
+**The width exponent is not stealing the stiffness.** Curvature along `ln n` with q frozen (`H_nn`, median
+0.00109) against q free to re-optimise (the Schur complement `H_nn - H_nq^2/H_qq`, median 0.00128) differ by a
+factor of **0.99**. The n-q coupling is negligible at every basin size, so pinning q the way p was pinned would
+not sharpen n.
+
+So the direction is clear and the valley is flat. The quantity to attack is the **curvature**, not the gradient.
+
+### 25.1 Ninety percent of the curvature is in one percent of the gauges
+
+| | share of the population's total &#124;H_nn&#124; |
+|---|---|
+| top 1 % of gauges (21 of 2,124) | **89.9 %** |
+| top 5 % (106) | 95.3 % |
+| top 10 % (212) | 96.7 % |
+| top 50 % (1,062) | 99.6 % |
+
+| basin size | gauges | median &#124;H_nn&#124; | share of total curvature |
+|---|---|---|---|
+| n_reach <= 50 | 1,580 | 0.0127 | 6.6 % |
+| 51 to 200 | 404 | 0.0293 | 67.1 % |
+| > 200 | 140 | 0.0734 | 26.3 % |
+
+The continental channel parameter is, in effect, determined by a few dozen gauges. Everything else contributes a
+confident push on a surface too flat to care.
+
+### 25.2 What creates curvature: the hydrograph's time derivative
+
+Spearman rank correlations with `|H_nn|`:
+
+| predictor | rho |
+|---|---|
+| gauge reach slope | **-0.435** |
+| flashiness (daily dQ/dt magnitude) | **+0.314** |
+| total channel length | +0.314 |
+| drainage area | +0.270 |
+| reach count | +0.261 |
+| mean flow | +0.183 |
+
+Within small basins alone (`n_reach <= 50`, n = 1,580), flashiness against `|H_nn|` is **+0.408**, stronger than
+in the pooled set, so this is not a size proxy.
+
+**The mechanism this implies.** Roughness acts on the hydrograph almost entirely through travel time: for Manning
+flow at fixed discharge, velocity goes as `n^-3/5`, so travel time goes as `n^3/5`. To first order a change in
+roughness shifts the routed series in time, and a pure time shift changes the series by `dQ = -(dQ/dt) dtau`. The
+loss therefore picks up curvature in proportion to **the mean square of the hydrograph's time derivative**, scaled
+by the channel's travel time. That predicts exactly what is measured: stiffness rises with flashiness and with
+channel length, and falls with slope (steep reaches are fast, so `dtau/d ln n` is small).
+
+It also explains the flatness directly. Daily averaging is a low-pass filter applied to precisely the quantity
+that gives roughness its leverage. Whatever timing information lives below the daily scale, which is most of it at
+a basin whose wave crosses in hours, is removed before the loss ever sees it.
+
+### 25.3 What follows for strengthening it
+
+Ranked by the mechanism above, not by convenience:
+
+1. **Sub-daily observations.** The only change that attacks `⟨(dQ/dt)^2⟩` at its source. The hourly store, the
+   AORC precip source and the disaggregation head already exist. This is the principled fix and the strongest
+   available test of whether the flatness is physics or sampling.
+2. **A time-derivative term in the objective.** Even at daily resolution, adding a penalty on `d/dt` mismatch
+   projects the loss onto what roughness controls, instead of onto the volume and correlation that the inflow
+   already supplies. Cheap to implement in `src/training/loss.rs` alongside the existing kinds.
+3. **Curvature-weighted or size-restricted training.** Legitimate, and revealing rather than merely tuning, since
+   §9 and §23 showed the training population sets the roughness. But note what 25.1 means: weighting by curvature
+   is close to training the channel on a few dozen gauges, with the variance that implies.
+4. **Not worth doing:** pinning q to sharpen n (factor 0.99), or dropping short-travel-time gauges to clean up the
+   gradient (effect size 0.734 to 0.717). Both are ruled out above.
+
+**Caveat.** The mechanism in 25.2 is inferred from correlations plus the Manning scaling, not from a controlled
+experiment. The direct test is to recompute `H_nn` on an hourly-resolution objective at the same gauges and check
+that it rises, most at the flashy small basins where daily curvature is lowest.
+
+---
+
+## 26. Pre-registered prediction: what a time-derivative loss term should do to the curvature
+
+Written **before** the probe was run, so the comparison is a test and not a post-hoc fit.
+
+§25 established that curvature in `ln n` is governed by the mean square of the hydrograph's time derivative:
+`d2L/d(ln n)^2 = 2 (0.6 tau)^2 <(dQ/dt)^2> / sigma^2`. Tested against the measured Hessian at 2,365 gauges
+(training window, series and Hessian from the same run) this parameter-free expression gives **Spearman +0.710**
+with a log-log slope of **0.82**, against a predicted slope of 1.0. The absolute scale is off by about 12x
+(median measured/predicted 0.086), which is expected: a pure time shift ignores attenuation, and the travel time
+is an order-of-magnitude proxy. The ranking is what the mechanism claims, and the ranking holds. Both factors
+carry weight independently: `<(dQ/dt)^2>/sigma^2` alone gives +0.533, `tau^2` alone +0.301.
+
+### The prediction
+
+Add to the objective a term on the series' time derivative,
+
+    L' = L_nse + lambda * mean_pairs( (dsim/dt - dobs/dt)^2 ) / sigma_d^2
+
+with `sigma_d` the standard deviation of the observed daily differences. Under the same time-shift argument the
+derivative term contributes curvature through `<(d2Q/dt2)^2>/sigma_d^2` where the level term contributes
+`<(dQ/dt)^2>/sigma^2`, so
+
+    stiffening = 1 + lambda * R,      R = [<Q''^2>/sigma_d^2] / [<Q'^2>/sigma^2]
+
+Measured from the stored daily series at 2,365 gauges: **R has median 5.33** (p25 2.79, p75 13.25), and it rises
+with basin size (4.35 at `n_reach <= 50`, 9.23 at 51 to 200, 15.05 above 200).
+
+**At `lambda = 0.5` the prediction is therefore:**
+
+| quantity | predicted |
+|---|---|
+| median stiffening of &#124;H_nn&#124; | **3.7x** (p25 2.4x, p75 7.6x) |
+| stiffening at `n_reach <= 50` | 3.2x |
+| stiffening at 51 to 200 | 5.6x |
+| stiffening at `n_reach > 200` | 8.5x |
+| direction | curvature rises at essentially every gauge; the gain rises with basin size |
+
+### What would refute it
+
+- Median stiffening below about 1.5x: the derivative term does not reach the mechanism the correlations implied.
+- Stiffening that does not increase with basin size: `tau^2` is not really the second factor, so the time-shift
+  picture is wrong even if the curvature happens to rise.
+- Curvature rising while the per-gauge optimum `alpha_n_star` moves a long way: then the term is not sharpening
+  the existing valley, it is choosing a different one, and the two objectives disagree about the answer rather
+  than about the confidence. Worth knowing either way, but it is a different claim from the one registered here.
+
+### Design of the probe
+
+`objective: nse-deriv`, `deriv_weight: 0.5`, run at the **same checkpoint, same gauges and same window** as
+`landscape-p21b-all-testwin-diag`, which supplies the `nse-batch` baseline. No retraining: this measures whether
+the valley is deeper under the candidate objective before any training run is spent on it. If it passes, the term
+goes into `src/training/loss.rs` and gets a retrain; if it fails, the cost was a few hours.
+
+---
+
+## 27. The retrain converged: §21 is closed
+
+§21 measured that the 60-update model was not at a stationary point, on either window. The fix it implied was
+optimizer budget, and §20 predicted the prize was about +0.009 median NSE concentrated in large basins. Both were
+tested by the 2026-09-10 retrain (`grad_accum_steps` 20 to 4, `epochs` 30 to 50, lr flattened to 0.005 through
+epoch 20, giving **500 optimizer updates against 60**). Everything else held fixed: same data, architecture, seed
+and population.
+
+### The convergence test, before and after
+
+Paired on the gauges well-fit in both windows, using the robust statistics of §21.3:
+
+| | 60 updates (§21) | **500 updates** |
+|---|---|---|
+| shared gauges | 2,059 | 2,076 |
+| share where the loss falls if n rises, **testing** | 78.4 % (z = 25.8) | **53.6 %** (z = 3.2) |
+| share where the loss falls if n rises, **training** | 78.9 % (z = 26.2) | **53.1 %** (z = 2.8) |
+| 10 % trimmed alignment, testing | 0.941 | **0.008** |
+| 10 % trimmed alignment, training | 0.959 | **0.057** |
+
+Per window across all well-fit gauges, by basin size (testing window):
+
+| basin size | share negative | trimmed alignment | z |
+|---|---|---|---|
+| all (2,138) | 53.9 % | 0.017 | 3.6 |
+| n_reach <= 50 | 53.9 % | 0.047 | 3.1 |
+| 51 to 200 | 53.9 % | 0.223 | 1.6 |
+| > 200 | 53.1 % | 0.355 | **0.7** |
+
+**The aggregate gradient has essentially vanished.** The population sign share moved from 78 % to 54 %, and the
+trimmed alignment from 0.94 to 0.008, which is what a batch optimum looks like: the per-gauge gradients now
+cancel. At basins over 200 reaches, where the 60-update model was most lopsided (90 % negative, alignment 1.000),
+the retrained model is at z = 0.7, statistically indistinguishable from a stationary point.
+
+A residual tilt remains, 54 % rather than 50 %, at z = 3.2. On 2,076 gauges that is detectable but it is 1/8 the
+effect size of before, and it is the scale at which "not exactly stationary" stops being the dominant story.
+
+### What this settles
+
+1. **The undertraining diagnosis was right, and the fix worked.** This is the instrument's first genuine
+   out-of-sample prediction: the landscape said the model had not converged, the prescribed change was made, and
+   the landscape now says it has.
+2. **§20's magnitude prediction also held.** Predicted about +0.009 median NSE with the gain concentrated in large
+   basins; measured +0.0062 paired median, +0.018 in the medians (0.7200 to 0.7376), improved at 70.7 % of gauges,
+   with the gain rising from +0.005 below 1,000 km2 to +0.020 at 10,000 to 30,000 km2.
+3. **It changes what the remaining displacement means.** Before, "gauges sit away from their own optima" was
+   ambiguous between an unfinished descent and a genuine batch compromise. That ambiguity is now resolved: the
+   descent is finished, so what remains **is** the compromise. Selective equifinality is the correct reading of
+   the residual, not undertraining.
+4. **It reopens §10.** "Composition, not step count" was concluded from two runs that had both made exactly 60
+   updates (see the §10 correction). With 500 updates the same gages_3000 population lands at median trained
+   n = 0.080 rather than 0.049, wandering between 0.073 and 0.100 over the last 40 epochs without the loss
+   objecting. Whether the two populations still differ by a factor of two once BOTH are properly trained is now
+   an open question, and it bears directly on the abstract's central claim (§22, §23).
+
+### Caveat
+
+The residual z of 3.2 is small but real, and the trimmed alignment at large basins (0.355 testing, 0.172 training)
+is higher than the population value, so the biggest basins are the least settled even though their sign share is
+closest to 50 %. That is consistent with them having the most curvature and therefore the most to say.
+
+---
+
+## 28. The curvature probe: the derivative term deepens the valley, as predicted
+
+The prediction registered in §26 was tested by running the landscape with `objective: nse-deriv`,
+`deriv_weight: 0.5` at the **same checkpoint, gauges and window** as `landscape-p21b-all-testwin-diag`, so the
+only difference between the two censuses is the objective. 2,365 paired gauges.
+
+### Result
+
+| quantity | predicted (§26) | **measured** |
+|---|---|---|
+| median stiffening of &#124;H_nn&#124; | 3.7x | **3.04x** |
+| p25 / p75 | 2.4x / 7.6x | 1.89x / 5.98x |
+| share of gauges stiffer | essentially all | **92.8 %** |
+| `n_reach <= 50` | 3.2x | 2.71x |
+| 51 to 200 | 5.6x | 4.16x |
+| `n_reach > 200` | 8.5x | 4.92x |
+
+Absolute curvature, median `|H_nn|`: **0.0455 to 0.1670**. The share of gauges flat enough that a factor of two in
+roughness costs under 0.005 of loss falls from **35 % to 16 %**.
+
+**The registered prediction passes.** The median is 82 % of the predicted value, comfortably above the 1.5x
+refutation bar, and the direction of the size scaling is right. The magnitude of that scaling is over-predicted at
+the largest basins (4.92x measured against 8.5x), which is the one place the simple time-shift argument is weakest:
+at long travel times the routing also attenuates rather than purely translating, so `<Q''^2>` over-states the
+available leverage.
+
+### The term sharpens the existing valley, it does not choose a different one
+
+This was the third refutation condition in §26, and it is the one that decides whether the term is usable. Gradient
+at the identical parameter point under each objective:
+
+| | share where the loss falls if n rises | 10 % trimmed alignment |
+|---|---|---|
+| nse-batch | 54.1 % | 0.059 |
+| nse-deriv | 54.5 % | 0.024 |
+
+Sign agreement between the two objectives, gauge by gauge: **88.7 %**. Both objectives agree that the converged
+model is close to stationary, and they agree gauge by gauge about which way to move. So the derivative term is
+adding **confidence, not disagreement**: the minimum stays where it was and the surface around it becomes steeper.
+That is exactly the property needed for it to sharpen identifiability without changing the answer.
+
+### Caveats
+
+- Both censuses ran `newton_iters: 0`, so this compares curvature and gradient at the trained point, not the
+  location of the two optima directly. The gradient agreement above is the proxy, and it is a good one at a point
+  this close to stationary, but a Newton run under each objective would be the direct measurement.
+- The probe measures the objective's curvature at a point reached by training on a *different* objective. For a
+  quadratic the Hessian does not depend on where it is evaluated, and the model is near-stationary, so this is a
+  small correction, but it is not zero.
+- `lambda = 0.5` makes the two terms roughly co-equal in magnitude, since the median gauge's realised derivative
+  contribution is 2.5x its level contribution. That is a deliberate choice and not a tuned one; no other value was
+  tried.
+- The derivative term concentrates the batch somewhat more than the level term (effective sample size 151 of 2,365
+  gauges against 295 by realised contribution), which is the same regime, not a new pathology.
+
+### 28.1 The same question at one gauge: does a derivative-trained model end up better placed?
+
+The probe measures the curvature of the new objective. The complementary question is whether a model *trained*
+with the term ends up nearer its own optimum. `experiments/juniata-deriv-compare` answers it at the Juniata
+(USGS 01567000, 213 reaches): two models identical apart from `experiment.loss.kind`, both at 300 optimizer steps,
+both scored under the **same** `nse-batch` objective with a 25 x 25 grid, so the comparison is of trained points
+and not of two different surfaces.
+
+| | trained NSE | NSE at its own optimum | displacement `alpha_n_star` | n factor from optimum |
+|---|---|---|---|---|
+| trained on `nse-batch` | 0.8653 | 0.8670 | **-0.268** | 1.31x |
+| trained on `nse-batch-deriv` | 0.8671 | 0.8672 | **-0.049** | **1.05x** |
+
+The derivative-trained model sits **5.4 times closer to its own optimum**, with essentially nothing left to gain
+(+0.0001 against +0.0017). Its skill is also marginally higher, though at 0.002 that is not the point and should
+not be quoted as one.
+
+This is one gauge, so it is an illustration rather than evidence: a single basin cannot show a population effect,
+and the Juniata is large enough (213 reaches) to be among the better-constrained gauges to begin with. The
+population version of this table is what the retrain now running will produce.
+
+**One number that does not fit the simple story.** The stiff eigenvalue at the optimum, measured under
+`nse-batch`, is *lower* for the derivative-trained model (0.457 against 0.593). That is not a contradiction, since
+the probe measured curvature under the derivative objective while this measures the `nse-batch` surface at a
+different point, but it is a reminder that "better placed" and "in a sharper basin" are separate claims. Only the
+first is demonstrated here.
+
+---
+
+## 29. Why the width exponent collapses to its bounds
+
+Training on `nse-batch-deriv` drove q to the boundaries: reaches with `q < 0.01` went from 3.5 % to 64.2 %, the
+share inside the Leopold and Maddock band 0.1 to 0.6 fell from 33.0 % to 9.3 %, and 7.9 % sit at the upper bound,
+so **72 % of reaches are pinned at one end or the other**. Manning's n, by contrast, stayed off both bounds
+entirely. Two candidate causes: p being fixed at 21 forcing q to compensate, or q sitting on a weak gradient path
+of the kind n was on.
+
+### The q direction is concave, not merely flat
+
+Measured at the same parameter point under both objectives (2,365 paired gauges, the `nse-batch`-trained
+500-update model):
+
+| | nse-batch | nse-deriv |
+|---|---|---|
+| share where the loss falls if q RISES | 54.2 % | 58.6 % |
+| trimmed alignment along q | 0.257 | 0.426 |
+| median &#124;H_qq&#124; | 0.00107 | 0.00366 |
+| **share with `H_qq <= 0`, i.e. NO interior minimum in q** | **50 %** | **53 %** |
+
+Sign agreement between the two objectives along q is 87.8 %, so they largely agree about direction.
+
+**At half the gauges the q direction is a ridge, not a valley.** That is true under the ordinary `nse-batch`
+objective and predates the derivative term entirely. A parameter sitting on a concave direction does not converge;
+gradient descent pushes it away from the stationary point toward whichever bound it started nearest.
+
+The 25 x 25 grids say the same thing from the other side: scanning q at the trained n, the minimum sits at an
+**edge of the search box at 62.5 % of gauges** (59.4 % upper, 3.1 % lower) and is interior at only 37.5 %, while
+the loss changes by a median of just **5.4 %** across a factor of ten either way in q.
+
+### The derivative term did not create this, it amplified it
+
+The term multiplies the q gradient by **2.77x** and the q curvature by 2.89x. For comparison it multiplies the n
+gradient by 2.68x. **It is not q-specific**: it amplifies both directions by essentially the same factor. On n,
+which has a genuine interior minimum at most gauges, amplification sharpens convergence. On q, which is concave
+at half of them, the same amplification accelerates divergence.
+
+The bimodal outcome is the signature. If q were simply being pushed down by a monotone preference, the result
+would pile up at one bound. Instead it splits, 64.2 % at the lower bound and 7.9 % at the upper, which is what
+divergence from a ridge looks like: each reach falls off toward whichever side it started on. The skew toward
+zero follows from where training starts and where it had already moved: q initialises near 0.49 and the
+`nse-batch` model had already carried it down to a median of 0.084 with a long low tail, so most reaches were
+below the crest before the amplified gradient arrived.
+
+### Verdict on the two hypotheses
+
+- **"Weak gradient path like n": SUPPORTED, with a correction.** It is not weak-but-monotone, it is concave. That
+  distinction matters, because a weak monotone gradient is fixed by more optimizer steps whereas a concave
+  direction is made worse by them.
+- **"Caused by fixing p at 21": NOT SUPPORTED by this evidence, and not refuted either.** The concavity is present
+  under `nse-batch` with p fixed, so it is not something the derivative term introduced, but every measurement
+  here has p fixed, so there is no control that isolates p's role. §8 established that what a gauge identifies is
+  the n/p ratio and that the gauge-optimal n scales with p, which makes p worth suspecting: with p frozen, the
+  width degree of freedom has only q to move in.
+
+**The experiment that settles it:** a landscape census on the learned-p arm with p active, comparing `H_qq` and the
+share of concave gauges against the p-fixed model. If concavity in q largely disappears when p is free, fixing p
+is the cause and the fix is to prescribe p from river size rather than to constrain q. If it persists, q is
+intrinsically unidentifiable from daily discharge and should be fixed rather than learned.
+
+**Practical consequence either way:** do not ship `nse-batch-deriv` with q learnable. The term's benefit is on n,
+and n is where the curvature result applies; q should be pinned the way p is until this is resolved.
+
+---
+
+## 30. n and q live in different information channels, which decides what objective can identify what
+
+### The measurement
+
+What predicts each parameter's identifiability, Spearman rank correlation against the curvature at the trained
+point (2,124 well-fit gauges):
+
+| predictor | &#124;H_nn&#124; (roughness) | &#124;H_qq&#124; (width exponent) |
+|---|---|---|
+| flashiness (daily dQ/dt) | **+0.314** | **-0.045** |
+| gauge reach slope | **-0.435** | -0.109 |
+| depth at mean flow | | **+0.312** |
+| width | | +0.242 |
+| mean flow | +0.183 | +0.221 |
+| channel length | +0.314 | +0.213 |
+| peak ratio | +0.116 | +0.158 |
+
+**They are governed by different things.** Roughness identifiability is a TIMING quantity: it tracks the
+hydrograph's time derivative and is destroyed by steep, fast reaches. Width-exponent identifiability is a SCALE
+quantity: it tracks depth, width and size, and flashiness tells you nothing about it (-0.045).
+
+Two supporting numbers: `|H_qq|` is a median **6.2 %** of `|H_nn|` at the same gauge, so q is roughly sixteen
+times less determined than n; and the two curvatures correlate only +0.353 across gauges, so a gauge that pins
+down roughness is not thereby pinning down width.
+
+### Why this decides the objective question
+
+The derivative term of §26 to §28 works by amplifying the `dQ/dt` channel. That is exactly the channel roughness
+lives in, which is why it deepened the n valley 3.04x. It is exactly the channel the width exponent does **not**
+live in, which is why it amplified q's gradient by a nearly identical 2.77x while leaving q no better determined,
+and so drove it off the ridge of §29 into the bounds.
+
+**RMSE and MSE would not help either, and for a more basic reason.** `nse-batch` already is a mean squared error,
+normalised per gauge by that gauge's observed variance. RMSE is its monotone square root: identical minimiser,
+different gradient scaling. Unnormalised MSE differs only in how gauges are weighted against each other, trading
+the per-gauge normalisation for a size weighting. None of the three opens a new information channel about channel
+geometry; they reweight the same residuals. An objective can only identify a parameter if the data carries
+information about it, and for q, daily discharge barely does.
+
+**What would actually identify q** is an observation of the thing q parameterises. `W = p * d^q` is a width-depth
+relation, and remotely sensed river widths (Landsat-derived, SWOT) constrain it directly, at the scale where the
+measurement above says the signal already lives: large, deep rivers. Short of that, a flow-stratified objective
+is the best proxy available from discharge alone, since q controls how celerity changes between low and high
+flow; but note that the dynamic-range proxy we have (peak ratio) correlates with `|H_qq|` at only +0.158, so
+expectations should be modest.
+
+### On learning p and q together rather than n
+
+This changes what is learned but not how much is identified, and it is still the better choice.
+
+- **It does not add constraint.** §8 established that a gauge identifies the ratio n/p, not n and p separately, so
+  "learn p with n fixed" and "learn n with p fixed" are the same model reparameterised. The stiff direction is the
+  same direction either way.
+- **It relocates the free parameter to something checkable.** Reach-scale Manning's n cannot be measured. Channel
+  width can. Putting the learned degree of freedom in `p` and `q` makes the learned field falsifiable against
+  external width data instead of being an unfalsifiable friction factor, which is worth more than the identifiability
+  it does not gain.
+- **The pair is genuinely coupled, and the standard fix applies.** `log W = log p + q log d` makes p and q the
+  intercept and slope of a line, and intercept and slope are strongly correlated unless the predictor is centred.
+  The reparameterisation `W = p_ref * (d / d_ref)^q`, with `d_ref` a per-reach reference depth (bankfull, or the
+  median routed depth), decorrelates them by construction and makes `p_ref` directly comparable to a measured
+  width. Without that centring, learning p and q together will reproduce the ridge behaviour of §29 in a rotated
+  frame.
+- **Measured coupling, for what it is worth:** the n-q Hessian correlation has median 0.336 with 21 % of gauges
+  above 0.9, so n and q are not generally degenerate. p could not be measured here because no landscape census has
+  p as an active axis, and no learned-p model is on disk; that is the gap to close.
+
+### Recommended next experiments, in order
+
+1. **Census with p active** on a p-learnable arm, to measure `H_pp`, `H_pq` and the p-q coupling directly. Nothing
+   in this document constrains p, and every claim about it above is inference from §8 plus the algebra.
+2. **Centred geometry**: implement `W = p_ref * (d/d_ref)^q` and repeat the census. Prediction to register in
+   advance: the p-q Hessian correlation drops well below 0.9 at most gauges, and q stops running to its bounds
+   under any objective.
+3. **Fix n, learn p and q** with the centred parameterisation, against the current model. Expect equal skill
+   (§20: the whole channel is worth about 0.09 NSE and roughness about a third of it), and judge it on whether the
+   learned widths agree with observed river widths, not on NSE.
+
+---
+
+## 31. The KAN head is emitting one latent direction relabelled as two parameters
+
+The architecture is `Linear(F, H) -> KanLayer(H, H) x 2 -> Linear(H, P) -> Sigmoid` with `F = 10` attributes and
+`H = 21`. All learned parameters come from **one shared trunk**, separated only by the final `Linear(H, P)`.
+Measured on the learned fields over all 346,321 CONUS reaches (500-update `nse-batch` model):
+
+| quantity | value |
+|---|---|
+| Spearman rho(n, q_spatial) | **0.9967** |
+| Pearson rho(n, q_spatial) | 0.9640 |
+| Pearson on the PRE-SIGMOID (logit) scale | **0.9935** |
+| variance of q's pre-activation explained by a line in n's | **98.7 %** |
+| fitted relation | `logit(q) = 3.98 * logit(n) + 2.75` |
+
+The two learnable outputs are **the same spatial field read twice with different gains**. If the trunk's output
+were full rank, two independent rows of the final Linear layer would produce two unrelated combinations of 21
+hidden units. A near-perfect line on the pre-sigmoid scale means the trunk is delivering essentially one
+direction.
+
+Across models: rho(n, q) is 0.727 at epoch 1 (near initialisation), **0.999** after 60 updates, **0.997** after
+500, and 0.869 for the derivative-loss model. Training makes the collapse worse, not better.
+
+### This explains the boundary behaviour of §29 without any appeal to the loss
+
+The fitted gain is **3.98**. Whatever spread the trunk produces in `logit(n)`, q's pre-activation spans about four
+times as much, so q saturates its sigmoid at both ends while n stays comfortably interior. That is exactly what is
+measured: n occupies 0.031 to 0.213 inside a declared range of 0.01 to 0.35 and never reaches a bound, while q
+runs 0.0006 to 0.998 and piles up at both. **q hits its bounds because it is n's field amplified fourfold, not
+because of anything the objective does to q.** The derivative term made it worse by widening n's spread, which q
+then multiplies.
+
+### What this means for the three questions
+
+1. **"Is our KAN the problem?"** Yes, demonstrably, and this is the first architectural defect the study has
+   found that is not about identifiability. A model whose two geometry-and-friction outputs are 98.7 % the same
+   latent direction cannot represent independent spatial patterns for them, whatever the data or the loss allows.
+2. **"A separate KAN for p and q?"** This is now the evidence-backed fix rather than an intuition. Separate trunks
+   (or at minimum a wider trunk with a decorrelation penalty on the output heads) are what allow the fields to
+   differ at all. Note the likely cause of the collapse: 10 attributes with a gradient-boosted ceiling of
+   R^2 = 0.160 on the targets carry roughly one usable direction of information, and a 21-unit trunk trained on
+   near-unanimous gradients has no reason to preserve more than that.
+3. **"A loss that assists p and q outside n?"** Still worth having, for the reasons in §30, but it is now clearly
+   the SECOND problem. **No objective can separate two outputs that are reading the same latent direction.** Fix
+   the architecture first, then re-ask whether the loss needs changing.
+
+### Caveats
+
+- This measures the learned output fields, not the trunk activations directly. The rank-1 reading is an inference
+  from a 98.7 % linear relation on the pre-sigmoid scale, which is strong but indirect. Dumping the penultimate
+  activations and taking their singular values would settle it outright and is cheap.
+- `p_spatial` is constant at 21 and `x_storage` constant at 0.30 in this configuration, so this is a statement
+  about the two genuinely learned outputs. Whether a three-output head collapses the same way is untested.
+- The collapse is present but weaker at initialisation (0.727), so it is partly inherited from the initial
+  weights and partly learned. Which dominates is untested.
+
+### Suggested order of work
+
+1. Dump the trunk activations and compute their singular-value spectrum. One dominant singular value confirms
+   rank-1 outright.
+2. Separate heads or trunks per parameter group, retrain, and re-measure rho(n, q). Registered prediction: rho
+   falls well below 0.9 and q stops reaching its bounds under the ordinary objective, with no skill change
+   (§20 bounds the whole channel at about 0.09 NSE).
+3. Only then revisit the objective question of §30.

@@ -95,13 +95,24 @@ pub struct LandscapeSpec {
     #[serde(default = "d_slice_center")]
     pub slice_center: String,
     /// Which per-window loss the Newton search optimizes: "nse-batch"
-    /// (default; the training objective restricted to this gauge) or "kge"
-    /// (`1 - KGE` over the window's valid days). `nse` and `kge`
+    /// (default; the training objective restricted to this gauge), "kge"
+    /// (`1 - KGE` over the window's valid days), or "nse-deriv"
+    /// (`nse-batch` plus `deriv_weight` times a term on the series' time
+    /// derivative — the curvature probe of findings §26). `nse` and `kge`
     /// diagnostics are always both computed regardless of which one drives
     /// the search. Checked against `VALID_OBJECTIVES` at the top of
     /// `run_landscape`.
     #[serde(default = "d_objective")]
     pub objective: String,
+    /// `lambda` on the time-derivative term of `objective: nse-deriv`:
+    /// `L = L_nse + lambda * L_deriv`. Read only when the objective is
+    /// `nse-deriv` (an `nse-batch` or `kge` study never sees it, so those
+    /// bundles are unchanged). `lambda = 0` reduces `nse-deriv` to
+    /// `nse-batch` exactly, which is the regression guard. Must be finite
+    /// and `>= 0`; checked by `validate_deriv_weight` at the top of
+    /// `run_landscape`.
+    #[serde(default = "default_deriv_weight")]
+    pub deriv_weight: f32,
     /// When true, write each gauge's window-0 daily series (observed,
     /// routed at alpha = 0 and alpha*, and the no-routing summed-q'
     /// baseline) to the netCDF on a new `day` dimension. Off by default: it
@@ -153,13 +164,19 @@ fn d_objective() -> String {
 fn d_period() -> String {
     PERIOD_TESTING.to_string()
 }
+fn default_deriv_weight() -> f32 {
+    0.5
+}
 
 /// The four slices `run_gauge` knows how to compute.
 pub const VALID_PLANES: [&str; 4] = ["n-p", "n-q", "p-q", "stiff-sloppy"];
 /// The two slice-centering conventions accepted by `slice_center`.
 pub const VALID_SLICE_CENTERS: [&str; 2] = ["optimum", "trained"];
-/// The two per-window losses accepted by `LandscapeSpec::objective`.
-pub const VALID_OBJECTIVES: [&str; 2] = ["nse-batch", "kge"];
+/// The three per-window losses accepted by `LandscapeSpec::objective`.
+pub const VALID_OBJECTIVES: [&str; 3] = ["nse-batch", "kge", OBJECTIVE_NSE_DERIV];
+/// NSE-batch plus `LandscapeSpec::deriv_weight` times a time-derivative
+/// term; the only objective that reads `deriv_weight`.
+pub const OBJECTIVE_NSE_DERIV: &str = "nse-deriv";
 /// The two eval windows accepted by `LandscapeSpec::period`.
 pub const VALID_PERIODS: [&str; 2] = [PERIOD_TESTING, PERIOD_TRAINING];
 
@@ -217,6 +234,20 @@ impl LandscapeSpec {
         Ok(())
     }
 
+    /// Reject a `deriv_weight` that isn't finite and `>= 0.0`. Checked for
+    /// every objective (a stray negative weight in a bundle is a mistake
+    /// worth reporting) even though only `nse-deriv` reads it.
+    pub fn validate_deriv_weight(&self) -> Result<(), BoxError> {
+        if !self.deriv_weight.is_finite() || self.deriv_weight < 0.0 {
+            return Err(format!(
+                "landscape deriv_weight must be finite and >= 0.0, got {}",
+                self.deriv_weight
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Reject a `period` that isn't one of `VALID_PERIODS`.
     pub fn validate_period(&self) -> Result<(), BoxError> {
         if !VALID_PERIODS.contains(&self.period.as_str()) {
@@ -241,6 +272,9 @@ pub struct LandscapeOptions {
     /// `LandscapeSpec::period`, threaded from the bundle spec to every
     /// `InfluenceContext::open` call this study makes.
     pub period: String,
+    /// `LandscapeSpec::deriv_weight`, threaded from the bundle spec. Only
+    /// reported (and only read) when the objective is `nse-deriv`.
+    pub deriv_weight: f32,
 }
 
 pub fn run_landscape<I: Backend + 'static>(
@@ -259,6 +293,7 @@ where
     spec.validate_slice_center()?;
     spec.validate_window_days()?;
     spec.validate_objective()?;
+    spec.validate_deriv_weight()?;
     spec.validate_period()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
@@ -356,7 +391,13 @@ where
         if spec.window_days == 0 { format!(" (spec 0 -> full axis from day {})", starts[0]) } else { String::new() }
     );
     println!("  {window_note}");
-    let mut notes = vec![window_note];
+    let objective_note = if spec.objective == OBJECTIVE_NSE_DERIV {
+        format!("[{}] objective {} (deriv_weight {})", arm.name, spec.objective, opts.deriv_weight)
+    } else {
+        format!("[{}] objective {}", arm.name, spec.objective)
+    };
+    println!("  {objective_note}");
+    let mut notes = vec![window_note, objective_note];
     if opts.dry_run {
         return Ok(notes);
     }
@@ -412,7 +453,7 @@ where
     I::Device: 'static,
 {
     let staid = Staid::new(&g.staid);
-    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective)?;
+    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight)?;
     let h = spec.fd_step;
     let active = obj.active();
     let n_active_params = active.iter().filter(|&&a| a).count();
@@ -980,6 +1021,30 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("optimum"));
         assert!(err.to_string().contains("trained"));
+    }
+
+    #[test]
+    fn default_deriv_weight_is_half_and_validates() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.deriv_weight, 0.5);
+        assert!(spec.validate_deriv_weight().is_ok());
+    }
+
+    #[test]
+    fn nse_deriv_objective_parses_with_its_weight() {
+        let spec: LandscapeSpec =
+            serde_yaml::from_str("gauges: {}\nobjective: nse-deriv\nderiv_weight: 0.25\n").unwrap();
+        assert_eq!(spec.objective, OBJECTIVE_NSE_DERIV);
+        assert_eq!(spec.deriv_weight, 0.25);
+        assert!(spec.validate_objective().is_ok());
+        assert!(spec.validate_deriv_weight().is_ok());
+    }
+
+    #[test]
+    fn negative_deriv_weight_is_rejected() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nderiv_weight: -0.1\n").unwrap();
+        let err = spec.validate_deriv_weight().unwrap_err();
+        assert!(err.to_string().contains("deriv_weight"), "{err}");
     }
 
     #[test]

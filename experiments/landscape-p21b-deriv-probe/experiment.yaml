@@ -1,0 +1,23 @@
+# CURVATURE PROBE: same checkpoint, gauges and window as landscape-p21b-all-testwin-diag,
+# but with the derivative-augmented objective. The nse-batch census is the paired baseline.
+# Pre-registered prediction in findings §26: median stiffening of |H_nn| 3.7x at lambda 0.5,
+# rising with basin size (3.2x below 50 reaches, 5.6x at 51-200, 8.5x above 200).
+study: landscape
+arms:
+  - { name: p21b-conus, run: 2026-09-10T21-21-48Z-conus-train-and-test, checkpoint: epoch_50_mb_9 }   # grad_accum_steps 4, 50 epochs, 500 optimizer updates
+landscape:
+  gauges:
+    source: all
+  period: testing
+  window_days: 1826
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 0     # gradient, Hessian and series at the trained point only
+  grid: 0
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  objective: nse-deriv
+  deriv_weight: 0.5
+  series: true

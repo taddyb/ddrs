@@ -150,6 +150,7 @@ fn dispatch(
                 dry_run: input.dry_run,
                 shard,
                 period: ls.period.clone(),
+                deriv_weight: ls.deriv_weight,
             };
             match input.backend.as_str() {
                 "cpu" => {
