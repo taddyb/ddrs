@@ -1158,3 +1158,91 @@ costs KGE. This agrees with §16, which found the two objectives pick the same d
 they over-represent large displacements. The median changes here are not population estimates; the population
 figures are in §20.
 
+
+---
+
+## 25. It is not a weak gradient, it is a flat valley: where roughness curvature lives
+
+"The gradient with respect to roughness is weak" is imprecise and sends the wrong fixes. Measured on the
+2,124 well-fit gauges of the five-year census:
+
+**The batch gradient is not noisy.** Per-gauge `dL/d ln n` has a 5-95 % trimmed effect size
+`|mean| / sd` of 0.734, so a batch of 256 gauges sees the direction at a signal-to-noise ratio of about **12**.
+Adam normalises by gradient magnitude, so a uniformly small but consistent gradient is not a problem for it.
+
+**Restricting to identifiable gauges does not help.** Keeping only travel times over one day changes the effect
+size from 0.734 to 0.717. Short-travel-time gauges actually have the *highest* effect size (1.66 below half a day,
+1.04 from half a day to one day, against 0.39 beyond four days): they sit far from their optima and push
+consistently, on a surface where moving buys nothing.
+
+**The width exponent is not stealing the stiffness.** Curvature along `ln n` with q frozen (`H_nn`, median
+0.00109) against q free to re-optimise (the Schur complement `H_nn - H_nq^2/H_qq`, median 0.00128) differ by a
+factor of **0.99**. The n-q coupling is negligible at every basin size, so pinning q the way p was pinned would
+not sharpen n.
+
+So the direction is clear and the valley is flat. The quantity to attack is the **curvature**, not the gradient.
+
+### 25.1 Ninety percent of the curvature is in one percent of the gauges
+
+| | share of the population's total &#124;H_nn&#124; |
+|---|---|
+| top 1 % of gauges (21 of 2,124) | **89.9 %** |
+| top 5 % (106) | 95.3 % |
+| top 10 % (212) | 96.7 % |
+| top 50 % (1,062) | 99.6 % |
+
+| basin size | gauges | median &#124;H_nn&#124; | share of total curvature |
+|---|---|---|---|
+| n_reach <= 50 | 1,580 | 0.0127 | 6.6 % |
+| 51 to 200 | 404 | 0.0293 | 67.1 % |
+| > 200 | 140 | 0.0734 | 26.3 % |
+
+The continental channel parameter is, in effect, determined by a few dozen gauges. Everything else contributes a
+confident push on a surface too flat to care.
+
+### 25.2 What creates curvature: the hydrograph's time derivative
+
+Spearman rank correlations with `|H_nn|`:
+
+| predictor | rho |
+|---|---|
+| gauge reach slope | **-0.435** |
+| flashiness (daily dQ/dt magnitude) | **+0.314** |
+| total channel length | +0.314 |
+| drainage area | +0.270 |
+| reach count | +0.261 |
+| mean flow | +0.183 |
+
+Within small basins alone (`n_reach <= 50`, n = 1,580), flashiness against `|H_nn|` is **+0.408**, stronger than
+in the pooled set, so this is not a size proxy.
+
+**The mechanism this implies.** Roughness acts on the hydrograph almost entirely through travel time: for Manning
+flow at fixed discharge, velocity goes as `n^-3/5`, so travel time goes as `n^3/5`. To first order a change in
+roughness shifts the routed series in time, and a pure time shift changes the series by `dQ = -(dQ/dt) dtau`. The
+loss therefore picks up curvature in proportion to **the mean square of the hydrograph's time derivative**, scaled
+by the channel's travel time. That predicts exactly what is measured: stiffness rises with flashiness and with
+channel length, and falls with slope (steep reaches are fast, so `dtau/d ln n` is small).
+
+It also explains the flatness directly. Daily averaging is a low-pass filter applied to precisely the quantity
+that gives roughness its leverage. Whatever timing information lives below the daily scale, which is most of it at
+a basin whose wave crosses in hours, is removed before the loss ever sees it.
+
+### 25.3 What follows for strengthening it
+
+Ranked by the mechanism above, not by convenience:
+
+1. **Sub-daily observations.** The only change that attacks `⟨(dQ/dt)^2⟩` at its source. The hourly store, the
+   AORC precip source and the disaggregation head already exist. This is the principled fix and the strongest
+   available test of whether the flatness is physics or sampling.
+2. **A time-derivative term in the objective.** Even at daily resolution, adding a penalty on `d/dt` mismatch
+   projects the loss onto what roughness controls, instead of onto the volume and correlation that the inflow
+   already supplies. Cheap to implement in `src/training/loss.rs` alongside the existing kinds.
+3. **Curvature-weighted or size-restricted training.** Legitimate, and revealing rather than merely tuning, since
+   §9 and §23 showed the training population sets the roughness. But note what 25.1 means: weighting by curvature
+   is close to training the channel on a few dozen gauges, with the variance that implies.
+4. **Not worth doing:** pinning q to sharpen n (factor 0.99), or dropping short-travel-time gauges to clean up the
+   gradient (effect size 0.734 to 0.717). Both are ruled out above.
+
+**Caveat.** The mechanism in 25.2 is inferred from correlations plus the Manning scaling, not from a controlled
+experiment. The direct test is to recompute `H_nn` on an hourly-resolution objective at the same gauges and check
+that it rises, most at the flashy small basins where daily curvature is lowest.
