@@ -20,6 +20,7 @@ is what a future session needs, not the narrative.
 | Resumed run trains zero batches | T10 |
 | Baseline predicts ~0 (FHV −100 %) on a new Q′ store, no error | T11 |
 | Fresh checkout/worktree fails in `cudarc`'s build script: `Unsupported cuda toolkit version` | T12 |
+| Training crawls; GPU is resident but idle at single-digit utilisation | T13 |
 
 ---
 
@@ -240,6 +241,42 @@ plain `plan` reports drift then refreshes the lock.
 6. Grep the smoke log for `streamflow resolution:` and the gauge-filter line.
 7. Check no other CUDA job is resident if you are using `--backend cuda`.
 
+## T13 — CUDA is the SLOW path for training this model (2026-09-11)
+
+**Symptom.** `ddrs run --workflow train-and-test` with the default backend takes
+~20 s per micro-batch. `nvidia-smi` shows the process holding ~1.4 GB of device
+memory at **7 % utilisation**, and the host process using only ~2 of 32 cores.
+
+**Measured, same config, same 2,365 gauges, 64-gauge micro-batches:**
+
+| backend | per micro-batch | 50 epochs |
+|---|---|---|
+| cuda | ~20 s | ~11 h |
+| **cpu** | **~3.5 s** | **~97 min** |
+
+**Why.** The sparse triangular solve is sequential in the topologically ordered
+reach index, so there is nothing to parallelise within a timestep. CUDA pays
+kernel-launch overhead per timestep and recovers none of it. The 7 %
+utilisation is the tell.
+
+**Do not misdiagnose this as resource contention.** Six concurrent CPU-bound
+landscape shards were the obvious suspect; pausing all six with `SIGSTOP` moved
+the CUDA rate only from 22 s to 20 s, which is what identified the backend
+rather than the neighbours. Measure before you blame.
+
+**Consequence for comparisons.** The reference CONUS results were produced on
+CPU: run `2026-09-10T21-21-48Z-conus-train-and-test` (NSE 0.7376 / KGE 0.7600,
+the current best) logs `backend: cpu (NdArray, deterministic; sparse_solver
+forced to cpu)` on its first line. Any new arm meant to be compared against it
+must also run `--backend cpu`, both for speed and because NdArray is
+deterministic while CUDA scatter-add is not.
+
+So `--backend cpu` is not only the diagnostics convention (see the standing
+preference for CPU in experiments); for training on this network it is simply
+faster. Check `head -1 <run>/run.log` to see which backend any historical run
+actually used before quoting its wall clock.
+
+---
 ## T11 Forward-only Autodiff evaluations retain the tape
 
 **Symptom.** A process that runs many routing forwards without training (grid sweeps, sensitivity scans) grows
