@@ -1,0 +1,32 @@
+# Method validation on ONE inflow arm (UH retrospective) before any cross-arm
+# comparison. Checks 1 (full-map finite differences) and 2 (kernel lag vs the
+# model's own hydraulic travel time, exported as hydraulic_lag_days).
+#   target/release/ddrs --workspace .ddrs experiment adjoint-uh-validate --backend cpu
+study: adjoint
+arms:
+  - { name: uh-retro, run: 2026-08-09T09-30-39Z-train-and-test }   # merit_dhbv2_UH_retrospective.ic
+
+adjoint:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]   # Juniata: Mapleton Depot -> Newport (127 / 213 reaches)
+      - ["06447000", "06452000"]   # White River, SD: 06452000 is the largest basin (520 reaches, 838 km)
+      - ["06449100", "06452000"]
+      - ["06350000", "06354000"]   # Cannonball River, ND: Northern Plains mass-loss cluster
+      - ["06353000", "06354000"]
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  anchors: { high: 2, low: 2 }
+  anchor_min_gap_days: 60
+  lag_days: 30
+  tail_days: 7
+  water_year: 2000
+  functionals: [kernel, volume, residual]
+  fd_perturb_fraction: 0.05
+  fd_rel_tol: 0.05
+  validation:
+    reach_stride: 10
+    lags_hours: [6, 48, 240]
+    perturb_fraction: 0.1
+    rel_tol: 0.02
+    abs_tol: 1.0e-4
+    pass_fraction: 0.95

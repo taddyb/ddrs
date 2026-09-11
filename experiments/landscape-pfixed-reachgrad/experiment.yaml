@@ -1,0 +1,23 @@
+# p = 21 on the area-balanced population (run 2026-09-08T14-06-12Z-train-and-test): the single-change twin of the learned-p arm.
+# Per-reach dL/d ln(n,p,q) at alpha=0 and alpha* for the Juniata gauge pair:
+# the "perturbations in a watershed" half of the per-gauge parameter-validity
+# study, showing where the gauge still constrains parameters even where the
+# basin-uniform gradient has gone to zero.
+# Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md
+#   target/release/ddrs --workspace .ddrs experiment landscape-uh-reachgrad --backend cpu
+study: landscape
+arms:
+  - { name: uh-pfixed21, run: 2026-09-08T14-06-12Z-train-and-test, checkpoint: epoch_30_mb_1 }   # p fixed at 21, n and q learned, gages_2000_area_balanced (clean twin of the learned-p seed-42 arm)
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  water_year: 2000
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 2.3025851     # ln 10, matches landscape-uh-juniata-wide
+  grid: 0                  # no slices, only the Newton optimum + reach_grad
+  fd_step: 0.05
+  newton_iters: 10
+  tolerances: [0.05, 0.10]
+  reach_grad: true

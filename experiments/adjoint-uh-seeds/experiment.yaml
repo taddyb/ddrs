@@ -1,0 +1,23 @@
+# Replicate-seed noise floor for the adjoint celerity comparison: the UH
+# retrospective arm trained twice with identical config except seed (42 vs 43).
+# The per-gauge max/min celerity ratio between these two "arms" is the noise
+# floor against which the 5-arm cross-source ratio (median 2.2) must be judged.
+#   target/release/ddrs --workspace .ddrs experiment adjoint-uh-seeds --backend cpu
+study: adjoint
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }   # seed 42 (population arm)
+  - { name: uh-seed43, run: 2026-09-07T18-45-57Z-train-and-test }   # seed 43 (config/experiments/uh_retro_seed43.yaml)
+
+adjoint:
+  gauges:
+    source: nested-reference
+    gages_ii_dbf: /mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  anchors: { high: 2, low: 2 }
+  anchor_min_gap_days: 60
+  lag_days: 30
+  tail_days: 7
+  water_year: 2000
+  functionals: [kernel, volume, residual]
+  fd_perturb_fraction: 0.05
+  fd_rel_tol: 0.05

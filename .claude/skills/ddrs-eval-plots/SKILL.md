@@ -192,9 +192,12 @@ the dHBV2-UH store that is **median NSE 0.6781 / KGE 0.7172 on 2,365 gauges**.
 > that scored phantom zeros before the 2026-07-28 fix. Both series must come from the
 > same population and the same metric code.
 
-Best documented trained result: **0.7152 NSE / 0.7106 KGE** (precip-driven disagg +
-L1, run `2026-06-23T02-49-12Z-conus-hourly-train-and-test`) — that is +0.037 NSE and
-−0.007 KGE against the baseline. Full table and the 2026-07-30 KGE qualification:
+Best documented trained result: **0.7200 NSE / 0.7537 KGE** (p fixed at 21,
+`nse-batch` + Adam, daily flat, run `2026-09-08T15-55-52Z-conus-train-and-test`),
++0.042 NSE and +0.037 KGE against its own-population baseline (0.6785 / 0.7171),
+the first dual win on the dHBV2-UH store. Previous best was 0.7152 / 0.7106
+(precip-driven disagg + L1, run `2026-06-23T02-49-12Z-conus-hourly-train-and-test`,
++0.037 NSE and −0.007 KGE). Full table and the 2026-07-30 KGE qualification:
 `ddrs-dev` → `references/research-status.md`.
 
 `ddrs show <id> | grep -E "nse|kge|loss"` is the cheap pre-plot triage.
@@ -226,7 +229,7 @@ was still ruled NO-GO — passing it is necessary, not sufficient.
 
 - **Warmup**: drop the first 3 timesteps from hydrographs.
 - **Metric clipping**: NSE/KGE clipped to `[-1, 1]` before plotting.
-- **Basemap**: CartoDB.Positron, alpha 0.6, attribution off.
+- **Basemap**: `Esri.WorldGrayCanvas`, alpha 0.6, attribution off. DDR's convention was CartoDB.Positron, but since 2026-09-08 Carto tiles render with an "API KEY REQUIRED" watermark and OpenStreetMap.Mapnik returns 403 "Access blocked" tiles, so both are unusable. Esri WorldGrayCanvas needs no key and looks like Positron. Pass `basemap_source="Esri.WorldGrayCanvas"` to `plot_gauge_map` (its default is still Positron).
 - **CONUS bounds**: `xlim=(-125, -66)`, `ylim=(24, 53)`.
 - **Colormaps**: `plasma_r` for Manning's n (high n = rough = red), `viridis` for
   p/q, `Blues` for depth/width, `bamako` or `plasma` for NSE.

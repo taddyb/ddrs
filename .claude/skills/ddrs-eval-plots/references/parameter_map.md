@@ -115,7 +115,7 @@ vmax = cfg.get("vmax", float(np.nanmax(gdf_clean[VARIABLE])))
 
 gdf_clean.plot(ax=ax, column=VARIABLE, cmap=cfg["cmap"],
                linewidth=0.3, vmin=vmin, vmax=vmax, zorder=1)
-cx.add_basemap(ax, crs=gdf_clean.crs, source=cx.providers.CartoDB.Positron,
+cx.add_basemap(ax, crs=gdf_clean.crs, source=cx.providers.Esri.WorldGrayCanvas,
                alpha=0.6, zorder=0, attribution=False)
 
 ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
@@ -241,7 +241,7 @@ def plot_param_map(g, var, bbox, label, linewidth, fname):  # g is pre-subset
     ax.set_xlim(bbox[0], bbox[2]); ax.set_ylim(bbox[1], bbox[3])
     try:
         import contextily as cx
-        cx.add_basemap(ax, crs=g.crs, source=cx.providers.CartoDB.Positron, alpha=0.6, zorder=0, attribution=False)
+        cx.add_basemap(ax, crs=g.crs, source=cx.providers.Esri.WorldGrayCanvas, alpha=0.6, zorder=0, attribution=False)
     except Exception as e:
         print(f"basemap skipped ({type(e).__name__}: {e})"); ax.set_facecolor("#f0f0f0")
     ax.set_xticks([]); ax.set_yticks([]); ax.set_title(f"{cfg['title']} - {label}", fontsize=14)
@@ -370,6 +370,8 @@ Reported by the template below, and executed for real in `.ddrs/runs/2026-07-30T
 4. **Fraction of reaches pinned at a bound** — within 1% of `lo` or `hi`. This is the *opposite* failure: saturation. Diagnostics 3 and 4 are both bad, and they are mutually exclusive, so always report both.
 
 **Interpretation.** Expanding IQR *plus* a realized span of a few percent of the declared range means the parameters sit **near initialization** — the model is **UNDER-TRAINED, not converged**. Do not read "the distribution barely moved" as "the optimizer found its optimum". Measured on the 2026-07-30 30-epoch CONUS run: `n` late-half fraction 0.59, IQR 0.0011 → 0.0027 (expanding 2.4×), realized span 4.5% of [0.015, 0.25], 0.0% at a bound. `q_spatial` 3.1% span, `p_spatial` 1.7%. That run had not converged.
+
+The converged counterexample is `2026-09-08T15-55-52Z-conus-train-and-test` (p fixed at 21, `nse-batch`, Adam, gages_3000): `n` late-half fraction 0.009 (epochs 1/10/20/30), median moved 33% of the range by epoch 10 and 0.3% per 10 epochs after, realized span 47%, 0.02% at a bound; `q_spatial` the same shape (0.010, 33%, 48%). Note the template's "IQR trend" compares first to last epoch, so a run that spread out early and then held still reports "expanding": read the per-epoch IQR values, not the label.
 
 ### Template
 

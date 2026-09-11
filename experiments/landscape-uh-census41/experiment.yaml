@@ -1,0 +1,21 @@
+# Displacement census over the 41 GAGES-II nested reference gauges, both UH
+# seeds, Newton/Hessian only; the 8-gauge census had only two well-fit
+# gauges, this one asks whether the "route faster" displacement is
+# Appalachian or CONUS-wide.
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test }
+  - { name: uh-seed43, run: 2026-09-07T18-45-57Z-train-and-test }   # replicate seed
+landscape:
+  gauges:
+    source: nested-reference
+    gages_ii_dbf: /mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  water_year: 2000
+  n_windows: 1     # one window covering the water year; was 4 seasonal
+  alpha_max: 2.3025851
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0

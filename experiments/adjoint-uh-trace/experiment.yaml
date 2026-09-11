@@ -1,0 +1,21 @@
+# Check 4 pulse traces on the UH arm: sustained +1 m3/s at one reach for 30 days,
+# record dQ at every reach and hour over a 180-day window (WY2000 first window).
+#   target/release/ddrs --workspace .ddrs experiment adjoint-uh-trace --backend cpu
+study: adjoint
+arms:
+  - { name: uh-retro, run: 2026-08-09T09-30-39Z-train-and-test }
+adjoint:
+  gauges:
+    pairs:
+      - ["06447000", "06452000"]
+      - ["06350000", "06354000"]
+  window_days: 180
+  functionals: [volume]
+  water_year: 2000
+  traces:
+    - { staid: "06447000", comid: 74017934, delta_m3s: 1.0, from_day: 10, to_day: 40 }   # loss, 173 km, kernel mass 0, hyd lag 9.7 d
+    - { staid: "06447000", comid: 74019234, delta_m3s: 1.0, from_day: 10, to_day: 40 }   # loss, 72 km, kernel mass 0
+    - { staid: "06447000", comid: 74024884, delta_m3s: 1.0, from_day: 10, to_day: 40 }   # loss, 392 km, kernel mass 1.04, vol 0.17
+    - { staid: "06447000", comid: 74019402, delta_m3s: 1.0, from_day: 10, to_day: 40 }   # control, 259 km, vol 0.91
+    - { staid: "06354000", comid: 74007891, delta_m3s: 1.0, from_day: 10, to_day: 40 }   # loss, 316 km, hyd lag 49 d
+    - { staid: "06354000", comid: 74007259, delta_m3s: 1.0, from_day: 10, to_day: 40 }   # control, 111 km, vol 0.91

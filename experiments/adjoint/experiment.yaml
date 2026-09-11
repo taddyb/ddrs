@@ -1,0 +1,35 @@
+# Adjoint influence-map study (proof of concept: one nested gauge pair in the
+# Juniata River basin). Spec:
+# docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md
+#
+# Run from the repo root:
+#   target/release/ddrs --workspace .ddrs experiment adjoint --backend cpu
+#
+# Arms are run ids under .ddrs/runs/. Each arm's config.yaml snapshot and
+# latest checkpoint directory (max by epoch, then mini-batch — epoch_30_mb_1
+# for these runs) are what the study analyzes. These are the tau=9-era runs,
+# one per lateral-inflow store (2026-08-09..17).
+study: adjoint
+arms:
+  - { name: daily-lstm,   run: 2026-08-09T12-05-08Z-train-and-test }   # daily_lstm_merit_unit_catchments.ic
+  - { name: hourly-lstm,  run: 2026-08-09T14-55-05Z-train-and-test }   # hourly_lstm_merit_unit_catchments.ic
+  - { name: uh-retro,     run: 2026-08-09T09-30-39Z-train-and-test }   # merit_dhbv2_UH_retrospective.ic
+  - { name: dhbv2-lumped, run: 2026-08-09T22-13-43Z-train-and-test }   # daily_dhbv2_lumped_aorc2f_merit_unit_catchments.ic
+  - { name: dhbv2-dist,   run: 2026-08-09T03-05-54Z-train-and-test }   # daily_dhbv2_distributed_aorc2f_merit_unit_catchments.ic (NOT 2026-08-17: that run used gages_3000.csv)
+
+adjoint:
+  gauges:
+    # [upstream, downstream]. Juniata River at Mapleton Depot (5,262 km²)
+    # nests inside Juniata River at Newport (8,657 km², the Bindas et al. 2024
+    # / examples/juniata gauge). Both are in gages_2000_area_balanced.csv.
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  anchors: { high: 2, low: 2 }
+  anchor_min_gap_days: 60
+  lag_days: 30             # kernel horizon
+  tail_days: 7             # anchor sits tail_days before the window end
+  water_year: 2000         # volume + 4 seasonal residual windows
+  functionals: [kernel, volume, residual]
+  fd_perturb_fraction: 0.05
+  fd_rel_tol: 0.05

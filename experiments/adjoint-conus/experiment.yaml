@@ -1,0 +1,34 @@
+# Adjoint influence-map study — GAGES-II nested-reference population.
+# Spec: docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md §2.1
+#
+# Run from the repo root (arms run concurrently, one thread each):
+#   target/release/ddrs --workspace .ddrs experiment adjoint-conus --backend cpu
+#   target/release/ddrs --workspace .ddrs experiment adjoint-conus --dry-run   # gauge list only
+#
+# Downstream gauges: GAGES-II CLASS == Ref with at least one other training
+# gauge (gages_2000_area_balanced.csv) nested in their subgraph. Upstream
+# partners: the maximal nested gauges (disjoint subgraphs), any class.
+# Same arms as experiments/adjoint (tau=9-era runs, latest checkpoint). All five
+# were trained on gages_2000_area_balanced.csv — the study refuses arms with
+# different gauge CSVs (the 2026-08-17 dhbv2-dist run used gages_3000.csv).
+study: adjoint
+arms:
+  - { name: daily-lstm,   run: 2026-08-09T12-05-08Z-train-and-test }
+  - { name: hourly-lstm,  run: 2026-08-09T14-55-05Z-train-and-test }
+  - { name: uh-retro,     run: 2026-08-09T09-30-39Z-train-and-test }
+  - { name: dhbv2-lumped, run: 2026-08-09T22-13-43Z-train-and-test }
+  - { name: dhbv2-dist,   run: 2026-08-09T03-05-54Z-train-and-test }
+
+adjoint:
+  gauges:
+    source: nested-reference
+    gages_ii_dbf: /mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf
+  window_days: 365   # full water year (user decision 2026-09-08); was 90
+  anchors: { high: 2, low: 2 }
+  anchor_min_gap_days: 60
+  lag_days: 30
+  tail_days: 7
+  water_year: 2000
+  functionals: [kernel, volume, residual]
+  fd_perturb_fraction: 0.05
+  fd_rel_tol: 0.05
