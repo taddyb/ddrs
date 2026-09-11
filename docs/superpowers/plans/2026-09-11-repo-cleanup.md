@@ -1140,7 +1140,31 @@ In `book.toml`, change `src = "docs"` to `src = "docs/book"`, and
 
 In `.github/workflows/docs.yml`, change both `docs/**` path filters to `docs/book/**` so research edits stop triggering a docs deploy.
 
-- [ ] **Step 4: Prove the published URLs did not change**
+- [ ] **Step 4: Check the book's internal links survived the move**
+
+`mdbook build` validates `SUMMARY.md` entries but not inline links, and
+`scripts/verify_doc_paths.py` cannot see a bare sibling link either: `is_citation`
+rejects a token with no `/` before the sibling-directory fallback runs, so the 44
+`](algorithm.md)`-style chapter links in the book are unverified by either gate. The
+move keeps whole directories together so they should stay valid, but prove it with a
+throwaway script:
+
+```bash
+python3 - <<'PYEOF'
+import pathlib, re
+bad = []
+for md in pathlib.Path("docs/book").rglob("*.md"):
+    for n, line in enumerate(md.read_text().splitlines(), 1):
+        for target in re.findall(r"\]\(([^)#:]+\.md)(?:#[^)]*)?\)", line):
+            if not (md.parent / target).exists():
+                bad.append(f"{md}:{n}: {target}")
+print("\n".join(bad) if bad else "all intra-book links resolve")
+PYEOF
+```
+
+Expected: `all intra-book links resolve`. Any output is a link the move broke.
+
+- [ ] **Step 5: Prove the published URLs did not change**
 
 ```bash
 mdbook build && find target/book -type f | sort > /tmp/book-after.txt
@@ -1149,7 +1173,7 @@ diff /tmp/book-before.txt /tmp/book-after.txt
 
 Expected: the diff shows ONLY removals, and every removal is a copied research asset (`2026-*.md`, `superpowers/`, `why-analysis/`, `figures/`, `journal/`). If any `.html` file appears or disappears, the URL surface changed: stop and investigate before committing.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A
