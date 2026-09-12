@@ -64,9 +64,12 @@ LM_B_BAND = (0.4, 0.6)
 def b_from_q(q):
     """Downstream width exponent implied by the width-depth exponent, at constant p.
 
-    w = p*d^q and d ~ Q^(3/(5+3q)) give w ~ Q^(3q/(5+3q)). With p learnable this
-    understates b by however much p itself grows with discharge, so it is exact
-    only for the p-fixed configuration."""
+    w = p*d^q and d ~ Q^(3/(5+3q)) give w ~ Q^(3q/(5+3q)). This is the p-CONSTANT
+    part of b only. In general b = beta + q*f with beta = dlog(p)/dlog(Q), and
+    beta can have either sign, so q*f is NOT a bound in either direction: the
+    p-learnable run 2026-09-11T23-24-04Z has q*f = 0.150 and an actual b of
+    0.004, because beta = -0.144. Use experiments/head_arch/downstream_geometry.py
+    for the real fitted b whenever p varies."""
     q = np.asarray(q, dtype=np.float64)
     return 3.0 * q / (5.0 + 3.0 * q)
 
@@ -204,10 +207,11 @@ def main() -> int:
     print("\n" + "=" * 100)
     print("CHANNEL GEOMETRY — downstream width exponent b (w ~ Q^b) vs Leopold & Maddock")
     print("  L&M b ~ 0.50. q in [0,1] caps b at 0.375, so the box cannot reach it.")
-    print("  b here is implied from q at constant p; with p learnable it is a lower bound.")
+    print("  b below is the p-CONSTANT part only (q*f). When p varies the real b is")
+    print("  beta + q*f and beta has either sign — run downstream_geometry.py for it.")
     print("=" * 100)
     print(
-        f"  {'arm':<22} {'median q':>10} {'implied b':>10} "
+        f"  {'arm':<22} {'median q':>10} {'q*f only':>10} "
         f"{'b in 0.4-0.6 %':>15} {'q at box top %':>15} {'median p':>10}"
     )
     for a in arms:
