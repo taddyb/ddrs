@@ -151,7 +151,7 @@ paper's R1–R5.
 | "leakance is identifiable" (any phrasing) | Explicitly forbidden by the NO-GO summary §7 |
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
-| Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T11 |
+| Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T13 |
 | The 84-gauge full-year census (`landscape-p21-census41/2026-09-09T01-52-19Z`), or any census run on a binary before `964f062`, for "share of gauges at optimum" | Unbounded Newton step landed on the search-box corner and reported zero iterations, which read as already-at-optimum; superseded by the 2,365-gauge sharded census, §Landscape census above |
 | The (n, q) landscape with a depth axis by default | User: the axis should show post-transformation q, not depth |
 | alpha_q_star or q half-widths as a reported optimum | The Hessian at the optimum is a saddle along q at 53 % of well-fit gauges (§Why gauges are not at their roughness optimum, F). Confirm with the 1-D line scan at n\* before quoting a q optimum |
