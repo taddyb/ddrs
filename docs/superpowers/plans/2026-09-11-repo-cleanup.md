@@ -1255,14 +1255,40 @@ incident named so a reader can check it.
    `reference_discharge_coefficient` and `reference_discharge_exponent` appear nowhere in
    it. Check the promise, not just the address.
 
-7. **Counts of sets that grow are a systematic defect class, not isolated slips.** Four
-   instances in one repository: `CLAUDE.md`'s diagram naming 4 of 12 binaries,
-   `docs/usage/running.md` claiming 10 of 12, a skill index enumerating 10 of 13 traps,
-   and a skill summary listing 4 of 5 loss kinds. In every case the omitted members were
-   the newest, so each index was stalest exactly where a reader most needed it. The fix
-   that holds is to name families or defer to the authoritative list, never to correct
-   one number to another. The repository already had this rule for test counts; it was
-   not generalized.
+7. **Counts of sets that grow are the single most common defect in this repository.**
+   Ten instances found, and the class was only recognised because the third one prompted
+   a deliberate sweep:
+
+   | Claim | Reality |
+   |---|---|
+   | `CLAUDE.md` diagram: 4 `src/bin/` binaries named | 12 |
+   | `docs/usage/running.md`: "ten binaries", twice | 12 |
+   | `running.md`: "sixteen examples" | 17 |
+   | `running.md`: "three groups" naming one `probe_*` binary | the `probe_*` family has 3 |
+   | `docs/architecture.md`: "fifteen top-level modules" | `src/lib.rs` declares 16 |
+   | `architecture.md` module map | **omitted `src/experiment/` entirely** |
+   | `docs/usage/inputs-formatting.md`: "runs four validators" | 10 |
+   | `inputs-formatting.md`: disagg has "no `enabled` flag", "Eight keys" | 9 fields, `enabled` is the first |
+   | `ddrs-dev/SKILL.md` trap index: T1-T10 | T1-T13 |
+   | `ddrs-dev/SKILL.md`: 4 loss kinds | 5 |
+   | `README.md` data-source groups table | omitted `conus-gridded` |
+
+   Two observations make this more than bookkeeping. First, in every single case the
+   omitted members were the **newest**, so each index was stalest exactly where a reader
+   most needed it. Second, the `architecture.md` module map had lost an entire
+   subsystem, and that was discovered only because someone checked a count: the count was
+   a symptom whose cause was a missing row in the document that exists to map the
+   codebase.
+
+   Two documents also drifted to the **same** wrong validator count of four
+   independently, which is the signature of both being written from a shared stale
+   reading rather than from source.
+
+   The fix that holds is to name families, state a range, or defer to the authoritative
+   list, never to correct one number to another. A legitimate exception is a table that
+   IS the enumeration, which a reader can recount against source; a bare count floating
+   in prose is not. The repository already had this rule for test counts and had not
+   generalised it.
 
 8. **A gate's usefulness is set by its false-positive rate, not its coverage.** The
    first draft of `verify_doc_paths.py` reported 288 strict failures, almost all bare
