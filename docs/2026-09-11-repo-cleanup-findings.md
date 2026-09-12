@@ -117,7 +117,10 @@ Every row of the design's section 2.2 table was corrected:
   removed from `CLAUDE.md` and the YAML by an earlier, unrelated commit.
 
 Hard-coded counts were removed throughout: `testing.md`'s "70 test files, 233
-`#[test]` fns" claim (actual 88 files, 363 fns at the time this was checked),
+`#[test]` fns" claim (actual 88 files, 363 fns at the time this was checked;
+commit `16adb9c`'s own message says "364 tests", but `ls tests/*.rs | wc -l`
+gives 88 and `grep -rhE '^\s*#\[test\]' tests/*.rs | wc -l` gives 363, so 363
+is the measured figure and the commit message is the one that is off by one),
 `ddrs-dev/SKILL.md`'s per-reference line-count table, and `ddrs-eval-plots`'s
 file-list counts were all replaced with the file names alone or with the
 editorial rule the library already stated but did not follow.
@@ -151,7 +154,11 @@ full, because it is the single most common defect this run found.
 `.claude/2026-05-29-ddrs-docs-{design,plan}.md` were deleted as exact
 duplicates of their `.claude/specs/` counterparts, confirmed by git blob
 identity rather than a checksum tool (`3d8e7eb`, Task 3). `.claude/references/`
-(12 files, roughly 2,268 lines) was deleted in full (`3522c38`, Task 2) after
+(12 files, 2,243 lines, measured via `git archive 927f755 .claude/references
+| tar -xO | wc -l`) was deleted in full (commit `3522c38`'s own deletion count
+of 2,268 lines also includes `docs/intro.md` and
+`docs/reference/burn-autograd.md`, which the same commit trimmed; 2,243 is
+the directory's own size) in Task 2 after
 a complete re-read of every pair against its `docs/` counterpart, not a
 sampled check. Section 4.4 names what that deleted directory was actively
 propagating, not merely duplicating.
@@ -299,7 +306,8 @@ drifted onto unrelated code before anyone touched them:
 - `.claude/ARCHITECTURE.md:255` cited `src/routing/mmc.rs:289-294` for the
   CUDA-graph capture gate. That range had drifted onto an unrelated
   `denormalize(params.n, ...)` block; the gate the prose actually describes
-  (`use_cuda_graphs && sparse_solver == Cuda`) lives at lines 370-374, inside
+  (`use_cuda_graphs && sparse_solver == Cuda`) lives at lines 370-372, with
+  its guarded call (`self.try_capture_forward_graph();`) at 374, inside
   `setup_inputs`. The citation now reads
   `src/routing/mmc.rs::setup_inputs`.
 - `ddrs-dev/references/gauge-population.md:44` cited
@@ -440,6 +448,13 @@ executing it.
    exception is a table that IS the enumeration, which a reader can recount
    against source; a bare count floating in prose is not. The repository
    already had this rule for test counts and had not generalised it.
+
+   The defect recurred during the task that wrote this finding: Task 9's own
+   scratch report first said "twelve fixture-based cases" in
+   `scripts/test_verify_doc_paths.py` where there are fourteen, caught only
+   on a later review pass. A bare count is apparently easy to write and hard
+   to self-audit even while cataloguing the exact failure mode it is an
+   instance of.
 
 8. **A gate's usefulness is set by its false-positive rate, not its
    coverage.** The first draft of `verify_doc_paths.py` reported 288 strict
