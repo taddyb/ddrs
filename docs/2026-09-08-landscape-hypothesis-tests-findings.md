@@ -1905,11 +1905,21 @@ and the downstream geometry got worse, not better.
 - **One seed.** NdArray is deterministic, so re-running reproduces the number exactly and tells us nothing.
   There is no spread estimate for this configuration. +0.008 is seven times smaller than the +0.059 the
   optimizer-budget fix delivered (§27), and that one moved 70.7 % of gauges.
-- **Not run on a plain-master binary.** The binary was built from master plus the `kan_head` restructuring
-  commit (`1bbc3b7`). The arm uses none of the new features — zero occurrences of `parameter_groups`,
-  `input_layer_kan`, `output_layer_kan` — so it takes the default path, which `tests/kan_head_groups.rs`
-  asserts is bit-identical for the group case. But master-versus-now numerical equivalence for the whole
-  training loop is argued, not verified. The cheap check is a `--max-mini-batches 2` run on both binaries.
+- ~~**Not run on a plain-master binary.**~~ **RESOLVED 2026-09-12.** A binary built from `3412a78` (plain
+  master) and one built from this branch — carrying both the `kan_head` restructure and the stage-roughness
+  code — produce **identical per-micro-batch losses** on this exact config, to all six printed decimals:
+
+  ```
+    micro 1/4  loss=0.141474  n=4980  median_n=0.13343      master 3412a78
+    micro 1/4  loss=0.141474  n=4980  median_n=0.13343      this branch
+    micro 2/4  loss=0.153518  n=5312  median_n=0.13331      both
+    micro 3/4  loss=0.092350  n=5312  median_n=0.13324      both
+  ```
+
+  So both sets of changes are numerically inert at their defaults, and the +0.008 is attributable to
+  `p_spatial` becoming learnable rather than to any code change. Reproduce with
+  `experiments/head_arch/` — the check is a `run --workflow train --max-mini-batches 2` on each binary with
+  the same config (note `--max-mini-batches` caps mini-batches PER EPOCH, not in total).
 - **The mechanism was measured and is refuted.** See §33.1.
 
 ### Also measured: the celerity convention is approximate
