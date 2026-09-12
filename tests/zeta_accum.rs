@@ -37,6 +37,7 @@ fn leakance_params(n: usize, factor_norm: f32, device: &TestDevice) -> SpatialPa
         d_gw: Some(Tensor::<AB, 1>::zeros([n], device)),
         leakance_factor: Some(Tensor::<AB, 1>::ones([n], device) * factor_norm),
         impervious_mask: None,
+        gamma: None,
     }
 }
 

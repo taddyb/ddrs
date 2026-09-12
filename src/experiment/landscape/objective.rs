@@ -294,6 +294,7 @@ where
                     d_gw: None,
                     leakance_factor: None,
                     impervious_mask: None,
+            gamma: None,
                 },
                 false,
                 None,

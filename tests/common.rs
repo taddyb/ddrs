@@ -81,5 +81,6 @@ pub fn mock_spatial_parameters(n: usize, device: &TestDevice) -> SpatialParamete
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     }
 }

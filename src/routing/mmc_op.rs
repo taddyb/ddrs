@@ -168,6 +168,15 @@ pub(crate) struct TimestepState<B: Backend> {
     /// Reference depth for `gamma`, metres. Only `d_ref^gamma` enters, so this
     /// is inert at `gamma == 0` and at `d_ref == 1`.
     pub d_ref: f32,
+    /// Per-reach `gamma` when it is a LEARNED KAN output rather than a global
+    /// constant. `Some` makes it the op's sixth parent, so it receives a
+    /// gradient; `None` falls back to the scalar `gamma` above.
+    ///
+    /// Both paths exist on purpose. The scalar path is what
+    /// `2026-09-12T06-06-19Z-train-and-test` ran, and keeping it byte-exact
+    /// means that recorded result stays reproducible; the tensor path is what
+    /// makes gamma learnable.
+    pub gamma_t: Option<B::FloatTensorPrimitive>,
 }
 
 #[derive(Debug)]
@@ -203,14 +212,20 @@ struct BetaGrads<I: Backend> {
     g_side_slope: Tensor<I, 1>,
 }
 
-/// The five accumulated parent gradients produced by [`timestep_backward_core`],
-/// in parent order `[n, q_spatial, p_spatial, q_t, q_prime_t]`.
+/// The accumulated parent gradients produced by [`timestep_backward_core`], in
+/// parent order `[n, q_spatial, p_spatial, q_t, q_prime_t]`, plus `ggamma` when
+/// stage-dependent roughness is a learned per-reach field.
 pub(crate) struct FiveGrads<I: Backend> {
     pub gn_total: Tensor<I, 1>,
     pub gq_spatial: Tensor<I, 1>,
     pub gp_total: Tensor<I, 1>,
     pub gq_t_total: Tensor<I, 1>,
     pub gq_prime_t: Tensor<I, 1>,
+    /// `Some` only when `state.gamma_t` is `Some`, i.e. gamma is the sixth
+    /// parent. Accumulated from the three places gamma enters the forward:
+    /// the depth exponent (B5), the velocity's `(d/d_ref)^gamma` (B15), and
+    /// the celerity's `gamma·A/(T·d)` (B17).
+    pub ggamma: Option<Tensor<I, 1>>,
 }
 
 /// Shared analytical backward body for both [`TimestepOp`] (5 parents) and
@@ -617,8 +632,8 @@ where
         //   The first two fold into the same gA/gT accumulators as G's; the
         //   third is a NEW path into depth, returned separately because depth
         //   is not one of BetaGrads' existing four.
-        let (gvelocity_cl, beta_grads, gdepth_from_s17) = if state.ddr_match {
-            (gcelerity * (5.0 / 3.0), None, None)
+        let (gvelocity_cl, beta_grads, gdepth_from_s17, ggamma_from_s17) = if state.ddr_match {
+            (gcelerity * (5.0 / 3.0), None, None, None)
         } else {
             let g_term = area.clone() * sqrt_1_plus_ss_sq.clone()
                 / (top_width.clone() * wp.clone())
@@ -632,17 +647,38 @@ where
                 g_side_slope: -gbeta.clone() * g_term.clone() * side_slope.clone()
                     / one_plus_ss_sq.clone(),
             };
-            if state.gamma != 0.0 {
-                let h_term =
-                    area.clone() * state.gamma / (top_width.clone() * depth.clone());
+            let gamma_t = state
+                .gamma_t
+                .clone()
+                .map(|g| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)));
+            // H = gamma·A/(T·d).  ∂H/∂A = H/A, ∂H/∂T = −H/T, ∂H/∂d = −H/d,
+            // and ∂c/∂gamma = v·A/(T·d) — the last only when gamma is learned.
+            let h_term = match (&gamma_t, state.gamma) {
+                (Some(g), _) => {
+                    Some(area.clone() * g.clone() / (top_width.clone() * depth.clone()))
+                }
+                (None, gm) if gm != 0.0 => {
+                    Some(area.clone() * gm / (top_width.clone() * depth.clone()))
+                }
+                _ => None,
+            };
+            if let Some(h_term) = h_term {
                 grads.g_area = grads.g_area + gbeta.clone() * h_term.clone() / area.clone();
                 grads.g_top_width =
                     grads.g_top_width - gbeta.clone() * h_term.clone() / top_width.clone();
-                let gd = -gbeta * h_term.clone() / depth.clone();
+                let gd = -gbeta.clone() * h_term.clone() / depth.clone();
+                // ∂c/∂gamma = v·A/(T·d) = v · (H/gamma); computed directly from
+                // A, T and d so it is well defined at gamma = 0.
+                let ggamma_s17 = gamma_t.as_ref().map(|_| {
+                    gcelerity.clone()
+                        * _velocity_cl.clone()
+                        * area.clone()
+                        / (top_width.clone() * depth.clone())
+                });
                 let beta = beta + h_term;
-                (gcelerity * beta, Some(grads), Some(gd))
+                (gcelerity * beta, Some(grads), Some(gd), ggamma_s17)
             } else {
-                (gcelerity * beta, Some(grads), None)
+                (gcelerity * beta, Some(grads), None, None)
             }
         };
 
@@ -666,11 +702,26 @@ where
         //   (d/d_ref)^gamma, on top of its dependence through R:
         //     ∂v/∂depth |_explicit = gamma · v / depth
         //   That is a path into depth which does not exist at gamma == 0.
-        let gdepth_from_s15 = if state.gamma != 0.0 {
-            Some(gvelocity_un.clone() * velocity_un.clone() * state.gamma / depth.clone())
-        } else {
-            None
+        //   ∂v/∂depth |_explicit = gamma·v/depth, and when gamma is LEARNED
+        //   also ∂v/∂gamma = v·ln(depth/d_ref).
+        let gamma_t_b15 = state
+            .gamma_t
+            .clone()
+            .map(|g| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)));
+        let gdepth_from_s15 = match (&gamma_t_b15, state.gamma) {
+            (Some(g), _) => Some(
+                gvelocity_un.clone() * velocity_un.clone() * g.clone() / depth.clone(),
+            ),
+            (None, gm) if gm != 0.0 => {
+                Some(gvelocity_un.clone() * velocity_un.clone() * gm / depth.clone())
+            }
+            _ => None,
         };
+        let ggamma_from_s15 = gamma_t_b15.as_ref().map(|_| {
+            gvelocity_un.clone()
+                * velocity_un.clone()
+                * (depth.clone() / state.d_ref).log()
+        });
         let gn_from_s15 = gvelocity_un.clone() * (-velocity_un.clone() / n_t.clone());
         let gr_from_s15 =
             gvelocity_un.clone() * (velocity_un.clone() * (2.0f32 / 3.0f32)) / hyd_radius.clone();
@@ -815,8 +866,13 @@ where
         // d = ratio^exponent  (NOTE: depth saved is post-clamp; the un-clamped
         // value at differentiation point equals depth when mask is true, so we can
         // use depth in derivative expressions where mask is true.)
-        let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * state.gamma;
-        let exponent = (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0;
+        let five_plus_three_gamma: Tensor<I, 1> = match state.gamma_t.clone() {
+            Some(g) => {
+                Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)) * 3.0 + 5.0
+            }
+            None => q_eps.clone().zeros_like() + (5.0_f32 + 3.0_f32 * state.gamma),
+        };
+        let exponent = (q_eps.clone() * 3.0 + five_plus_three_gamma.clone()).recip() * 3.0;
         let gratio_from_s6 =
             gd_pre_clamp.clone() * exponent.clone() * depth.clone() / ratio.clone();
         let gexp_from_s6 = gd_pre_clamp * depth.clone() * ratio.clone().log();
@@ -830,7 +886,14 @@ where
         //   gamma is a constant here (Phase 1 does not learn it), so only the
         //   denominator changes, not the form.
         let five_plus_three_qeps = q_eps.clone() * 3.0 + five_plus_three_gamma;
-        let gqeps_from_s5 = -gexp_from_s6 * 9.0 / (five_plus_three_qeps.clone() * five_plus_three_qeps);
+        let denom_sq = five_plus_three_qeps.clone() * five_plus_three_qeps;
+        //   exponent = 3/(5 + 3·q_eps + 3·gamma), so gamma and q_eps enter the
+        //   denominator identically and their partials are the same expression.
+        let ggamma_from_s5 = state
+            .gamma_t
+            .as_ref()
+            .map(|_| -gexp_from_s6.clone() * 9.0 / denom_sq.clone());
+        let gqeps_from_s5 = -gexp_from_s6 * 9.0 / denom_sq;
 
         // ===========================================================
         // B4. ratio = numerator / denominator
@@ -894,12 +957,24 @@ where
         // Touch unused intermediate bindings to silence dead-code warnings.
         let _ = (_q_spatial, _velocity_cl);
 
+        // Sum gamma's three contributions. All three are Some together or None
+        // together, gated on `state.gamma_t`, so a partial sum cannot happen.
+        let ggamma = match (ggamma_from_s5, ggamma_from_s15, ggamma_from_s17) {
+            (Some(a), Some(b), Some(c)) => Some(a + b + c),
+            (None, None, None) => None,
+            _ => unreachable!(
+                "gamma gradient paths disagree on whether gamma is learned; all \
+                 three are gated on state.gamma_t"
+            ),
+        };
+
         FiveGrads {
             gn_total,
             gq_spatial,
             gp_total,
             gq_t_total,
             gq_prime_t,
+            ggamma,
         }
     }
 }
@@ -917,6 +992,11 @@ where
         _checkpointer: &mut Checkpointer,
     ) {
         let state = ops.state;
+        debug_assert!(
+            state.gamma_t.is_none(),
+            "a learned gamma must route through TimestepGammaOp, which has the \
+             sixth parent needed to give it a gradient"
+        );
         let [p_n, p_qsp, p_psp, p_qt, p_qpt] = ops.parents;
 
         let grad_out = grads.consume::<I>(&ops.node);
@@ -945,6 +1025,70 @@ where
         }
         if let Some(node) = p_qpt {
             grads.register::<I>(node.id, unwrap(g.gq_prime_t));
+        }
+    }
+}
+
+/// Six-parent variant of [`TimestepOp`] for a LEARNED stage-roughness exponent.
+///
+/// A tensor that is not a parent receives no gradient, so `gamma` can only be
+/// trained if it is registered as one. Rather than widen `TimestepOp` and give
+/// every existing run a sixth parent it does not use, this is a sibling op —
+/// the same pattern `TimestepLeakanceOp` already follows for leakance. The
+/// backward body is shared via [`timestep_backward_core`]; only the parent
+/// bookkeeping differs.
+#[derive(Debug)]
+pub(crate) struct TimestepGammaOp;
+
+impl<I: Backend + 'static> Backward<I, 6> for TimestepGammaOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 6>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
+            state.gamma_t.is_some(),
+            "TimestepGammaOp requires a per-reach gamma in the saved state"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_gamma] = ops.parents;
+
+        let grad_out = grads.consume::<I>(&ops.node);
+        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+            match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }
+        };
+
+        let g = timestep_backward_core::<I>(&state, grad_out, |_gb_rhs| None);
+
+        if let Some(node) = p_n {
+            grads.register::<I>(node.id, unwrap(g.gn_total));
+        }
+        if let Some(node) = p_qsp {
+            grads.register::<I>(node.id, unwrap(g.gq_spatial));
+        }
+        if let Some(node) = p_psp {
+            grads.register::<I>(node.id, unwrap(g.gp_total));
+        }
+        if let Some(node) = p_qt {
+            grads.register::<I>(node.id, unwrap(g.gq_t_total));
+        }
+        if let Some(node) = p_qpt {
+            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
+        }
+        if let Some(node) = p_gamma {
+            let gg = g.ggamma.expect(
+                "gamma is a tracked parent but the backward produced no gradient                  for it; state.gamma_t and the parent must agree",
+            );
+            grads.register::<I>(node.id, unwrap(gg));
         }
     }
 }
@@ -1132,6 +1276,9 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     // `TimestepState::x_effective`). Always written.
     x_eff_out: &mut Option<I::FloatTensorPrimitive>,
     track_neg: bool,
+    // Per-reach stage-roughness exponent when it is a learned KAN output.
+    // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`.
+    gamma_in: Option<Tensor<I, 1>>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -1190,8 +1337,16 @@ where
     // shifts the denominator. `gamma == 0` restores `5 + 3·q_eps` exactly —
     // the literal is written as a separate binding so the f32 rounding of the
     // historical expression cannot change.
-    let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
-    let exponent = (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0;
+    // When gamma is learned it is a per-reach tensor and the denominator has to
+    // be built elementwise; the scalar spelling is kept verbatim for the
+    // constant case so `gamma_t: None` reproduces it bit for bit.
+    let exponent = match &gamma_in {
+        Some(g) => (q_eps.clone() * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
+        None => {
+            let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
+            (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0
+        }
+    };
     // S6
     let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
     // S7
@@ -1217,10 +1372,12 @@ where
     // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
     // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
     // caught on the first run.
-    let n_recip = if gamma != 0.0 {
-        n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
-    } else {
-        n_in.clone().recip()
+    let n_recip = match &gamma_in {
+        Some(g) => n_in.clone().recip() * (depth.clone() / d_ref).powf(g.clone()),
+        None if gamma != 0.0 => {
+            n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
+        }
+        None => n_in.clone().recip(),
     };
     let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
         * slope_in.clone().sqrt();
@@ -1246,10 +1403,14 @@ where
         let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
         let beta =
             -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
-        let beta = if gamma != 0.0 {
-            beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
-        } else {
-            beta
+        let beta = match &gamma_in {
+            Some(g) => {
+                beta + _area.clone() * g.clone() / (top_width.clone() * depth.clone())
+            }
+            None if gamma != 0.0 => {
+                beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
+            }
+            None => beta,
         };
         velocity_cl.clone() * beta
     };
@@ -1807,6 +1968,10 @@ pub fn timestep_forward<I: Backend + 'static>(
     slope_at: Tensor<Autodiff<I>, 1>,
     x_storage_at: Tensor<Autodiff<I>, 1>,
     track_neg: bool,
+    // Learned per-reach stage-roughness exponent. `Some` makes it the op's
+    // SIXTH parent, so it receives a gradient and the KAN can train it.
+    // `None` falls back to the global `params.stage_roughness.gamma`.
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -1838,6 +2003,8 @@ where
     let length_aut = unwrap_at(length_at);
     let slope_aut = unwrap_at(slope_at);
     let xst_aut = unwrap_at(x_storage_at);
+    let gamma_aut = gamma_at.map(unwrap_at);
+    let gamma_p = gamma_aut.as_ref().map(|g| g.primitive.clone());
 
     let n_p = n_aut.primitive.clone();
     let qsp_p = qsp_aut.primitive.clone();
@@ -1854,6 +2021,7 @@ where
     };
 
     let mut x_eff_out: Option<I::FloatTensorPrimitive> = None;
+    let gamma_chain = gamma_p.clone().map(wrap);
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg,
         pattern,
@@ -1869,6 +2037,7 @@ where
         &mut None,
         &mut x_eff_out,
         track_neg,
+        gamma_chain.clone(),
     );
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
@@ -1929,24 +2098,44 @@ where
         use_cuda,
         ddr_match,
         enforce_pos,
-            gamma,
-            d_ref,
+        gamma,
+        d_ref,
+        gamma_t: gamma_p.clone(),
     };
 
-    // Register the op on the autograd tape.
-    let result_prim = match TimestepOp
-        .prepare::<NoCheckpointing>([
-            n_aut.node.clone(),
-            qsp_aut.node.clone(),
-            psp_aut.node.clone(),
-            qt_aut.node.clone(),
-            qpt_aut.node.clone(),
-        ])
-        .compute_bound()
-        .stateful()
-    {
-        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
-        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    // Register the op on the autograd tape. A learned gamma needs a sixth
+    // parent to receive a gradient at all, so it routes through the sibling
+    // `TimestepGammaOp`; everything else keeps the historical five-parent node.
+    let result_prim = match &gamma_aut {
+        Some(g) => match TimestepGammaOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+                g.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
+        None => match TimestepOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
     };
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
@@ -2060,6 +2249,7 @@ where
         &mut leak_out,
         &mut x_eff_out,
         track_neg,
+        None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
@@ -2139,8 +2329,9 @@ where
         use_cuda,
         ddr_match,
         enforce_pos,
-            gamma,
-            d_ref,
+        gamma,
+        d_ref,
+        gamma_t: None,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -2226,6 +2417,9 @@ where
             n_at, q_spatial_at, p_spatial_at,
             q_t_at, q_prime_t_at, length_at, slope_at, x_storage_at,
             false,
+            // CUDA graphs and a learned gamma are mutually exclusive at config
+            // load, so this fallback never needs one.
+            None,
         );
     }
 
@@ -2454,6 +2648,7 @@ where
         // `use_cuda_graphs: true`, so it is off here by construction.
         gamma: 0.0,
         d_ref: 1.0,
+        gamma_t: None,
     };
 
     let result_prim = match TimestepOp
@@ -2501,7 +2696,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false,
+        &mut None, &mut None, false, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -2564,7 +2759,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false,
+        &mut None, &mut None, false, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

@@ -326,6 +326,7 @@ fn layer_b_step2_hotstart_matches_ddr() {
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            gamma: None,
         },
         false, // carry_state = false
         None,
@@ -455,6 +456,7 @@ fn layer_b_step3_mc_forward_matches_ddr() {
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            gamma: None,
         },
         false, // carry_state = false
         None,

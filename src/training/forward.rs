@@ -212,6 +212,7 @@ pub fn forward_with_frozen_params<I: Backend>(
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            gamma: None,
         },
         carry_state,
         initial_state_ad,
@@ -323,6 +324,12 @@ pub fn forward<I: Backend>(
     // [0,1] output to the configured range so the routing learns its own
     // attenuation-vs-translation per reach (gradient already flows via the
     // custom sparse backward in mmc_op.rs). Otherwise hold the constant 0.3.
+    // Stage-roughness exponent: learned per reach when the KAN emits `gamma`,
+    // otherwise absent and the solver falls back to the global
+    // `params.stage_roughness.gamma` (or to no stage roughness at all).
+    // Denormalisation happens in `setup_inputs`, like every other output.
+    let gamma_param: Option<Tensor<Autodiff<I>, 1>> = params_map.get("gamma").cloned();
+
     let x_storage: Tensor<Autodiff<I>, 1> = match params_map.get("x_storage") {
         Some(x_norm) => denormalize(
             x_norm.clone(),
@@ -372,6 +379,7 @@ pub fn forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
+            gamma: gamma_param,
             k_d,
             d_gw,
             leakance_factor,
@@ -712,6 +720,9 @@ fn forward_eval_core<I: Backend>(
         SpatialParameters {
             n: n_ad,
             q_spatial: q_ad,
+            // Frozen-parameter eval: gamma comes from the config scalar, not
+            // from a head, so there is nothing to learn here.
+            gamma: None,
             p_spatial: p_ad,
             k_d: k_d_ad,
             d_gw: d_gw_ad,

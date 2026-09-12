@@ -565,11 +565,19 @@ pub struct ParameterRanges {
     pub d_gw: [f32; 2],
     /// Fractional leakance weight [0, 1]. Companion to `k_d`; same activation guard.
     pub leakance_factor: [f32; 2],
+    /// Stage-roughness exponent for `n(d) = n_0·(d/d_ref)^(−gamma)`, when it
+    /// is a learned KAN output rather than the global
+    /// `params.stage_roughness.gamma`. Upper bound 0.5 because the depth
+    /// exponent is `3/(5+3q+3·gamma)` and roughness grows without bound as
+    /// depth goes to zero; 0.183 reproduces observed at-a-station hydraulic
+    /// geometry when paired with `q ≈ 0.65`.
+    pub gamma: [f32; 2],
 }
 
 impl Default for ParameterRanges {
     fn default() -> Self {
         Self {
+            gamma: [0.0, 0.5],
             n: [0.015, 0.25],
             q_spatial: [0.0, 1.0],
             p_spatial: [1.0, 200.0],
@@ -833,6 +841,9 @@ impl From<ParamsRaw> for Params {
         if let Some(v) = r.parameter_ranges.get("x_storage") {
             p.parameter_ranges.x_storage = *v;
         }
+        if let Some(v) = r.parameter_ranges.get("gamma") {
+            p.parameter_ranges.gamma = *v;
+        }
         // DDR spells this uppercase (K_D); siblings are lowercase.
         if let Some(v) = r.parameter_ranges.get("K_D") {
             p.parameter_ranges.k_d = *v;
@@ -1069,6 +1080,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_learned_gamma(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         validate_enforce_positivity(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -1232,6 +1247,57 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// True when `gamma` is a KAN output rather than a global constant.
+fn learns_gamma(cfg: &Config) -> bool {
+    cfg.kan_head
+        .as_ref()
+        .map(|k| k.learnable_parameters.iter().any(|s| s == "gamma"))
+        .unwrap_or(false)
+}
+
+/// Guards for a LEARNED per-reach `gamma`, which routes through the six-parent
+/// `TimestepGammaOp`.
+fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
+    if !learns_gamma(cfg) {
+        return Ok(());
+    }
+    let r = cfg.params.parameter_ranges.gamma;
+    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < 0.0 || r[1] <= r[0] || r[1] > 1.0 {
+        return Err(format!(
+            "params.parameter_ranges.gamma must be a valid range inside [0, 1] \
+             with lo < hi, got {r:?}. Channels get SMOOTHER as they fill so gamma \
+             is non-negative, and above 1 the depth exponent 3/(5+3q+3·gamma) \
+             collapses while roughness explodes as depth goes to zero."
+        ));
+    }
+    if cfg.params.ddr_match {
+        return Err(
+            "`gamma` in kan_head.learnable_parameters requires `ddr_match: false`. \
+             The deprecated ddr_match celerity is the constant 5/3, with no \
+             A/(T·d) term for the stage correction to attach to."
+                .to_string(),
+        );
+    }
+    if cfg.params.use_cuda_graphs {
+        return Err(
+            "`gamma` in kan_head.learnable_parameters requires \
+             `use_cuda_graphs: false`. The captured graph is ddr_match-only and \
+             bakes the constant-5/3 celerity in."
+                .to_string(),
+        );
+    }
+    if cfg.params.use_leakance {
+        return Err(
+            "`gamma` in kan_head.learnable_parameters is not supported together \
+             with `use_leakance: true`. Leakance routes through its own \
+             eight-parent op, which has no gamma parent, so gamma would silently \
+             receive no gradient."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_stage_roughness(cfg: &Config) -> std::result::Result<(), String> {
     let Some(sr) = cfg.params.stage_roughness.as_ref() else {
         return Ok(());
@@ -1252,6 +1318,16 @@ fn validate_stage_roughness(cfg: &Config) -> std::result::Result<(), String> {
     }
     if sr.gamma == 0.0 {
         return Ok(());
+    }
+    if learns_gamma(cfg) {
+        return Err(
+            "params.stage_roughness.gamma is a GLOBAL constant and `gamma` is \
+             also in kan_head.learnable_parameters. Pick one: remove the \
+             stage_roughness block to learn it per reach, or drop `gamma` from \
+             learnable_parameters to hold it fixed. Setting both silently makes \
+             the constant dead, because the learned field takes precedence."
+                .to_string(),
+        );
     }
     if sr.d_ref != 1.0 {
         return Err(format!(

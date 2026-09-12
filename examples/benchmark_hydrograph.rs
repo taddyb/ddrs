@@ -166,6 +166,7 @@ fn main() -> std::io::Result<()> {
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     };
 
     let t_start = std::time::Instant::now();

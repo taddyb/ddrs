@@ -130,6 +130,7 @@ fn run_forward(
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     };
 
     let mut mc = MuskingumCunge::<Inner>::new(cfg.clone(), device.clone());

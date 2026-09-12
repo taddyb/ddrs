@@ -188,6 +188,7 @@ pub fn probe_forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
+            gamma: None,
             k_d,
             d_gw,
             leakance_factor,
