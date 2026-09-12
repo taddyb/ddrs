@@ -267,13 +267,18 @@ where
         let raw = head.forward(input);
 
         let n_d = denormalize(raw["n"].clone(), cfg.params.parameter_ranges.n, is_log("n"));
-        let q_d = denormalize(
-            raw["q_spatial"].clone(),
-            cfg.params.parameter_ranges.q_spatial,
-            is_log("q_spatial"),
-        );
         n_phys.extend(n_d.into_data().to_vec::<f32>().unwrap());
-        q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        if learn_has("q_spatial") {
+            let q_d = denormalize(
+                raw["q_spatial"].clone(),
+                cfg.params.parameter_ranges.q_spatial,
+                is_log("q_spatial"),
+            );
+            q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        } else {
+            let q_default = *cfg.params.defaults.get("q_spatial").expect("q_spatial fixed but no default");
+            q_phys.extend(std::iter::repeat(q_default).take(rows));
+        }
 
         if learn_has("p_spatial") {
             let p_d = denormalize(
@@ -534,13 +539,18 @@ where
         let raw = head.forward(input);
 
         let n_d = denormalize(raw["n"].clone(), cfg.params.parameter_ranges.n, is_log("n"));
-        let q_d = denormalize(
-            raw["q_spatial"].clone(),
-            cfg.params.parameter_ranges.q_spatial,
-            is_log("q_spatial"),
-        );
         n_phys.extend(n_d.into_data().to_vec::<f32>().unwrap());
-        q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        if learn_has("q_spatial") {
+            let q_d = denormalize(
+                raw["q_spatial"].clone(),
+                cfg.params.parameter_ranges.q_spatial,
+                is_log("q_spatial"),
+            );
+            q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        } else {
+            let q_default = *cfg.params.defaults.get("q_spatial").expect("q_spatial fixed but no default");
+            q_phys.extend(std::iter::repeat(q_default).take(rows));
+        }
 
         if learn_has("p_spatial") {
             let p_d = denormalize(

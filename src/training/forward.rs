@@ -155,6 +155,28 @@ pub fn physical_to_normalized(values: &[f32], range: [f32; 2], log_space: bool) 
     }
 }
 
+/// The NORMALIZED constant the engine should see for a head output that is
+/// not learned: `params.defaults[name]` (physical) mapped into the parameter's
+/// box exactly as `denormalize` will map it back. Config load guarantees the
+/// default exists and lies inside the range when the output is absent from
+/// `kan_head.learnable_parameters` (`validate_fixed_q_spatial`).
+pub fn fixed_output_normalized<B: Backend>(
+    cfg: &Config,
+    name: &str,
+    range: [f32; 2],
+    n: usize,
+    device: &B::Device,
+) -> Tensor<B, 1> {
+    let phys = *cfg
+        .params
+        .defaults
+        .get(name)
+        .unwrap_or_else(|| panic!("head has no `{name}` output and params.defaults has no `{name}`"));
+    let log = cfg.params.log_space_parameters.iter().any(|s| s == name);
+    let v = physical_to_normalized(&[phys], range, log)[0];
+    Tensor::full([n], v, device)
+}
+
 /// Direct-param forward pass for V1/V2 verification. No MLP, no autograd
 /// retention. Takes frozen physical parameters, runs the MC engine over the
 /// full window, and returns per-gauge hourly predictions `(num_gauges, T_hours)`.
@@ -317,7 +339,12 @@ pub fn forward<I: Backend>(
     );
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
-    let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
+    // `q_spatial` is fixed at `params.defaults.q_spatial` when the head does
+    // not emit it (the n_0 + gamma design, 2026-09-12).
+    let q_param = match params_map.get("q_spatial") {
+        Some(q) => q.clone(),
+        None => fixed_output_normalized::<Autodiff<I>>(cfg, "q_spatial", cfg.params.parameter_ranges.q_spatial, n_active, device),
+    };
     let p_param = params_map.get("p_spatial").cloned();
 
     // Learnable Muskingum X: when the KAN emits `x_storage`, denormalize its
@@ -627,7 +654,11 @@ fn forward_eval_core<I: Backend>(
     );
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
-    let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
+    // Fixed q (mirrors `forward`): the default, normalized into the box.
+    let q_param = match params_map.get("q_spatial") {
+        Some(q) => q.clone(),
+        None => fixed_output_normalized::<I>(cfg, "q_spatial", cfg.params.parameter_ranges.q_spatial, n_active, device),
+    };
     let p_param = params_map.get("p_spatial").cloned();
 
     // H5/H6 parameter-swap override: whole-batch replace of n/q_spatial/

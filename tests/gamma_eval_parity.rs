@@ -188,7 +188,11 @@ fn every_optional_head_output_reaches_all_three_readers() {
     let mut leak = mock_config();
     leak.params.use_leakance = true;
     leak.params.use_cuda_graphs = false;
-    let rows: [(&str, &[&str], &ddrs::config::Config); 6] = [
+    let mut fixed_q = mock_config();
+    fixed_q.params.defaults.insert("q_spatial".to_string(), 0.65);
+    let rows: [(&str, &[&str], &ddrs::config::Config); 8] = [
+        ("n only (p, q fixed)", &["n"], &fixed_q),
+        ("n + gamma (p, q fixed)", &["n", "gamma"], &fixed_q),
         ("n, q only (p fixed)", &["n", "q_spatial"], &base),
         ("p_spatial", &["n", "q_spatial", "p_spatial"], &base),
         ("x_storage", &["n", "q_spatial", "p_spatial", "x_storage"], &base),

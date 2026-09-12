@@ -1084,6 +1084,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_fixed_q_spatial(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         validate_enforce_positivity(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -1245,6 +1249,29 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// A head that does not emit `q_spatial` holds it at `params.defaults.q_spatial`
+/// (the n_0 + gamma design). The default must exist and sit inside the box,
+/// because the readers normalize it into the box and the engine denormalizes
+/// it back; a value outside would silently clamp.
+fn validate_fixed_q_spatial(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(head) = cfg.kan_head.as_ref() else { return Ok(()) };
+    if head.learnable_parameters.iter().any(|s| s == "q_spatial") {
+        return Ok(());
+    }
+    let [lo, hi] = cfg.params.parameter_ranges.q_spatial;
+    match cfg.params.defaults.get("q_spatial") {
+        None => Err("`q_spatial` is not in kan_head.learnable_parameters, so it is FIXED and \
+                     params.defaults must carry `q_spatial` (e.g. 0.65, the at-a-station \
+                     Leopold & Maddock value b/f)."
+            .into()),
+        Some(v) if !(lo..=hi).contains(v) => Err(format!(
+            "params.defaults.q_spatial = {v} lies outside params.parameter_ranges.q_spatial \
+             [{lo}, {hi}]; the fixed value must be inside the box."
+        )),
+        Some(_) => Ok(()),
+    }
 }
 
 /// True when `gamma` is a KAN output rather than a global constant.
@@ -1854,7 +1881,7 @@ kan_head:
   hidden_size: 8
   num_hidden_layers: 1
   input_var_names: [a, b]
-  learnable_parameters: [n]
+  learnable_parameters: [n, q_spatial]
   disaggregation:
     freeze: true
 "#;
@@ -2085,7 +2112,7 @@ data_sources:
                     streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
                     gages: /dev/null/g.csv\n\
                     mlp:\n  hidden_size: 21\n  num_hidden_layers: 2\n  grid: 50\n  k: 2\n  \
-                    input_var_names: [meanP]\n  learnable_parameters: [n]\n";
+                    input_var_names: [meanP]\n  learnable_parameters: [n, q_spatial]\n";
         let path = std::env::temp_dir().join("ddrs_mlp_alias.yaml");
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("mlp alias must still parse");

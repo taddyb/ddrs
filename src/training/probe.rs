@@ -138,8 +138,15 @@ pub fn probe_forward<I: Backend>(
         .iter()
         .find(|(n, _)| n.as_str() == "q_spatial")
         .map(|(_, t)| t.clone())
-        .unwrap_or_else(|| {
-            params_map.get("q_spatial").expect("head missing q_spatial").clone()
+        .unwrap_or_else(|| match params_map.get("q_spatial") {
+            Some(q) => q.clone(),
+            None => crate::training::forward::fixed_output_normalized::<Autodiff<I>>(
+                cfg,
+                "q_spatial",
+                cfg.params.parameter_ranges.q_spatial,
+                n_active,
+                device,
+            ),
         });
     let p_param: Option<Tensor<Autodiff<I>, 1>> = leaves
         .leaves
