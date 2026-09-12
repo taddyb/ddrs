@@ -160,6 +160,14 @@ pub(crate) struct TimestepState<B: Backend> {
     /// Tells the backward whether S18' (K floor) and S19' (three-way X min) ran,
     /// so B18'/B19' apply their masks. `false` ⇒ the pre-clamp math, unchanged.
     pub enforce_pos: bool,
+    /// Stage-roughness exponent, `n(d) = n_0·(d/d_ref)^(−gamma)`. `0.0` means
+    /// the block is absent and the backward takes the historical path verbatim
+    /// (B5's `5 + 3q` and B17's four-term beta), so a zero here is not merely
+    /// a value that happens to cancel.
+    pub gamma: f32,
+    /// Reference depth for `gamma`, metres. Only `d_ref^gamma` enters, so this
+    /// is inert at `gamma == 0` and at `d_ref == 1`.
+    pub d_ref: f32,
 }
 
 #[derive(Debug)]
@@ -603,21 +611,39 @@ where
         //   accumulators — A, T, P and z all already carry gradient through
         //   the hyd_radius chain.
         // ===========================================================
-        let (gvelocity_cl, beta_grads) = if state.ddr_match {
-            (gcelerity * (5.0 / 3.0), None)
+        //   Stage-dependent roughness (`gamma != 0`) adds  H ≡ gamma·A/(T·d)
+        //   to beta, contributing three more terms:
+        //     ∂H/∂A = H/A     ∂H/∂T = −H/T     ∂H/∂depth = −H/depth
+        //   The first two fold into the same gA/gT accumulators as G's; the
+        //   third is a NEW path into depth, returned separately because depth
+        //   is not one of BetaGrads' existing four.
+        let (gvelocity_cl, beta_grads, gdepth_from_s17) = if state.ddr_match {
+            (gcelerity * (5.0 / 3.0), None, None)
         } else {
             let g_term = area.clone() * sqrt_1_plus_ss_sq.clone()
                 / (top_width.clone() * wp.clone())
                 * (4.0 / 3.0);
             let beta = -g_term.clone() + (5.0 / 3.0);
             let gbeta = gcelerity.clone() * _velocity_cl.clone();
-            let grads = BetaGrads {
+            let mut grads = BetaGrads {
                 g_area: -gbeta.clone() * g_term.clone() / area.clone(),
                 g_top_width: gbeta.clone() * g_term.clone() / top_width.clone(),
                 g_wp: gbeta.clone() * g_term.clone() / wp.clone(),
-                g_side_slope: -gbeta * g_term * side_slope.clone() / one_plus_ss_sq.clone(),
+                g_side_slope: -gbeta.clone() * g_term.clone() * side_slope.clone()
+                    / one_plus_ss_sq.clone(),
             };
-            (gcelerity * beta, Some(grads))
+            if state.gamma != 0.0 {
+                let h_term =
+                    area.clone() * state.gamma / (top_width.clone() * depth.clone());
+                grads.g_area = grads.g_area + gbeta.clone() * h_term.clone() / area.clone();
+                grads.g_top_width =
+                    grads.g_top_width - gbeta.clone() * h_term.clone() / top_width.clone();
+                let gd = -gbeta * h_term.clone() / depth.clone();
+                let beta = beta + h_term;
+                (gcelerity * beta, Some(grads), Some(gd))
+            } else {
+                (gcelerity * beta, Some(grads), None)
+            }
         };
 
         // ===========================================================
@@ -636,6 +662,15 @@ where
         //   ∂v/∂R = (2/3) · v / R
         //   (slope is constant — dropped)
         // ===========================================================
+        //   With stage roughness, v also depends on depth EXPLICITLY through
+        //   (d/d_ref)^gamma, on top of its dependence through R:
+        //     ∂v/∂depth |_explicit = gamma · v / depth
+        //   That is a path into depth which does not exist at gamma == 0.
+        let gdepth_from_s15 = if state.gamma != 0.0 {
+            Some(gvelocity_un.clone() * velocity_un.clone() * state.gamma / depth.clone())
+        } else {
+            None
+        };
         let gn_from_s15 = gvelocity_un.clone() * (-velocity_un.clone() / n_t.clone());
         let gr_from_s15 =
             gvelocity_un.clone() * (velocity_un.clone() * (2.0f32 / 3.0f32)) / hyd_radius.clone();
@@ -759,6 +794,15 @@ where
         //   ∂d/∂exponent = d · ln(ratio)
         // ===========================================================
         let mut gd_total = gd_from_s13 + gd_from_s12 + gd_from_s10 + gd_from_s8 + gdepth_from_s7;
+        // Stage-dependent roughness opens two extra paths into depth that do
+        // not exist at gamma == 0: the celerity's `beta += gamma·A/(T·d)`
+        // (B17) and the velocity's explicit `(d/d_ref)^gamma` (B15).
+        if let Some(gd) = gdepth_from_s17 {
+            gd_total = gd_total + gd;
+        }
+        if let Some(gd) = gdepth_from_s15 {
+            gd_total = gd_total + gd;
+        }
         if let Some(zg) = zeta_geom.as_ref() {
             gd_total = gd_total + zg.g_depth.clone();
         }
@@ -771,7 +815,8 @@ where
         // d = ratio^exponent  (NOTE: depth saved is post-clamp; the un-clamped
         // value at differentiation point equals depth when mask is true, so we can
         // use depth in derivative expressions where mask is true.)
-        let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+        let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * state.gamma;
+        let exponent = (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0;
         let gratio_from_s6 =
             gd_pre_clamp.clone() * exponent.clone() * depth.clone() / ratio.clone();
         let gexp_from_s6 = gd_pre_clamp * depth.clone() * ratio.clone().log();
@@ -781,7 +826,10 @@ where
         //   ∂exp/∂q_eps = -9 / (5 + 3·q_eps)² = -3 · exp² / 3 = ... use direct:
         //   d/dq[3/(5+3q)] = -9/(5+3q)²
         // ===========================================================
-        let five_plus_three_qeps = q_eps.clone() * 3.0 + 5.0;
+        //   With stage roughness the denominator is `5 + 3·q_eps + 3·gamma`;
+        //   gamma is a constant here (Phase 1 does not learn it), so only the
+        //   denominator changes, not the form.
+        let five_plus_three_qeps = q_eps.clone() * 3.0 + five_plus_three_gamma;
         let gqeps_from_s5 = -gexp_from_s6 * 9.0 / (five_plus_three_qeps.clone() * five_plus_three_qeps);
 
         // ===========================================================
@@ -799,15 +847,24 @@ where
         let gp_from_s3 = gden * slope.clone().sqrt();
 
         // ===========================================================
-        // B2. numerator = q_t · n · (q_eps + 1)
-        //   ∂num/∂q_t   = n · (q_eps + 1)
-        //   ∂num/∂n     = q_t · (q_eps + 1)
-        //   ∂num/∂q_eps = q_t · n
+        // B2. numerator = q_t · n · (q_eps + 1) · d_ref^gamma
+        //   ∂num/∂q_t   = n · (q_eps + 1) · d_ref^gamma
+        //   ∂num/∂n     = q_t · (q_eps + 1) · d_ref^gamma
+        //   ∂num/∂q_eps = q_t · n · d_ref^gamma
+        //   `d_ref^gamma` is a constant (gamma is not learned in Phase 1), so
+        //   it scales all three identically. It is exactly 1.0 whenever the
+        //   stage-roughness block is absent OR d_ref is 1, which config load
+        //   currently requires — see `validate_stage_roughness`.
         // ===========================================================
         let q_eps_plus_one = q_eps.clone() + 1.0;
-        let gq_t_from_s2 = gnum.clone() * n_t.clone() * q_eps_plus_one.clone();
-        let gn_from_s2 = gnum.clone() * q_t.clone() * q_eps_plus_one.clone();
-        let gqeps_from_s2 = gnum * q_t.clone() * n_t.clone();
+        let dref_pow_gamma = if state.gamma != 0.0 && state.d_ref != 1.0 {
+            state.d_ref.powf(state.gamma)
+        } else {
+            1.0
+        };
+        let gq_t_from_s2 = gnum.clone() * n_t.clone() * q_eps_plus_one.clone() * dref_pow_gamma;
+        let gn_from_s2 = gnum.clone() * q_t.clone() * q_eps_plus_one.clone() * dref_pow_gamma;
+        let gqeps_from_s2 = gnum * q_t.clone() * n_t.clone() * dref_pow_gamma;
 
         // ===========================================================
         // B1. q_eps = q_spatial + 1e-6  →  ∂q_eps/∂q_spatial = 1
@@ -1092,6 +1149,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
     // S18'/S19' positivity clamp. `ddr_match: true` must stay byte-identical to
     // DDR (invariant 1), so the clamp is gated on BOTH flags even though
     // `validate_enforce_positivity` already rejects the combination at load.
@@ -1112,14 +1170,28 @@ where
 
     // S1
     let q_eps = qsp_in.clone() + 1e-6_f32;
-    // S2
+    // S2. With stage-dependent roughness the Manning inversion picks up a
+    // constant `d_ref^gamma` on the numerator; see S5 for where gamma really
+    // bites. At gamma == 0 (or d_ref == 1) the factor is exactly 1.0.
     let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
+    let numerator = if gamma != 0.0 && d_ref != 1.0 {
+        numerator * d_ref.powf(gamma)
+    } else {
+        numerator
+    };
     // S3
     let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
     // S4
     let ratio = numerator.clone() / denominator.clone();
-    // S5
-    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+    // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma).
+    //
+    // Substituting n = n_0·(d/d_ref)^(−gamma) into the Manning relation moves
+    // one power of depth from the left side to the right, so gamma simply
+    // shifts the denominator. `gamma == 0` restores `5 + 3·q_eps` exactly —
+    // the literal is written as a separate binding so the f32 rounding of the
+    // historical expression cannot change.
+    let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
+    let exponent = (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0;
     // S6
     let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
     // S7
@@ -1139,8 +1211,18 @@ where
         + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
     // S14
     let hyd_radius = _area.clone() / wp.clone();
-    // S15
-    let velocity_un = n_in.clone().recip() * hyd_radius.clone().powf_scalar(2.0 / 3.0)
+    // S15. v = (1/n(d))·R^(2/3)·√slope. With stage-dependent roughness
+    // 1/n(d) = (1/n_0)·(d/d_ref)^gamma, so the factor rides on the velocity as
+    // well as on the depth inversion. Applying it to only one of the two leaves
+    // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
+    // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
+    // caught on the first run.
+    let n_recip = if gamma != 0.0 {
+        n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
+    } else {
+        n_in.clone().recip()
+    };
+    let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
         * slope_in.clone().sqrt();
     // S16
     let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
@@ -1152,12 +1234,23 @@ where
     //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
     //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
     //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
+    //   With stage-dependent roughness, Q = (d/d_ref)^gamma · Q_Manning(d), so
+    //   c = dQ/dA picks up one extra term. Using dA/dd = T (true for ANY cross
+    //   section, not just the power law):
+    //       c = v · [ beta_trapezoid + gamma · A/(T·d) ]
+    //   Sanity: for the pure power-law section A/(T·d) = 1/(q+1), recovering
+    //   beta = (5 + 3q + 3·gamma)/(3(q+1)), which is 5/3 at q = gamma = 0.
     let celerity = if ddr_match {
         velocity_cl.clone() * (5.0_f32 / 3.0_f32)
     } else {
         let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
         let beta =
             -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
+        let beta = if gamma != 0.0 {
+            beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
+        } else {
+            beta
+        };
         velocity_cl.clone() * beta
     };
 
@@ -1728,6 +1821,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
     // Must mirror `forward_chain_inner`'s gate EXACTLY (S18'/S19' vs B18'/B19').
     let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
@@ -1835,6 +1929,8 @@ where
         use_cuda,
         ddr_match,
         enforce_pos,
+            gamma,
+            d_ref,
     };
 
     // Register the op on the autograd tape.
@@ -1904,6 +2000,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
     // Must mirror `forward_chain_inner`'s gate EXACTLY (S18'/S19' vs B18'/B19').
     let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
@@ -2042,6 +2139,8 @@ where
         use_cuda,
         ddr_match,
         enforce_pos,
+            gamma,
+            d_ref,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -2146,6 +2245,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
 
     // Unwrap autograd primitives.
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
@@ -2349,6 +2449,11 @@ where
         // and `enforce_positivity` requires `ddr_match: false` at config load,
         // so S18'/S19' can never have run on this path.
         enforce_pos: false,
+        // Stage-dependent roughness needs the trapezoidal celerity, which this
+        // path does not have; config load rejects `gamma > 0` together with
+        // `use_cuda_graphs: true`, so it is off here by construction.
+        gamma: 0.0,
+        d_ref: 1.0,
     };
 
     let result_prim = match TimestepOp

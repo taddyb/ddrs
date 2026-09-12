@@ -31,22 +31,45 @@ pub fn reach_k_hours<I: Backend>(
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
 
+    // Stage-dependent roughness, if configured. This file MUST track
+    // `mmc_op.rs` S5/S17 exactly: it is what the landscape instrument measures
+    // K on, so a divergence here would silently probe a different surface than
+    // the one the solver routes.
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
+
     let q_t = q_t.clamp_min(discharge_lb);
     let q_eps = q.clone() + 1e-6_f32;
     let numerator = q_t * n.clone() * (q_eps.clone() + 1.0);
+    let numerator = if gamma != 0.0 && d_ref != 1.0 {
+        numerator * d_ref.powf(gamma)
+    } else {
+        numerator
+    };
     let denominator = p.clone() * slope.clone().sqrt() + 1e-8_f32;
     let ratio = numerator / denominator;
-    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+    let exponent = (q_eps.clone() * 3.0 + (5.0 + 3.0 * gamma)).recip() * 3.0;
     let depth = ratio.powf(exponent).clamp_min(depth_lb);
     let top_width = p.clone() * depth.clone().powf(q_eps.clone());
     let side_slope = (top_width.clone() * q_eps / (depth.clone() * 2.0)).clamp(0.5, 50.0);
     let bottom_width = (top_width.clone() - side_slope.clone() * depth.clone() * 2.0).clamp_min(bottom_width_lb);
     let area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
     let root = (side_slope.powf_scalar(2.0) + 1.0).sqrt();
-    let wp = bottom_width + depth * root.clone() * 2.0;
+    let wp = bottom_width + depth.clone() * root.clone() * 2.0;
     let hyd_radius = area.clone() / wp.clone();
-    let velocity = (n.clone().recip() * hyd_radius.powf_scalar(2.0 / 3.0) * slope.clone().sqrt()).clamp(velocity_lb, 15.0);
-    let beta = -(area * root) / (top_width * wp) * (4.0 / 3.0) + (5.0 / 3.0);
+    // Stage-dependent roughness rides on the velocity too, not only on the
+    // depth inversion — must match mmc_op.rs S15 exactly.
+    let n_recip = if gamma != 0.0 {
+        n.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
+    } else {
+        n.clone().recip()
+    };
+    let velocity = (n_recip * hyd_radius.powf_scalar(2.0 / 3.0) * slope.clone().sqrt()).clamp(velocity_lb, 15.0);
+    let beta = -(area.clone() * root) / (top_width.clone() * wp) * (4.0 / 3.0) + (5.0 / 3.0);
+    let beta = if gamma != 0.0 {
+        beta + area * gamma / (top_width * depth)
+    } else {
+        beta
+    };
     let celerity = velocity * beta;
     let k_seconds = length.clone() / celerity;
     let k: Vec<f32> = k_seconds.into_data().to_vec::<f32>().expect("f32");

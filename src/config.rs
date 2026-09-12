@@ -363,6 +363,43 @@ pub struct KanHeadConfigSection {
     pub disaggregation: Option<DisaggregationSection>,
 }
 
+/// YAML `params.stage_roughness:` block. Absent (the default) ⇒ `gamma = 0`,
+/// which is byte-identical to every model trained before this existed.
+///
+/// Makes Manning's roughness depend on stage:
+///
+/// ```text
+///   n(d) = n_0 · (d / d_ref)^(−gamma)
+/// ```
+///
+/// **Why.** At one cross section `p`, `q`, `n` and slope are all constant in
+/// time, so Manning plus continuity lock the flood response onto a
+/// one-parameter curve: `m = (2/3)·f`. Observed at-a-station hydraulic geometry
+/// sits at `m ≈ 0.34` against `f ≈ 0.40`, i.e. off that curve. Roughness falling
+/// as the channel fills is the one physical term that can move `m` without
+/// breaking width and depth. See
+/// `docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`.
+///
+/// Two things change in the solver, both reducing exactly at `gamma = 0`:
+/// the depth exponent becomes `3/(5 + 3q + 3·gamma)`, and the celerity gains
+/// `beta += gamma · A/(T·d)`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageRoughnessSection {
+    /// Stage exponent. `0.0` = off. `0.183` reproduces observed at-a-station
+    /// hydraulic geometry when paired with `q = 0.65`.
+    ///
+    /// Phase 1 of the design: a single global value, NOT a learned per-reach
+    /// field. It becomes a KAN output only if the landscape probe shows it is
+    /// identifiable.
+    #[serde(default)]
+    pub gamma: f32,
+    /// Reference depth in metres. `n_0` is roughness AT THIS DEPTH, so changing
+    /// it re-scales `n_0` and makes published `n` values incomparable.
+    #[serde(default = "default_d_ref")]
+    pub d_ref: f32,
+}
+
 /// YAML `kan_head.disaggregation:` block (presence enables the head, unless
 /// `enabled: false`). The head always consumes `(daily Q', that day's 24h
 /// precip)` — requires `data_sources.aorc_precip` to be set. See
@@ -455,6 +492,9 @@ pub fn kan_config(
 
 fn default_grid() -> usize {
     5
+}
+fn default_d_ref() -> f32 {
+    1.0
 }
 fn default_kan_grid_range() -> [f64; 2] {
     [-3.0, 3.0]
@@ -704,6 +744,21 @@ pub struct Params {
     pub enforce_positivity: bool,
     /// Static reach subdivision (variable Δx). Off by default.
     pub subdivision: Subdivision,
+    /// Stage-dependent Manning roughness, `n(d) = n_0·(d/d_ref)^(−gamma)`.
+    /// Absent ⇒ `gamma = 0`, byte-identical to the historical solver.
+    pub stage_roughness: Option<StageRoughnessSection>,
+}
+
+impl Params {
+    /// `(gamma, d_ref)` for the solver. `(0.0, 1.0)` when the block is absent
+    /// or `gamma` is zero, which callers use to take the historical code path
+    /// verbatim rather than relying on `powf(0.0) == 1.0`.
+    pub fn stage_roughness_params(&self) -> (f32, f32) {
+        match &self.stage_roughness {
+            Some(sr) if sr.gamma != 0.0 => (sr.gamma, sr.d_ref),
+            _ => (0.0, 1.0),
+        }
+    }
 }
 
 fn default_ddr_match() -> bool {
@@ -731,6 +786,7 @@ impl Default for Params {
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
             subdivision: Subdivision::default(),
+            stage_roughness: None,
         }
     }
 }
@@ -757,6 +813,8 @@ struct ParamsRaw {
     enforce_positivity: Option<bool>,
     #[serde(default)]
     subdivision: Subdivision,
+    #[serde(default)]
+    stage_roughness: Option<StageRoughnessSection>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -850,6 +908,7 @@ impl From<ParamsRaw> for Params {
         // yields `Subdivision::default()` when the block is absent, which is
         // exactly what `Params::default()` carries.
         p.subdivision = r.subdivision;
+        p.stage_roughness = r.stage_roughness;
         p
     }
 }
@@ -1003,6 +1062,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_stage_roughness(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -1163,6 +1226,57 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
         return Err(
             "params: `use_leakance: true` requires `use_cuda_graphs: false` — the \
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_stage_roughness(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(sr) = cfg.params.stage_roughness.as_ref() else {
+        return Ok(());
+    };
+    if !sr.gamma.is_finite() || sr.gamma < 0.0 || sr.gamma > 1.0 {
+        return Err(format!(
+            "params.stage_roughness: `gamma` must be in [0, 1], got {}. Channels get \
+             SMOOTHER as they fill, so gamma is non-negative; above 1 the depth \
+             exponent 3/(5+3q+3·gamma) collapses and roughness explodes as depth → 0.",
+            sr.gamma
+        ));
+    }
+    if !sr.d_ref.is_finite() || sr.d_ref <= 0.0 {
+        return Err(format!(
+            "params.stage_roughness: `d_ref` must be > 0 metres, got {}",
+            sr.d_ref
+        ));
+    }
+    if sr.gamma == 0.0 {
+        return Ok(());
+    }
+    if sr.d_ref != 1.0 {
+        return Err(format!(
+            "params.stage_roughness: `d_ref` must be 1.0 while `gamma` is a single \
+             global value, got {}. With gamma global, `d_ref^gamma` is a constant on \
+             the Manning numerator and is therefore fully absorbed by the learned `n` \
+             field — it would be a second name for the same degree of freedom. The \
+             restriction lifts when gamma becomes a per-reach KAN output, where \
+             `d_ref^gamma` varies across reaches and stops being absorbable.",
+            sr.d_ref
+        ));
+    }
+    if cfg.params.ddr_match {
+        return Err(
+            "params.stage_roughness: `gamma > 0` requires `ddr_match: false`. The \
+             deprecated ddr_match celerity is the constant 5/3, which has no A/(T·d) \
+             term for the stage correction to attach to."
+                .to_string(),
+        );
+    }
+    if cfg.params.use_cuda_graphs {
+        return Err(
+            "params.stage_roughness: `gamma > 0` requires `use_cuda_graphs: false`. \
+             The CUDA-graph capture path is ddr_match-only by construction and bakes \
+             the constant-5/3 celerity into the captured graph."
                 .to_string(),
         );
     }

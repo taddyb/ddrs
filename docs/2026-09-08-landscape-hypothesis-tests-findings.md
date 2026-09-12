@@ -1874,3 +1874,60 @@ Four arms, differing only in `kan_head`, all learning `n` + `p_spatial` + `q_spa
 - Eight seeds is enough to separate the control from the split and wide arms (0.466 against 0.086 to 0.105) and
   not enough to separate those two from each other.
 - The trunk spectrum is measured on a 4,027-reach stride sample, not all 346,321 reaches.
+
+
+## 33. Making `p_spatial` learnable is worth about +0.008 NSE (one seed, one arm)
+
+The first of the four head-topology arms finished before the chain was stopped, and it carries a result that
+is not about head topology at all.
+
+`head_shared_linear` is the **matched control**: the current architecture, one shared trunk, Linear read-out,
+everything taken from the 500-update `nse-batch` baseline `2026-09-10T21-21-48Z-conus-train-and-test` except
+that it learns `n` + `p_spatial` + `q_spatial` where the baseline learned `n` + `q_spatial` and pinned
+`p_spatial` at 21.
+
+| | NSE | KGE |
+|---|---|---|
+| baseline, `p` fixed at 21 | 0.7376 | 0.7600 |
+| **`head_shared_linear`, `p` learnable** | **0.7458** | **0.7619** |
+| difference | **+0.0082** | +0.0019 |
+
+Same 2,365 gauges, same eval window, same optimizer budget, same seed, same everything else — the arm config is
+that run's own `config.yaml` with only the `kan_head` block changed.
+
+**Why this is worth taking seriously despite the size.** It is what §32.5 predicted, before the run.
+`channel_geometry.md` showed the downstream width exponent `b` is capped at `q·f` when `p` is constant, which is
+about 0.28 even with a perfect `q`, against Leopold & Maddock's 0.50. `p` is the only parameter that can supply
+the rest, through how it scales with river size. Letting it move should help, and it did.
+
+### What this is not, yet
+
+- **One seed.** NdArray is deterministic, so re-running reproduces the number exactly and tells us nothing.
+  There is no spread estimate for this configuration. +0.008 is seven times smaller than the +0.059 the
+  optimizer-budget fix delivered (§27), and that one moved 70.7 % of gauges.
+- **Not run on a plain-master binary.** The binary was built from master plus the `kan_head` restructuring
+  commit (`1bbc3b7`). The arm uses none of the new features — zero occurrences of `parameter_groups`,
+  `input_layer_kan`, `output_layer_kan` — so it takes the default path, which `tests/kan_head_groups.rs`
+  asserts is bit-identical for the group case. But master-versus-now numerical equivalence for the whole
+  training loop is argued, not verified. The cheap check is a `--max-mini-batches 2` run on both binaries.
+- **The mechanism is unconfirmed.** Whether `p` actually grew with river size, which is the claim, is free to
+  measure from the parameter dump and has not been done.
+
+### Also measured: the celerity convention is approximate
+
+Building the stage-roughness gates surfaced a property of the existing solver worth recording, since it is
+pre-existing and easy to rediscover as a bug. `beta = 5/3 − (4/3)·A·√(1+z²)/(T·P)` is derived for a trapezoid
+of FIXED shape being filled, i.e. `dA/dd = T` and `dP/dd = 2√(1+z²)`. This geometry reshapes as it fills:
+`bw = tw·(1−q)` and `z = (p·q/2)·d^(q−1)` both move with depth, so the true `dA/dd` is `T·(2−q)(q+1)/2`.
+
+Measured gap between `v·beta` and the true `dQ/dA`:
+
+| q | 0.084 | 0.30 | 0.65 | 1.00 |
+|---|---|---|---|---|
+| relative error | 0.0–0.8 % | 0.8–1.0 % | **2.1 %** | 0.0 % |
+
+It vanishes at `q = 0` and `q = 1` (where `(2−q)(q+1)/2 = 1`) and peaks in between. At the trained
+`q ≈ 0.084` it is under 1 %, so it is not a live problem for current results, but it scales with `q` and would
+matter if `q` were moved toward the Leopold & Maddock band. Inherited from DDR; changing it would move
+invariant 1, so it is documented rather than fixed. Test:
+`tests/stage_roughness.rs::documents_the_preexisting_beta_approximation`.
