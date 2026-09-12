@@ -81,15 +81,25 @@ def main() -> int:
 
     # Pins the real interface: later tasks invoke the verifier with no
     # arguments from the repository root, which run_on() above never
-    # exercises because it always passes --root.
+    # exercises because it always passes --root. Deliberately does NOT
+    # assert a specific exit code or failure count: those are verdicts
+    # about the real tree's current citation health, which is exactly what
+    # this cleanup is improving, so pinning either one makes the test fail
+    # the moment the repository gets healthier (it did: this case once
+    # required exit 1, and a later task drove the real tree to 0 strict
+    # failures, which is success, not a regression). What this case exists
+    # to prove is narrower: the no-argument invocation actually runs from
+    # the repo root and reaches its summary line, rather than crashing or
+    # exiting some other way (2, a traceback, a signal).
     repo_root = VERIFY.resolve().parent.parent
     proc = subprocess.run(
         [sys.executable, str(VERIFY)], cwd=repo_root,
         capture_output=True, text=True,
     )
-    check("real tree, no args: exit 1", proc.returncode == 1,
+    check("real tree, no args: runs and reports",
+          proc.returncode in (0, 1),
           f"got {proc.returncode}, stdout={proc.stdout!r}")
-    check("real tree, no args: reports agent-context count",
+    check("real tree, no args: reaches the summary line",
           "unresolved in agent context" in proc.stdout,
           f"stdout={proc.stdout!r}")
 

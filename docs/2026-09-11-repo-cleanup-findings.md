@@ -346,7 +346,7 @@ similarity, specifically because of this near-miss.
 
 ---
 
-## 4. Process findings: the nine lessons this execution produced
+## 4. Process findings: the ten lessons this execution produced
 
 These are general lessons about running this kind of cleanup, each grounded
 in one specific, named incident from this branch's history so a reader can
@@ -456,6 +456,30 @@ executing it.
    370-372 inside `setup_inputs`. `gauge-population.md`'s
    `src/data/store/gage_csv.rs:62` had drifted to 64. The line-citation
    problem was not hypothetical at the time it was fixed.
+
+10. **A test written against the state of a system mid-repair will fail when
+    the repair completes.** The Task 6 brief told its implementer to "add a
+    case that runs `python3 scripts/verify_doc_paths.py` with no arguments
+    from the repository root and asserts the exit code is 1", because at the
+    moment that instruction was written the real tree carried twelve strict
+    failures and exit 1 was the observed, correct behaviour. Task 7 then
+    drove the strict count to zero, which is the entire point of the work,
+    and the frozen assertion started failing precisely because the project
+    succeeded: a test that can only pass while its companion defect still
+    exists. The fix (this task) does not flip the expectation from 1 to 0
+    either, since that only moves the coupling to the other direction: the
+    next contributor who introduces a bad citation would then get a failing
+    unit-test suite instead of a clear citation report, and would go looking
+    for a bug in the script rather than in their own edit. The case now
+    asserts the interface instead of a verdict: the no-argument invocation
+    exits 0 or 1 (anything else, a 2 or a traceback, is the only real
+    failure) and its stdout reaches the `unresolved in agent context`
+    summary line, with no assertion about how many failures it found. The
+    instruction that created the bug came from the plan's own dispatcher, not
+    from an implementer, which makes this another instance of finding 1
+    above: the specification was where the expensive error lived, discovered
+    here only because the gate set was run in full at the end of Phase 1
+    rather than trusted from its last green run.
 
 ---
 
