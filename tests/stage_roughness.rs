@@ -223,50 +223,102 @@ fn stage_roughness_celerity_increment_is_exact() {
     }
 }
 
-/// Not a gate: a measurement, recorded so it is not rediscovered as a bug.
+/// Not a gate: a measurement, recorded so it is not rediscovered as a bug and
+/// so the decision not to fix it is backed by a number.
 ///
-/// `beta_trapezoid` ignores `dz/dd`, so `v·beta` differs from the true `dQ/dA`.
-/// This prints the size of that gap across the range of `q` the model actually
-/// occupies. It matters because `K = L/c`, so a celerity bias is a routing
-/// timescale bias, and the whole model is judged on peak timing.
+/// Muskingum-Cunge defines the kinematic celerity as `c = dQ/dA`. The solver
+/// computes `c = v·beta` with
+///
+/// ```text
+///   beta = 5/3 − (4/3)·A·√(1+z²)/(T·P)
+/// ```
+///
+/// which is the right answer for a trapezoid of FIXED shape being filled, i.e.
+/// `dA/dd = T` and `dP/dd = 2√(1+z²)`. This geometry reshapes as it fills:
+/// `bw = tw·(1−q)` and `z = (p·q/2)·d^(q−1)` both move with depth, so the true
+/// derivatives are
+///
+/// ```text
+///   A' = [(T' + bw')·d + (T + bw)] / 2        T'  = q·T/d
+///   P' = bw' + 2u + 2d·(z/u)·z'               z'  = z·(q−1)/d
+///                                             bw' = T' − 2(z + d·z')
+///   beta_exact = 5/3 − (2/3)·(A/P)·(P'/A')
+/// ```
+///
+/// **Why this is documented rather than fixed.** The gap is at most ~2.3 % and
+/// ~1.2 % at the trained `q ≈ 0.084`, it changes sign with depth so it partly
+/// averages out, and since `K = L/c` with `c ∝ 1/n`, a smooth systematic
+/// celerity bias is absorbed almost entirely by the learned roughness. Only the
+/// q- and depth-dependent STRUCTURE of the error survives training. Correcting
+/// it means a hand-derived backward through masked clamps in the code that
+/// exists to keep the tape O(nnz) per timestep (invariant 4), and it would move
+/// DDR parity. Worth doing deliberately, behind a config gate, not casually.
+///
+/// Inherited from DDR. If you are here because a celerity looks off by a
+/// percent or two, this is why, and it is expected.
 #[test]
 fn documents_the_preexisting_beta_approximation() {
     let (n0, s, p) = (0.08_f64, 0.002_f64, 21.0_f64);
-    let geom = |d: f64, q: f64| -> (f64, f64, f64, f64) {
-        let tw = p * d.powf(q);
-        let z = (tw * q / (d * 2.0)).clamp(0.5, 50.0);
-        let bw = (tw - z * d * 2.0).max(BW_LB as f64);
-        let area = (tw + bw) * d / 2.0;
-        let wp = bw + d * (z * z + 1.0).sqrt() * 2.0;
-        (area, tw, wp, z)
-    };
-    eprintln!("\n  beta_trapezoid vs true dQ/dA at gamma = 0 (pre-existing)");
-    eprintln!("  {:>8} {:>7} {:>12} {:>12} {:>9}", "q", "depth", "v*beta", "dQ/dA", "rel err");
-    for q in [0.084_f64, 0.3, 0.65, 1.0] {
-        for d in [0.25_f64, 1.0] {
-            let (area, tw, wp, z) = geom(d, q);
-            let r = area / wp;
-            let v = (1.0 / n0) * r.powf(2.0 / 3.0) * s.sqrt();
-            let beta = 5.0 / 3.0 - (4.0 / 3.0) * area * (1.0 + z * z).sqrt() / (tw * wp);
-            let c_analytic = v * beta;
+    let bw_lb = BW_LB as f64;
 
-            let h = d * 1e-5;
-            let qd = |dd: f64| {
-                let (a, _, w, _) = geom(dd, q);
-                let rr = a / w;
-                (1.0 / n0) * rr.powf(2.0 / 3.0) * s.sqrt() * a
-            };
-            let (a_hi, ..) = geom(d + h, q);
-            let (a_lo, ..) = geom(d - h, q);
-            let c_num = (qd(d + h) - qd(d - h)) / (a_hi - a_lo);
-            eprintln!(
-                "  {:>8.3} {:>7.2} {:>12.5} {:>12.5} {:>8.1}%",
-                q, d, c_analytic, c_num, 100.0 * (c_analytic - c_num).abs() / c_num.abs()
-            );
+    // Mirrors src/geometry.rs, carrying the clamp masks the derivatives need.
+    let geom = |d: f64, q: f64| {
+        let tw = p * d.powf(q);
+        let z_raw = tw * q / (d * 2.0);
+        let z = z_raw.clamp(0.5, 50.0);
+        let bw_raw = tw - z * d * 2.0;
+        let bw = bw_raw.max(bw_lb);
+        let area = (tw + bw) * d / 2.0;
+        let u = (z * z + 1.0).sqrt();
+        let wp = bw + d * u * 2.0;
+        (tw, z, bw, area, wp, u, (0.5..=50.0).contains(&z_raw), bw_raw > bw_lb)
+    };
+    let code_beta = |d: f64, q: f64| {
+        let (tw, _z, _bw, area, wp, u, _, _) = geom(d, q);
+        5.0 / 3.0 - (4.0 / 3.0) * area * u / (tw * wp)
+    };
+    let exact_beta = |d: f64, q: f64| {
+        let (tw, z, bw, area, wp, u, z_free, bw_free) = geom(d, q);
+        let tw_p = q * tw / d;
+        let z_p = if z_free { z * (q - 1.0) / d } else { 0.0 };
+        let bw_p = if bw_free { tw_p - 2.0 * (z + d * z_p) } else { 0.0 };
+        let a_p = ((tw_p + bw_p) * d + (tw + bw)) / 2.0;
+        let p_p = bw_p + 2.0 * u + 2.0 * d * (z / u) * z_p;
+        5.0 / 3.0 - (2.0 / 3.0) * (area / wp) * (p_p / a_p)
+    };
+
+    eprintln!("\n  celerity beta: solver vs exact dQ/dA (gamma-independent:");
+    eprintln!("  gamma shifts both by the same amount, so the RELATIVE gap is unchanged)");
+    eprintln!("  {:>7} {:>7} {:>9} {:>9} {:>9}", "q", "depth", "solver", "exact", "rel err");
+    let mut worst: f64 = 0.0;
+    let mut worst_at_trained: f64 = 0.0;
+    for q in [0.05_f64, 0.084, 0.2, 0.35, 0.5, 0.65, 0.85, 1.0] {
+        for d in [0.1_f64, 0.25, 1.0, 3.0] {
+            let (bc, be) = (code_beta(d, q), exact_beta(d, q));
+            let rel = (bc - be) / be;
+            worst = worst.max(rel.abs());
+            if (q - 0.084).abs() < 1e-9 {
+                worst_at_trained = worst_at_trained.max(rel.abs());
+            }
+            eprintln!("  {q:>7.3} {d:>7.2} {bc:>9.4} {be:>9.4} {:>8.2}%", 100.0 * rel);
         }
     }
-    eprintln!(
-        "  (beta treats the side slope z as fixed; here z = (p·q/2)·d^(q−1),\n   \
-         so it varies with depth for every q except 1. Inherited from DDR.)\n"
+    eprintln!("  worst over the grid: {:.2}%", 100.0 * worst);
+    eprintln!("  at the trained q ~ 0.084: {:.2}%", 100.0 * worst_at_trained);
+    eprintln!("  K = L/c, so this is a travel-time bias of the same size, and");
+    eprintln!("  since c is proportional to 1/n the learned roughness absorbs most of it.\n");
+
+    // Pin the magnitude. If a geometry change makes this materially worse, the
+    // "small enough to document rather than fix" judgement needs revisiting.
+    assert!(
+        worst < 0.05,
+        "celerity approximation grew to {:.1}% — revisit the decision in this \
+         test's doc comment, it was made when the worst case was 2.3%",
+        100.0 * worst
+    );
+    assert!(
+        worst > 1e-4,
+        "celerity approximation vanished; if beta was made exact, delete this \
+         test rather than letting it pass vacuously"
     );
 }
