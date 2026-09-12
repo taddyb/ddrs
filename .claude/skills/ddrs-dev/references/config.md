@@ -238,3 +238,17 @@ Three changes are required together — `params.use_leakance: true` (which force
 `kan_head.learnable_parameters`, and matching `parameter_ranges`. The term is
 CLOSED (NO-GO) as a research direction but remains code-complete and gradient-exact;
 see `research-status.md` before touching it.
+
+To produce the `zeta` / `zeta_net` eval diagnostic for an EXISTING checkpoint
+without retraining (`ddrs run --workflow train-and-test` writes it automatically
+in Phase 2, so this is only for a checkpoint from an earlier run):
+
+```bash
+cargo build --release --bin eval
+target/release/eval --config config/experiments/leakance_hourly_on.yaml \
+  --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
+  --output /tmp/eval.zarr \
+  --zeta-output .ddrs/runs/<id>/kan_parameters.nc
+```
+
+Takes about 10 minutes, no retrain.

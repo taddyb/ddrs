@@ -442,143 +442,36 @@ per-gauge masked (the driver already drops NaN gauges) then averaged, with
 Autograd is unchanged — it's a drop-in scalar on the routed predictions, so
 invariant 4 (the sparse backward) is untouched.
 
-## Leakance (experimental GW–SW water-loss term, off by default)
+## Leakance (CLOSED, NOT PROMOTABLE, 2026-07-06)
 
-**What it is.** A losing-stream correction subtracted from the routing RHS `b`
-at every timestep:
+A losing-stream term subtracted from the routing RHS `b`:
+`zeta = leakance_factor · area_z · K_D · (depth − d_gw)`, positive zeta means a
+losing reach. Code-complete and gradient-exact (`src/routing/leakance.rs`,
+`TimestepLeakanceOp`); `params.use_leakance` defaults false. Do NOT remove it.
 
-```
-zeta = leakance_factor · area_z · K_D · (depth − d_gw)
-area_z = (p · depth)^q_eps · length          (plan-view wetted area, m²)
-b ← b − zeta                                 (positive zeta = losing reach)
-```
+Do NOT re-open the question. A gauge measures the SUM of zeta over its upstream
+network, and that sum does not determine the per-reach distribution, so training
+constrains aggregate loss while carrying zero information about per-reach flux.
+Every rival explanation (gradient starvation, objective noise, uninformative
+inputs, sign ambiguity) was individually refuted.
 
-Ported from DDR `_compute_zeta` (commit c2bd0f9), later reverted on DDR master.
-Implementation: `src/routing/leakance.rs`. Gradient is analytical via
-`TimestepLeakanceOp: Backward<I,8>` — one extra autograd node per timestep,
-gradient-exact against finite differences.
+Verdict and refutations: `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3
+Enable steps, ranges, gates, zeta diagnostic: `ddrs-dev/references/config.md`
 
-**How to enable.** Three config changes are required together:
+## Reach subdivision (`params.subdivision`, NO-GO, off by default)
 
-1. `params.use_leakance: true` — activates the term and forces
-   `use_cuda_graphs: false` (config load rejects the combination; CUDA
-   Graphs cannot capture the extra leakance kernel without a separate
-   capture path).
-2. Add `K_D`, `d_gw`, `leakance_factor` to `kan_head.learnable_parameters`
-   so the KAN head emits them.
-3. Add matching ranges to `params.parameter_ranges`:
-   - `K_D`: `[1e-8, 1e-6]` (log-space; hydraulic exchange rate, 1/s)
-   - `d_gw`: `[-2, 2]` (groundwater depth offset, m)
-   - `leakance_factor`: `[0, 1]` (dimensionless scale)
+A build-time normalization of reach length toward `Δx ≈ c_ref·Δt` inside the
+managed adjacency builder. Built to make the Muskingum coefficients non-negative
+by construction; measured on 1,841 CONUS gauges, `frac c1 < 0` got WORSE (93.0 %
+to 98.79 % at `max_pieces: 8`). Both coefficients are non-negative only inside a
+window `2(1−2X)` wide, which is 1.4 % at the measured CONUS median X = 0.4966,
+and a static piece count cannot hold a flow-varying `Cr` inside it. It does
+nearly eliminate `Cr > 2` (3.93 % to 0.31 %), via the length clamp.
 
-**Gradient-exactness guard.** Any change to `src/routing/leakance.rs` or the
-leakance backward op must pass:
-
-```bash
-cargo test --test leakance_gradcheck       # analytical ≈ finite-difference
-cargo test --test leakance_off_parity      # byte-identical to no-leakance when off
-cargo test --test zeta_accum               # eval zeta diagnostic == what's subtracted from b
-cargo run --release --example compare_ddr_sandbox  # must still report ABSOLUTE MATCH
-```
-
-**Eval-time zeta diagnostic (the `|zeta| > 0.01 m³/s` GO/NO-GO bar).**
-`dump_parameters` exports the three *raw* leakance params, but zeta needs the
-routed per-timestep **depth** — so it can only be measured during eval. When
-leakance is active, `evaluate` accumulates per-reach `Σ|zeta|` and `Σzeta`
-across all eval timesteps (`MuskingumCunge::enable_zeta_accumulation`; the
-per-step zeta is recomputed inside `timestep_forward_leakance` from the SAME
-saved primitives the backward reads, so the reported value is exactly what was
-subtracted from `b_rhs` — `tests/zeta_accum.rs` proves this via the headwater
-identity `q_no_leak[0] − q_leak[0] == zeta[0]`). Means land in
-`<run_dir>/kan_parameters.nc` as `zeta` (mean |zeta|, m³/s) and `zeta_net`
-(signed; positive = losing reach), dimensioned by the EVAL network's COMIDs
-(gauge-subgraph union, not full CONUS) — exactly what
-`scripts/leakance_subset_analysis.py::maybe_load_zeta` reads. Writers:
-`ddrs run --workflow train-and-test` does it automatically in Phase 2; for an
-EXISTING checkpoint use the legacy eval binary (~10 min, no retrain):
-
-```bash
-cargo build --release --bin eval
-target/release/eval --config config/experiments/leakance_hourly_on.yaml \
-  --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
-  --output /tmp/eval.zarr \
-  --zeta-output .ddrs/runs/<id>/kan_parameters.nc
-```
-
-The training path never enables accumulation — zero overhead, autograd
-untouched (invariant 4 intact).
-
-**Status (2026-07-06): CLOSED — NOT PROMOTABLE.** The full identifiability
-campaign (2×2 experiment, low-zeta diagnosis, gradient probe, synthetic
-recoverability control, Phase C promotion gate) concluded with a definitive
-**NO-GO**. The binding constraint is the observation operator: a gauge measures
-Σ(zeta) over its upstream network — the sum is not invertible for the per-reach
-distribution. Training constrains aggregate loss but carries zero information
-about per-reach flux. Every rival explanation (gradient starvation, objective
-noise, uninformative inputs, sign ambiguity) was individually REFUTED. The term
-remains code-complete and gradient-exact; do not remove it. Do NOT re-open
-without reading `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3.
-
-Campaign docs (chronological):
-`docs/2026-07-01-leakance-hourly-findings.md`,
-`docs/2026-07-02-leakance-diagnosis-findings.md`,
-`docs/2026-07-03-zeta-gradient-probe-findings.md`,
-`docs/2026-07-04-synthetic-recoverability-findings.md`,
-`docs/2026-07-06-phase-c-findings.md`.
-
-## Reach subdivision (`params.subdivision`, off by default)
-
-**What it is.** A build-time (not runtime) normalization of reach length toward
-`Δx ≈ c_ref·Δt` inside the managed adjacency builder, so `Cr = Δt/K` lands near
-1. Two-sided: reaches longer than `Δx_target` are **split** into
-`m = min(ceil(L/Δx_target), max_pieces)` pieces of length `L/m` with `q' → q'/m`;
-shorter reaches have their **length clamped up** (never merged — merging would
-destroy junction topology), bounded by `max_clamp_factor`. The runtime just sees
-a bigger graph: no autograd change, no gradient path, `mmc_op.rs` untouched.
-
-**STATUS: NO-GO for its stated purpose (2026-08-05).** It was built to make the
-Muskingum coefficients non-negative by construction and retire
-`enforce_positivity`. Measured on 1,841 CONUS gauges with `enforce_positivity`
-off, `frac c1 < 0` gets **worse** (93.0 % off → 98.79 % at `max_pieces: 8`) and
-negative solves fall only 35 % for a 2.05× network, 1.5× step time and +23.9 %
-total channel length. Reason: both coefficients are non-negative only inside
-`[2X, 2(1−X)]`, a window of width `2(1−2X)` — **1.4 % wide at the measured CONUS
-median X = 0.4966** — and a static piece count cannot hold a flow-varying `Cr`
-inside it. It *does* nearly eliminate `Cr > 2` / `c3 < 0` (3.93 % → 0.31 %), via
-the length clamp rather than the splitting. The code is correct, gated off, and
-**stays in-tree** as the measurement apparatus. Do not re-open the "Cr ≈ 1 ⇒
-non-negative" argument without reading `.claude/REACH-SUBDIVISION.md`.
-
-**How to enable** (`params.subdivision.enabled: true`), and what will reject you:
-
-1. **Requires `geospatial_fabric`.** Subdivision runs inside the managed
-   adjacency builder, which explicit `conus_adjacency`/`gages_adjacency` paths
-   bypass — so `enabled: true` alongside them is a **config error**, not a
-   warning (`src/config.rs::validate_subdivision_reaches_the_builder`).
-   Otherwise the flag would be *silently inert* while the manifest claimed
-   subdivision. The one allowed exception is an explicit path to a store already
-   built subdivided, detected from zarr metadata (`n_parent < n`).
-2. **Requires `use_cuda_graphs: false`** — a captured graph is sized to a fixed
-   reach count.
-3. **Requires retraining.** Every learned parameter was fit against the un-split
-   network's effective diffusion; checkpoints do not transfer.
-
-Fields (all seven are hashed into the adjacency cache key, so editing any one
-rebuilds the graph): `enabled` (false), `max_pieces` (8 — uncapped is infeasible:
-13.2× reaches, 9.2× solver critical path, and `Σm` cannot be pinned down),
-`reference_n` (0.05 — **a guess; the trained CONUS median is 0.130**, and this
-sets `dx_target` directly, so sweep it), `reference_discharge_coefficient`
-(0.01), `reference_discharge_exponent` (0.9), `min_length_fraction` (1.0; 0
-disables the short-reach clamp), `max_clamp_factor` (4.0 — unbounded, measured
-clamp factors reached 48,597×).
-
-Implementation: `src/adjacency/subdivide.rs` + `src/adjacency/cache.rs`;
-persistence of `parent_order`/`parent_offset` in `src/data/store/zarr.rs`
-(`IdIndex` is built from `parent_order`, since `order` gains duplicates).
-Gates: `cargo test --test subdivide --test subdivision_integration --test
-adjacency_parity --test gauge_mass_conservation`, plus `compare_ddr_sandbox`
-staying an ABSOLUTE MATCH. Design, measurements and gotchas:
-`.claude/REACH-SUBDIVISION.md`.
+Correct, gated off, stays in-tree as the measurement apparatus. Do not re-open
+the "Cr ≈ 1 implies non-negative" argument without reading
+`.claude/REACH-SUBDIVISION.md`. Enable steps and fields:
+`ddrs-dev/references/config.md`
 
 ## Baseline
 
