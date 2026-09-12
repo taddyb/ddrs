@@ -38,7 +38,7 @@ IGNORE_MARKER = "verify-doc-paths: ignore"
 WARN_GLOBS = ("docs/**/*.md", "README.md")
 
 FILE_EXT = r"rs|py|md|ya?ml|toml|sh|json|nc|ipynb|dbf|shp|gpkg|mpk|zarr|ic|csv"
-PATH_RE = re.compile(rf"`([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?::\d+(?:-\d+)?)?`")
+PATH_RE = re.compile(rf"`([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?::(\d+(?:-\d+)?))?`")
 DIR_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/)`")
 SYM_RE = re.compile(r"`([A-Za-z0-9_./-]+\.rs)::([A-Za-z0-9_]+)`")
 LINK_RE = re.compile(rf"\]\(([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?:#[A-Za-z0-9_-]+)?\)")
@@ -81,12 +81,17 @@ def symbol_defined(source: Path, name: str) -> bool:
 
 
 def citations(text: str):
-    """Yield (line_no, kind, token, symbol_or_None) for every citation."""
+    """Yield (line_no, kind, token, detail) for every citation.
+
+    `detail` is the symbol name for a "symbol" citation, the bare `:NN`
+    line-number suffix (digits only, no leading colon) for a "path"
+    citation that carried one, and None otherwise.
+    """
     for n, line in enumerate(text.splitlines(), 1):
         for m in SYM_RE.finditer(line):
             yield n, "symbol", m.group(1), m.group(2)
         for m in PATH_RE.finditer(line):
-            yield n, "path", m.group(1), None
+            yield n, "path", m.group(1), m.group(2)
         for m in LINK_RE.finditer(line):
             yield n, "path", m.group(1), None
         for m in DIR_RE.finditer(line):
@@ -97,15 +102,22 @@ def check_file(root: Path, doc: Path, listing: bool) -> list[str]:
     failures = []
     text = doc.read_text(encoding="utf-8", errors="replace")
     exempt = {n for n, line in enumerate(text.splitlines(), 1) if IGNORE_MARKER in line}
-    for line_no, kind, token, symbol in citations(text):
+    for line_no, kind, token, detail in citations(text):
         if line_no in exempt:
             continue
         if not is_citation(root, token):
             continue
-        target = root / token
         rel = doc.relative_to(root)
+        if kind == "path" and detail and token.startswith("src/"):
+            failures.append(
+                f"{rel}:{line_no}: line citation into src/ is not allowed, "
+                f"cite file.rs::symbol instead of {token}:{detail}"
+            )
+            continue
+        target = root / token
         if listing:
-            print(f"{rel}:{line_no}: {kind} {token}" + (f"::{symbol}" if symbol else ""))
+            tag = f"::{detail}" if kind == "symbol" else (f":{detail}" if detail else "")
+            print(f"{rel}:{line_no}: {kind} {token}{tag}")
         # Skill references cite their own siblings, so try the citing file's
         # directory before giving up. An .ic or .zarr store is a directory, so
         # existence rather than file-ness is the test.
@@ -117,8 +129,8 @@ def check_file(root: Path, doc: Path, listing: bool) -> list[str]:
             failures.append(f"{rel}:{line_no}: unresolved {token}")
         elif kind == "dir" and not target.is_dir():
             failures.append(f"{rel}:{line_no}: not a directory {token}")
-        elif kind == "symbol" and not symbol_defined(target, symbol):
-            failures.append(f"{rel}:{line_no}: unresolved {token}::{symbol}")
+        elif kind == "symbol" and not symbol_defined(target, detail):
+            failures.append(f"{rel}:{line_no}: unresolved {token}::{detail}")
     return failures
 
 

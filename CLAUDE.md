@@ -559,6 +559,13 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
 - **The sparse path uses a single `Arc<CsrPattern>` per network**, built once at
   `setup_inputs` and reused for every timestep. Don't rebuild per step.
 - **Configs are YAML to match DDR's tooling**, deserialized via `serde_yaml`.
+- **Cite symbols, not lines, inside `src/`.** Write
+  `src/config.rs::validate_subdivision_reaches_the_builder`, never
+  `src/config.rs:1066`. Line numbers drift silently and a 2026-09-11 audit <!-- verify-doc-paths: ignore -->
+  found six that had, by up to 136 lines. Line citations are fine for files
+  that do not move: the DDR reference tree, fixtures, and config YAML where
+  the line number is the content. `scripts/verify_doc_paths.py` checks that
+  every `file.rs::symbol` citation resolves.
 
 ## When in doubt
 

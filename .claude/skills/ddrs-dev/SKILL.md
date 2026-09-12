@@ -139,9 +139,9 @@ gh pr checks --watch                                # CI status for the current 
 
 **`ddrs run --workflow eval` does not work** — it returns
 `"standalone --workflow eval needs a --from-run <run-id> flag"`, and `--from-run`
-is unimplemented (`src/cli/run.rs:322`). Use `--workflow train-and-test`, or the
+is unimplemented (`src/cli/run.rs`). Use `--workflow train-and-test`, or the
 legacy `eval` binary against an existing checkpoint. **`ddrs init` is a dead stub**
-(exits 2, `src/bin/ddrs.rs:167`); use `ddrs plan`. Both are still documented as
+(exits 2, `src/bin/ddrs.rs`); use `ddrs plan`. Both are still documented as
 working in README.md and `docs/` — see `docs/2026-07-30-docs-and-skills-audit.md`.
 
 ## Verifying a run did what you think

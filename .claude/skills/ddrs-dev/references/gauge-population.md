@@ -41,7 +41,7 @@ incident, traps.md T4).
    disagreement while admitting small basins at >6,000%. Recompute as
    `ABS_DIFF / DRAIN_SQKM <= 0.10`. Effect on GAGES-II: 7,919 → 5,528
    (recovers 433 large, drops 2,824 mostly-small). ddrs only *reads* the
-   column (`src/data/store/gage_csv.rs:62`); the fix must happen at CSV
+   column (`src/data/store/gage_csv.rs::RawRow`); the fix must happen at CSV
    construction.
 2. **Observation coverage in BOTH configured windows.** Check the windows
    training actually slices (`config/merit_training.yaml`): train

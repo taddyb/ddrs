@@ -41,6 +41,8 @@ def scaffold(tmp: Path, body: str) -> Path:
     )
     (tmp / "src" / "sparse").mkdir()
     (tmp / "src" / "sparse" / "mod.rs").write_text("// solver\n")
+    (tmp / "config").mkdir()
+    (tmp / "config" / "merit_training.yaml").write_text("epochs: 10\n")
     (tmp / "CLAUDE.md").write_text(body)
     return tmp
 
@@ -52,7 +54,8 @@ def main() -> int:
         ("dead path is caught", "See `src/sparse.rs` for the solver.\n", 1, "src/sparse.rs"),
         ("dead dir is caught", "Notes in `.claude/references/`.\n", 1, ".claude/references/"),
         ("live dir resolves", "Solver in `src/sparse/`.\n", 0, ""),
-        ("line suffix stripped", "See `src/config.rs:9999`.\n", 0, ""),
+        ("line suffix stripped outside src", "See `config/merit_training.yaml:9999`.\n", 0, ""),
+        ("src line citation is rejected", "See `src/config.rs:9999`.\n", 1, "src/config.rs:9999"),
         ("live symbol resolves", "See `src/config.rs::validate_grad_accum`.\n", 0, ""),
         ("dead symbol is caught", "See `src/config.rs::validate_nothing`.\n", 1, "validate_nothing"),
         ("runtime path skipped", "Writes `.ddrs/runs/x/manifest.json`.\n", 0, ""),

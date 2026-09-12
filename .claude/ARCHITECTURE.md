@@ -252,8 +252,8 @@ allows step 1 above to work.
   does not test what it claims.** `DDRS_FORCE_GRAPHS=1` only selects the
   CUDA *backend* (`examples/compare_ddr_sandbox.rs`, `.is_ok()` — so `=0`
   triggers it too). Capture additionally requires
-  `use_cuda_graphs && sparse_solver == Cuda` (`src/routing/mmc.rs:289-294`),
-  and the sandbox builds from `Config::default()` (`src/sandbox.rs:88-89`)
+  `use_cuda_graphs && sparse_solver == Cuda` (`src/routing/mmc.rs::setup_inputs`),
+  and the sandbox builds from `Config::default()` (`src/sandbox.rs::parse_config_csv`)
   = `use_cuda_graphs: false` + `SparseSolver::Cpu`, with
   `fixtures/sandbox/config.csv` setting neither key. So the recorded run
   exercised the CUDA backend with the **CPU** sparse solver and **no
