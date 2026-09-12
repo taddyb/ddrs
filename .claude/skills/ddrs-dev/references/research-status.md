@@ -200,6 +200,30 @@ Arms in training: `config/experiments/head_{shared_linear,split_trunk,wider,kan_
 `n` + `p_spatial` + `q_spatial`, all off the 500-update `nse-batch` baseline
 `2026-09-10T21-21-48Z-conus-train-and-test`, `--backend cpu`.
 
+## Stage-dependent roughness `n(d) = n_0·(d/d_ref)^(−gamma)` (2026-09-12)
+
+Three matched CONUS arms off the 500-update `nse-batch` baseline, all on 2,365 gauges, seed 42, CPU
+(findings §35–§36; `b` is the downstream width exponent, Leopold & Maddock 0.50):
+
+| arm | run | NSE / KGE | `b` | trunk rank | note |
+|---|---|---|---|---|---|
+| control `gamma = 0` (`head_shared_linear`) | `2026-09-12T03-53-34Z` | 0.7458 / 0.7619 | 0.004 | 1.64 | |
+| constant `gamma = 0.35` | `2026-09-12T06-06-19Z` | 0.7362 / 0.7588 | **0.098** | 1.36 | Juniata said +0.091; CONUS −0.0096 |
+| **learned `gamma` per reach** | `2026-09-12T16-30-14Z` | 0.7420 / 0.7624 | −0.017 | **1.96** | rho(n, gamma) = **0.30**, not > 0.9 |
+
+- **Do not cite Juniata as a predictor for this parameter** (§35): +0.091 there became −0.0096 on CONUS.
+- **The registered prediction "learned gamma is `n` relabelled" was refuted.** `gamma` tracks the width
+  channel instead (rho(p, gamma) 0.89, rho(q, gamma) 0.76), is physically ordered (median 0.236 below
+  100 km² falling to 0.149 above 10,000 km²), and raised the trunk rank. §35.2's "more solver physics ⇒
+  deeper collapse" was drawn from the constant arm and does not generalise — do not quote it as a rule.
+- **Neither arm is promotable.** The constant buys geometry at a skill cost; the learned field buys neither.
+  The open experiment is the small-constant sweep `gamma ∈ {0.1, 0.183}` scored on NSE *and* `b`.
+- **`n_0` is not Manning's `n`** (roughness at `d_ref = 1 m`); do not compare it to `n` from `gamma = 0` runs.
+- **Eval-path trap (T14).** `2026-09-12T13-38-27Z` (killed in eval) trained this arm correctly but would have
+  scored it at `gamma = 0`; any number from that run id is invalid. The relaunch above supersedes it.
+- Routing adds the lag the gauges ask for (0 d below ~1,500 km², 1 d to 30,000, 2 d above) at ~70 % of
+  gauges on all three arms; `experiments/stage_roughness/routing_lag.py`.
+
 ## Structural constants (stable)
 
 CONUS 346,321 reaches / 338,814 edges · eval network 64,892 reaches for the

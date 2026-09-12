@@ -2241,14 +2241,63 @@ will push on, and what the numbers below have to answer:
 5. **It deviates from DDR**, so the KAN-head parity fixtures do not cover it; the manifest's config snapshot
    records the deviation.
 
-### 36.5 Read-out
+### 36.5 Read-out: the registered prediction failed, and gamma bought nothing
 
-_TODO after the relaunch finishes: median NSE/KGE against 0.7458 / 0.7619 (control) and 0.7362 / 0.7588
-(gamma = 0.35); downstream `b`, `f`, `beta` from `experiments/head_arch/downstream_geometry.py`; learned
-gamma distribution (dump summary line: median, p10, p90, frac@floor, frac@ceil); rho(n, gamma) and the
-trunk effective rank from `head_arch_screen --checkpoint` + `analyze.py`; verdict on the registered
-prediction; n(d) animation (`--view area`, water year 2000) and the 3D surface; whether the per-reach
-breathing ratio moved from the constant arm's 1.91x._
+Run `2026-09-12T16-30-14Z-train-and-test`, binary `0844cf8`, 50 epochs / 500 updates, 2,365 gauges, CPU.
+
+| | control `gamma = 0` | constant `gamma = 0.35` | **learned `gamma`** |
+|---|---|---|---|
+| median NSE | 0.7458 | 0.7362 | **0.7420** (−0.0038) |
+| median KGE | 0.7619 | 0.7588 | **0.7624** (+0.0005) |
+| downstream `b` (L&M 0.50) | 0.004 | 0.098 | **−0.017** |
+| downstream `f` (L&M 0.40) | 0.551 | 0.484 | 0.550 |
+| `beta` = dlog p / dlog Q | −0.144 | −0.082 | −0.157 |
+| median `q` / `p` | 0.295 / 5.85 | 0.408 / 9.99 | 0.261 / 8.22 |
+| trunk effective rank (dims for 90 %) | 1.64 | 1.36 | **1.96** (3) |
+| affine R² (`n`, `q`) | 0.458 | 0.976 | 0.704 |
+| rho(`n`, `gamma`) | — | — | **+0.30** |
+
+**The learned field.** `gamma` is median 0.221, p10 0.159, p90 0.312, min 0.064, max 0.427, with 0.0 % of
+reaches at either bound of the [0, 0.5] box; the sigmoid initialises at 0.25, so the head moved it down and
+spread it. It is ordered by river size: median 0.236 below 100 km², 0.217 at 100–1,000, 0.179 at
+1,000–10,000, 0.149 above 10,000 km². That is the direction the resistance literature gives (relative
+submergence grows with size, so the stage dependence weakens), and the large-river value sits at Jarrett's
+0.16. Figure: `plots/gamma_readout.png`.
+
+**The registered prediction — rho(n, gamma) > 0.9, gamma as a relabelled `n` — did not hold.** rho(n, gamma)
+is +0.30. What `gamma` correlates with is the *width* channel: rho(p, gamma) = +0.89, rho(q, gamma) = +0.76
+(and rho(q, p) = +0.97). The trunk did not collapse further either; its effective rank rose from 1.64 to
+1.96 and it takes three directions to explain 90 % of the latent, against two for every earlier arm. §35.2's
+reading ("more physics in the solver ⇒ less for the parameters to carry ⇒ deeper collapse") was drawn from
+the constant arm and does not transfer to the learned one; treat it as refuted in that general form.
+
+**But it bought nothing.** Skill is inside noise of the control (−0.004 NSE, +0.0005 KGE) and better than the
+constant arm; the width exponent `b` is back at the control's value (−0.017 vs 0.004), so the geometric
+improvement that made the constant arm interesting (§35, `b` → 0.098) is gone once `gamma` is free to move.
+Compare the two `gamma` arms: the constant forced every reach to 0.35 and the head answered by raising `q`
+(0.295 → 0.408) and `p`; the learned arm settled `gamma` lower (0.22) and `q` *fell* (0.261), and the
+downstream exponent went with it. The daily objective, given a free `gamma`, uses it as a third direction
+that is correlated with the width parameters and orthogonal to skill.
+
+**Verdict on the handoff's question** (learned field or fixed constant): on skill grounds undecided (both
+within 0.01 of the control); on geometry grounds the constant is the only arm that moved `b`, and only at a
+skill cost. Neither arm is promotable as-is. What is now settled: (i) `gamma` is not `n` relabelled, so the
+§31/§32 "one latent direction" story does not automatically extend to a fourth output; (ii) the learned
+field is physically ordered, which is worth one figure in the paper as a positive example next to the
+`q`/`p` negative ones; (iii) the open experiment remains the small-constant sweep, `gamma ∈ {0.1, 0.183}`,
+scored on both NSE and `b`, which the learned arm's median (0.22) now brackets from above.
+
+**Breathing.** Over water year 2000, with 192,152 dead reaches (55.5 %) excluded and accumulated Q′
+as the discharge, the typical live reach swings its Manning's `n` by a median **1.46x** between its driest and
+wettest day (p90 2.24x), against 1.91x (p90 3.26x) on the constant `gamma = 0.35` arm over water year 1996;
+the learned field's lower median (0.22) and its fall with river size both damp the swing where the flow
+range is largest. Figures: `plots/n_of_d_wy2000_area.gif` (log drainage area vs n(d), one frame per day),
+`n_of_d_wy2000_3d.png` / `_3d_heatmap.png`, `n_of_d_wy2000_traces.png`.
+
+**Routing lag** (§36.6 method) on this arm: identical to the control below 10,000 km²; above it the router
+adds a median 2 days at 10,000–30,000 km² and 3 above (control 1 and 2; the gauges ask for 1 and 2), on 138
+gauges — a hint that the learned stage law slows the largest rivers slightly too much, consistent with
+`gamma` being lowest but not zero there. Correlation with observations is 0.886 routed vs 0.880 summed.
 
 ### 36.6 Routing lag against the summed Q', on the two finished arms
 
