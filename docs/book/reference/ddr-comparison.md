@@ -106,12 +106,12 @@ Both runs must report `ABSOLUTE MATCH` for a clean V1.
 > capture.** `examples/compare_ddr_sandbox.rs:113-117` uses it for exactly
 > one thing — `std::env::var("DDRS_FORCE_GRAPHS").is_ok()` picks
 > `InnerGpu = Cuda<f32, i32>` over `InnerCpu = NdArray<f32>`. Graph
-> capture is gated separately in `src/routing/mmc.rs:289-294` on
+> capture is gated separately in `src/routing/mmc.rs::setup_inputs` on
 > `use_cuda_graphs && sparse_solver == SparseSolver::Cuda &&
 > backend_is_cuda::<I>()`. The sandbox `Config` comes from
 > `Config::default()` (`src/sandbox.rs:88-89`), which is
-> `use_cuda_graphs: false` (`src/config.rs:454`) and
-> `SparseSolver::Cpu` (`src/config.rs:407-410`), and
+> `use_cuda_graphs: false` (`src/config.rs`'s `Default` impl for `Params`) and
+> `SparseSolver::Cpu` (`src/config.rs`'s `ParamsRaw` conversion), and
 > `fixtures/sandbox/config.csv` sets neither key — `parse_config_csv`
 > only honours `range_n`, `range_q_spatial`, `log_space_parameters`, and
 > `p_spatial_default`. So the `DDRS_FORCE_GRAPHS=1` run is the **CUDA

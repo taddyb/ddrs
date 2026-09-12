@@ -90,7 +90,7 @@ filters, in order, preserving gages-CSV order:
    `valid_gauges_mask = np.isin(...)`).
 2. **Single-divide / headwater gauges** — `GageSubgraph::is_headwater()`,
    i.e. the subgraph has **zero edges** (`indices_0.is_empty()`,
-   `src/data/store/zarr.rs:128-130`). Dropped, with a
+   `src/data/store/zarr.rs::is_headwater`). Dropped, with a
    `summed Q' gauge filter: dropped N headwater` line on stderr.
 3. **No observation series** — `observations.contains(staid)`. Reads
    hard-error on missing STAIDs, and global gage CSVs list a few dozen

@@ -768,6 +768,43 @@ not to a fix wave sized around six specific, reviewer-identified defects.
 This paragraph records the argument so the next person inherits the
 reasoning, not just the defect count.
 
+**The published book's 56 `src/` line citations: 4 fixed, 52 still a measured
+follow-up.** The book pages carry 56 pre-existing `src/...:NN` line citations
+that the symbol-citation policy (Task 6) deliberately left as warn-tier
+rather than converting, since converting all 56 was out of that task's scope.
+The controller's first instinct was to defer the whole 56 as a single sized
+follow-up, the same shape as the archive-pointers item above. A scoped
+re-review overruled that for four of the 56, on a distinction worth keeping:
+three of the four (`docs/book/reference/ddr-comparison.md:109` for the
+CUDA-graph gate, `:113` for `use_cuda_graphs: false`'s default, `:114` for
+`SparseSolver::Cpu`'s mapping) pointed at lines that are merely near the
+right code, not at it. `src/routing/mmc.rs:289-294` is a `denormalize` call,
+not the gate (the gate is `setup_inputs`, line 370); `src/config.rs:454` is a
+bare `}`, not the `Default` impl; `src/config.rs:407-410` is `kan_config`'s
+signature, not the `ParamsRaw` conversion. The fourth,
+`docs/book/reference/baseline.md:93` citing `src/data/store/zarr.rs:128-130`
+for `is_headwater`, duplicates a drift this branch already fixed once, at
+the identical function, in `gauge-population.md` (corrected there to
+`src/data/store/zarr.rs::is_headwater`) -- an exact in-branch precedent for
+converting this one too. All four are now symbol citations
+(`src/routing/mmc.rs::setup_inputs`, prose naming the `Default` impl for
+`Params` and the `ParamsRaw` conversion in `src/config.rs`, and
+`src/data/store/zarr.rs::is_headwater`), matching the branch's existing
+convention rather than corrected line numbers, which would just drift again.
+The remaining 52 stay a measured, warn-tier follow-up for the same reason the
+archive-pointers item above does: fixing all of them is a larger edit than
+this fix wave's scope, and most of the 52 are imprecise rather than wrong.
+
+**Process point, worth more than the four-line fix:** the controller deferred
+these and a reviewer argued it out of that call. The deciding distinction was
+that a citation pointing at entirely wrong content is a different defect
+from one that is merely imprecise by a few lines -- the former actively
+misdirects a reader, the latter just ages. A measured-follow-up deferral is
+the right call for a pile of imprecision; it is the wrong call for even one
+citation inside that pile that points at the wrong thing. That distinction
+generalizes past this cleanup and is recorded here so the next sizing
+decision over a backlog of line citations does not have to rediscover it.
+
 ---
 
 ## 9. Process findings from Phase 2: five more lessons
