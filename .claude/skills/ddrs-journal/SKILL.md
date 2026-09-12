@@ -49,6 +49,27 @@ experiment was designed to move, not the one that happens to look best.
 "Inconclusive" is a real and frequent answer; write it rather than rounding a
 null result up into a weak positive.
 
+## In a git worktree, the hook and you write to DIFFERENT files
+
+The stop hook runs `$CLAUDE_PROJECT_DIR/scripts/journal.py`, and
+`CLAUDE_PROJECT_DIR` is the **main checkout**, not the worktree the session is
+editing. So:
+
+- the hook opens its stub in `<main tree>/docs/journal/`
+- a stub you fill in the worktree is invisible to it
+- `journal.py --mode status` run from the worktree reports 0 open TODOs while
+  `--mode stop` keeps blocking on the same run, which looks like a bug in the
+  hook and is not
+
+Fill the **main tree's** copy to clear the block, with the same judgement text,
+then let the two converge when the branch merges. Expect a conflict in
+`docs/journal/<month>.md` at merge: the main tree has hook-written stubs the
+branch does not, and the branch has filled entries the main tree does not. Both
+sides are wanted; resolve by keeping the filled version of each entry.
+
+Seen 2026-09-12 on `worktree-kan-split-heads`, where the worktree journal had 0
+TODOs and the main tree had 4.
+
 ## Rules
 
 1. **Never invent a Question or Conclusion.** If you did not run the experiment
