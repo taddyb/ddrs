@@ -119,9 +119,14 @@ Named "save files" for the `data_sources:` block, stored under
 |---|---|---|
 | `conus` | dHBV2 UH retrospective (daily) | Default CONUS source; MHPI cluster paths + managed adjacency |
 | `conus-hourly` | dHBV2 UH retrospective + AORC precip | Feeds the daily→hourly disaggregation head. Not simply `conus` plus one key — it uses workstation paths and explicit adjacency zarr |
+| `conus-gridded` | dHBV2 UH retrospective regridded onto DDM30 cells | ISIMIP DDM30 (0.5°) gridded routing on DDR's sub-reach adjacency; 620 gauges |
 | `global` | Global zarr-v2 Q' stores | 2.94M reaches |
 | `daily-lstm` | CudaLSTM unit-catchment forwards (daily) | NH LSTM output |
 | `hourly-lstm` | MTS-LSTM unit-catchment forwards (hourly-native) | NH LSTM output; no disagg |
+
+A few experimental/scratch groups also ship in-repo beyond this table, so
+`ddrs sources list` output is never a surprise; the rows above are the
+supported, documented ones.
 
 Switching datasets never requires hand-editing `ddrs.yaml`:
 

@@ -251,22 +251,31 @@ a `kan_head.disaggregation:` block is present, and in that case it is
 **mandatory**: `MeritGagesDataset::open` errors if the head wants precip
 and no `aorc_precip` source is configured, so a missing precip store can
 never silently degrade to flat daily forcing. Note this is a *runtime*
-check in the dataset, not one of the four config-load validators.
+check in the dataset, not one of the config-load validators below.
 
 ### Load-time validation
 
-`Config::from_yaml_file_with_mode` runs **four** validators in order,
-each wrapping its message in a `DataError::Yaml`:
+`Config::from_yaml_file_with_mode` runs a fixed sequence of validators, in
+this order, each wrapping its message in a `DataError::Yaml`:
 
 | Validator | Rejects | Error substring |
 |---|---|---|
 | `validate_mode_workflow` | `mode`/`workflow` disagreement | `conflicting top-level keys` |
 | `validate_data_sources` | the adjacency matrix below; `geospatial_fabric_layer` on a non-`.gpkg` fabric | `data_sources:` |
+| `validate_geodataset` | `geodataset:` contradicting the network type implied by `data_sources` (`gridded_network` ⇒ `ddm30`, `geospatial_fabric` ⇒ `merit`) | `contradicts` |
 | `validate_leakance` | `use_leakance: true` together with `use_cuda_graphs: true` | `` `use_leakance: true` requires `use_cuda_graphs: false` `` |
+| `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `` requires the DEPRECATED `ddr_match: true` `` |
+| `validate_enforce_positivity` | `enforce_positivity: true` together with `ddr_match: true` | `` requires `ddr_match: false` `` |
+| `validate_subdivision` (calls `validate_subdivision_reaches_the_builder`) | `subdivision.enabled: true` with `max_pieces < 1`, with `use_cuda_graphs: true`, with `data_sources.gridded_network`, or alongside explicit `conus_adjacency`/`gages_adjacency` paths that bypass the managed builder | `params.subdivision:` |
 | `validate_disagg_pretrained` | `disaggregation.freeze: true` without `pretrained_checkpoint` | `` `freeze: true` requires `pretrained_checkpoint` `` |
+| `validate_grad_accum` | `grad_accum_steps: 0`, or `use_grad_accum: true` with `grad_accum_steps < 2` | `grad_accum_steps` |
+| `validate_loss` | a non-finite or negative `experiment.loss.deriv_weight` | `experiment.loss:` |
 
-The `testing:` overlay is applied *after* all four run, so validation
-always sees the training-mode view of the config.
+This list is read off the call sequence in `src/config.rs`
+(`Config::from_yaml_file_with_mode`) rather than restated as a count, since
+a new validator added there would otherwise make a hardcoded number stale
+without anyone noticing. The `testing:` overlay is applied *after* all of
+them run, so validation always sees the training-mode view of the config.
 
 ### `kan_head` — the routing head
 
@@ -289,13 +298,19 @@ merit config overrides them to `50` and `2` to match DDR production.
 
 #### `kan_head.disaggregation` — the daily→hourly head
 
-The **presence of the block** turns the head on; there is no `enabled`
-flag and — important — **no `use_precip` key**. The head always consumes
-`(daily Q′, that day's 24 h precip)`, which is why the block's presence
-makes `data_sources.aorc_precip` mandatory. Eight keys, all optional:
+The **presence of the block** turns the head on. Importantly, there is
+**no `use_precip` key**: the head always consumes `(daily Q′, that day's
+24 h precip)`, which is why the block's presence makes
+`data_sources.aorc_precip` mandatory. There is an `enabled` flag (default
+`true`), but it is a convenience, not a second activation path: setting
+`enabled: false` strips the whole block at config load, before the
+mandatory-precip check ever runs, so it is equivalent to deleting the block
+rather than an independent on/off switch. All keys, including `enabled`,
+are optional:
 
 | Key | Type | Default | Role |
 |---|---|---|---|
+| `enabled` | bool | `true` | A bare block enables the head (presence-only contract). `false` strips the whole block at load, falling back to flat `repeat-24` upsampling with the block left inert in the YAML |
 | `hidden_size` | usize | `16` | Hidden width of the disagg KAN |
 | `num_hidden_layers` | usize | `1` | Inner `KanLayer` count |
 | `grid` | usize | `3` | B-spline grid intervals |

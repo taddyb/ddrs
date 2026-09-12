@@ -17,8 +17,9 @@ the `ddr_match` deprecation; see
 
 ## What it is
 
-`src/bin/` holds **ten** binaries. They fall into three groups, and only the
-middle group is deprecated:
+`src/bin/` holds the `ddrs` CLI, a deprecated legacy trio, and a set of
+non-deprecated research-tooling binaries. They fall into three groups, and
+only the middle group is deprecated:
 
 **1. The `ddrs` CLI — the supported entrypoint.** A terraform-style
 lifecycle: `plan`, `run`, `show`, `import`, `sources`, `status`, `gc` (plus
@@ -41,14 +42,14 @@ still load-bearing**: `eval --zeta-output` is the documented way to extract
 the leakance zeta diagnostic from an existing checkpoint without retraining
 (see [Diagnostic and tooling binaries](#diagnostic-and-tooling-binaries)).
 
-**3. Six current, non-deprecated tool binaries** — `dump_parameters`,
-`probe_zeta_gradient`, and the four `pretrain_disagg*` drivers. These print
-no deprecation warning and have no `ddrs run` equivalent; they are the
-research tooling around the trained head.
+**3. The non-deprecated research-tooling binaries:** `dump_parameters`, the
+`probe_*` family, and the `pretrain_disagg*` family. These print no
+deprecation warning and have no `ddrs run` equivalent; they are the research
+tooling around the trained head.
 
-**Sixteen `examples/`** round out the set. Two are the standing regression
-and sanity checks (`compare_ddr_sandbox`, `benchmark_hydrograph`); the other
-fourteen are one-off diagnostics from the disaggregation and pretraining
+**The `examples/` directory** rounds out the set. Two are the standing
+regression and sanity checks (`compare_ddr_sandbox`, `benchmark_hydrograph`);
+the rest are one-off diagnostics from the disaggregation and pretraining
 work. Every example carries a `//!` module docstring stating what it does and
 what it needs — read it before running one.
 
@@ -57,8 +58,8 @@ what it needs — read it before running one.
 ### Build
 
 ```bash
-cargo build --release            # lib + the ten binaries (LTO=thin). NOT examples.
-cargo build --release --examples # add the sixteen examples
+cargo build --release            # lib + the src/bin/ binaries (LTO=thin). NOT examples.
+cargo build --release --examples # add the examples/ targets
 cargo install --path .           # put `ddrs` on PATH (~/.cargo/bin/ddrs)
 cargo test                       # CPU-only suite
 ```

@@ -67,8 +67,8 @@ practice.
 
 ## Module map
 
-`src/lib.rs` declares fifteen top-level modules; all fifteen appear
-below, plus `src/bin/` (binary targets, not a library module). Note that
+Every top-level module `src/lib.rs` declares appears below, plus `src/bin/`
+(binary targets, not a library module). Note that
 `src/routing` and `src/sparse` are **directories**, not `routing.rs` /
 `sparse.rs`, so their members are listed individually. `mod.rs` files
 that only re-export are omitted throughout.
@@ -97,6 +97,7 @@ that only re-export are omitted throughout.
 | `src/sandbox.rs` | 5-reach RAPID sandbox fixture loader + smoke test, used by `compare_ddr_sandbox` and the `ddrs plan` GPU probe. | (the DDR sandbox fixture) |
 | `src/error.rs` | CLI error type mapping onto process `ExitCode`. | — |
 | `src/cli/` | The `ddrs` lifecycle: `plan`, `run`, `show`, `status`, `gc`, `sources`, `import`, plus manifests, lockfiles, workspace layout, and the run-log `tee`. | `ddr/scripts/` |
+| `src/experiment/` | `ddrs experiment <name>` paper studies over already-trained runs: `adjoint` (inflow-gradient influence map) and `landscape` (per-gauge loss landscape in channel-parameter log-multiplier space), resolved from run ids, never loose configs. | (ddrs-specific) |
 | `src/bin/` | Binary entry points: `ddrs.rs` (primary CLI), the deprecated `train`/`eval`/`train_and_test` trio, `dump_parameters`, the `pretrain_disagg_*` family, and the `probe_*` family. | `ddr/scripts/` |
 
 ### `src/data/`
