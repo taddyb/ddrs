@@ -2,7 +2,7 @@
 title = "ddrs"
 authors = ["Tadd Bindas"]
 description = "BURN-based differentiable Muskingum-Cunge routing in Rust"
-src = "docs"
+src = "docs/book"
 language = "en"
 
 [build]
@@ -19,7 +19,7 @@ command = "mdbook-mermaid"
 default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/taddyb/ddrs"
-edit-url-template = "https://github.com/taddyb/ddrs/edit/master/docs/{path}"
+edit-url-template = "https://github.com/taddyb/ddrs/edit/master/docs/book/{path}"
 mathjax-support = false
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 

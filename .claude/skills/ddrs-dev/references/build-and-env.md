@@ -67,7 +67,7 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 > `ddr_match` is deprecated). The old rule — only the desktop's working tree
 > with unpushed `geometry/trapezoidal.py` work — applied before #192 landed;
 > a PRE-#192 clean clone still diverges ~1% (max abs ≈ 0.55 m³/s). Details:
-> `docs/reference/ddr-comparison.md` §Regenerating fixtures.
+> `docs/book/reference/ddr-comparison.md` §Regenerating fixtures.
 
 **KAN parity** — `tests/fixtures/` (tracked, unlike `/fixtures/`), loaded behind
 `#[cfg(feature = "fixtures")]`. Regenerate under DDR's venv with

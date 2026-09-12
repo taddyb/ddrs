@@ -176,7 +176,7 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 Case quirk: **`K_D` is uppercase in YAML, `k_d` in Rust.** `x_storage` is only
 consumed when listed in `learnable_parameters`; otherwise routing uses a constant 0.3.
 `p_spatial` is the Leopold-Maddock **coefficient**; `q_spatial` is the exponent
-(`docs/algorithm.md` has this backwards).
+(`docs/book/algorithm.md` has this backwards).
 
 ### `attribute_minimums`
 

@@ -211,7 +211,7 @@ The house rules that produced the results above, worth keeping:
 | plan (tasks from a spec) | `docs/superpowers/plans/` | `YYYY-MM-DD-<slug>.md` |
 | findings (after it ran) | `docs/` | `YYYY-MM-DD-<slug>-findings.md` |
 | handoff (mid-experiment) | `docs/` | `YYYY-MM-DD-<slug>-handoff.md` |
-| reference (data contract, API) | `docs/reference/` or `docs/` | descriptive, no date |
+| reference (data contract, API) | `docs/book/reference/` or `docs/` | descriptive, no date |
 
 A findings doc opens with the header block (spec / plan / script / prior finding),
 then a **one-line verdict** before any section, then §1 pre-registered hypotheses,

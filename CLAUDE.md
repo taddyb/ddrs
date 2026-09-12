@@ -26,7 +26,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
    flipped to `false`; see `.claude/PHYSICS-CORRECTIONS.md`). The old
    2026-06-06 "desktop-only reference" caveat is obsolete: any DDR checkout at
    or past #192 is a valid reference. See
-   `docs/reference/ddr-comparison.md` §Regenerating fixtures.
+   `docs/book/reference/ddr-comparison.md` §Regenerating fixtures.
 2. **f32 throughout the routing core.** No mixed precision. The DDR comparison
    sits at the f32 precision floor (~1e-7 rel diff per reach); any cast to
    f64/bf16 breaks reproducibility against the reference.
@@ -35,7 +35,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 4. **Don't replace the hand-written sparse backward** in `src/sparse/`
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
-   `docs/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `docs/book/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
 5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`.** Do NOT
    reintroduce the prior MLP placeholder. The KAN head matches DDR-Python's
    `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) × num_hidden_layers →
@@ -45,7 +45,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 6. **rskan is a git dependency pinned to a tag.** When updating `rskan`, bump
    the tag in `Cargo.toml`'s `rskan = { git = ..., tag = ... }`, then re-run
    `tests/kan_head.rs` and the full parity sweep before merging.
-   `docs/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `docs/book/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
 7. **KAN head parity vs DDR must pass on every PR that touches `src/nn/`,
    `Cargo.toml`'s rskan pin, or DDR's `nn/kan.py`.** Run:
    `cargo test --features fixtures --test kan_head_init_repro --test kan_head_init_parity --test kan_head_fixture_forward --test kan_head_fixture_backward`
@@ -199,7 +199,7 @@ workspace is therefore: `ddrs sources use global && ddrs plan --workflow
 train && ddrs run --workflow train`.
 
 **Importing a Q' store** (`src/cli/import.rs`): any store meeting the DDR Q'
-contract (`docs/nh-qprime-store-contract.md` — `Qr(divide_id, time)` f32
+contract (`docs/book/nh-qprime-store-contract.md` — `Qr(divide_id, time)` f32
 m³/s, CF `days since`/`hours since` axis) registers as a source group in one
 command:
 
@@ -578,7 +578,7 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
   training or eval job.
   The other 16 skills were consolidated on 2026-07-30; see
   `docs/2026-07-30-docs-and-skills-audit.md`.
-- Sparse / autograd questions → `docs/reference/burn-autograd.md`
+- Sparse / autograd questions → `docs/book/reference/burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`

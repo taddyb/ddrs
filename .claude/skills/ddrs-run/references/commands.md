@@ -125,7 +125,7 @@ Groups shipped in-repo: `conus`, `conus-gridded`, `conus-hourly`,
 ## `ddrs import <STORE>`
 
 Validates a Q' store against the DDR store contract
-(`docs/nh-qprime-store-contract.md`) and registers it as a source group.
+(`docs/book/nh-qprime-store-contract.md`) and registers it as a source group.
 
 | Flag | Notes |
 |---|---|

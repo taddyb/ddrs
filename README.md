@@ -160,7 +160,7 @@ they can serve as reference examples. After import:
 ddrs sources use <group> && ddrs plan && ddrs run --workflow train
 ```
 
-See `docs/nh-qprime-store-contract.md` for the full producer/consumer contract.
+See `docs/book/nh-qprime-store-contract.md` for the full producer/consumer contract.
 
 ### Leakance (experimental, NOT promotable)
 
