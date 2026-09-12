@@ -1203,6 +1203,81 @@ Expected: all pass, verifier exits 0, the final grep is empty. If the verifier i
 - One audit finding was misfiled. The `ddrs experiment` claim was reported at `ddrs-run/references/commands.md:245`; that file is 178 lines long and the text is at `ddrs-run/SKILL.md:245`. The finding held, the location did not. This is why every finding was re-checked by hand.
 - `examples/leak_probe.rs` was nearly archived as a leakance artifact. It is the autograd-tape-leak repro, named in `traps.md` as a live trap's discriminating test and cited from `src/experiment/landscape/objective.rs`. Name-matching would have removed a working diagnostic; the admission rule in Task 13 is written against the citing findings doc for exactly this reason.
 
+- [ ] **Step 2b: Record the nine process findings this execution produced**
+
+These are the durable output of the run and they are NOT in the spec, because they were
+discovered while executing it. Each one is a general lesson, verified by a specific
+incident in this branch's history. Write them as a section of their own, with the
+incident named so a reader can check it.
+
+1. **The expensive errors were in the specification, not the work.** Across eight tasks
+   the review loop caught roughly seven false claims that originated in the plan or its
+   briefs, against about one implementer slip. Examples: the verifier's docstring
+   claimed it caught drifted line numbers when it discards the line suffix entirely; a
+   predicted post-compression line count of 480 that was wrong by 80 and would have
+   shipped in the PR description; "nine validators" when `Config::from_yaml_file` runs
+   ten; `src/bin/` described as four binaries when it holds twelve. The plan was written
+   from a six-week-old audit plus one reading of the tree, and the tree had moved. The
+   practice that caught these was re-verifying each task's premises against source
+   immediately before dispatching it, not the post-hoc review.
+
+2. **Compression can manufacture a factual error out of hedged prose.** The
+   pre-compression text read "`Cr > 2` / `c3 < 0` (3.93 % to 0.31 %)", vague but not
+   false. Dropping the second label to shorten it produced a precise, wrong attribution:
+   `Cr > 2` is 2.10 % to 0.16 %. Shortening always-loaded context is not purely
+   subtractive and needs the same numeric re-checking as new writing.
+
+3. **Renaming a label breaks references that no gate and no keyword search can find.**
+   Renumbering a duplicate `## T11` trap heading to `T13` orphaned
+   `research-status.md:154`, which said "see traps.md T11" while describing the
+   autodiff-tape trap. A keyword grep missed it because the line described the bug in
+   different words than the trap's title, and `verify_doc_paths.py` is blind to it
+   because `T11` is a label, not a path. Cross-references keyed on numbers need a
+   by-subject sweep after any renumbering.
+
+4. **Duplication propagates staleness, observed directly rather than inferred.**
+   `ddrs-dev/SKILL.md:142` and `:144` carried the same two drifted citations that
+   `CLAUDE.md` carried, because the skill had been written by copying `CLAUDE.md`. One
+   stale line became two. This is the mechanism the whole cleanup is premised on, caught
+   in the act.
+
+5. **An audit misses what it does not think to look for, and a default flip's blast
+   radius goes uncounted.** The three-auditor sweep graded `docs/setup.md` and
+   `docs/intro.md` CLEAN and `docs/usage/running.md` MINOR. All three were wrong about
+   `use_cuda_graphs`, and `setup.md` carried five stale claims. The auditors checked
+   against the prior follow-up list and for newly-landed features; nobody swept for the
+   2026-08-19 `ddr_match` default flip, so every consequence of that one change went
+   unexamined. When a default changes, enumerate everything that asserts the old value.
+
+6. **Verifying that a pointer resolves is not verifying that it delivers.** A fix round
+   confirmed each status-block pointer's target existed, and the claim "all seven fields"
+   was still false, because `.claude/REACH-SUBDIVISION.md` names five.
+   `reference_discharge_coefficient` and `reference_discharge_exponent` appear nowhere in
+   it. Check the promise, not just the address.
+
+7. **Counts of sets that grow are a systematic defect class, not isolated slips.** Four
+   instances in one repository: `CLAUDE.md`'s diagram naming 4 of 12 binaries,
+   `docs/usage/running.md` claiming 10 of 12, a skill index enumerating 10 of 13 traps,
+   and a skill summary listing 4 of 5 loss kinds. In every case the omitted members were
+   the newest, so each index was stalest exactly where a reader most needed it. The fix
+   that holds is to name families or defer to the authoritative list, never to correct
+   one number to another. The repository already had this rule for test counts; it was
+   not generalized.
+
+8. **A gate's usefulness is set by its false-positive rate, not its coverage.** The
+   first draft of `verify_doc_paths.py` reported 288 strict failures, almost all bare
+   filenames and runtime artifacts. A gate that noisy gets switched off. Four changes
+   took it to 9 actionable findings: requiring a repo-rooted path, skipping gitignored
+   workspace paths, resolving against the citing file's directory, and testing existence
+   rather than file-ness because an `.ic` store is a directory.
+
+9. **Two citations were already pointing at the wrong code before conversion, which is
+   the concrete cost of the drift.** `.claude/ARCHITECTURE.md`'s `src/routing/mmc.rs:289-294`
+   had drifted onto an unrelated `denormalize` block, while the gate it described sits at
+   370-372 inside `setup_inputs`. `gauge-population.md`'s `src/data/store/gage_csv.rs:62`
+   had drifted to 64. The line-citation problem was not hypothetical at the time it was
+   fixed.
+
 - [ ] **Step 3: Record the new gate in `ddrs-dev/references/testing.md`**
 
 Add `python3 scripts/verify_doc_paths.py` to the gate list, with one line on what it catches and the note that it must exit 0 on any change to `CLAUDE.md` or `.claude/skills/`.
