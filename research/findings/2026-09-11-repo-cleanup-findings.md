@@ -160,7 +160,7 @@ of 2,268 lines also includes `docs/intro.md` and
 `docs/reference/burn-autograd.md`, which the same commit trimmed; 2,243 is
 the directory's own size) in Task 2 after
 a complete re-read of every pair against its `docs/` counterpart, not a
-sampled check. Section 4.4 names what that deleted directory was actively
+sampled check. Section 3.4 names what that deleted directory was actively
 propagating, not merely duplicating.
 
 ### 2.5 The citation gate
@@ -354,7 +354,7 @@ similarity, specifically because of this near-miss.
 
 ---
 
-## 4. Process findings: the ten lessons this execution produced
+## 4. Process findings from Phase 1: the ten lessons this execution produced
 
 These are general lessons about running this kind of cleanup, each grounded
 in one specific, named incident from this branch's history so a reader can
@@ -498,7 +498,7 @@ executing it.
 
 ---
 
-## 5. `CLAUDE.md` line count: the measured trajectory, not a predicted one
+## 5. `CLAUDE.md` line count: the full trajectory
 
 `CLAUDE.md` was 663 lines at branch start (`3412a78`). Task 4's diagram
 rebuild, which named eight previously-omitted subsystems (section 2.1 above),
@@ -513,24 +513,28 @@ Task 5's compression of the leakance and reach-subdivision sections to status
 blocks took the file from 684 to 577, then to 578 and 581 across two fix
 rounds that corrected the numeric errors in section 3.2. Task 6 added the
 seven-line "cite symbols, not lines" convention paragraph, landing at 588.
-Tasks 7 and 8 touched other files and left `CLAUDE.md` unchanged.
+Tasks 7 and 8 touched other files and left `CLAUDE.md` unchanged, and so did
+every Phase 2 task (10 through 14): none of them touched the file either.
 
-**Measured now, by running `wc -l CLAUDE.md` against this branch's HEAD
-(`f2ecf52`) on 2026-09-12, immediately before this task's own commit: 588
-lines.** This task's commit touches only `docs/2026-09-11-repo-cleanup-findings.md`
-and `.claude/skills/ddrs-dev/references/testing.md`, neither of which is
-`CLAUDE.md`, so this count should still read 588 after this commit; a reader
-checking it later should re-run `wc -l CLAUDE.md` rather than trust this
-sentence, which is itself a count that will drift the moment someone next
-edits the file.
+**Measured now, at Task 15's HEAD, by running `wc -l CLAUDE.md`: 588 lines,**
+the same value reached at the end of Phase 1 and unchanged through the whole
+of Phase 2. Task 15's own edits (the "When in doubt" paths in `CLAUDE.md`
+itself, the research-journal path, and the doc-conventions table in
+`.claude/skills/ddrs-dev/references/research-status.md`) changed text in
+place on existing lines rather than adding or removing any, so the count
+held through this task too. A reader checking it later should re-run
+`wc -l CLAUDE.md` rather than trust this sentence, which is itself a count
+that will drift the moment someone next edits the file.
 
 ---
 
-## 6. What Phase 2 covers (not yet done)
+## 6. The Phase 2 plan, as it stood at the Phase 1 boundary
 
-Everything below is still open, per the design document's sections 5 and the
-plan's Tasks 10-15. Recording it here so this findings document is a complete
-phase boundary, not a partial one:
+This is the restructure plan as Task 9 recorded it at the end of Phase 1, per
+the design document's section 5 and the plan's Tasks 10-15: a snapshot of
+what was planned at that boundary, not a live list of outstanding work.
+Section 7 below records what actually happened once Tasks 10 through 14 ran
+it.
 
 - **Split the book from the research record** (Task 10): move `book.toml`'s
   `src` to `docs/book/`, move the 14 book pages and `SUMMARY.md` with it, and
@@ -559,17 +563,15 @@ phase boundary, not a partial one:
   green. This task does not push and does not open a PR; that is Task 15's
   Step 5.
 
-**Update (2026-09-12):** all five items above are complete. Section 8 below
-records what actually happened, including findings Phase 1 had no way to
-predict. This section is left as written, since it is a correct record of
-what was still open at the time Task 9 wrote it.
+Kept here exactly as Task 9 wrote it: a findings document is a record of what
+was true when it was written, not a page that gets edited to stay current.
 
 ---
 
-## 8. Phase 2: the book tree holds only the book
+## 7. Phase 2: the book tree holds only the book
 
-Tasks 10 through 14 did the restructure this document described in section 6
-as not yet done. Measured at this task's HEAD:
+Tasks 10 through 14 did the restructure section 6 above sketched as the
+Phase 2 plan. Measured at this task's HEAD:
 
 - `book.toml`'s `src` now points at `docs/book/` (Task 10, commit `cd4ec55`).
   `find target/book -type f | sort` before and after the move differs by
@@ -607,9 +609,9 @@ exits 0; `cargo test --test ddr_sandbox_match --test gridded_bundle` is 6/6;
 
 ---
 
-## 9. Findings Phase 2 surfaced that Phase 1 had no way to know
+## 8. Findings Phase 2 surfaced that Phase 1 had no way to know
 
-### 9.1 A number we nearly shipped as an achievement was a scope change, not a cleanup
+### 8.1 A number we nearly shipped as an achievement was a scope change, not a cleanup
 
 The citation gate's prose-warning count fell from roughly 516 mid-run to 80.
 That looks like thorough hygiene. It is almost entirely Task 11 moving 135
@@ -631,7 +633,7 @@ is now a comment in `scripts/verify_doc_paths.py` next to `WARN_GLOBS`,
 converting what started as an accident of the move into a documented
 decision a future contributor can read without having to reconstruct it.
 
-### 9.2 Archiving by filename would have silently broken a live test and orphaned a published gate
+### 8.2 Archiving by filename would have silently broken a live test and orphaned a published gate
 
 The Task 13 brief listed `scripts/sp8_check_scatter.sh` and
 `scripts/sp10_check_launches.sh` for archiving, on the strength of both
@@ -653,7 +655,7 @@ alongside the `examples/leak_probe.rs` near-miss from Phase 1 (section 3.8
 above: a "leak" filename that is an active autograd-tape-leak repro, not a
 leakance artifact).
 
-### 9.3 A citation broke twice in one cleanup, and only a widened gate caught the second break
+### 8.3 A citation broke twice in one cleanup, and only a widened gate caught the second break
 
 `src/sparse/mod.rs:11` cited `.claude/references/ddrs-burn-autograd.md` at
 branch start. Task 2 repointed it to `docs/reference/burn-autograd.md`, which
@@ -671,7 +673,7 @@ for the rest of the restructure. It can be re-broken by a later, unrelated
 step, and nothing catches that except running the gate, at its fullest
 coverage, after every step, rather than trusting the last green run.
 
-### 9.4 A commit message self-certified a false claim about its own diff
+### 8.4 A commit message self-certified a false claim about its own diff
 
 Commit `ec7014d` ("docs: repoint 406 references at research/") ends its
 message with "Touches `src/` and `scripts/` doc comments/docstrings only; no
@@ -688,7 +690,7 @@ commit message. The commit is several back in the branch's history and is
 not worth rewriting to fix prose in a message; recording it here is the
 correction.
 
-### 9.5 A sweep that returned zero was itself wrong, and nearly went unchecked
+### 8.5 A sweep that returned zero was itself wrong, and nearly went unchecked
 
 Checking whether any stale `docs/` citation remained inside the newly-moved
 book pages, the controller ran:
@@ -713,7 +715,7 @@ surface, committed by the person checking for exactly that failure mode.
 **Lesson: when a sweep returns zero, verify the sweep before trusting the
 zero.**
 
-### 9.6 Two smaller items, recorded briefly
+### 8.6 Two smaller items, recorded briefly
 
 **The 21-item pre-existing citation backlog.** Task 12 deliberately left 21
 dead or convention-violating citations unfixed, named and measured rather
@@ -747,56 +749,47 @@ silently-accepted one.
 
 ---
 
-## 10. Process findings, continued: five more lessons from Phase 2
+## 9. Process findings from Phase 2: five more lessons
 
-Continuing the numbering from section 4 above (lessons 1 through 10 were
-Phase 1's).
+These continue the numbering from section 4's ten Phase 1 lessons (1 through
+10); these five are Phase 2's, numbered 11 through 15. The two sections are
+not adjacent in this document (the Phase 2 narrative sits between them), so
+the numbering continuity is stated here rather than implied by position.
 
 11. **A scope change can look like a quality improvement if you only read the
     summary number.** The citation gate's prose-warning count falling from
     roughly 516 to 80 reads as hygiene; it is almost entirely 135 documents
     leaving the scanned set. Any before/after count needs its denominator
-    checked, not just its value. See section 9.1.
+    checked, not just its value. See section 8.1.
 
 12. **An admission rule stated against a citing document, not a filename,
     is the whole point, and it only proves its worth when it overrides a
     plan that used filenames.** The sp8/sp10 scripts were listed for
     archiving by name-matching against "spike check"; both are live, one
     spawned directly by an `#[ignore]`d test whose failure mode would have
-    been invisible to CI. See section 9.2.
+    been invisible to CI. See section 8.2.
 
 13. **A fix made early in a multi-step restructure is not durable against the
     later steps.** `src/sparse/mod.rs:11` broke, was fixed, and broke again
     from an unrelated later move, and was only caught because an unrelated
     later gate-widening happened to re-scan it. The practice that generalizes:
     run the widest-coverage gate after every step, not just the step that
-    seems related. See section 9.3.
+    seems related. See section 8.3.
 
 14. **A commit message is a claim like any other, and needs the same
     verification.** "No logic changed" in `ec7014d`'s message is false for
     `scripts/journal.py`. The change itself was correct; the self-description
-    of it was not checked before being written. See section 9.4.
+    of it was not checked before being written. See section 8.4.
 
 15. **A sweep returning zero is a claim, not a proof, until the sweep itself
     is checked.** `grep -rn "docs/" docs/book | grep -v "docs/book"` returns
     zero by construction, not because the tree is clean: `grep -n` prefixes
     every line with a filename that itself contains the excluded string. See
-    section 9.5.
+    section 8.5.
 
 ---
 
-## 11. `CLAUDE.md` line count, reconfirmed
-
-`CLAUDE.md` is still **588** lines, unchanged since section 5's measurement
-at the end of Phase 1. None of Tasks 10 through 14 touched `CLAUDE.md`; this
-task's own edits (the "When in doubt" paths, the research-journal path, and
-the doc-conventions table in `.claude/skills/ddrs-dev/references/research-status.md`)
-changed text in place on existing lines rather than adding or removing any,
-so the count held. Re-run `wc -l CLAUDE.md` rather than trust this sentence.
-
----
-
-## 12. Final gate results (whole branch, 2026-09-12)
+## 10. Final gate results (whole branch, 2026-09-12)
 
 ```
 python3 scripts/test_verify_doc_paths.py        # 21/21 pass
@@ -814,7 +807,7 @@ opened against.
 
 ---
 
-## 7. Reproduce
+## 11. Reproduce
 
 ```bash
 # the citation gate, now and its history
