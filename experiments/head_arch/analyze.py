@@ -110,15 +110,18 @@ def main() -> int:
     rows = []
     for name, info in meta["arms"].items():
         init = read(out / f"{name}.init.bin", np_)
-        fitted = read(out / f"{name}.fitted.bin", np_)
         trunk = read(out / f"{name}.trunk.bin", info["trunk_shape"][1])
+        # The `--checkpoint` mode measures a trained head and runs no capacity
+        # control, so there is nothing fitted to read.
+        fit_path = out / f"{name}.fitted.bin"
+        fitted = read(fit_path, np_) if fit_path.exists() else None
 
         ln, lq = logit(init[:, i_n]), logit(init[:, i_q])
         spec = spectrum(trunk)
 
         # In the capacity control the two supervised columns are the ones that
         # were told to be uncorrelated.
-        f0, f1 = fitted[:, 0], fitted[:, 1]
+        f0, f1 = (fitted[:, 0], fitted[:, 1]) if fitted is not None else (None, None)
 
         sweep = None
         sw_path = out / f"{name}.seedsweep.bin"
@@ -151,15 +154,20 @@ def main() -> int:
                 "trunk_width": spec["width"],
                 "fit_loss0": info["fit_loss_first"],
                 "fit_loss1": info["fit_loss_last"],
-                "fit_rho": spearmanr(f0, f1).statistic,
-                "fit_affine_r2": affine_r2(logit(f0), logit(f1)),
+                "fit_rho": spearmanr(f0, f1).statistic if fitted is not None else None,
+                "fit_affine_r2": affine_r2(logit(f0), logit(f1)) if fitted is not None else None,
                 "q_bounds": bound_stats(init[:, i_q]),
                 "n_bounds": bound_stats(init[:, i_n]),
             }
         )
 
     w = max(len(r["arm"]) for r in rows) + 1
-    print("AT INIT — what the topology inherits before any training")
+    trained = any(r["fit_rho"] is None for r in rows)
+    print(
+        "TRAINED FIELDS — what the gradient actually produced"
+        if trained
+        else "AT INIT — what the topology inherits before any training"
+    )
     print(f"{'arm':<{w}} {'rho(n,q)':>9} {'affine R2':>10} {'q<.01':>7} {'q>.99':>7}")
     for r in rows:
         print(
@@ -198,14 +206,17 @@ def main() -> int:
     print(f"  ({meta.get('init_seeds', 1)} seeds per arm, on the {meta['subsample_len']:,}-reach subsample)")
     print()
 
-    print("CAPACITY CONTROL — can it decorrelate two outputs when TOLD the answer?")
-    print(f"{'arm':<{w}} {'loss0':>9} {'loss1':>9} {'fit rho':>9} {'affine R2':>10}")
-    for r in rows:
-        print(
-            f"{r['arm']:<{w}} {r['fit_loss0']:>9.5f} {r['fit_loss1']:>9.5f} "
-            f"{r['fit_rho']:>+9.3f} {r['fit_affine_r2']:>10.4f}"
-        )
-    print()
+    if any(r["fit_rho"] is not None for r in rows):
+        print("CAPACITY CONTROL — can it decorrelate two outputs when TOLD the answer?")
+        print(f"{'arm':<{w}} {'loss0':>9} {'loss1':>9} {'fit rho':>9} {'affine R2':>10}")
+        for r in rows:
+            if r["fit_rho"] is None:
+                continue
+            print(
+                f"{r['arm']:<{w}} {r['fit_loss0']:>9.5f} {r['fit_loss1']:>9.5f} "
+                f"{r['fit_rho']:>+9.3f} {r['fit_affine_r2']:>10.4f}"
+            )
+        print()
 
     print("READING IT")
     print("  A topology whose capacity |fit rho| stays near 1 while its loss barely")

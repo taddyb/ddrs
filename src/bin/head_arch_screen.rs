@@ -107,6 +107,21 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     arms: Vec<String>,
 
+    /// Measure a TRAINED head instead of running the topology screen.
+    ///
+    /// Path to a checkpoint directory or head base (`.../epoch_E_mb_M`, with or
+    /// without the trailing `head`). The screen's own arms are skipped; the
+    /// config's own `kan_head` section supplies the architecture, so this must
+    /// be the run's `config.yaml`.
+    ///
+    /// This answers the one question the initialisation screen cannot: whether
+    /// training COLLAPSES the trunk. §32.2 measured effective rank 4.36 of 21
+    /// at initialisation, while §31 measured the trained outputs at 98.7 %
+    /// mutual affine variance. Both can only hold if training contracts the
+    /// latent, and the trained spectrum is the direct test of that.
+    #[arg(long)]
+    checkpoint: Option<PathBuf>,
+
     /// Number of initialisation seeds to sweep per arm, starting at the
     /// config's `seed`.
     ///
@@ -242,6 +257,59 @@ where
             .with_kan_grid_range(section.kan_grid_range)
     };
     let base = mk_base(cfg.seed);
+
+    if let Some(ckpt) = &cli.checkpoint {
+        // The template must match the checkpoint's own architecture, so it
+        // comes from the config section rather than from `mk_base`, which
+        // overrides the learnable set.
+        let template: KanHead<B> = ddrs::config::kan_config(section, cfg.seed).init(&device);
+        let head = ddrs::training::checkpoint::load_kan_head::<B>(
+            &ddrs::training::checkpoint::head_base(ckpt),
+            template,
+            &device,
+        )?;
+        eprintln!("loaded trained head: {:?}", head.learnable_parameters());
+
+        let h = head.valid().trunk_activations(x_sub.clone().inner());
+        let hd = h.dims();
+        write_f32(
+            &cli.out_dir.join("trained.trunk.bin"),
+            &h.into_data().to_vec::<f32>().map_err(|e| format!("{e:?}"))?,
+        )?;
+        let fields = head.valid().forward(x_full.clone().inner());
+        let params: Vec<String> = head.learnable_parameters().to_vec();
+        write_fields(
+            &cli.out_dir.join("trained.init.bin"),
+            &fields,
+            &params,
+            n_reaches,
+        )?;
+        let meta = serde_json::json!({
+            "mode": "trained",
+            "checkpoint": ckpt,
+            "config": cli.config,
+            "params": params,
+            "n_reaches": n_reaches,
+            "subsample_len": idx.len(),
+            "target_corr": target_corr,
+            "arms": { "trained": {
+                "rationale": "trained head, loaded from checkpoint",
+                "hidden_size": section.hidden_size,
+                "num_hidden_layers": section.num_hidden_layers,
+                "parameter_groups": section.parameter_groups,
+                "input_layer_kan": section.input_layer_kan,
+                "output_layer_kan": section.output_layer_kan,
+                "trunk_shape": [hd[0], hd[1]],
+                "fit_loss_first": serde_json::Value::Null,
+                "fit_loss_last": serde_json::Value::Null,
+                "loss_trace": Vec::<f32>::new(),
+            }},
+        });
+        std::fs::File::create(cli.out_dir.join("manifest.json"))?
+            .write_all(serde_json::to_string_pretty(&meta)?.as_bytes())?;
+        eprintln!("wrote {}", cli.out_dir.display());
+        return Ok(());
+    }
 
     let mut manifest = serde_json::Map::new();
     for arm in arms() {
