@@ -111,6 +111,20 @@ enables `.githooks/pre-push`, which runs `ddr_sandbox_match` +
 broken checkout fails locally rather than in CI). Bypass with
 `git push --no-verify`.
 
+## Citation gate (added 2026-09-11)
+
+```bash
+python3 scripts/verify_doc_paths.py
+```
+
+Catches a `file:line` or `file.rs::symbol` citation in `CLAUDE.md` or
+`.claude/skills/**` that does not resolve against the current tree: a drifted
+line number, a renamed or moved function, a deleted path. Must exit 0 (zero
+strict failures) on any change to `CLAUDE.md` or `.claude/skills/`; prose
+citations in `docs/` are warn-only and do not fail the gate. Inside `src/`,
+cite `file.rs::symbol`, never a line number; the verifier rejects a `src/`
+line citation outright rather than trusting it to stay pinned.
+
 ## What covers what
 
 | Area | Tests |
