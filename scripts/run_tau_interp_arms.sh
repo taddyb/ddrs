@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 3-arm q'-interpolation experiment: nearest / linear / quadratic upsampling,
 # gages_3000 population, epoch-30 checkpoint, full eval window + hourly dump.
-# Spec: docs/superpowers/specs/2026-08-05-per-gauge-tau-sweep-design.md (Phase 2 prep)
+# Spec: research/specs/2026-08-05-per-gauge-tau-sweep-design.md (Phase 2 prep)
 set -euo pipefail
 cd /home/tbindas/projects/ddrs
 

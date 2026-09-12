@@ -4,7 +4,7 @@ First end-to-end run of the **precip-driven mass-preserving daily→hourly
 disaggregation head** (real hourly AORC precip drives the within-day shape;
 daily mean conserved exactly). Branch `hourly-forcings`; source group
 `conus-hourly`; loss **L1**; `cuda_graphs: false`. Design:
-`docs/superpowers/specs/2026-06-22-precip-driven-disaggregation-design.md`.
+`research/specs/2026-06-22-precip-driven-disaggregation-design.md`.
 
 ## Result (run `2026-06-23T02-49-12Z-conus-hourly-train-and-test`)
 

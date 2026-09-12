@@ -303,8 +303,8 @@ gc). First-run flow is `init → plan → init → run`:
   workflow, writes a manifest with config + source fingerprints + git SHA
   + outputs. `--plot` chains `dump_parameters::dump`.
 
-Full design at `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
-Implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+Full design at `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+Implementation plan at `research/plans/2026-05-30-ddrs-cli-lifecycle.md`.
 
 The `dispatch()` inside `cli::run::run` is a v1 stub (always returns
 `RunStatus::Failed`); real workflow execution is wired in a follow-up

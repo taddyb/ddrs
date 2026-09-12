@@ -1,7 +1,7 @@
 # Adjoint influence map — GAGES-II nested-reference population — findings
 
-**Spec:** `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
-**Prior finding:** `docs/2026-09-04-adjoint-influence-poc-findings.md` (Juniata pair)
+**Spec:** `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
+**Prior finding:** `research/findings/2026-09-04-adjoint-influence-poc-findings.md` (Juniata pair)
 **Bundle:** `experiments/adjoint-conus/`
 **Output:** `.ddrs/experiments/adjoint-conus/2026-09-05T16-28-57Z/` — figures, `README.md`,
 `STATS.md` (tables T1–T10) and `HANDOFF.md` (paper-structured handoff) in `figures/`
@@ -20,7 +20,7 @@ unexplained mass loss is 13–69 reaches per arm (~1–2 %), clustered in Northe
 Plains basins.
 
 > **Correction (2026-09-07, checks 3–4 on the UH arm,
-> `docs/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`):** the "mass loss" /
+> `research/findings/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`):** the "mass loss" /
 > "unexplained mass loss" / "clamped negative solves" reading of low volume sensitivity below is
 > superseded. Low `volume_sens` is (1) inflow intermittency — the gradient is exactly zero at source
 > hours with inflow at the clamp floor, so the raw time-mean collapses to the wet-hour fraction — and
@@ -120,7 +120,7 @@ target/release/ddrs --workspace .ddrs experiment adjoint-conus --backend cpu
 ## 7. Corrected volume statistics (2026-09-07 rerun, `.ddrs/experiments/adjoint-conus/2026-09-07T18-18-39Z/`)
 
 Rerun of all five arms with `volume_sens_wet` (mean over source hours with inflow above the clamp
-floor; see `docs/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`). 3,146 reaches per arm.
+floor; see `research/findings/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`). 3,146 reaches per arm.
 
 | arm | median raw | median wet-hour | reaches raw < 0.5 | reaches wet < 0.5 | gauges with any wet < 0.5 | reaches with wet-hour fraction < 0.5 |
 |---|---|---|---|---|---|---|

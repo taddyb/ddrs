@@ -3,7 +3,7 @@
 Reads ONLY the raw per-window / per-gauge CSVs produced by the registered
 `probe_zeta_gradient --mode eval-loss` and `--mode landscape` runs — no Rust
 re-execution. Produces every number cited in
-docs/2026-07-09-h5-h6-equifinality-v2-findings.md:
+research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md:
 
   1. H5 paired per-window statistics (compositions share identical windows,
      so paired differences are the correct test — not mean vs window std).

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (zarrs + icechunk crates, ndarray, clap, serde_yaml); one Python fixture script run under DDR's uv venv.
 
-**Spec:** `docs/superpowers/specs/2026-07-01-nh-qprime-import-design.md`
+**Spec:** `research/specs/2026-07-01-nh-qprime-import-design.md`
 **Branch:** work on the current branch `unit_catchments`.
 
 **Confirmed store facts (probed 2026-07-01, drive the sniff grammar and tests):**
@@ -959,7 +959,7 @@ experiment window reaching into 1980 hard-errors rather than clamping.
    `config/sources/<group>.yaml`.
 4. `ddrs sources use <group> && ddrs plan && ddrs run --workflow train`.
 
-Design history: `docs/superpowers/specs/2026-07-01-nh-qprime-import-design.md`.
+Design history: `research/specs/2026-07-01-nh-qprime-import-design.md`.
 ```
 
 - [ ] **Step 2: Commit**
@@ -1646,7 +1646,7 @@ windows must not reach into 1980. Dataset open logs
 
 - [ ] **Step 2: Verify the plan's spec coverage one last time**
 
-Re-read `docs/superpowers/specs/2026-07-01-nh-qprime-import-design.md` §§1-5 and confirm: contract doc (Task 5), sniff + three-method behavior + out-of-range hard error + hourly-alignment validation (Tasks 2-3), disagg guard + resolution log (Task 4), import command with dry-run/coverage/registration (Tasks 6-7), all-four-store validation + LSTM smoke trains + daily-path regression (Tasks 8-9).
+Re-read `research/specs/2026-07-01-nh-qprime-import-design.md` §§1-5 and confirm: contract doc (Task 5), sniff + three-method behavior + out-of-range hard error + hourly-alignment validation (Tasks 2-3), disagg guard + resolution log (Task 4), import command with dry-run/coverage/registration (Tasks 6-7), all-four-store validation + LSTM smoke trains + daily-path regression (Tasks 8-9).
 
 - [ ] **Step 3: Commit**
 

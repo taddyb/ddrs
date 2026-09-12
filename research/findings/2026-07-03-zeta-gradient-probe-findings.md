@@ -1,8 +1,8 @@
 # Zeta gradient-sensitivity probe — experiment report (2026-07-03)
 
-Spec: `docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md`
-Plan: `docs/superpowers/plans/2026-07-02-zeta-gradient-probe.md`
-Prior experiment: `docs/2026-07-02-leakance-diagnosis-findings.md` (whose §5
+Spec: `research/specs/2026-07-02-zeta-gradient-probe-design.md`
+Plan: `research/plans/2026-07-02-zeta-gradient-probe.md`
+Prior experiment: `research/findings/2026-07-02-leakance-diagnosis-findings.md` (whose §5
 item 1 this executes, reshaped from a twin experiment into two no-training
 instruments after the recoverability discussion).
 Code: `src/bin/probe_zeta_gradient.rs`, `src/training/probe.rs`,

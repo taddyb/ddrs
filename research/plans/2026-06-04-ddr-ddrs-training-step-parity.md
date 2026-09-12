@@ -16,7 +16,7 @@ D Adam step), each producing a comparison artifact. Pause after Layer B sub-step
 fixture-driver scripts. New Rust integration tests under `tests/`.
 
 **Spec source of truth:**
-`docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md`.
+`research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md`.
 
 ---
 
@@ -37,7 +37,7 @@ fixture-driver scripts. New Rust integration tests under `tests/`.
 
 | Path | Status | Responsibility |
 |------|--------|----------------|
-| `docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md` | modify | Fill §4 Layer A audit table; append §5.1 verdict. |
+| `research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md` | modify | Fill §4 Layer A audit table; append §5.1 verdict. |
 | `scripts/dump_ddr_training_step.py` | create | Loads KAN fixture into DDR, runs one mini-batch through `ddr.routing.mmc.MuskingumCunge`, dumps every intermediate state to `tests/fixtures/training_step/`. |
 | `tests/fixtures/training_step/manifest.json` | create | Records the fixture gauge (COMID + STAID), time window, expected file list, version. |
 | `tests/fixtures/training_step/subgraph_<COMID>.npz` | create (committed) | DDR's loaded `(rows, cols, vals)` subgraph triplets for the fixture gauge. |
@@ -57,7 +57,7 @@ fixture-driver scripts. New Rust integration tests under `tests/`.
 **Spec ref:** §4 Layer A.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md` (the §4 Layer A table)
+- Modify: `research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md` (the §4 Layer A table)
 
 - [ ] **Step 1: Read DDR's training inner loop**
 
@@ -101,7 +101,7 @@ Specific things to check that are easy to miss:
 
 ```bash
 cd /home/tbindas/projects/ddrs
-git add docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md
+git add research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: complete Layer A inner-loop audit
 
@@ -711,7 +711,7 @@ EOF
 **Spec ref:** §5 outcome table → §5.1 (new).
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md`
+- Modify: `research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md`
 
 - [ ] **Step 1: Tally the layer results**
 
@@ -761,7 +761,7 @@ Mirror the structure of the previous trained-parity spec's §5.1:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md
+git add research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: record Layer B-D empirical verdict
 
@@ -791,7 +791,7 @@ EOF
 ---
 
 Plan complete and saved to
-`docs/superpowers/plans/2026-06-04-ddr-ddrs-training-step-parity.md`.
+`research/plans/2026-06-04-ddr-ddrs-training-step-parity.md`.
 
 **Two execution options:**
 

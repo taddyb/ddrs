@@ -13,7 +13,7 @@ top_width = p · depth^q
 Log-sensitivities at the trained q ≈ 0.35: ∂ln d/∂ln p = −3/(5+3q) = −0.50, ∂ln w/∂ln p = 5/(5+3q) = 0.83.
 Doubling p widens the channel by 77 % and shallows it by 29 %, so p is not physically weak. But n and p enter depth
 only as the ratio n/p. What a gauge sees (celerity, attenuation) comes mostly through depth, so to first order a
-gauge identifies n/p and not n and p separately. The Newport Hessian (`docs/2026-09-07-landscape-uh-juniata-findings.md`)
+gauge identifies n/p and not n and p separately. The Newport Hessian (`research/findings/2026-09-07-landscape-uh-juniata-findings.md`)
 shows exactly this: stiff eigenvector ≈ n^0.8 p^−0.5, sloppy directions where n and p move together.
 
 The exponent's leverage on width is `∂ln w/∂q = ln d + q ∂ln d/∂q`: it scales with ln(depth), so it is a river-size

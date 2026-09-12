@@ -1,7 +1,7 @@
 # Leakance × hourly-disaggregation 2×2 — findings (2026-07-01)
 
-Spec:  `docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`
-Handoff (root-cause + re-run): `docs/2026-07-01-leakance-hourly-experiment-handoff.md`
+Spec:  `research/specs/2026-06-29-leakance-hourly-feasibility-design.md`
+Handoff (root-cause + re-run): `research/findings/2026-07-01-leakance-hourly-experiment-handoff.md`
 Branch: `hourly-forcings`
 
 **One-line verdict:** the hypothesized **interaction is present and in the

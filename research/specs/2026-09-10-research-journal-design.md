@@ -10,7 +10,7 @@ it and nothing made it cheap.
 
 ## 1. What this is
 
-A per-month, append-only notebook at `docs/journal/YYYY-MM.md` with two parts:
+A per-month, append-only notebook at `research/journal/YYYY-MM.md` with two parts:
 
 - **Ledger** — one row per completed run or experiment. Machine-written.
 - **Entries** — Question / What we did / Result / Conclusion. Human-written.
@@ -42,7 +42,7 @@ question, not a formatting defect.
                     |                             |         _TODO_ x4
                     +--------------+--------------+
                                    |
-                     docs/journal/YYYY-MM.md   (git-tracked)
+                     research/journal/YYYY-MM.md   (git-tracked)
                                    |
                                    |  <-- judgement written here, by hand
                                    v
@@ -88,7 +88,7 @@ Rejected alternatives:
 |---|---|---|
 | `.claude/settings.json` (new) | Hooks fire on **every** Bash call in the repo | Regex-gated to `ddrs run`/`ddrs experiment`; returns in ~30 ms otherwise; `DDRS_JOURNAL_OFF=1` kill switch; top-level `except` exits 0 so a journal bug can never fail the command it observes |
 | `scripts/journal.py` (new) | Could corrupt the record it exists to keep | `scripts/test_journal.py` covers idempotency, smoke classification, and that judgement is never auto-written |
-| `docs/journal/**` (new) | Merge conflicts across parallel worktrees | Append-only, monthly, `---`-separated; conflict resolution is always "keep both" |
+| `research/journal/**` (new) | Merge conflicts across parallel worktrees | Append-only, monthly, `---`-separated; conflict resolution is always "keep both" |
 | `.ddrs/journal-state.json` (new) | none — gitignored under the existing `.ddrs/` rule | — |
 | `CLAUDE.md`, `docs/SUMMARY.md` | Journal deliberately **not** added to `SUMMARY.md` | It is a working notebook; mdBook publishes reference docs |
 | `src/**`, `Cargo.toml`, CI | **Untouched.** No Rust, no build, no gate. | Invariants 1–7 are not in scope |

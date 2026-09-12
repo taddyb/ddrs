@@ -2,8 +2,8 @@
 
 Date: 2026-07-01. Branch: `worktree-leakance-diagnosis` (worktree off `master`
 @ `25f93aa`, post PR #22 merge).
-Lit review: `docs/2026-07-01-leakance-litreview.md`.
-Prior findings: `docs/2026-07-01-leakance-hourly-findings.md`.
+Lit review: `research/findings/2026-07-01-leakance-litreview.md`.
+Prior findings: `research/findings/2026-07-01-leakance-hourly-findings.md`.
 
 ## Problem
 
@@ -90,7 +90,7 @@ zarr/xarray available there), consuming:
 
 It prints one section per hypothesis (effect sizes + verdict) and writes the
 report skeleton. Findings land in
-`docs/2026-07-02-leakance-diagnosis-findings.md` with a ranked table.
+`research/findings/2026-07-02-leakance-diagnosis-findings.md` with a ranked table.
 
 ## Phase 3 — gated fix (at most one retrain)
 
@@ -114,10 +114,10 @@ spending GPU.
 
 ## Deliverables
 
-1. `docs/2026-07-01-leakance-litreview.md` (done, committed with this spec).
+1. `research/findings/2026-07-01-leakance-litreview.md` (done, committed with this spec).
 2. Phase-1 instrumentation + extended `tests/zeta_accum.rs` on this branch.
 3. Updated `kan_parameters.nc` in both ON run dirs (depth_mean/q_mean added).
-4. `scripts/leakance_diagnosis.py` + `docs/2026-07-02-leakance-diagnosis-findings.md`.
+4. `scripts/leakance_diagnosis.py` + `research/findings/2026-07-02-leakance-diagnosis-findings.md`.
 5. If gated in: the widened-K_D run, updated findings, GO/NO-GO refresh.
 
 ## Concerns / assumptions (per planning rules)

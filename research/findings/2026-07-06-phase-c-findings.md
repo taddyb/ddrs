@@ -2,11 +2,11 @@
 
 Date: 2026-07-06
 Worktree: `zeta-sensitivity` (branch `worktree-zeta-sensitivity`)
-Experiment spec: `docs/2026-07-05-phase-c-leakance-gate-experiment.md`
-Program spec: `docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md`
-Prior findings: `docs/2026-07-02-leakance-diagnosis-findings.md`,
-`docs/2026-07-03-zeta-gradient-probe-findings.md`,
-`docs/2026-07-04-synthetic-recoverability-findings.md`.
+Experiment spec: `research/findings/2026-07-05-phase-c-leakance-gate-experiment.md`
+Program spec: `research/specs/2026-07-04-leakance-gate-program-design.md`
+Prior findings: `research/findings/2026-07-02-leakance-diagnosis-findings.md`,
+`research/findings/2026-07-03-zeta-gradient-probe-findings.md`,
+`research/findings/2026-07-04-synthetic-recoverability-findings.md`.
 
 **One-line result: leakance is NOT promotable. On real USGS gauges with a
 fixed objective and genuinely informative groundwater inputs, it improves KGE
@@ -113,7 +113,7 @@ Leakance is a **selective-equifinality** term, established by removing every
 confound in sequence:
 
 1. **Physically motivated** — MODFLOW-family Darcy conductance (32 verified
-   citations, `docs/2026-07-04-leakance-literature-review.md`).
+   citations, `research/findings/2026-07-04-leakance-literature-review.md`).
 2. **Live gradients everywhere** — the gradient probe refuted starvation
    (gauged/ungauged |g| ratio 1.5×, not ≥10×).
 3. **Real losses undetectable at gauges** — 53× below the 5% discharge

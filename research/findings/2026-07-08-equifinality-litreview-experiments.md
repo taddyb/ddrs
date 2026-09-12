@@ -3,7 +3,7 @@
 Produced by a Fable 5 subagent with live web verification (Crossref/arXiv/PMLR);
 all references verified, none flagged [UNVERIFIED]. Commissioned from the paper
 session (`~/projects/ddr_equifinality`) to design the next experiment wave after
-the v2 findings (`docs/2026-07-07-lstm-equifinality-v2-findings.md`).
+the v2 findings (`research/findings/2026-07-07-lstm-equifinality-v2-findings.md`).
 
 ---
 

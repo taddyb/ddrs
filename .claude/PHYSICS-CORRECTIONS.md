@@ -127,7 +127,7 @@ rather than hydraulic-diffusivity-matched. **Skill impact is unmeasured; do not
 promote this flag on the positivity guarantee alone.**
 
 > **Erratum.** An earlier version of this section and of
-> `docs/superpowers/plans/2026-08-04-positivity-clamp.md` reported X falling only
+> `research/plans/2026-08-04-positivity-clamp.md` reported X falling only
 > to ~0.45 at the median. That was a methodological error: `X_max(Cr)` is
 > non-monotone (it peaks at `Cr = 1`), so evaluating it *at* each Cr percentile
 > does not yield the percentiles of X. The tell was that the p95 entry came out
@@ -186,7 +186,7 @@ are already `Cr < 2`, shrinking `X_max` and making the cap bite *harder*.
 >
 > Full write-up, cost tables and the code that stays in-tree:
 > `.claude/REACH-SUBDIVISION.md`. Plan of record:
-> `docs/superpowers/plans/2026-08-05-reach-subdivision.md`.
+> `research/plans/2026-08-05-reach-subdivision.md`.
 
 ## Outside the forward chain: per-gauge extraction (`outflow_idx`)
 

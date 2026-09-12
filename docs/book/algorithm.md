@@ -235,7 +235,7 @@ Gates for any change here — `cargo test --test leakance_gradcheck`
 `cargo test --test zeta_accum` (the eval diagnostic equals what was
 actually subtracted from `b_rhs`). The term's *scientific* status is
 **NO-GO / not promotable** — see CLAUDE.md §Leakance and
-`docs/2026-07-06-leakance-nogo-scientific-summary.md` before re-opening
+`research/findings/2026-07-06-leakance-nogo-scientific-summary.md` before re-opening
 it.
 
 ### Hourly forcing from daily Q'

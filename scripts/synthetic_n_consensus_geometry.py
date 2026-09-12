@@ -1,5 +1,5 @@
 """Consensus geometry for the synthetic-n recoverability experiment
-(docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+(research/specs/2026-07-22-synthetic-n-recoverability-design.md).
 
 Runs `dump_parameters` against the 4 already-converged real-Q'-source
 checkpoints from this campaign, then computes the per-COMID MEDIAN

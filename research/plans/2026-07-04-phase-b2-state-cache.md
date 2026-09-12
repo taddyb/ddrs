@@ -10,7 +10,7 @@
 
 **Tech Stack:** Rust (ddrs worktree `/home/tbindas/projects/ddrs/.claude/worktrees/zeta-sensitivity`, branch `worktree-zeta-sensitivity`), CPU/NdArray for all runs. Python (ddrs-py venv) for validation analysis.
 
-**Spec:** `docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md` §4 option B; decision evidence `output/floor_fix/logs/analysis.log` + `docs` findings from Phase B1 (B3 commit `ff7c59a`).
+**Spec:** `research/specs/2026-07-04-leakance-gate-program-design.md` §4 option B; decision evidence `output/floor_fix/logs/analysis.log` + `docs` findings from Phase B1 (B3 commit `ff7c59a`).
 
 **Hard invariants (this touches the training path — maximum care):**
 - With `experiment.state_cache` UNSET: every code path byte-identical to master behavior. Proven by a new parity test + the existing guard suites (`leakance_gradcheck`, `leakance_off_parity`, `zeta_accum`) + `compare_ddr_sandbox` ABSOLUTE MATCH after every task.
@@ -174,7 +174,7 @@ nice -n 10 $WT/target/release/probe_zeta_gradient \
 
 ### Task 6: Findings + CLAUDE.md note
 
-- [ ] **Step 1:** Write `docs/2026-07-XX-floor-fix-findings.md` (run date) — the Phase B report covering BOTH halves: B1 curves (the plateau discovery, the OPTION B decision verbatim) and B2 (state cache design, validation table, PASS/FAIL vs the bar). Structure: hypothesis / what was changed / experiment / pass-fail / conclusions (incl. "every prior ddrs training run carried this floor" and the staleness caveat for Phase C) / next steps (Phase C consumes `state_cache`; refresh policy only if Phase C loss curves demand it) / raw output / reproduce.
+- [ ] **Step 1:** Write `research/findings/2026-07-XX-floor-fix-findings.md` (run date) — the Phase B report covering BOTH halves: B1 curves (the plateau discovery, the OPTION B decision verbatim) and B2 (state cache design, validation table, PASS/FAIL vs the bar). Structure: hypothesis / what was changed / experiment / pass-fail / conclusions (incl. "every prior ddrs training run carried this floor" and the staleness caveat for Phase C) / next steps (Phase C consumes `state_cache`; refresh policy only if Phase C loss curves demand it) / raw output / reproduce.
 - [ ] **Step 2:** Add a short CLAUDE.md subsection under the training notes: what `experiment.state_cache` is, when to regenerate it (config's forcing/network changed), and that warmup alone cannot fix large-river IC error (pointer to the findings).
 - [ ] **Step 3:** Final guard sweep + sandbox. Commit docs.
 

@@ -1,5 +1,5 @@
 """Pre-registered verdicts S1-S5 for the synthetic-n recoverability
-experiment (docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md §3).
+experiment (research/specs/2026-07-22-synthetic-n-recoverability-design.md §3).
 
 Run from ddrs-py's venv, after all 4 students' dump_parameters outputs exist:
     cd ddrs-py && uv run python ../scripts/synthetic_n_recoverability_analysis.py

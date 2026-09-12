@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, BURN 0.21 (Autodiff custom ops), rskan, ndarray, serde_yaml. f32 throughout the routing core.
 
-**Spec:** `docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`
+**Spec:** `research/specs/2026-06-29-leakance-hourly-feasibility-design.md`
 
 **DDR reference (read first):** `~/projects/ddr` commit `c2bd0f9`, `src/ddr/routing/mmc.py` `_compute_zeta` (lines 146–197) and `route_timestep` (the `b = ... - zeta` branch). View with:
 `git -C ~/projects/ddr show c2bd0f9:src/ddr/routing/mmc.py | sed -n '146,197p'`
@@ -916,10 +916,10 @@ Expected: a printed GO/NO-GO verdict + the metric tables.
 
 - [ ] **Step 5: Write up findings + commit**
 
-Create `docs/2026-XX-XX-leakance-hourly-findings.md` (mirror the style of `docs/2026-06-23-precip-disaggregation-findings.md`): the 2×2 table, the subset deltas, the `|zeta|` distribution, the verdict, and the recommendation (full port vs drop).
+Create `research/findings/2026-XX-XX-leakance-hourly-findings.md` (mirror the style of `research/findings/2026-06-23-precip-disaggregation-findings.md`): the 2×2 table, the subset deltas, the `|zeta|` distribution, the verdict, and the recommendation (full port vs drop).
 
 ```bash
-git add scripts/leakance_subset_analysis.py docs/2026-XX-XX-leakance-hourly-findings.md
+git add scripts/leakance_subset_analysis.py research/findings/2026-XX-XX-leakance-hourly-findings.md
 git commit -m "experiment: leakance x hourly 2x2 results + go/no-go verdict"
 ```
 

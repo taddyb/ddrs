@@ -19,7 +19,7 @@ Tightens existing PR #13 integration tests (Layer B4 / C2 / D1) at the new
 1e-5 tolerance. Retrains DDRS once + re-runs PR #12's parity notebook.
 
 **Spec source of truth:**
-`docs/superpowers/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`.
+`research/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`.
 §4.2 contains the full Rust code; this plan is mostly about sequencing
 + verification.
 
@@ -55,7 +55,7 @@ branch — the diagnosis + fix-design + implementation belong together.
 | `tests/training_step_layer_b.rs` | modify | Tighten Layer B4 tolerance `0.1` → `1e-5`. |
 | `tests/training_step_layer_c.rs` | modify | Tighten Layer C2 tolerance `1e-3` → `1e-5`. |
 | `tests/training_step_layer_d.rs` | modify | Tighten Layer D1 tolerance `2e-3` → `1e-5`. |
-| `docs/superpowers/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md` | modify | Append §5.1 (post-retrain verdict). |
+| `research/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md` | modify | Append §5.1 (post-retrain verdict). |
 
 ---
 
@@ -608,7 +608,7 @@ result honestly. The next investigation would be a fresh spec.
 **Spec ref:** §4.5 + §5.1 entry.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`
+- Modify: `research/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`
   (append §5.1)
 
 - [ ] **Step 1: Generate DDR reference NetCDF if needed**
@@ -679,7 +679,7 @@ go into §5.1.
 
 - [ ] **Step 4: Append §5.1 to the fix spec**
 
-Open `docs/superpowers/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`.
+Open `research/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`.
 Append at EOF:
 
 ```markdown
@@ -721,7 +721,7 @@ closed" if the n distribution lands at KS ≤ 0.10 and Spearman ≥ 0.70.>
 
 ```bash
 cd /home/tbindas/projects/ddrs
-git add docs/superpowers/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md
+git add research/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: record area-pool fix verdict
 
@@ -764,7 +764,7 @@ EOF
 ---
 
 Plan complete and saved to
-`docs/superpowers/plans/2026-06-04-ddrs-area-mode-downsample-fix.md`.
+`research/plans/2026-06-04-ddrs-area-mode-downsample-fix.md`.
 
 **Two execution options:**
 

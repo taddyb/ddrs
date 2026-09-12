@@ -8,7 +8,7 @@
 //! 0.795 / 0.737 on the same bundle: the gap is the different RNG window
 //! stream plus ddrs's parent-space KAN head (one parameter set per cell;
 //! DDR varies `log10_uparea` per sub-reach) — see
-//! `docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
+//! `research/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
 //! The baseline has no RNG and matches DDR's 0.594 / 0.671 to rounding, so it
 //! gets a tight band and doubles as the cross-implementation reader check —
 //! it is what caught the time-major `Qr(time, divide_id)` layout of DDR's

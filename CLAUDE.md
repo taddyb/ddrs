@@ -117,7 +117,7 @@ cargo install --path .   # puts `ddrs` in ~/.cargo/bin/
 > This bit the 2026-07-01 leakance×hourly 2×2: the installed `ddrs` was from
 > **before** the disaggregation feature, so the hourly cell silently ran flat
 > repeat-24 (both cells byte-identical — a false "disagg no-op"; see
-> `docs/2026-07-01-leakance-hourly-experiment-handoff.md`).
+> `research/findings/2026-07-01-leakance-hourly-experiment-handoff.md`).
 >
 > After touching `src/`, do ONE of:
 > ```bash
@@ -160,7 +160,7 @@ directory checkpoint; flat `.mpk` refused) into `.ddrs/experiments/<name>/<ts>/`
 Two studies ship: `adjoint` (inflow-gradient influence map) and `landscape`
 (loss-landscape and watershed-perturbation probes, `src/experiment/landscape/`).
 See the `ddrs-dev` skill and
-`docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+`research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
 **Data-source groups** (`src/cli/sources.rs`): named "save files" for the
 `data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
@@ -251,11 +251,11 @@ return the recorder bases (`dir/head`, `dir/optim`; `CompactRecorder` appends
 Resume state is exact, but stored weights/moments are f16
 (`CompactRecorder` = `HalfPrecisionSettings`), so a resumed trajectory drifts
 slowly from the uninterrupted one — see
-`docs/2026-06-07-checkpoint-resume-handoff.md` follow-up #1.
+`research/findings/2026-06-07-checkpoint-resume-handoff.md` follow-up #1.
 
 Full design at
-`docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
-implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+`research/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
+implementation plan at `research/plans/2026-05-30-ddrs-cli-lifecycle.md`.
 
 ### Workspace layout
 
@@ -362,7 +362,7 @@ sample: `examples/juniata_gridded/` (routed NSE 0.751 / KGE 0.730 vs baseline
 `config/sources/conus-gridded.yaml` (620 gauges via
 `scripts/snap_gridded_gauges.py`). Known deviations from DDR (per-cell KAN head,
 no `da_ratio` output correction) are in
-`docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
+`research/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
 DDR's gridded Q′ stores are `Qr(time, divide_id)`; the icechunk reader sniffs
 the axis order (`detect_time_major`) — see the ddrs-dev skill's trap T11.
 
@@ -455,7 +455,7 @@ constrains aggregate loss while carrying zero information about per-reach flux.
 Every rival explanation (gradient starvation, objective noise, uninformative
 inputs, sign ambiguity) was individually refuted.
 
-Verdict and refutations: `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3
+Verdict and refutations: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md` §3
 Enable steps, ranges, zeta diagnostic: `ddrs-dev/references/config.md`
 Gates: `ddrs-dev/references/testing.md`
 
@@ -515,7 +515,7 @@ Subsequent plans on the same input set are cache hits and instant for both.
 Implementation: `src/baseline/`. Mirrors
 `~/projects/ddr/scripts/summed_q_prime.py`.
 
-## Research journal (`docs/journal/`, added 2026-09-10)
+## Research journal (`research/journal/`, added 2026-09-10)
 
 One file per month, append-only, recording what we tried and what came of it.
 Two parts per month: a **ledger** with one row per completed run or experiment
@@ -577,12 +577,12 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
   `ddrs-run`: the runbook for launching, watching, resuming, and auditing a
   training or eval job.
   The other 16 skills were consolidated on 2026-07-30; see
-  `docs/2026-07-30-docs-and-skills-audit.md`.
+  `research/findings/2026-07-30-docs-and-skills-audit.md`.
 - Sparse / autograd questions → `docs/book/reference/burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`
   (which is verbatim from DDR's `merit_training_config.yaml`)
-- CLI behavior / lifecycle / manifest schema → `docs/superpowers/specs/`
-  (specs from `/superpowers brainstorming` runs) and `docs/superpowers/plans/`
+- CLI behavior / lifecycle / manifest schema → `research/specs/`
+  (specs from `/superpowers brainstorming` runs) and `research/plans/`
   (corresponding implementation plans).

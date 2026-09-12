@@ -182,7 +182,7 @@ campaign established that zeta cannot be constrained from gauged discharge alone
 per-reach distribution. The term is code-complete and gradient-exact; it is left
 in place as the anchor for the paper's selective-equifinality axis. Do not
 attempt to promote it without reading
-`docs/2026-07-06-leakance-nogo-scientific-summary.md`.
+`research/findings/2026-07-06-leakance-nogo-scientific-summary.md`.
 
 ### Daily→hourly disaggregation head
 

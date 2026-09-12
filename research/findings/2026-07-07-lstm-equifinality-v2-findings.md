@@ -1,9 +1,9 @@
 # LSTM-source selective-equifinality — v2 findings (audit-corrected rules)
 
 Date: 2026-07-07. Branch: `unit_catchments`. Governed by
-`docs/superpowers/specs/2026-07-07-lstm-equifinality-v2-analysis-design.md`.
+`research/specs/2026-07-07-lstm-equifinality-v2-analysis-design.md`.
 Supersedes ONLY the analysis rules of the original findings doc
-(`docs/2026-07-07-lstm-equifinality-findings.md`) — no retraining, no new
+(`research/findings/2026-07-07-lstm-equifinality-findings.md`) — no retraining, no new
 arms. That doc's Methods (§2), arms, run IDs, and raw §6 script output remain
 the reference for setup; this doc reports what changed under the v2 rules
 and the two analyses the audit flagged as untested.

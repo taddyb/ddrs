@@ -1,6 +1,6 @@
 # Adjoint influence map — checks 3 and 4 on the UH arm: volume functional and the "mass loss" — findings
 
-**Plan:** validation plan of 2026-09-05 (checks 3, 4); prior: `docs/2026-09-06-adjoint-method-validation-uh-findings.md` (checks 1, 2)
+**Plan:** validation plan of 2026-09-05 (checks 3, 4); prior: `research/findings/2026-09-06-adjoint-method-validation-uh-findings.md` (checks 1, 2)
 **Bundles:** `experiments/adjoint-uh-w90`, `experiments/adjoint-uh-w180`, `experiments/adjoint-uh-trace` (UH retrospective arm, 8 gauges)
 **Outputs:** `.ddrs/experiments/adjoint-uh-w90/2026-09-07T18-13-59Z/`, `.ddrs/experiments/adjoint-uh-w180/2026-09-07T18-14-59Z/`
 (figures + `CHECK34.md` in the w180 `figures/`), `.ddrs/experiments/adjoint-uh-trace/2026-09-07T18-08-*/uh-retro/trace/*.nc`
@@ -109,12 +109,12 @@ routing mass-balance defect.
 
 ## 4. Consequences for earlier documents
 
-1. `docs/2026-09-05-adjoint-influence-conus-findings.md` §3.1 and the population handoff: "genuine
+1. `research/findings/2026-09-05-adjoint-influence-conus-findings.md` §3.1 and the population handoff: "genuine
    unexplained mass loss … clamped negative solves are the candidate mechanism" must be replaced by
    intermittency + slow transport; the "13–69 reaches per arm" count was computed with a window-mean
    wetness criterion that hides intermittency. The population run is being re-executed with
    `volume_sens_wet` (2026-09-07) to give the corrected per-arm numbers.
-2. `docs/2026-09-04-adjoint-influence-poc-findings.md` §3.1: the "dhbv2-lumped destroys mass in a
+2. `research/findings/2026-09-04-adjoint-influence-poc-findings.md` §3.1: the "dhbv2-lumped destroys mass in a
    12-reach tributary" reading must be re-examined under that arm with `q_prime_wet_frac` before it is
    repeated; the mechanism it hypothesised is refuted here on the UH arm.
 3. Spec §2.3 volume functional: define the reported statistic as the wet-hour mean; keep the raw mean as

@@ -250,7 +250,7 @@ was still ruled NO-GO — passing it is necessary, not sufficient.
 - Debugging gradient parity against DDR → `examples/compare_ddr_sandbox.rs`.
 - **H5/H6 selective-equifinality plots** — campaign CLOSED, both **INCONCLUSIVE**.
   The authoritative analysis is `scripts/h5_h6_audit_analysis.py` +
-  `docs/2026-07-09-h5-h6-equifinality-v2-findings.md`. Do **not** regenerate the v1
+  `research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md`. Do **not** regenerate the v1
   figures: the `f_n ≥ 2/3` bars used an unpaired variance estimate (the correct
   paired test has 15–40× smaller variance), and the `min × 1.05` sublevel contour
   saturated — it swallowed 100–105 of 121 grid points. Both instruments are refuted.

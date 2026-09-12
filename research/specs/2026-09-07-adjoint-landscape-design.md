@@ -1,7 +1,7 @@
 # Per-gauge loss landscape in channel-parameter space via the adjoint — Design
 
 **Date:** 2026-09-07
-**Status:** approved in conversation (training loss for now; other losses later). **Sample case run 2026-09-07:** `docs/2026-09-07-landscape-uh-juniata-findings.md` (instrument PASS; box must be bounded by the parameter ranges, see §5).
+**Status:** approved in conversation (training loss for now; other losses later). **Sample case run 2026-09-07:** `research/findings/2026-09-07-landscape-uh-juniata-findings.md` (instrument PASS; box must be bounded by the parameter ranges, see §5).
 **Study name:** `landscape` (`ddrs experiment <bundle>` with `study: landscape`)
 **Depends on:** `src/experiment/` framework, `adjoint::influence::InfluenceContext` (dataset/head/collate),
 the seed-43 replicate (`config/experiments/uh_retro_seed43.yaml`) for the tolerance.

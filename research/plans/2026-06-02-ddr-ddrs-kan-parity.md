@@ -29,7 +29,7 @@ under DDR's `uv` venv at `~/projects/ddr/.venv/` (existing). New Rust dep
 `ndarray-npy = "0.9"` for `.npz` I/O. No new Python deps (pykan, numpy,
 torch already installed under DDR).
 
-**Spec source of truth:** `docs/superpowers/specs/2026-06-02-ddr-ddrs-kan-parity-design.md`.
+**Spec source of truth:** `research/specs/2026-06-02-ddr-ddrs-kan-parity-design.md`.
 Do not relitigate decisions made there; if a question arises, re-read the
 spec and decide consistently with it.
 
@@ -140,7 +140,7 @@ Note the run-id in the plan execution log; do NOT block on completion.
 **Spec ref:** §4 Layer 0, sub-tables 0.1–0.5.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-02-ddr-ddrs-kan-parity-design.md` (replace `(verify)` placeholders with ✓ or ✗)
+- Modify: `research/specs/2026-06-02-ddr-ddrs-kan-parity-design.md` (replace `(verify)` placeholders with ✓ or ✗)
 
 - [ ] **Step 1: Inspect each spec table row marked `(verify)`**
 
@@ -198,7 +198,7 @@ is NOT seedable — Task 3 is required to fix).
 - [ ] **Step 3: Commit the audited spec**
 
 ```bash
-git add docs/superpowers/specs/2026-06-02-ddr-ddrs-kan-parity-design.md
+git add research/specs/2026-06-02-ddr-ddrs-kan-parity-design.md
 git commit -m "docs/spec: complete Layer 0 hyperparameter audit
 
 Replaces (verify) placeholders with concrete ✓/✗ verdicts after reading
@@ -2092,7 +2092,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Plan complete — execution choice
 
-**Plan saved to `docs/superpowers/plans/2026-06-02-ddr-ddrs-kan-parity.md`.
+**Plan saved to `research/plans/2026-06-02-ddr-ddrs-kan-parity.md`.
 Two execution options:**
 
 **1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration.

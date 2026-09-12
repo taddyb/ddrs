@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (BURN 0.21, netcdf crate), Python under `~/projects/ddr` uv venv (numpy/xarray/scipy) and `./ddrs-py` venv (geopandas/matplotlib, per the `ddrs-eval-plots` skill).
 
-**Spec:** `docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md`
+**Spec:** `research/specs/2026-07-02-zeta-gradient-probe-design.md`
 (Spec delta discovered while planning: params in `SpatialParameters` are
 NORMALIZED [0,1]; denormalization happens inside `setup_inputs`
 (`src/routing/mmc.rs:203-222`). The leaves are therefore lifted in normalized
@@ -233,7 +233,7 @@ git commit -m "test(probe): leaf-lift parity + leaf grads + COMID accumulation (
 
 ```rust
 //! Stage-1 adjoint reachability probe (spec:
-//! docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md).
+//! research/specs/2026-07-02-zeta-gradient-probe-design.md).
 //!
 //! Gradients of the training objective w.r.t. the per-reach NORMALIZED
 //! leakance parameters, read at a FIXED head (no optimizer step ever).
@@ -520,7 +520,7 @@ optimizer step and checkpointing REMOVED). Structure:
 
 ```rust
 //! Stage-1/2 driver for the zeta gradient-sensitivity probe.
-//! Spec: docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md
+//! Spec: research/specs/2026-07-02-zeta-gradient-probe-design.md
 //!
 //!   --mode grad     adjoint reachability map (default)
 //!   --mode perturb  stage-2 q' perturbation runs (Task 6)
@@ -1290,13 +1290,13 @@ in the report (skill requirement).
 ### Task 10: Findings report
 
 **Files:**
-- Create: `docs/2026-07-0X-zeta-gradient-probe-findings.md` (date = the day
+- Create: `research/findings/2026-07-0X-zeta-gradient-probe-findings.md` (date = the day
   the battery completes; fill every number from `/tmp/zeta_gradient_verdicts.txt`
   and the run logs — no placeholders may survive)
 
 - [ ] **Step 1: Write in the established report format**
 
-Sections (mirroring `docs/2026-07-02-leakance-diagnosis-findings.md`):
+Sections (mirroring `research/findings/2026-07-02-leakance-diagnosis-findings.md`):
 1. Motivating question + the two rival mechanisms (starvation vs rejection)
 2. Methods (stage-1 replica of the training loop, leaf-lifting, two parameter
    points; stage-2 site selection with the GAGES-II Ref filter, round
@@ -1312,7 +1312,7 @@ Sections (mirroring `docs/2026-07-02-leakance-diagnosis-findings.md`):
 - [ ] **Step 2: Commit**
 
 ```bash
-git add docs/2026-07-0*-zeta-gradient-probe-findings.md
+git add research/findings/2026-07-0*-zeta-gradient-probe-findings.md
 git commit -m "docs: zeta gradient probe findings — <verdict summary>"
 ```
 

@@ -4,8 +4,8 @@
 
 **Goal:** Build and run the leakance promotion gate: losing-only clamp + impervious hard-zero + staged two-head training + three-leg gate, on the clean objective with enriched inputs.
 
-**Experiment doc:** `docs/2026-07-05-phase-c-leakance-gate-experiment.md`
-**Spec:** `docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md` §5
+**Experiment doc:** `research/findings/2026-07-05-phase-c-leakance-gate-experiment.md`
+**Spec:** `research/specs/2026-07-04-leakance-gate-program-design.md` §5
 **Worktree:** `zeta-sensitivity`; CPU-only; seed 42; guard every code task with `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum`, `compare_ddr_sandbox` ABSOLUTE MATCH.
 
 **Prereqs already done:** C0 (multi-store attributes), Phase A (`merit_channel_attributes_v1.nc`), Phase B (state cache), continuity fixes, disagg lookahead.
@@ -74,7 +74,7 @@
 
 ### Task 8: Findings + paper hook
 
-- [ ] `docs/2026-07-XX-phase-c-findings.md` in the experiment-report structure; connect the verdict to the selective-equifinality narrative (`ddr_equifinality/paper.tex`). Guards green. Commit.
+- [ ] `research/findings/2026-07-XX-phase-c-findings.md` in the experiment-report structure; connect the verdict to the selective-equifinality narrative (`ddr_equifinality/paper.tex`). Guards green. Commit.
 
 ---
 

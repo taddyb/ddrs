@@ -547,8 +547,8 @@ anything. Deletion is opt-in via at least one of the filter flags.
   examples; old binary commands moved to a "Legacy" subsection that is
   removed when the binaries are deleted.
 - CLAUDE.md "When in doubt" section currently points at `.claude/`. This
-  spec lives at `docs/superpowers/specs/` (the brainstorming-skill default).
-  Add a line: "`docs/superpowers/specs/` holds design docs from `/superpowers`
+  spec lives at `research/specs/` (the brainstorming-skill default).
+  Add a line: "`research/specs/` holds design docs from `/superpowers`
   brainstorms" so the doc-root split is documented.
 - `.claude/ARCHITECTURE.md` gains a short "CLI lifecycle" section linking
   to this spec.

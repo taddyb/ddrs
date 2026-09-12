@@ -101,4 +101,4 @@ zarr-v2 store therefore means "the reader opened it", not "it satisfies
 this contract" — the checks in the sections above are unenforced for that
 format.
 
-Design history: `docs/superpowers/specs/2026-07-01-nh-qprime-import-design.md`.
+Design history: `research/specs/2026-07-01-nh-qprime-import-design.md`.

@@ -1,10 +1,10 @@
 # Synthetic losing-reach recoverability (positive control) — experiment report (2026-07-04)
 
-Spec: `docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md`
-Plan: `docs/superpowers/plans/2026-07-03-synthetic-recoverability.md`
+Spec: `research/specs/2026-07-03-synthetic-recoverability-design.md`
+Plan: `research/plans/2026-07-03-synthetic-recoverability.md`
 Prior instruments:
-`docs/2026-07-03-zeta-gradient-probe-findings.md` (P1/P2 refuted, P3 NO-GO),
-`docs/2026-07-02-leakance-diagnosis-findings.md` (H1–H7 diagnosis).
+`research/findings/2026-07-03-zeta-gradient-probe-findings.md` (P1/P2 refuted, P3 NO-GO),
+`research/findings/2026-07-02-leakance-diagnosis-findings.md` (H1–H7 diagnosis).
 Code: `src/training/forward.rs` (`LeakanceOverride`), `src/data/store/obs_writer.rs`,
 `src/bin/probe_zeta_gradient.rs` (`--mode teacher`), `src/bin/{train,eval,dump_parameters}.rs`
 (`--backend cpu`), `scripts/recoverability_sites.py`,

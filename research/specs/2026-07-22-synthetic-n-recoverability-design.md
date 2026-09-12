@@ -2,10 +2,10 @@
 
 Date: 2026-07-22
 Prior instruments:
-`docs/2026-07-16-aorc2f-wave1-findings.md`, `docs/2026-07-16-wave2-cross-wave-findings.md`
+`research/findings/2026-07-16-aorc2f-wave1-findings.md`, `research/findings/2026-07-16-wave2-cross-wave-findings.md`
 (this campaign's 4 real-Q'-source arms),
-`docs/2026-07-04-synthetic-recoverability-findings.md` +
-`docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md`
+`research/findings/2026-07-04-synthetic-recoverability-findings.md` +
+`research/specs/2026-07-03-synthetic-recoverability-design.md`
 (the leakance positive-control pattern this design generalizes),
 `/tmp/experiment-handoff-lstm-equifinality-parameterization-patterns.md`
 (the standing selective-equifinality hypothesis this experiment tests).
@@ -39,8 +39,8 @@ because the roughness observations are built by construction.
 **Naming — do not conflate with the registered campaign.** This experiment's
 4 arms are this AORC2F/LSTM wave campaign's own naming
 (`aorc2f_distributed`/`aorc2f_lumped`/`daily_lstm`/`hourly_lstm`, from
-`docs/2026-07-16-aorc2f-wave1-findings.md` and
-`docs/2026-07-16-wave2-cross-wave-findings.md`) — a DIFFERENT arm set from
+`research/findings/2026-07-16-aorc2f-wave1-findings.md` and
+`research/findings/2026-07-16-wave2-cross-wave-findings.md`) — a DIFFERENT arm set from
 the pre-registered LSTM-equifinality campaign's R1/R2/R3 naming (the paper's
 `tab:arms` table). Any findings doc or paper section drawing on this
 experiment must keep the two naming schemes and the two campaigns'
@@ -175,7 +175,7 @@ sign.** S5 is supporting evidence, not a hard bar (only 4 data points).
    loads the 4 students' `dump_parameters` outputs, the truth-n CSV, and the
    consensus-geometry NetCDF; computes S1-S5 exactly as §3 defines; prints a
    VERDICTS block; writes per-reach rows CSV.
-7. **Findings report** — `docs/2026-07-22-synthetic-n-recoverability-findings.md`
+7. **Findings report** — `research/findings/2026-07-22-synthetic-n-recoverability-findings.md`
    once run.
 
 ## 5. Execution sequence and compute

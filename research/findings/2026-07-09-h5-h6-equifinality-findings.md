@@ -1,10 +1,10 @@
 # H5/H6 parameter-transfer and loss-landscape — findings (2026-07-09)
 
-Spec: `docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`
-Prior findings: `docs/2026-07-07-lstm-equifinality-v2-findings.md` (H1–H4)
+Spec: `research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`
+Prior findings: `research/findings/2026-07-07-lstm-equifinality-v2-findings.md` (H1–H4)
 
 > **Superseded analysis (2026-07-09):**
-> `docs/2026-07-09-h5-h6-equifinality-v2-findings.md` re-analyzes these same
+> `research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md` re-analyzes these same
 > raw CSVs with paired statistics and corrects §3.1's noise comparison, the
 > missing split-half floors (computable from the per-window CSVs), the
 > unreported R1↔R2 control comparison, and §3.2's surface characterization.

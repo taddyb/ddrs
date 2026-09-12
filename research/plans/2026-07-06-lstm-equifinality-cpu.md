@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (BURN 0.21, NdArray backend, clap, netcdf crate), YAML configs, Python via `uv` (numpy, scipy, xarray, zarr, icechunk, netCDF4).
 
-**Spec:** `docs/superpowers/specs/2026-07-06-lstm-equifinality-cpu-design.md`
+**Spec:** `research/specs/2026-07-06-lstm-equifinality-cpu-design.md`
 **Branch:** stay on `unit_catchments` (the runs depend on PR #24's LSTM-store support; do NOT branch off master).
 
 **Standing rules for every task:**
@@ -34,7 +34,7 @@
 | `config/experiments/equif_hourly_lstm.yaml` | Create | arm R3 |
 | `scripts/run_equif_arms.sh` | Create | sequential detached run driver |
 | `scripts/equif_convergence_analysis.py` | Create | 4-level cross-arm analysis (run from `~/projects/ddr` venv) |
-| `docs/2026-07-XX-lstm-equifinality-findings.md` | Create (last task) | findings doc |
+| `research/findings/2026-07-XX-lstm-equifinality-findings.md` | Create (last task) | findings doc |
 
 ---
 
@@ -374,7 +374,7 @@ Rules baked in: `data_sources` blocks are STRUCTURALLY identical to `config/sour
 ```yaml
 # equif_daily_lstm_flat.yaml — selective-equifinality arm R1
 # Q': daily CudaLSTM (NH), flat repeat-24 to hourly (NO disaggregation head).
-# Spec: docs/superpowers/specs/2026-07-06-lstm-equifinality-cpu-design.md
+# Spec: research/specs/2026-07-06-lstm-equifinality-cpu-design.md
 # Constants across all equif_* arms: seed 42, 5 epochs, rho 90, warmup 5,
 # L1 loss, train 1981/10/01-1995/09/30, eval 1995/10/01-2010/09/30, CPU.
 
@@ -840,14 +840,14 @@ git commit -m "feat(analysis): cross-arm selective-equifinality convergence anal
 ### Task 8: Findings doc
 
 **Files:**
-- Create: `docs/2026-07-XX-lstm-equifinality-findings.md` (date = day the analysis completes)
+- Create: `research/findings/2026-07-XX-lstm-equifinality-findings.md` (date = day the analysis completes)
 
 - [ ] **Step 1: Write the findings doc** using the mandatory template from the `ddrs-docs-and-writing` skill: header block (spec/plan/script links), **one-line verdict first**, §1 pre-registered H1–H4 table (copied from the spec, NOT reverse-engineered), §2 methods (arms table with run IDs, git SHA, binary provenance note per the STALE-BINARY rule, `streamflow resolution` log lines), §3 results (SUPPORTED/REFUTED/INCONCLUSIVE + key number per hypothesis, every number with units + gauge count + window), §4 conclusions, §5 next steps (dHBV2 arms), §6 raw script output, §7 reproduce commands.
 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add docs/2026-07-*-lstm-equifinality-findings.md
+git add research/findings/2026-07-*-lstm-equifinality-findings.md
 git commit -m "docs(findings): LSTM-source selective-equifinality results (H1-H4 verdicts)"
 ```
 

@@ -28,7 +28,7 @@
 - Authors: Tadd Bindas (presenter) and Chaopeng Shen, as in `paper.tex`. Affiliations/author order are entered in the portal by the user, not drafted here.
 - The user has an AGU account and session H069 accepts direct submissions (the session text says "Submit an Abstract to this Session").
 - The abstract is for a talk/poster derived from the paper — so it may share the paper's title stem "Beyond Equifinality in Differentiable River Routing".
-- Numbers are quoted from the extraction verified this session against `docs/2026-07-07-lstm-equifinality{,-v2}-findings.md`, `docs/2026-07-09-h5-h6-equifinality-v2-findings.md`, and `references/research-status.md` (re-verified 2026-07-30). No new computation is needed or attempted.
+- Numbers are quoted from the extraction verified this session against `research/findings/2026-07-07-lstm-equifinality{,-v2}-findings.md`, `research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md`, and `references/research-status.md` (re-verified 2026-07-30). No new computation is needed or attempted.
 
 ---
 
@@ -67,7 +67,7 @@
 
 - [ ] **Step 2: Verify every number in the table against the repo (not memory)**
 
-Run: `grep -n "0.4512\|−0.380\|-0.380\|0.095\|0.023" /home/tbindas/projects/ddrs/docs/2026-07-07-lstm-equifinality*.md /home/tbindas/projects/ddrs/docs/2026-07-09-h5-h6-equifinality-v2-findings.md | head -30`
+Run: `grep -n "0.4512\|−0.380\|-0.380\|0.095\|0.023" /home/tbindas/projects/ddrs/research/findings/2026-07-07-lstm-equifinality*.md /home/tbindas/projects/ddrs/research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md | head -30`
 Expected: each of C3–C5's numbers appears in the named doc. If any number is absent, fix the table from the doc — the doc wins.
 
 - [ ] **Step 3: Commit the working file** (paper repo, not ddrs)

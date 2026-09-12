@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Leakance low-zeta diagnosis — 7-hypothesis falsification battery.
 
-Spec: docs/superpowers/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md
+Spec: research/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md
 Run:  cd ~/projects/ddr && uv run python <ddrs>/scripts/leakance_diagnosis.py
 
 H1 structural ceiling   H2 driving head      H3 KAN variance collapse

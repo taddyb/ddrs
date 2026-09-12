@@ -21,7 +21,7 @@ in `scripts/` using `hydra` (already DDR's invocation pattern) + JSON.
 No new dependencies on either side.
 
 **Spec source of truth:**
-`docs/superpowers/specs/2026-06-04-matched-batch-replay-design.md`.
+`research/specs/2026-06-04-matched-batch-replay-design.md`.
 
 **Branch:** Stay on `training-step-parity` (PR #13).
 
@@ -57,7 +57,7 @@ No new dependencies on either side.
 | `src/data/sampler.rs` | modify | Add `BatchSource` enum + `ReplaySampler` struct. Keep `RandomSampler` unchanged so the existing path is byte-for-byte preserved. |
 | `src/training/driver.rs` | modify | Plumb `BatchSource` through the training loop. When `Replay`, iterate the externally-provided batches; when `Shuffle`, use the existing `RandomSampler`. |
 | `src/cli/run.rs` | modify | Add `--batch-order-from <path>` argument to `ddrs run`. Loads the JSON and converts to `BatchSource::Replay`. |
-| `docs/superpowers/specs/2026-06-04-matched-batch-replay-design.md` | modify | Append §5.1 verdict. |
+| `research/specs/2026-06-04-matched-batch-replay-design.md` | modify | Append §5.1 verdict. |
 | `/tmp/ddr_batch_order.json` | create (transient) | DDR's full `(epoch, mb_idx, [staids])` trace. Not committed. |
 
 ---
@@ -657,7 +657,7 @@ To the struct found in Step 1, add:
 
 ```rust
     /// Replay a captured mini-batch order from a JSON file (matched-batch
-    /// parity experiment; see docs/superpowers/specs/
+    /// parity experiment; see research/specs/
     /// 2026-06-04-matched-batch-replay-design.md). When set, overrides
     /// the default RandomSampler.
     ///
@@ -862,7 +862,7 @@ No commit (the retrain output is gitignored).
 **Spec ref:** §5.3 + §6 outcome thresholds.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-04-matched-batch-replay-design.md`
+- Modify: `research/specs/2026-06-04-matched-batch-replay-design.md`
   (append §5.1)
 
 - [ ] **Step 1: Regenerate DDR reference NetCDF against new run's COMID order**
@@ -950,7 +950,7 @@ Map the actual Cell 5 verdict to one of these three rows.
 
 - [ ] **Step 5: Append §5.1 to the spec**
 
-Open `docs/superpowers/specs/2026-06-04-matched-batch-replay-design.md`.
+Open `research/specs/2026-06-04-matched-batch-replay-design.md`.
 Append at EOF:
 
 ```markdown
@@ -1002,7 +1002,7 @@ Append at EOF:
 
 ```bash
 cd /home/tbindas/projects/ddrs
-git add docs/superpowers/specs/2026-06-04-matched-batch-replay-design.md
+git add research/specs/2026-06-04-matched-batch-replay-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: record matched-batch replay verdict
 
@@ -1044,7 +1044,7 @@ EOF
 ---
 
 Plan complete and saved to
-`docs/superpowers/plans/2026-06-04-matched-batch-replay.md`.
+`research/plans/2026-06-04-matched-batch-replay.md`.
 
 **Two execution options:**
 

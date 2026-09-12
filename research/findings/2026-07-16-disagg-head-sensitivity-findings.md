@@ -5,8 +5,8 @@ Checkpoints probed: `.ddrs/runs/2026-07-16T02-22-14Z-train-and-test`,
 `.ddrs/runs/2026-07-16T02-23-20Z-train-and-test`,
 `.ddrs/runs/2026-07-16T11-31-50Z-train-and-test`'s
 `checkpoints/epoch_5_mb_35/head` (all three train-and-test arms that used
-the frozen capacity-boosted disagg head — `docs/2026-07-16-aorc2f-wave1-findings.md`,
-`docs/2026-07-16-wave2-cross-wave-findings.md`; run-ID-to-experiment mapping
+the frozen capacity-boosted disagg head — `research/findings/2026-07-16-aorc2f-wave1-findings.md`,
+`research/findings/2026-07-16-wave2-cross-wave-findings.md`; run-ID-to-experiment mapping
 in `.ddrs/README.md`).
 
 ## 1. Setup

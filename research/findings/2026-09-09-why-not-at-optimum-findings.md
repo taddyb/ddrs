@@ -11,8 +11,8 @@ and too few optimizer steps are all ruled out; what is left is a channel geometr
 and a head whose attributes carry only a tenth of the information needed to place n per gauge. The width exponent q
 is unidentifiable from daily discharge at 85 % of gauges and should be prescribed or reparametrised, not learned.
 
-Reports: `docs/why-analysis/A-flat-q.md`, `B-clamping.md`, `C-weak-gradient.md`, `D-inflow-bias.md`,
-`E-training-side.md`, `F-equifinality.md`. Census facts: `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §13, §14.
+Reports: `research/why-analysis/A-flat-q.md`, `B-clamping.md`, `C-weak-gradient.md`, `D-inflow-bias.md`,
+`E-training-side.md`, `F-equifinality.md`. Census facts: `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` §13, §14.
 
 ## 1. Question and data
 
@@ -118,7 +118,7 @@ Ranked by expected effect, each with the evidence and the confirming experiment.
    trained channel adds 0.00 days of delay at two thirds of gauges (D); the class-iv gauges want n × 2.5 and the ten
    most egregious n × 4 to 9 with q at the floor (§14), which is the gauge compensating a 21 m channel on an
    8,700 km² river (findings §7); the largest basins want slower at 77 % and gain most (E). Experiment: the
-   Moody and Troutman p(Q_ref) or p(A) arm from `docs/2026-09-08-fixed-p-assessment.md`, retrained on gages_3000, then
+   Moody and Troutman p(Q_ref) or p(A) arm from `research/findings/2026-09-08-fixed-p-assessment.md`, retrained on gages_3000, then
    this census. Success: the early-arrival class shrinks from 40 % toward the on-time share, class-iv gain falls
    below 0.01, small-basin displacement unchanged. Expected effect: the largest of any single change, because it
    addresses the 35 % that carry nearly all the available NSE.

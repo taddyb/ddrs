@@ -4,7 +4,7 @@
 
 **Goal:** GitHub Actions CI that vets every PR and every master push with the full debug test suite plus the release routing-acceptance gates, backed by branch protection and an opt-in local pre-push hook.
 
-**Architecture:** One workflow (`ci.yml`) with two independent `ubuntu-latest` jobs — `test` (debug `cargo test --features fixtures`) and `acceptance` (release `compare_ddr_sandbox` example + `juniata_acceptance`). Both install a CUDA toolkit because `burn-cuda`/`cudarc` are non-optional compile-time deps. Branch protection requires both checks but leaves admin direct pushes possible (hybrid posture). Spec: `docs/superpowers/specs/2026-09-03-ci-vetting-design.md`.
+**Architecture:** One workflow (`ci.yml`) with two independent `ubuntu-latest` jobs — `test` (debug `cargo test --features fixtures`) and `acceptance` (release `compare_ddr_sandbox` example + `juniata_acceptance`). Both install a CUDA toolkit because `burn-cuda`/`cudarc` are non-optional compile-time deps. Branch protection requires both checks but leaves admin direct pushes possible (hybrid posture). Spec: `research/specs/2026-09-03-ci-vetting-design.md`.
 
 **Tech Stack:** GitHub Actions, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `Jimver/cuda-toolkit`, `gh` CLI, git `core.hooksPath`.
 
@@ -186,7 +186,7 @@ Claude-Session: https://claude.ai/code/session_01RHusoRV4Th4tio8bh2oPca"
 git push -u origin ci-vetting
 gh pr create --title "CI: vet PRs and master pushes with the routing acceptance gates" \
   --body "$(cat <<'EOF'
-Implements docs/superpowers/specs/2026-09-03-ci-vetting-design.md: `test`
+Implements research/specs/2026-09-03-ci-vetting-design.md: `test`
 (debug suite + KAN fixtures) and `acceptance` (release sandbox parity +
 Juniata metric floors) on every PR and master push. This PR is the bring-up
 vehicle — CUDA-install iteration commits land here until both jobs are green.

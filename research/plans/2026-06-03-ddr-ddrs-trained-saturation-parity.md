@@ -26,7 +26,7 @@ venv at `~/projects/ddr/.venv/`. Jupyter notebook via the same venv. xarray,
 matplotlib, scipy.stats, pandas (already present).
 
 **Spec source of truth:**
-`docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`.
+`research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`.
 
 ---
 
@@ -57,7 +57,7 @@ matplotlib, scipy.stats, pandas (already present).
 
 | Path | Status | Responsibility |
 |------|--------|----------------|
-| `docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md` | modify | Layer 0 audit table filled in; Layer 0.5 finding appended; §5 verdict appended. |
+| `research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md` | modify | Layer 0 audit table filled in; Layer 0.5 finding appended; §5 verdict appended. |
 | `scripts/dump_ddr_trained_params.py` | create | Python helper. Run under DDR's venv. Loads DDR checkpoint, calls `_predict_kan_params`, subsets to DDRS's CONUS COMID order, writes `/tmp/kan_params_trained_ddr.nc`. |
 | `.claude/skills/ddrs-eval-plots/references/parity_trained.md` | create | Skill reference with the 5-cell notebook recipe (load → stats → histograms → per-gauge scatter → verdict). |
 | `.ddrs/runs/2026-06-03T09-45-09Z-train-and-test/plots/parity_trained.ipynb` | create (transient — gitignored) | Materialized notebook from the skill ref. Executed via `cd ddrs-py && uv run jupyter nbconvert --execute`. |
@@ -72,7 +72,7 @@ matplotlib, scipy.stats, pandas (already present).
 **Spec ref:** §4 Layer 0.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md` (the §4 Layer 0 table)
+- Modify: `research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md` (the §4 Layer 0 table)
 
 - [ ] **Step 1: Read the DDR-side training entry point**
 
@@ -101,7 +101,7 @@ Note the same fields on the DDRS side.
 - [ ] **Step 3: Fill in §4 Layer 0 table inline**
 
 Open the spec at
-`docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`.
+`research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`.
 For each row in the table at §4 Layer 0, replace `(audit)` with one of:
 
 - `✓` if the value matches (DDR source line + DDRS source line + identical
@@ -117,7 +117,7 @@ just confirm ✓ from pre-flight; you don't have to re-walk them.
 
 ```bash
 cd /home/tbindas/projects/ddrs
-git add docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md
+git add research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: complete Layer 0 training-config audit
 
@@ -141,7 +141,7 @@ EOF
 **Spec ref:** §4 Layer 0.5.
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md` (append finding under §4 Layer 0.5)
+- Modify: `research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md` (append finding under §4 Layer 0.5)
 
 - [ ] **Step 1: Locate the most recent existing DDR training output**
 
@@ -246,7 +246,7 @@ Under §4 Layer 0.5, append the result you got:
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md
+git add research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: Layer 0.5 finding from existing DDR checkpoint
 
@@ -844,7 +844,7 @@ EOF
 **Spec ref:** §5 "What success looks like".
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`
+- Modify: `research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`
 
 - [ ] **Step 1: Append the verdict**
 
@@ -878,7 +878,7 @@ Fill in the brackets with the actual values from Task 6 Step 3.
 
 ```bash
 cd /home/tbindas/projects/ddrs
-git add docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md
+git add research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md
 git commit -m "$(cat <<'EOF'
 docs/spec: record empirical verdict for trained-n parity
 
@@ -914,7 +914,7 @@ EOF
 
 ---
 
-Plan complete and saved to `docs/superpowers/plans/2026-06-03-ddr-ddrs-trained-saturation-parity.md`.
+Plan complete and saved to `research/plans/2026-06-03-ddr-ddrs-trained-saturation-parity.md`.
 
 **Two execution options:**
 

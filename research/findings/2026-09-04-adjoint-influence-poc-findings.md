@@ -1,7 +1,7 @@
 # Adjoint influence map — proof of concept on the Juniata pair — findings
 
-**Spec:** `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
-**Plan:** `docs/superpowers/plans/2026-09-03-ddrs-experiment-adjoint.md`
+**Spec:** `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
+**Plan:** `research/plans/2026-09-03-ddrs-experiment-adjoint.md`
 **Bundle:** `experiments/adjoint/` (`experiment.yaml`, `plots.py`, README)
 **Output:** `.ddrs/experiments/adjoint/2026-09-04T13-25-01Z/` (figures in `figures/`)
 **Binary:** `target/release/ddrs` built from the working tree at commit `cfdd7c8`+ (this PR), cpu backend

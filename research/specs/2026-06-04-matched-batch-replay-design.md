@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-04
 **Branch:** `training-step-parity` (PR #13)
-**Successor to:** `docs/superpowers/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`
+**Successor to:** `research/specs/2026-06-04-ddrs-area-mode-downsample-fix-design.md`
 (`§5.1 Empirical verdict` — area-pool fix closed ~50% of the saturation
 band fraction, but trained-`n` per-reach Spearman is still only 0.347)
 

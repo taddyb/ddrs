@@ -13,8 +13,8 @@ against the real R1/R3 checkpoints — but NO H6 evaluation has been run under
 the registered protocol (16 windows, 256-gauge subsample, 11×11 grid); do
 not interpret any H6 result until a registered run exists and this line is
 updated again.** Continues the numbering of the LSTM equifinality campaign (H1–H4,
-`docs/2026-07-07-lstm-equifinality-v2-findings.md`). Literature basis:
-`docs/2026-07-08-equifinality-litreview-experiments.md` (E1/E2/E3/E6 there).
+`research/findings/2026-07-07-lstm-equifinality-v2-findings.md`). Literature basis:
+`research/findings/2026-07-08-equifinality-litreview-experiments.md` (E1/E2/E3/E6 there).
 
 Interpretive frame (Chis et al. 2016; Renard et al. 2010): the LSTM arms left two
 readings of Manning's n open — *sloppy* (poorly constrained but structurally

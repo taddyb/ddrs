@@ -7,8 +7,8 @@ all 4 arms and are **not yet computable**. This doc records execution facts and
 the arm-1 preview so nothing is lost; it must be finalized when the remaining
 arms (`lumped`, `daily_lstm`, `hourly_lstm`) complete.
 
-Spec: `docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md`
-Plan: `docs/superpowers/plans/2026-07-22-synthetic-n-recoverability.md`
+Spec: `research/specs/2026-07-22-synthetic-n-recoverability-design.md`
+Plan: `research/plans/2026-07-22-synthetic-n-recoverability.md`
 PR: https://github.com/taddyb/ddrs/pull/29
 
 ## What this tests

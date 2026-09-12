@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-04
 **Branch (planned):** `area-mode-downsample`
-**Successor to:** `docs/superpowers/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md`
+**Successor to:** `research/specs/2026-06-04-ddr-ddrs-training-step-parity-design.md`
 (`§5.1 Empirical verdict` — concrete root cause: downsample-mode divergence)
 **Status:** ready for implementation
 

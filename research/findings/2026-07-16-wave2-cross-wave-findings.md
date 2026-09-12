@@ -1,7 +1,7 @@
 # LSTM Q′ wave 2 + cross-wave comparison, findings (2026-07-16)
 
 Plan: `.claude/plans/glowing-bubbling-sprout.md` (agent-authored, not checked in)
-Wave 1: `docs/2026-07-16-aorc2f-wave1-findings.md`
+Wave 1: `research/findings/2026-07-16-aorc2f-wave1-findings.md`
 Configs: `config/experiments/lstm_daily_frozen_chunk1.yaml`,
          `config/experiments/lstm_hourly_native.yaml`
 Plots: `output/2026-07-16-wave-comparison/` (script: `scripts/wave_comparison_plots.py`)
@@ -58,7 +58,7 @@ Strengthened with a process-global panic-hook detector
 (`WORKER_PANICKED`/`ensure_panic_hook_installed`/`take_worker_panicked` in
 `src/training/eval.rs`) that catches ANY background-thread panic during a
 chunk or the post-loop tensor readback, independent of what the output
-values look like. See `docs/2026-07-16-aorc2f-wave1-findings.md` and the
+values look like. See `research/findings/2026-07-16-aorc2f-wave1-findings.md` and the
 commit introducing `DataError::CorruptedEvalChunk` for the first (partial)
 fix; 6 unit tests cover both detectors (`cargo test --lib training::eval`).
 
@@ -113,7 +113,7 @@ correct). Cosmetic upstream-DDR quirk, not a data error.
 
 - **2026-07-21 correction:** wave 1's AORC2F-distributed-vs-lumped
   backend-mismatch dismissal was based on an inapplicable test tolerance;
-  see the corrected §3 discussion in `docs/2026-07-16-aorc2f-wave1-findings.md`
+  see the corrected §3 discussion in `research/findings/2026-07-16-aorc2f-wave1-findings.md`
   for the actual (mb=0 loss ordering) evidence and the leading untested
   hypothesis (the distributed store may already be UH-routed, causing
   double-routing). An adversarial review of this whole campaign's controls

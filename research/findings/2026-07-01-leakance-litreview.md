@@ -1,11 +1,11 @@
 # Literature review — why is the learned leakance (zeta) so small?
 
 Date: 2026-07-01. Companion to
-`docs/superpowers/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md`.
+`research/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md`.
 
 Context: the leakance term `zeta = leakance_factor · area_z · K_D · (depth − d_gw)`
 learned per reach by the KAN head came out tiny in the 2×2 experiment
-(`docs/2026-07-01-leakance-hourly-findings.md`): median |zeta| 6.4e-4 m³/s
+(`research/findings/2026-07-01-leakance-hourly-findings.md`): median |zeta| 6.4e-4 m³/s
 (hourly-ON), |zeta| > 0.01 m³/s on only 10.4% of eval reaches, `K_D` pinned at
 its `1e-6 s⁻¹` ceiling on 100% of reaches. Two questions to the literature:
 (A) what magnitudes are physically expected, and (B) why might a term trained

@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03
 **Branch (planned):** `trained-parity` (sibling to merged `kan_improvements`)
-**Successor to:** `docs/superpowers/specs/2026-06-02-ddr-ddrs-kan-parity-design.md`
+**Successor to:** `research/specs/2026-06-02-ddr-ddrs-kan-parity-design.md`
 **Symptom:** After 5 epochs of `train-and-test` at `seed=42, grid=50, k=2`, DDRS's
 trained Manning's `n` distribution is centred ≈ 0.030 with 47 % of CONUS reaches
 in the band `[0.020, 0.030]` and a p95 of 0.044 — i.e. the lower ~10 % of the

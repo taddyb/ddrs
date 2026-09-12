@@ -1,6 +1,6 @@
 # Per-gauge tau sweep — WY1996 pilot findings
 
-- **Spec:** `docs/superpowers/specs/2026-08-05-per-gauge-tau-sweep-design.md`
+- **Spec:** `research/specs/2026-08-05-per-gauge-tau-sweep-design.md`
 - **Script:** `scripts/tau_sweep.py` (offline, on the `DDRS_HOURLY_DUMP` from one eval run)
 - **Checkpoint:** `2026-08-05T04-58-58Z-conus-experimental-train-and-test/checkpoints/epoch_30_mb_1` (epoch 30, area-balanced 1,841 gauges)
 - **Binary provenance:** `eval` built from commit `76a4020` (dump diagnostic committed with the spec); run log `output/tau_sweep/eval.log`.

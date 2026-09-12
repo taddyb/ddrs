@@ -786,12 +786,12 @@ done
 
 - [ ] **Step 2: Record the comparison**
 
-Capture in `docs/2026-08-02-ddr-match-findings.md`: negative-solve % in each mode, `median_n` trajectory in each mode, and loss. **`ddr_match: false` is promoted only if negative solves drop AND `n` moves toward the 0.025–0.15 NLCD band.**
+Capture in `research/findings/2026-08-02-ddr-match-findings.md`: negative-solve % in each mode, `median_n` trajectory in each mode, and loss. **`ddr_match: false` is promoted only if negative solves drop AND `n` moves toward the 0.025–0.15 NLCD band.**
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/2026-08-02-ddr-match-findings.md
+git add research/findings/2026-08-02-ddr-match-findings.md
 git commit -m "docs: ddr_match true-vs-false comparison on the smoke config"
 ```
 

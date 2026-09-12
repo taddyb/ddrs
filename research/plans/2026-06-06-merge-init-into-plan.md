@@ -6,7 +6,7 @@
 
 **Architecture:** `init` Phase A (probe/smoke/skeleton) moves to `system::ensure_system_ready()`; `plan()` calls it first, then bootstraps the config if missing, then fingerprints → diffs → relocks (strict callers abort before the relock). `run` keeps calling `plan()` as a library. `src/cli/init.rs` is deleted; a hidden clap stub redirects with exit 2.
 
-**Tech Stack:** Rust, clap 4 (derive), serde/serde_json, tempfile (tests). Spec: `docs/superpowers/specs/2026-06-06-merge-init-into-plan-design.md`.
+**Tech Stack:** Rust, clap 4 (derive), serde/serde_json, tempfile (tests). Spec: `research/specs/2026-06-06-merge-init-into-plan-design.md`.
 
 **Verification baseline:** before Task 1, `cargo test` must be green. Run it once and note any pre-existing failures so they aren't attributed to this work.
 
@@ -1312,7 +1312,7 @@ git commit -m "docs(config): plain-language template comments; values unchanged"
 **Files:**
 - Modify: `README.md` (First-time setup, what-lives-where table, workflow-agreement note)
 - Modify: `CLAUDE.md` (CLI section, workspace table, bootstrap gotcha)
-- Modify: `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` (supersession note)
+- Modify: `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md` (supersession note)
 
 - [x] **Step 1: README**
 
@@ -1371,7 +1371,7 @@ In the workspace-layout table, change the "Written by" cells for `ddrs.yaml`, `.
 
 - [x] **Step 3: Mark the old spec superseded**
 
-In `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`, insert directly under the title:
+In `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`, insert directly under the title:
 
 ```markdown
 > **Partially superseded (2026-06-06):** `ddrs init` and `ddrs plan` were
@@ -1398,6 +1398,6 @@ Expected: `ABSOLUTE MATCH`.
 - [x] **Step 6: Commit**
 
 ```bash
-git add README.md CLAUDE.md docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md
+git add README.md CLAUDE.md research/specs/2026-05-30-ddrs-cli-lifecycle-design.md
 git commit -m "docs: plan→run lifecycle in README/CLAUDE.md; mark old CLI spec superseded"
 ```

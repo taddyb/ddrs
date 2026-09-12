@@ -2,7 +2,7 @@
 # GENERATED from recoverability_student_c.yaml + experiment.state_cache.
 # recoverability_student_c.yaml — synthetic losing-reach recoverability (positive control).
 # GENERATED from leakance_hourly_on.yaml — student C: cold init, leakance ON, synthetic obs
-# Spec: docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md
+# Spec: research/specs/2026-07-03-synthetic-recoverability-design.md
 
 mode: training
 workflow: train-and-test

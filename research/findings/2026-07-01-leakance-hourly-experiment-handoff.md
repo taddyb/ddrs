@@ -3,8 +3,8 @@
 Purpose: hand another session everything needed to continue the leakance feasibility
 experiment. Read this top-to-bottom; the **"What's left"** section is the action list.
 
-Spec:  `docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md`
-Plan:  `docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md`
+Spec:  `research/specs/2026-06-29-leakance-hourly-feasibility-design.md`
+Plan:  `research/plans/2026-06-29-leakance-hourly-feasibility.md`
 Branch: `hourly-forcings`   HEAD at handoff: `2cdd341`
 
 ---
@@ -256,8 +256,8 @@ Bottom line: leakance is worth continuing — it is identifiable and volume-corr
      --hourly-off 2026-06-23T02-49-12Z-conus-hourly-train-and-test \
      --daily-off  2026-06-05T01-41-16Z-train-and-test
    ```
-6. **Write the findings doc** (`docs/2026-XX-XX-leakance-hourly-findings.md`), mirroring
-   `docs/2026-06-23-precip-disaggregation-findings.md`: the 2×2 table, subset NSE/KGE/β,
+6. **Write the findings doc** (`research/findings/2026-XX-XX-leakance-hourly-findings.md`), mirroring
+   `research/findings/2026-06-23-precip-disaggregation-findings.md`: the 2×2 table, subset NSE/KGE/β,
    `|zeta|` distribution, and the GO/NO-GO verdict.
 
 ### Interim result available WITHOUT the fix
@@ -274,6 +274,6 @@ daily arm only — it does NOT test the hourly hypothesis.
 cd ~/projects/ddrs
 git log --oneline 1a2e75d..2cdd341            # the leakance testbed commits
 ls .ddrs/runs/2026-07-01T01-07-17Z-train-and-test   # my hourly-ON run
-cat docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md   # the hypothesis + GO/NO-GO
+cat research/specs/2026-06-29-leakance-hourly-feasibility-design.md   # the hypothesis + GO/NO-GO
 sed -n '/## Leakance/,/## Baseline/p' CLAUDE.md    # how to enable leakance
 ```

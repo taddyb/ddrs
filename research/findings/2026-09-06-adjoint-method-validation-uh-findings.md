@@ -1,6 +1,6 @@
 # Adjoint influence map — method validation on one arm (UH retrospective) — findings
 
-**Spec:** `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md` §2.5 (gate) and the
+**Spec:** `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md` §2.5 (gate) and the
 validation plan agreed 2026-09-05 (checks 1–8; this doc covers checks 1 and 2)
 **Bundle:** `experiments/adjoint-uh-validate/` (UH retrospective arm only)
 **Output:** `.ddrs/experiments/adjoint-uh-validate/2026-09-05T17-59-05Z/` — `uh-retro/validation/*.csv`,

@@ -3,7 +3,7 @@
 **Run:** `.ddrs/runs/2026-09-08T15-55-52Z-conus-train-and-test` (branch `experiment-adjoint`, sha `d983739`).
 **Question:** with the width coefficient p pinned at 21 (the 2024 setting) and only n and q learned, trained with the
 batch NSE loss on the gages_3000 population, does routing earn its keep over summed inflow, and does pinning p cost
-anything at the population median? Context: the landscape study (`docs/2026-09-08-landscape-hypothesis-tests-findings.md`
+anything at the population median? Context: the landscape study (`research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`
 §5 to §10) had predicted from per-gauge loss surfaces that the Juniata wants n near 0.03 to 0.05, and that the n/p
 degeneracy is what kept the learned-p models away from it.
 **Plots and notebooks:** `<run>/plots/` (`metrics.ipynb`, `hydrograph.ipynb`, `parameter_maps.ipynb`,

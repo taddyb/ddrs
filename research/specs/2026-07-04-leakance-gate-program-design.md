@@ -3,10 +3,10 @@
 Date: 2026-07-04
 Worktree: `zeta-sensitivity` (branch `worktree-zeta-sensitivity`); extraction
 work lives in `/home/tbindas/projects/extractrs`.
-Prior instruments: `docs/2026-07-02-leakance-diagnosis-findings.md`,
-`docs/2026-07-03-zeta-gradient-probe-findings.md`,
-`docs/2026-07-04-synthetic-recoverability-findings.md`,
-`docs/2026-07-04-leakance-literature-review.md`.
+Prior instruments: `research/findings/2026-07-02-leakance-diagnosis-findings.md`,
+`research/findings/2026-07-03-zeta-gradient-probe-findings.md`,
+`research/findings/2026-07-04-synthetic-recoverability-findings.md`,
+`research/findings/2026-07-04-leakance-literature-review.md`.
 
 ## 1. Question
 
@@ -123,7 +123,7 @@ head never exceeds `depth + 2 m` — retained deliberately.
 ## 3. Phase A — attribute extraction (extractrs)
 
 **Sourcing principle (2026-07-04 literature pass, see
-`docs/2026-07-04-leakance-literature-review.md` §6): precomputed per-reach
+`research/findings/2026-07-04-leakance-literature-review.md` §6): precomputed per-reach
 products first; raw-raster corridor extraction ONLY where no per-reach product
 exists.** The channel-characteristics search found most of our targets already
 published per-reach on NHDPlusV2 or SWORD — the genuinely novel extraction is

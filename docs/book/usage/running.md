@@ -251,7 +251,7 @@ the resumed run trains zero batches.
 Resume position is exact, but the stored weights and moments are f16
 (`CompactRecorder` uses half-precision settings), so a resumed trajectory
 drifts slowly from an uninterrupted one — a known follow-up tracked in
-`docs/2026-06-07-checkpoint-resume-handoff.md`. Old checkpoints written
+`research/findings/2026-06-07-checkpoint-resume-handoff.md`. Old checkpoints written
 before the directory layout resume weights-only: Adam cold, epoch counter
 back at 1, fresh shuffle.
 
@@ -399,9 +399,9 @@ cargo run --release --bin probe_zeta_gradient -- \
 > ~65 GB RSS over the 64,892-reach eval network. Drop to `--chunk-days 180`
 > on a 93 GB desktop.
 
-The spec is `docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md`;
-findings are in the `docs/2026-07-0*-leakance-*` series. Read
-`docs/2026-07-06-leakance-nogo-scientific-summary.md` §3 before re-opening
+The spec is `research/specs/2026-07-02-zeta-gradient-probe-design.md`;
+findings are in the `research/findings/2026-07-0*-leakance-*` series. Read
+`research/findings/2026-07-06-leakance-nogo-scientific-summary.md` §3 before re-opening
 that line of work.
 
 **`pretrain_disagg`, `pretrain_disagg_blend`, `pretrain_disagg_capacity`,

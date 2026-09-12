@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-04
 **Branch:** `training-step-parity` (sibling to merged `trained-parity` / PR #12)
-**Successor to:** `docs/superpowers/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`
+**Successor to:** `research/specs/2026-06-03-ddr-ddrs-trained-saturation-parity-design.md`
 (`§5.1 Empirical verdict`: outcome row 2 — "DDR healthier, DDRS has a
 training-loop bug")
 **Symptom:** With NaN-gauge filter wired (`30501af`) and `log_space_parameters`

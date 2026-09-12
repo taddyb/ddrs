@@ -3,7 +3,7 @@
 //! hourly streamflow (`src/data/store/camels_hourly.rs`) + real NLDAS hourly
 //! precip (bundled in the same file), with zero second-model bias, before
 //! any weights are brought into the production routing pipeline. See
-//! `docs/2026-07-1x-disagg-real-pretrain-*.md` for the campaign writeup.
+//! `research/findings/2026-07-1x-disagg-real-pretrain-*.md` for the campaign writeup.
 //!
 //! Not part of the production training/eval data path — `ddrs run` never
 //! touches this module. Entry point is `src/bin/pretrain_disagg.rs`.

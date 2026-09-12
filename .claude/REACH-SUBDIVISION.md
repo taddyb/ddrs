@@ -16,7 +16,7 @@
 
 Config: `params.subdivision` (`src/config.rs::Subdivision`), default `enabled: false`.
 Implementation: `src/adjacency/subdivide.rs`, wired in `src/adjacency/cache.rs`.
-Plan of record: `docs/superpowers/plans/2026-08-05-reach-subdivision.md`
+Plan of record: `research/plans/2026-08-05-reach-subdivision.md`
 (Tasks 1-8, commits `741e475` … `6cb66bf`).
 
 ---

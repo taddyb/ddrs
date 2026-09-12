@@ -1,11 +1,11 @@
 # H5/H6 parameter-transfer and loss-landscape — v2 findings (audit-corrected analysis)
 
 Date: 2026-07-09. Supersedes ONLY the analysis and interpretation of
-`docs/2026-07-09-h5-h6-equifinality-findings.md` — **no new Rust runs, no new
+`research/findings/2026-07-09-h5-h6-equifinality-findings.md` — **no new Rust runs, no new
 compute**. Same raw CSVs (`output/equif/h5/registered/*.csv`,
 `output/equif/h6/*_{surface,barrier}.csv`, seed 42), re-analyzed with
 `scripts/h5_h6_audit_analysis.py`. Spec:
-`docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`.
+`research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`.
 
 **Verdicts unchanged: H5 INCONCLUSIVE, H6 INCONCLUSIVE.** What changes is the
 evidentiary basis: H5's INCONCLUSIVE is now *certified* (the registered

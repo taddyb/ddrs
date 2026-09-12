@@ -1,6 +1,6 @@
 # Tests of the batch-compromise hypothesis (landscape spec §7) - findings, 2026-09-08
 
-**Spec:** `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md` §7.
+**Spec:** `research/specs/2026-09-07-adjoint-landscape-design.md` §7.
 **Hypothesis (user):** each gauge's loss under large-batch training sits at a batch compromise, not the gauge's own
 minimum; the adjoint landscape over (n, p, q) at a gauge tells whether the model is trained correctly, and the same
 map under different inputs tells whether inputs move the optimum or only the batch solution.
@@ -82,7 +82,7 @@ Readings.
 4. **The head changes a basin almost uniformly.** The across-reach spread of the per-checkpoint field change falls
    from 0.07 (init to epoch 30) to 0 monotonically and is nearly identical across the eight gauges (panel d): within
    a basin, training moves n, p, q by a common factor. This is why the basin-uniform multiplier parametrization
-   (Phase A) captures what training can do, and why "p is effectively a basin constant" (`docs/2026-09-08-fixed-p-assessment.md`).
+   (Phase A) captures what training can do, and why "p is effectively a basin constant" (`research/findings/2026-09-08-fixed-p-assessment.md`).
 5. **Plains gauges do not move in loss space.** NSE at the trained point is flat at −11 to −29 from init to epoch 30;
    training changed their parameters but not their loss. Consistent with §1: the channel is not where their error is.
 
@@ -428,7 +428,7 @@ its optimum changes sign with the evaluation window while the loss barely moves.
 
 First census with the fixed line search (§11) and the full population. Newton and Hessian over (n, q), p pinned;
 0.4 % of gauges range-bound, none with zero iterations, 4 % used the gradient fallback. Map:
-`docs/figures/2026-09-09-conus_n_gap_p21_wy2000.png` (copy of `merged/figures/conus_n_gap.png`).
+`research/figures/2026-09-09-conus_n_gap_p21_wy2000.png` (copy of `merged/figures/conus_n_gap.png`).
 
 | WY2000 | count | median gain to own optimum | gain > 0.02 | median |ln(n*/n)| | within × 1.25 | wants slower (n* > 1.25 n) | wants faster (n* < 0.8 n) |
 |---|---|---|---|---|---|---|---|
@@ -467,7 +467,7 @@ The Juniata full-period result (§12) says the n direction holds and the q direc
 
 ### 13b. By region (GAGES-II aggregated ecoregions; `experiments/landscape/region_breakdown.py`)
 
-`docs/figures/2026-09-09-conus_n_gap_by_ecoregion_wy2000.png`; tables in `merged/figures/region-ecoregion/REGION.md`
+`research/figures/2026-09-09-conus_n_gap_by_ecoregion_wy2000.png`; tables in `merged/figures/region-ecoregion/REGION.md`
 and `region-huc02/`. The seven PUR regions of Feng et al. (2021, GRL, doi 10.1029/2021GL092999) are defined in that
 paper's Table S4 (neighbouring HUC2 units combined); the SI was not retrievable, so a provisional geographic grouping
 is in the script, flagged, pending the published table.
@@ -495,7 +495,7 @@ farthest with the most balanced directions: routing is poorly identified there r
 
 ## 14. Five water years (WY1996 to WY2000), all 2,365 gauges (run `landscape-p21-all-5yr/merged`, 16 shards, 12.7 h)
 
-Maps: `docs/figures/2026-09-09-conus_n_gap_p21_wy1996-2000.png`, `docs/figures/2026-09-09-conus_n_gap_by_ecoregion_wy1996-2000.png`.
+Maps: `research/figures/2026-09-09-conus_n_gap_p21_wy1996-2000.png`, `research/figures/2026-09-09-conus_n_gap_by_ecoregion_wy1996-2000.png`.
 The 15-year all-gauge census was held at launch (12 shards would need about 140 GB); scope pending the user.
 
 | | WY2000 (365 d) | WY1996 to 2000 (1,826 d) |
@@ -532,7 +532,7 @@ hydrographs (§15, pending) will show. Their (n, q) terrains and hydrographs run
 ## 15. The ten most egregious gauges: terrains and hydrographs, NSE objective (run `landscape-p21-top10-nse/merged`)
 
 Five-year window, 25 × 25 (n, q) grid with p = 21, `series: true`; reports in `merged/figures/report_<staid>.png`,
-overview `docs/figures/2026-09-09-top10_nse_overview.png`, example `docs/figures/2026-09-09-top10_nse_report_05465000.png`.
+overview `research/figures/2026-09-09-top10_nse_overview.png`, example `research/figures/2026-09-09-top10_nse_report_05465000.png`.
 Timing below is the cross-correlation lag of each series against the observed daily flow (negative = arrives early).
 
 | gauge | NSE 0 → * | KGE 0 → * | n* / n | inflow vol / obs | inflow early (d) | routed early (d) | routed* early (d) | peak ratio 0 → * |
@@ -569,7 +569,7 @@ progress and will show whether the KGE optimum agrees in direction. Rerun both w
 
 ## 16. The same ten gauges with 1 − KGE as the objective (run `landscape-p21-top10-kge/merged`)
 
-Same window, grid and box as §15; objective `kge`. Overview `docs/figures/2026-09-09-top10_kge_overview.png`.
+Same window, grid and box as §15; objective `kge`. Overview `research/figures/2026-09-09-top10_kge_overview.png`.
 
 | gauge | NSE-optimum: n* / n, q* / q, NSE*, KGE* | KGE-optimum: n* / n, q* / q, NSE*, KGE* |
 |---|---|---|
@@ -596,7 +596,7 @@ identified. The wide-box reruns (n up to × 10) will give the true optima for bo
 ## 17. The ten gauges with the box widened to a factor ten in n (run `landscape-p21-top10-nse/merged`, box ln 10)
 
 All ten optima are now interior (none at the box edge, none range-bound). Overview
-`docs/figures/2026-09-10-top10_nse_wide_overview.png`; the box-1.5 results of §15 are kept at `merged-box1.5/`.
+`research/figures/2026-09-10-top10_nse_wide_overview.png`; the box-1.5 results of §15 are kept at `merged-box1.5/`.
 
 | gauge | n* / n | q* / q | NSE 0 → * | KGE 0 → * |
 |---|---|---|---|---|
@@ -675,7 +675,7 @@ alignment is also near 1, training genuinely stopped early and the fix is optimi
 0 while the test-window alignment is 0.81, the model converged on what it was shown and the test period wants a
 different channel.
 
-**If undertraining is confirmed**, it reorders the ranked changes of `docs/2026-09-09-why-not-at-optimum-findings.md`
+**If undertraining is confirmed**, it reorders the ranked changes of `research/findings/2026-09-09-why-not-at-optimum-findings.md`
 §4: more optimizer updates (smaller accumulation, more epochs, or a flatter learning-rate schedule) moves ahead of the
 attribute and architecture changes, and the width experiment becomes a test of whether the converged n is physical
 rather than a test of whether n can move at all. It does not overturn the equifinality results: q stays unidentified
@@ -778,7 +778,7 @@ genuinely disjoint transfer would be worse.
 
 Neither route to the displacement is clean. A single global constant recovers about a third of it, and a
 per-gauge estimate from a normal length of record loses about two fifths of its own promise. The "0.03 NSE
-gain" reported in §11 and in `docs/2026-09-09-why-not-at-optimum-findings.md` is an **in-sample upper bound on a
+gain" reported in §11 and in `research/findings/2026-09-09-why-not-at-optimum-findings.md` is an **in-sample upper bound on a
 quantity that is only partly recoverable**, and the recoverable part is of order 0.01, not 0.03.
 
 The identifiability statement is the durable one, and it does not depend on the surrogate at all: a large,
@@ -955,7 +955,7 @@ unidentifiable below one day of channel travel time whatever the optimizer does.
 discharge as an observation, not of the fit.
 
 **Ranked consequence.** More optimizer updates (a smaller accumulation factor, more epochs, or a flatter learning
-rate schedule) moves to the top of `docs/2026-09-09-why-not-at-optimum-findings.md` §4, ahead of the attribute and
+rate schedule) moves to the top of `research/findings/2026-09-09-why-not-at-optimum-findings.md` §4, ahead of the attribute and
 architecture changes. The width-from-river-size retrain becomes a test of whether a converged n is physical rather
 than a test of whether n can move at all.
 

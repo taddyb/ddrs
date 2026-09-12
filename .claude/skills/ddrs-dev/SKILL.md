@@ -140,7 +140,7 @@ gh pr checks --watch                                # CI status for the current 
 is unimplemented (`src/cli/run.rs`). Use `--workflow train-and-test`, or the
 legacy `eval` binary against an existing checkpoint. **`ddrs init` is a dead stub**
 (exits 2, `src/bin/ddrs.rs`); use `ddrs plan`. Both are still documented as
-working in README.md and `docs/` — see `docs/2026-07-30-docs-and-skills-audit.md`.
+working in README.md and `docs/` — see `research/findings/2026-07-30-docs-and-skills-audit.md`.
 
 ## Verifying a run did what you think
 
@@ -165,7 +165,7 @@ latest `checkpoints/epoch_E_mb_M/` (max by `(E, M)`; flat `.mpk` refused).
 Output: `.ddrs/experiments/<name>/<UTC ts>/` with `manifest.json`, `run.log`,
 per-arm outputs, and `figures/` from the bundle's `plots.py`. Training,
 baselines, and `status`/`gc` are deliberately not integrated. Spec:
-`docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+`research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
 Two studies ship: `adjoint` and `landscape`.
 
@@ -179,7 +179,7 @@ sensitivity `d[mean(Q̄−obs)²]/dq'` (NOT the signed mean residual — its gra
 is independent of the observations). A finite-difference gate runs first and
 aborts on > 5 % relative error. PoC on the Juniata pair 01563500 → 01567000:
 gate 0.1–0.9 %, ~15 s per gauge-arm for daily stores (56 s hourly-lstm), 9
-backwards per gauge-arm. Findings: `docs/2026-09-04-adjoint-influence-poc-findings.md`.
+backwards per gauge-arm. Findings: `research/findings/2026-09-04-adjoint-influence-poc-findings.md`.
 Gates: `cargo test --release --test adjoint_influence`, `cargo test --lib experiment`.
 Figures: `~/projects/ddr/.venv/bin/python experiments/adjoint/plots.py <out dir>`.
 
@@ -187,9 +187,9 @@ Figures: `~/projects/ddr/.venv/bin/python experiments/adjoint/plots.py <out dir>
 the channel parameters (Manning's `n`, Leopold–Maddock `p`, `q`) in
 log-multiplier space around a trained run, via the same adjoint machinery: it
 locates where large-batch training left each gauge relative to that gauge's
-own optimum. Design: `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`.
-Findings: `docs/2026-09-07-landscape-uh-juniata-findings.md`,
-`docs/2026-09-08-landscape-hypothesis-tests-findings.md`. Gate: `cargo test
+own optimum. Design: `research/specs/2026-09-07-adjoint-landscape-design.md`.
+Findings: `research/findings/2026-09-07-landscape-uh-juniata-findings.md`,
+`research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`. Gate: `cargo test
 --lib experiment`.
 
 ## Juniata single-catchment sample (`examples/juniata/`)
@@ -233,7 +233,7 @@ so `parent_order` lookups and `pieces_per_row_divisor` (Q′/k) need no change.
 The gauge CSV's `cell` column is a serde alias of `COMID`. Guards: exclusive
 with `geospatial_fabric` and the explicit zarr pair; `params.subdivision.enabled`
 is rejected with it. Spec:
-`docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md`.
+`research/specs/2026-09-08-ddrs-gridded-routing-design.md`.
 
 ```bash
 target/release/ddrs --config examples/juniata_gridded/ddrs.yaml plan
@@ -263,7 +263,7 @@ reader now sniffs the axis order (traps.md T11).
 Four skills live in this repo: this one (build / code / configure / test / debug),
 `ddrs-run` (launch, watch, resume, and audit runs; the full `ddrs` command
 reference), `ddrs-eval-plots` (visualize and interpret run output), and
-`ddrs-journal` (the running record in `docs/journal/`, wired into `ddrs run` and
+`ddrs-journal` (the running record in `research/journal/`, wired into `ddrs run` and
 `ddrs experiment` via `.claude/settings.json` hooks calling `scripts/journal.py`).
 When a run, eval, or export completes, update the relevant section here in the
 same session that produced the knowledge — do not leave it only in a findings
@@ -282,4 +282,4 @@ into a chapter.** This audit found that rule violated repeatedly.
 
 Every factual claim in this skill was verified against source on 2026-07-30. Claims
 carrying a date are volatile; re-verify before citing externally. The audit that
-produced this consolidation is `docs/2026-07-30-docs-and-skills-audit.md`.
+produced this consolidation is `research/findings/2026-07-30-docs-and-skills-audit.md`.

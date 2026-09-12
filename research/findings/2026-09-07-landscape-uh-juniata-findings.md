@@ -1,6 +1,6 @@
 # Per-gauge loss landscape in (n, p, q) log-multiplier space — sample case (UH arm, Juniata pair) — findings
 
-**Spec:** `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`
+**Spec:** `research/specs/2026-09-07-adjoint-landscape-design.md`
 **Bundles:** `experiments/landscape-uh-juniata` (box ±ln 3), `experiments/landscape-uh-juniata-wide` (box ±ln 10; arms uh-seed42 + uh-seed43)
 **Outputs:** `.ddrs/experiments/landscape-uh-juniata/2026-09-07T19-04-07Z/`,
 `.ddrs/experiments/landscape-uh-juniata-wide/2026-09-07T19-13-30Z/` (seed 42 only),

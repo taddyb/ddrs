@@ -1,9 +1,9 @@
 # LSTM-source selective-equifinality experiment — findings (2026-07-07)
 
-Spec:   `docs/superpowers/specs/2026-07-06-lstm-equifinality-cpu-design.md`
+Spec:   `research/specs/2026-07-06-lstm-equifinality-cpu-design.md`
 Script: `scripts/equif_convergence_analysis.py`
-Prior findings: `docs/2026-07-06-leakance-nogo-scientific-summary.md`,
-                `docs/2026-06-23-precip-disaggregation-findings.md`
+Prior findings: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md`,
+                `research/findings/2026-06-23-precip-disaggregation-findings.md`
 
 **One-line verdict (amended by the 2026-07-07 audit — see §8):** Under the registered
 rules H1–H3 are REFUTED and H4 is INCONCLUSIVE, but a same-day independent audit showed
@@ -210,7 +210,7 @@ The hourly-lstm baseline (R3) is substantially higher than the daily-lstm baseli
 (R1/R2 share the same daily-lstm store). R3's routing head provides modest incremental
 skill (+0.022 NSE) over an already stronger baseline. R2's disagg head gains the most
 NSE (+0.183) but loses KGE (−0.019), consistent with the prior disaggregation finding
-(dHBV2-UH arms: NSE +0.037 / KGE −0.007, `docs/2026-06-23-precip-disaggregation-findings.md`).
+(dHBV2-UH arms: NSE +0.037 / KGE −0.007, `research/findings/2026-06-23-precip-disaggregation-findings.md`).
 None of the arms beat their own baseline on KGE except R1 (+0.006).
 
 For context against prior work: the dHBV2-UH summed-Q′ baseline used in all

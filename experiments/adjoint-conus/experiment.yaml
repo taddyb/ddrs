@@ -1,5 +1,5 @@
 # Adjoint influence-map study — GAGES-II nested-reference population.
-# Spec: docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md §2.1
+# Spec: research/specs/2026-09-03-ddrs-experiment-adjoint-design.md §2.1
 #
 # Run from the repo root (arms run concurrently, one thread each):
 #   target/release/ddrs --workspace .ddrs experiment adjoint-conus --backend cpu

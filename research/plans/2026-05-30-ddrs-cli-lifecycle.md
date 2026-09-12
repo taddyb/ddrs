@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021, BURN 0.21, cudarc 0.19, clap 4, serde + serde_yaml + serde_json (existing); add blake3, os_pipe, humantime; std-lib only for `IsTerminal` and `git` shelling.
 
-**Spec:** `/home/tbindas/projects/ddrs/docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`
+**Spec:** `/home/tbindas/projects/ddrs/research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`
 
 ---
 
@@ -2259,7 +2259,7 @@ git commit -m "cli: show, status, gc commands"
 ```rust
 //! `ddrs` CLI entrypoint. Dispatches to subcommands defined in
 //! `ddrs::cli::*`. See spec at
-//! `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+//! `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -2725,8 +2725,8 @@ cargo run --release --bin train_and_test -- ...
 In `CLAUDE.md` under "When in doubt":
 
 ```markdown
-- New design docs from `/superpowers` brainstorms live at `docs/superpowers/specs/`
-  with implementation plans at `docs/superpowers/plans/`.
+- New design docs from `/superpowers` brainstorms live at `research/specs/`
+  with implementation plans at `research/plans/`.
 ```
 
 - [ ] **Step 3: Add "CLI lifecycle" section to `.claude/ARCHITECTURE.md`**
@@ -2736,7 +2736,7 @@ In `CLAUDE.md` under "When in doubt":
 
 The `ddrs` binary at `src/bin/ddrs.rs` is the single entrypoint. It
 dispatches to subcommands under `src/cli/`. Full design at
-`docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+`research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
 First-run flow: `init → plan → init → run`.
 ```
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (BURN 0.21, netcdf crate), Python under `~/projects/ddr`'s uv venv (numpy/xarray/netCDF4/scipy).
 
-**Spec:** `docs/superpowers/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md`
+**Spec:** `research/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md`
 (Spec delta: we additionally export `area_z_mean` — it's free from `LeakanceSaved` and makes H1 exact instead of re-deriving geometry in Python.)
 
 **Working directories — read carefully.** Code work happens in this worktree
@@ -43,7 +43,7 @@ with `cd /home/tbindas/projects/ddrs` using the WORKTREE's freshly built binary
 | `src/cli/run.rs`, `src/bin/eval.rs` | modify | updated call sites |
 | `tests/zeta_accum.rs` | modify | struct destructuring + 2 new tests |
 | `scripts/leakance_diagnosis.py` | create | Phase-2 hypothesis battery |
-| `docs/2026-07-02-leakance-diagnosis-findings.md` | create | ranked verdicts |
+| `research/findings/2026-07-02-leakance-diagnosis-findings.md` | create | ranked verdicts |
 | `config/experiments/leakance_hourly_on_kd4.yaml` | create (Task 9, gated) | widened K_D arm |
 
 ---
@@ -715,7 +715,7 @@ Runs under ddr's venv (`cd ~/projects/ddr && uv run python ...`). Consumes the f
 #!/usr/bin/env python3
 """Leakance low-zeta diagnosis — 7-hypothesis falsification battery.
 
-Spec: ddrs docs/superpowers/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md
+Spec: ddrs research/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md
 Run:  cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/leakance_diagnosis.py
 
 H1 structural ceiling   H2 driving head      H3 KAN variance collapse
@@ -1001,7 +1001,7 @@ Expected: exit 0; `/tmp/leakance_diagnosis_output.txt` holds the full report.
 ### Task 8: Findings document
 
 **Files:**
-- Create: `docs/2026-07-02-leakance-diagnosis-findings.md`
+- Create: `research/findings/2026-07-02-leakance-diagnosis-findings.md`
 
 - [ ] **Step 1: Write the findings doc from the captured output**
 
@@ -1010,8 +1010,8 @@ Structure (fill every `<...>` from `/tmp/leakance_diagnosis_output.txt` — no p
 ```markdown
 # Leakance low-zeta diagnosis — findings (2026-07-02)
 
-Spec: docs/superpowers/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md
-Lit review: docs/2026-07-01-leakance-litreview.md
+Spec: research/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md
+Lit review: research/findings/2026-07-01-leakance-litreview.md
 Script: scripts/leakance_diagnosis.py (output archived below)
 
 **One-line answer:** <why is zeta small — the top-ranked supported hypothesis(es)>
@@ -1045,7 +1045,7 @@ Decision: <GO for widened-K_D retrain / NO-GO with recommended alternative>.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add docs/2026-07-02-leakance-diagnosis-findings.md
+git add research/findings/2026-07-02-leakance-diagnosis-findings.md
 git commit -m "docs: leakance low-zeta diagnosis findings + phase-3 gate decision"
 ```
 
@@ -1129,11 +1129,11 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/leakance_subset_analy
 - [ ] **Step 6: Update the findings doc + commit**
 
 Append a "Phase 3 — widened K_D result" section to
-`docs/2026-07-02-leakance-diagnosis-findings.md` with: new K_D distribution,
+`research/findings/2026-07-02-leakance-diagnosis-findings.md` with: new K_D distribution,
 new zeta stats, subset ΔNSE/ΔKGE vs the 1e-6 arm, and the refreshed GO/NO-GO.
 
 ```bash
-git add docs/2026-07-02-leakance-diagnosis-findings.md
+git add research/findings/2026-07-02-leakance-diagnosis-findings.md
 git commit -m "docs(findings): widened-K_D arm result + refreshed GO/NO-GO"
 ```
 

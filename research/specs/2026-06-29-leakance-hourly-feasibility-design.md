@@ -60,7 +60,7 @@ real dynamic range. There is also a clean division of labor: the disagg head is
 mass-*reducing* term — and the summed-Q′ baseline over-predicts downstream
 (gage ratio ~1.05), a losing-stream signature and a KGE-β lever neither the loss
 function nor geometry tuning has moved (a *structural* ceiling per
-`docs/2026-06-23-precip-disaggregation-findings.md`).
+`research/findings/2026-06-23-precip-disaggregation-findings.md`).
 
 ## Part A — The testbed (minimal, flag-gated leakance port)
 

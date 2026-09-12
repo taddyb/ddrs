@@ -1,7 +1,7 @@
 # `ddrs experiment adjoint` — Implementation Plan (PoC on the Juniata pair)
 
-**Spec:** `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
-**Status (2026-09-04):** all nine tasks done; findings in `docs/2026-09-04-adjoint-influence-poc-findings.md`.
+**Spec:** `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`
+**Status (2026-09-04):** all nine tasks done; findings in `research/findings/2026-09-04-adjoint-influence-poc-findings.md`.
 
 **Goal:** one `ddrs experiment adjoint` invocation on the pair
 01563500 → 01567000 across the five trained arms, producing the four figure
@@ -25,7 +25,7 @@ families, with the finite-difference gate passing.
 7. **`experiments/adjoint/{experiment.yaml,README.md,plots.py}`**.
 8. **Run** on the pair, cpu; iterate until the gate passes and the figures
    render. Tier C gates (`cargo test --lib`, `compare_ddr_sandbox`).
-9. **Findings doc** `docs/2026-09-04-adjoint-influence-poc-findings.md`;
+9. **Findings doc** `research/findings/2026-09-04-adjoint-influence-poc-findings.md`;
    update `ddrs-dev` skill (new subcommand, cost numbers); commit.
 
 ## Concerns / assumptions

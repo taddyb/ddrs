@@ -3,12 +3,12 @@
 Date: 2026-07-06
 Branch: `worktree-zeta-sensitivity` (worktree off master).
 Campaign docs (chronological):
-`docs/2026-07-01-leakance-hourly-findings.md` (2×2),
-`docs/2026-07-02-leakance-diagnosis-findings.md` (diagnosis),
-`docs/2026-07-03-zeta-gradient-probe-findings.md` (gradient probe),
-`docs/2026-07-04-synthetic-recoverability-findings.md` (recovery control),
-`docs/2026-07-06-phase-c-findings.md` (promotion gate).
-Literature: `docs/2026-07-04-leakance-literature-review.md` (32 verified citations).
+`research/findings/2026-07-01-leakance-hourly-findings.md` (2×2),
+`research/findings/2026-07-02-leakance-diagnosis-findings.md` (diagnosis),
+`research/findings/2026-07-03-zeta-gradient-probe-findings.md` (gradient probe),
+`research/findings/2026-07-04-synthetic-recoverability-findings.md` (recovery control),
+`research/findings/2026-07-06-phase-c-findings.md` (promotion gate).
+Literature: `research/findings/2026-07-04-leakance-literature-review.md` (32 verified citations).
 
 **One-line verdict: riverbed leakance (the GW–SW exchange term zeta) is NOT
 identifiable from gauged discharge and is NOT promotable — established by
@@ -110,7 +110,7 @@ leakance does not change that.
 
 ## 5. What this supersedes
 
-- The 2×2 "GO — marginal" verdict (`docs/2026-07-01-leakance-hourly-findings.md`)
+- The 2×2 "GO — marginal" verdict (`research/findings/2026-07-01-leakance-hourly-findings.md`)
   stands as a description of the term's *aggregate skill* (active, non-collapsed,
   marginally helpful) but is **superseded as an identifiability or promotion
   claim**: the term is active and skill-positive, and simultaneously

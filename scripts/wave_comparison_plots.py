@@ -1,6 +1,6 @@
 """Cross-run NSE/KGE comparison plots for the 2026-07-16 AORC2F + LSTM wave 1/2
-campaign (docs/2026-07-16-aorc2f-wave1-findings.md,
-docs/2026-07-16-wave2-cross-wave-findings.md).
+campaign (research/findings/2026-07-16-aorc2f-wave1-findings.md,
+research/findings/2026-07-16-wave2-cross-wave-findings.md).
 
 Run from ddrs-py's venv:
     cd ddrs-py && uv run python ../scripts/wave_comparison_plots.py

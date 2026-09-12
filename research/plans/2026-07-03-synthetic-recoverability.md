@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (BURN 0.21, NdArray CPU backend, zarrs, netcdf, clap), Python under `ddrs-py` uv venv (xarray, netCDF4, pandas, geopandas) for sites/analysis/maps.
 
-**Spec:** `docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md`
+**Spec:** `research/specs/2026-07-03-synthetic-recoverability-design.md`
 
 **Plan-time deviations from the spec (all simplifications, discovered by reading current code):**
 1. Spec §4.2 prescribed a new `experiment.init_head` config key. NOT needed: `bootstrap_head_and_state` (src/training/bootstrap.rs:74-105) already implements weights-only warm-start when `experiment.checkpoint` points at a directory containing only `head.mpk` — it loads the head, logs "Adam starts cold" and "restarting at epoch 1 with a fresh shuffle". We create such a directory by copying `head.mpk`.
@@ -651,7 +651,7 @@ leak_off = [(r"^  use_leakance: true$", "  use_leakance: false")]
 hdr = lambda name, note: (
     f"# {name} — synthetic losing-reach recoverability (positive control).\n"
     f"# GENERATED from leakance_hourly_on.yaml — {note}\n"
-    f"# Spec: docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md\n")
+    f"# Spec: research/specs/2026-07-03-synthetic-recoverability-design.md\n")
 
 variants = {
     "recoverability_teacher.yaml":
@@ -1091,9 +1091,9 @@ git commit -m "feat(notebooks): CONUS recovery-ratio + absorption dn maps"
 ### Task 11: Findings report + final guard sweep
 
 **Files:**
-- Create: `docs/2026-07-XX-synthetic-recoverability-findings.md` (XX = actual run date)
+- Create: `research/findings/2026-07-XX-synthetic-recoverability-findings.md` (XX = actual run date)
 
-- [ ] **Step 1: Write the findings doc** in the established structure (mirror `docs/2026-07-03-zeta-gradient-probe-findings.md`): §1 Hypothesis (the positive-control question + R1–R5 table with bars), §2 What was changed to test it (LeakanceOverride, obs writer, teacher mode, backend dispatch, configs, scripts — cite commits), §3 The experiment (teacher world numbers: plants kept/dropped, target distribution, window; student roster + wall-clocks), §4 Did the test pass or fail (verdicts table verbatim from `verdicts.log`, per-verdict interpretation), §5 Conclusions, §6 Next steps (what the verdict means for the auxiliary-constraint experiment), §7 Raw verdict output (byte-copied from `verdicts.log`), §8 Reproduce (the exact commands from Tasks 6–10). Every number must come from an artifact, not memory.
+- [ ] **Step 1: Write the findings doc** in the established structure (mirror `research/findings/2026-07-03-zeta-gradient-probe-findings.md`): §1 Hypothesis (the positive-control question + R1–R5 table with bars), §2 What was changed to test it (LeakanceOverride, obs writer, teacher mode, backend dispatch, configs, scripts — cite commits), §3 The experiment (teacher world numbers: plants kept/dropped, target distribution, window; student roster + wall-clocks), §4 Did the test pass or fail (verdicts table verbatim from `verdicts.log`, per-verdict interpretation), §5 Conclusions, §6 Next steps (what the verdict means for the auxiliary-constraint experiment), §7 Raw verdict output (byte-copied from `verdicts.log`), §8 Reproduce (the exact commands from Tasks 6–10). Every number must come from an artifact, not memory.
 
 - [ ] **Step 2: Final guard sweep**
 
@@ -1103,7 +1103,7 @@ Expected: green + ABSOLUTE MATCH.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/2026-07-*-synthetic-recoverability-findings.md
+git add research/findings/2026-07-*-synthetic-recoverability-findings.md
 git commit -m "docs(findings): synthetic recoverability positive control — results"
 ```
 

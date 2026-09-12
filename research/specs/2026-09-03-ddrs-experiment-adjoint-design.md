@@ -4,14 +4,14 @@
 **Status:** Sections 1–2 approved in brainstorming; sections 3–4 drafted for
 review. Proof of concept authorized on the Juniata pair before full review
 (user directive 2026-09-03, overnight) — **implemented**, see
-`docs/2026-09-04-adjoint-influence-poc-findings.md`. One correction from the
+`research/findings/2026-09-04-adjoint-influence-poc-findings.md`. One correction from the
 PoC (§2.3): the residual functional is the **squared error**, not the mean
 signed residual — the latter is linear in the prediction, so the observations
 cancel out of its gradient.
 **Paper:** `~/papers/ddr_equifinality/paper.tex` (AGU H069 abstract;
 "Revisiting Beven's Equifinality and Uncertainty Thesis").
-**Related:** `docs/superpowers/specs/2026-08-06-ddr-equifinality-paper-scope-design.md`,
-`docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md` (the
+**Related:** `research/specs/2026-08-06-ddr-equifinality-paper-scope-design.md`,
+`research/specs/2026-07-02-zeta-gradient-probe-design.md` (the
 `lift_leaf` pattern this reuses).
 
 ## 0. Purpose

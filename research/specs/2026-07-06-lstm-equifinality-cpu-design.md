@@ -2,8 +2,8 @@
 
 Date: 2026-07-06. Branch: `unit_catchments` (contains master's leakance merge
 `ea5fb39`; PR #24 head).
-Prior findings: `docs/2026-07-06-leakance-nogo-scientific-summary.md` (leakance
-= the reference unidentifiable pole), `docs/2026-06-23-precip-disaggregation-findings.md`.
+Prior findings: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md` (leakance
+= the reference unidentifiable pole), `research/findings/2026-06-23-precip-disaggregation-findings.md`.
 Paper: `/home/tbindas/projects/ddr_equifinality/paper.tex` ("Beyond
 Equifinality in Differentiable River Routing", Bindas & Shen).
 
@@ -63,7 +63,7 @@ the standard windows never reach into 1980.
 
 R1↔R2 doubles as a controlled disagg-head ablation on a new source (prior
 disagg evidence is dHBV2-UH only: NSE +0.037 / KGE −0.007,
-`docs/2026-06-23-precip-disaggregation-findings.md`).
+`research/findings/2026-06-23-precip-disaggregation-findings.md`).
 
 ## Phase 1 — infrastructure (before any run)
 
@@ -132,7 +132,7 @@ Four levels, all restricted to the **intersection of real-coverage reaches**
    `kan_parameters.nc`, eval outputs, `gradients.nc`.
 5. Cross-arm analysis script in `ddrs-py` + figures (parameter maps,
    convergence scatter, gradient-alignment maps).
-6. Findings doc `docs/2026-07-XX-lstm-equifinality-findings.md` with the H1–H4
+6. Findings doc `research/findings/2026-07-XX-lstm-equifinality-findings.md` with the H1–H4
    verdict table, feeding the paper's Results section.
 
 ## Concerns / assumptions (per planning rules)

@@ -36,7 +36,7 @@ trained unweighted); all four R^2 columns are then computed as
 *evaluation*-time weightings of the same held-out predictions.
 
 Outputs:
-  - <report>            docs/why-analysis/G-head-capacity.md
+  - <report>            research/why-analysis/G-head-capacity.md
   - <figure>             .../figures/why/G_capacity.png
   - <results-csv>        .../figures/why/G_capacity_results.csv (per-fold detail)
 
@@ -68,7 +68,7 @@ DEFAULT_STATS_JSON = Path(
 )
 DEFAULT_GAGES_CSV = Path("/home/tbindas/projects/ddr/references/gage_info/gages_3000.csv")
 DEFAULT_OUT_DIR = REPO / ".ddrs/experiments/landscape-p21-all-5yr/merged/figures/why"
-DEFAULT_REPORT = REPO / "docs/why-analysis/G-head-capacity.md"
+DEFAULT_REPORT = REPO / "research/why-analysis/G-head-capacity.md"
 
 DDR_SRC = Path("/home/tbindas/projects/ddr/src")
 
@@ -170,7 +170,7 @@ def train_kan(
         # DDR's kan.py forward() already applies F.sigmoid internally before
         # returning outputs[key] -- do NOT sigmoid again here (that would
         # double-saturate and made training collapse to a near-constant
-        # prediction in early testing; see docs/why-analysis/G-head-capacity.md).
+        # prediction in early testing; see research/why-analysis/G-head-capacity.md).
         frac = model(inputs=X)[N_ARCH]
         n = lo + frac * (hi - lo)
         return torch.log(n)
@@ -180,7 +180,7 @@ def train_kan(
     # set: invert ln n -> n -> frac in [0,1] -> logit, leave the output
     # layer's weights at their random init. This removes the constant offset
     # from what Adam has to discover -- the original bug (see History in
-    # docs/why-analysis/G-head-capacity.md) was every arm getting stuck at
+    # research/why-analysis/G-head-capacity.md) was every arm getting stuck at
     # exactly that constant because epoch 0 (with a zero-initialised bias,
     # i.e. frac=0.5) was never beaten before patience fired.
     mean_y = float(np.average(y_train, weights=w_train))

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python under `uv` in `/home/tbindas/projects/extractrs` (extractrs, geopandas, pyogrio, rioxarray, xarray, netCDF4, pandas, pytest). No Rust changes to extractrs expected (categorical/threshold stats reduce to boolean-raster preprocessing + coverage-weighted `mean`).
 
-**Spec:** `ddrs docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md` §3 (Phase A). Read its §A0 ID-space clarification before starting: MERIT COMID and NHDPlus "COMID" are UNRELATED ID spaces sharing a name.
+**Spec:** `ddrs research/specs/2026-07-04-leakance-gate-program-design.md` §3 (Phase A). Read its §A0 ID-space clarification before starting: MERIT COMID and NHDPlus "COMID" are UNRELATED ID spaces sharing a name.
 
 **Working directory:** ALL code lives in `/home/tbindas/projects/extractrs` under a new `pipelines/channel_attrs/` directory. Data staging: `/mnt/ssd1/data/channel_attrs/{raw,derived}/`. Final outputs: `/home/tbindas/projects/ddr/data/merit_channel_attributes_v1.nc` (+ stats JSON next to it). One validation test lives in the ddrs worktree (Task 11).
 

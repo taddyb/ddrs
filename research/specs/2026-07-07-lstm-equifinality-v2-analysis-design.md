@@ -2,7 +2,7 @@
 
 Date: 2026-07-07. Branch: `unit_catchments`. Supersedes the ANALYSIS RULES (not
 the runs, not the raw artifacts) of
-`docs/superpowers/specs/2026-07-06-lstm-equifinality-cpu-design.md`.
+`research/specs/2026-07-06-lstm-equifinality-cpu-design.md`.
 
 Inputs already on disk, NOT re-run by this spec: R1/R2/R3 training+eval
 (`2026-07-07T03-55-53Z` / `04-49-19Z` / `06-50-28Z-train-and-test`, sha
@@ -168,9 +168,9 @@ are stated so a 4th/5th arm is a data addition, not a rules rewrite:
 
 ## What does NOT change
 
-- The three arms, their configs, checkpoints, and dumps (`docs/superpowers/
+- The three arms, their configs, checkpoints, and dumps (`research/
   specs/2026-07-06-lstm-equifinality-cpu-design.md` §Arms) — no retraining.
-- The v1-registered H1–H4 verdicts in `docs/2026-07-07-lstm-equifinality-
+- The v1-registered H1–H4 verdicts in `research/findings/2026-07-07-lstm-equifinality-
   findings.md` §3 — reported as registered, alongside the v2 numbers, never
   overwritten.
 - Stage A/B/D (network, coverage, routing skill) — unaffected by this spec.

@@ -3,7 +3,7 @@
 Date: 2026-07-02. Branch: `worktree-zeta-sensitivity` (worktree off `master`
 @ `1aa9278`, post PR #23 merge — includes the zeta/depth eval instrumentation).
 Prior findings this follows from:
-`docs/2026-07-02-leakance-diagnosis-findings.md` (§5 next-steps item 1).
+`research/findings/2026-07-02-leakance-diagnosis-findings.md` (§5 next-steps item 1).
 
 ## Problem
 

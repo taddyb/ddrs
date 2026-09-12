@@ -42,7 +42,7 @@ observed streamflow?* The pipeline in
    shape first — `summed Q': {gauges} gauges × {divides} unique upstream
    divides × {days} days` — which is the number to trust; the design-time
    estimate was ~17k divides over a 15-year window
-   (`docs/superpowers/plans/2026-06-02-summed-q-prime.md` §Concerns 5,
+   (`research/plans/2026-06-02-summed-q-prime.md` §Concerns 5,
    never re-measured after the 2026-07-29 population change).
 4. For each gauge, NaN-skipping `nansum` of `Qr` across that gauge's
    upstream slice gives a per-day predicted streamflow.
@@ -324,7 +324,7 @@ build that `plan` may also perform for fabric-only configs.)
 
 The commonly quoted read size is **~370 MB** for a CONUS 15-year window.
 That is a design-time *estimate*, not a measurement: it comes from
-`docs/superpowers/plans/2026-06-02-summed-q-prime.md` §Concerns 5
+`research/plans/2026-06-02-summed-q-prime.md` §Concerns 5
 (`(17k divides × 5,479 days) f32 ≈ 370 MB`), dated 2026-06-02 and not
 re-derived since the 2026-07-29 gauge-population change. Treat it as an
 order of magnitude for RAM budgeting; the `summed Q': … gauges × …
@@ -332,7 +332,7 @@ divides × … days` line `compute` prints is the ground truth for any
 given run.
 
 This was a deliberate trade-off
-(`docs/superpowers/plans/2026-06-02-summed-q-prime.md` §"Concerns"):
+(`research/plans/2026-06-02-summed-q-prime.md` §"Concerns"):
 computing the baseline lazily in `run` instead would waste that 30
 s–2 min on every `train-and-test` with a warm cache, so it is front-loaded
 into `plan` where the result can be reused.

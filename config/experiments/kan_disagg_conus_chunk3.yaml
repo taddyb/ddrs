@@ -1,7 +1,7 @@
 # kan_disagg_conus_chunk3.yaml — disaggregation head with chunk_days=3:
 # mass balance relaxed to the trailing 3-day (72h) window instead of each
 # individual calendar day, validated via a standalone real-USGS-hourly
-# pretraining experiment (docs/2026-07-1x-disagg-72h-window-findings.md) —
+# pretraining experiment (research/findings/2026-07-1x-disagg-72h-window-findings.md) —
 # smooth cross-day storm shapes + real peak-timing improvement (6h vs
 # climatology's 9h) vs. the old per-day-exact + boundary_blend approach,
 # which left peak timing exactly tied with climatology. No leakance.

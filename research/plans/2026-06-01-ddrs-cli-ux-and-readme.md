@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, BURN 0.21 (CUDA + NdArray backends), serde_yaml, clap derive.
 
-**Spec:** `docs/superpowers/specs/2026-06-01-ddrs-cli-ux-and-readme-design.md`
+**Spec:** `research/specs/2026-06-01-ddrs-cli-ux-and-readme-design.md`
 
 ---
 
@@ -1666,6 +1666,6 @@ All spec sections covered. Idempotency in §2 isn't a new task — current Phase
 
 ## Execution
 
-Plan complete and saved to `docs/superpowers/plans/2026-06-01-ddrs-cli-ux-and-readme.md`.
+Plan complete and saved to `research/plans/2026-06-01-ddrs-cli-ux-and-readme.md`.
 
 Tasks are tightly coupled (each depends on earlier tasks' types and field shapes) but otherwise independent enough for subagent dispatch — the controller threads the type signatures through prompts. Each task has self-contained tests so subagent dispatch with two-stage review is the recommended approach.

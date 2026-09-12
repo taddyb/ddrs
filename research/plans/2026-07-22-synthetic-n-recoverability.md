@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (BURN 0.21), Python (`ddrs-py` venv: xarray, netCDF4, numpy, pandas), existing `ddrs` CLI binaries (`probe_zeta_gradient`, `dump_parameters`, `train`).
 
-Spec: `docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md`
+Spec: `research/specs/2026-07-22-synthetic-n-recoverability-design.md`
 
 ---
 
@@ -69,7 +69,7 @@ with:
 //!       values from a CSV; also writes a per-reach zeta answer-key netCDF.
 //!       Requires `params.use_leakance: true`.
 //!   (b) routing-parameter donor world (`--donor-params-nc`, docs:
-//!       docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md)
+//!       research/specs/2026-07-22-synthetic-n-recoverability-design.md)
 //!       — overrides ALL THREE of n/q_spatial/p_spatial from a
 //!       `dump_parameters::write_netcdf`-schema donor NetCDF (the same
 //!       mechanism `--mode eval-loss`'s "full-swap" composition uses).
@@ -156,7 +156,7 @@ with:
     /// teacher mode: same donor-NetCDF schema, but ALL THREE of
     /// n/q_spatial/p_spatial are always overridden together (no partial
     /// swap) — the synthetic-twin ground-truth generator (see
-    /// docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+    /// research/specs/2026-07-22-synthetic-n-recoverability-design.md).
     /// Optional; independent of --plant-file/--zeta-output.
     #[arg(long)]
     donor_params_nc: Option<PathBuf>,
@@ -356,7 +356,7 @@ Replace with:
     };
 
     // Optional n/q_spatial/p_spatial donor override (the synthetic-n
-    // routing-parameter twin — docs/superpowers/specs/2026-07-22-synthetic-n-
+    // routing-parameter twin — research/specs/2026-07-22-synthetic-n-
     // recoverability-design.md). Reuses the same --donor-params-nc /
     // load_comid_field / gather_by_comid / physical_to_normalized machinery
     // as --mode eval-loss's full-swap composition.
@@ -508,7 +508,7 @@ Create `tests/teacher_donor_override_parity.rs`:
 
 ```rust
 //! Parity gate for teacher mode's new n/q_spatial/p_spatial donor override
-//! (docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+//! (research/specs/2026-07-22-synthetic-n-recoverability-design.md).
 //!
 //! Injecting a checkpoint's OWN dump_parameters output as the teacher's
 //! donor field must reproduce the SAME synthetic gauge observations as
@@ -631,7 +631,7 @@ are now independent of the new --donor-params-nc path."
 
 ```python
 """Consensus geometry for the synthetic-n recoverability experiment
-(docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+(research/specs/2026-07-22-synthetic-n-recoverability-design.md).
 
 Runs `dump_parameters` against the 4 already-converged real-Q'-source
 checkpoints from this campaign, then computes the per-COMID MEDIAN
@@ -754,7 +754,7 @@ git commit -m "feat(scripts): consensus-geometry generator for synthetic-n exper
 
 ```python
 """Prescribed truth-n fields for the synthetic-n recoverability experiment
-(docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md §1).
+(research/specs/2026-07-22-synthetic-n-recoverability-design.md §1).
 
 Combines each prescribed n field with the fixed consensus geometry
 (scripts/synthetic_n_consensus_geometry.py) into a single donor NetCDF per
@@ -877,7 +877,7 @@ Base it on `config/experiments/aorc2f_distributed_frozen_chunk1.yaml` (read it f
 # synthetic_n_teacher.yaml — synthetic-n recoverability ground-truth generator.
 # GENERATED from aorc2f_distributed_frozen_chunk1.yaml — teacher world: full
 # simulation window, standard benchmark Q' store, no leakance.
-# Spec: docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md
+# Spec: research/specs/2026-07-22-synthetic-n-recoverability-design.md
 
 mode: training
 workflow: train-and-test
@@ -1124,7 +1124,7 @@ Expected: 4 NetCDF files `output/synthetic_n/recovered_{distributed,lumped,daily
 
 ```python
 """Pre-registered verdicts S1-S5 for the synthetic-n recoverability
-experiment (docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md §3).
+experiment (research/specs/2026-07-22-synthetic-n-recoverability-design.md §3).
 
 Run from ddrs-py's venv, after all 4 students' dump_parameters outputs exist:
     cd ddrs-py && uv run python ../scripts/synthetic_n_recoverability_analysis.py
@@ -1265,7 +1265,7 @@ Expected: a printed per-arm table, then the VERDICTS block (including the `[S5]`
 
 - [ ] **Step 4: Write the findings doc**
 
-Create `docs/2026-07-22-synthetic-n-recoverability-findings.md` following this campaign's established findings-doc structure (see `docs/2026-07-16-aorc2f-wave1-findings.md` for the template: what this tests, execution notes, results table, interpretation). Populate it with the actual VERDICTS block output and the per-arm CSV, and state explicitly whether the headline S4/slope-flip bar passed.
+Create `research/findings/2026-07-22-synthetic-n-recoverability-findings.md` following this campaign's established findings-doc structure (see `research/findings/2026-07-16-aorc2f-wave1-findings.md` for the template: what this tests, execution notes, results table, interpretation). Populate it with the actual VERDICTS block output and the per-arm CSV, and state explicitly whether the headline S4/slope-flip bar passed.
 
 The findings doc MUST include these two notes explicitly (design spec §6 concern 1 and §1's naming note — do not silently drop either):
 
@@ -1294,7 +1294,7 @@ If the headline verdict FAILED: do not run Phase 2 — document in the findings 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/synthetic_n_recoverability_analysis.py docs/2026-07-22-synthetic-n-recoverability-findings.md output/synthetic_n/recoverability_rows.csv
+git add scripts/synthetic_n_recoverability_analysis.py research/findings/2026-07-22-synthetic-n-recoverability-findings.md output/synthetic_n/recoverability_rows.csv
 git commit -m "docs: synthetic-n recoverability findings across the 4 real Q' sources"
 ```
 

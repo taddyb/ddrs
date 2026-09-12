@@ -1,5 +1,5 @@
 """Prescribed truth-n fields for the synthetic-n recoverability experiment
-(docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md §1).
+(research/specs/2026-07-22-synthetic-n-recoverability-design.md §1).
 
 Combines each prescribed n field with the fixed consensus geometry
 (scripts/synthetic_n_consensus_geometry.py) into a single donor NetCDF per

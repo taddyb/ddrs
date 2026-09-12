@@ -1,6 +1,6 @@
 //! `ddrs` CLI entrypoint. Dispatches to subcommands defined in
 //! `ddrs::cli::*`. See spec at
-//! `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+//! `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
 
 use std::path::PathBuf;
 

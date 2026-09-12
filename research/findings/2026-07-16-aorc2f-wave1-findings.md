@@ -3,7 +3,7 @@
 Plan: `.claude/plans/glowing-bubbling-sprout.md` (agent-authored, not checked in)
 Configs: `config/experiments/aorc2f_distributed_frozen_chunk1.yaml`,
          `config/experiments/aorc2f_lumped_frozen_chunk1.yaml`
-Prior benchmark: `docs/2026-06-23-precip-disaggregation-findings.md` (median NSE 0.7152 / KGE 0.7106)
+Prior benchmark: `research/findings/2026-06-23-precip-disaggregation-findings.md` (median NSE 0.7152 / KGE 0.7106)
 
 ## 1. What this tests
 

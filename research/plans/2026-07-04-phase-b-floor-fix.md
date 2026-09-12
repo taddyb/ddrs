@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (probe binary extension, CPU/NdArray), Python under `ddrs-py` uv venv (xarray, netCDF4, numpy, matplotlib) for analysis.
 
-**Spec:** `docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md` §4 (Phase B).
+**Spec:** `research/specs/2026-07-04-leakance-gate-program-design.md` §4 (Phase B).
 
 **Worktree:** `/home/tbindas/projects/ddrs/.claude/worktrees/zeta-sensitivity` (branch `worktree-zeta-sensitivity`). Heavy runs: cwd `/home/tbindas/projects/ddrs` (main tree), ABSOLUTE worktree binary paths, `nice -n 10`, logs under `/home/tbindas/projects/ddrs/output/floor_fix/logs/`. Guard suites after every code task: `cargo test --test leakance_gradcheck --test leakance_off_parity --test zeta_accum` + `cargo run --release --example compare_ddr_sandbox` (ABSOLUTE MATCH).
 
@@ -250,7 +250,7 @@ import re, pathlib
 base = pathlib.Path("config/experiments/recoverability_student_a.yaml").read_text()
 hdr = lambda n, note: (f"# {n} — Phase B objective-floor measurement.\n"
                        f"# GENERATED from recoverability_student_a.yaml — {note}\n"
-                       f"# Spec: docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md §4\n")
+                       f"# Spec: research/specs/2026-07-04-leakance-gate-program-design.md §4\n")
 def patch(text, subs):
     for pat, rep in subs:
         text, n = re.subn(pat, rep, text, count=1, flags=re.M)
@@ -424,7 +424,7 @@ print(f"plot -> {OUT / 'floor_decay.png'}")
 ### Task 4: DECISION GATE
 
 - [ ] **If DECISION = OPTION A:** proceed to Task 5.
-- [ ] **If DECISION = OPTION B REQUIRED:** STOP this plan here. Deliverables so far (floor curves, decay plot, stratification) ARE the Phase-B1 output; write `docs/2026-07-XX-floor-curve-findings.md` (Task 6's structure, verdict = "config-only insufficient"), commit, and surface to the human with the measured decay lengths — the state-cache design (spec §4 option B: continuous-run state cache, ~1.3 GB, dataset plumbing, staleness measurement) gets its own brainstorm+plan informed by these numbers. Do not improvise the state cache from this plan.
+- [ ] **If DECISION = OPTION B REQUIRED:** STOP this plan here. Deliverables so far (floor curves, decay plot, stratification) ARE the Phase-B1 output; write `research/findings/2026-07-XX-floor-curve-findings.md` (Task 6's structure, verdict = "config-only insufficient"), commit, and surface to the human with the measured decay lengths — the state-cache design (spec §4 option B: continuous-run state cache, ~1.3 GB, dataset plumbing, staleness measurement) gets its own brainstorm+plan informed by these numbers. Do not improvise the state cache from this plan.
 
 ---
 
@@ -454,9 +454,9 @@ Then compute the floor at the CHOSEN warmup only (one-liner as in Task 2 Step 4)
 ### Task 6: Findings report
 
 **Files:**
-- Create: `docs/2026-07-XX-floor-fix-findings.md` (XX = run date)
+- Create: `research/findings/2026-07-XX-floor-fix-findings.md` (XX = run date)
 
-- [ ] **Step 1: Write it** in the established experiment-report structure (mirror `docs/2026-07-04-synthetic-recoverability-findings.md`): §1 Hypothesis (the floor is warmup-governed and a config-level trim can reach 0.25; pre-registered bar + decision rule), §2 What was changed (floor mode + configs + analysis script, commit SHAs; no Backward/training-path changes; guards green), §3 The experiment (2 runs × 96 windows, teacher point, synthetic obs; the 0.0076/1.017 anchors), §4 Did it pass (the floor table verbatim from analysis.log, the decay plot, the DECISION line, validation-seed result), §5 Conclusions (chosen recipe + sample-efficiency cost: loss-days per window; decay length by basin size — the generalizable ddrs finding), §6 Next steps (Phase C consumes the recipe; CLAUDE.md warmup guidance update; state-cache only if B was triggered), §7 Raw output, §8 Reproduce.
+- [ ] **Step 1: Write it** in the established experiment-report structure (mirror `research/findings/2026-07-04-synthetic-recoverability-findings.md`): §1 Hypothesis (the floor is warmup-governed and a config-level trim can reach 0.25; pre-registered bar + decision rule), §2 What was changed (floor mode + configs + analysis script, commit SHAs; no Backward/training-path changes; guards green), §3 The experiment (2 runs × 96 windows, teacher point, synthetic obs; the 0.0076/1.017 anchors), §4 Did it pass (the floor table verbatim from analysis.log, the decay plot, the DECISION line, validation-seed result), §5 Conclusions (chosen recipe + sample-efficiency cost: loss-days per window; decay length by basin size — the generalizable ddrs finding), §6 Next steps (Phase C consumes the recipe; CLAUDE.md warmup guidance update; state-cache only if B was triggered), §7 Raw output, §8 Reproduce.
 
 - [ ] **Step 2:** Final guard sweep (`cargo test` + sandbox ABSOLUTE MATCH). Commit `docs(findings): objective floor fix — curves, decision, validated recipe`.
 
@@ -465,5 +465,5 @@ Then compute the floor at the CHOSEN warmup only (one-liner as in Task 2 Step 4)
 ## Self-review (done at write time)
 
 - **Spec coverage:** §4 B1 (curve at warmup {5,15,30,60}@rho90 + {90}@rho180, uparea stratification) → Tasks 1–3 (the post-hoc trim trick supersedes per-warmup runs — one run per rho measures ALL warmups, strictly better than the spec's enumeration); B2 decision rule → Tasks 3–4; option A → Task 5; option B → explicit STOP gate (Task 4) rather than speculative code, honoring "each phase produces working software" (B1's curves are a complete deliverable on the B path); B3 bar (≤ 0.25, rerun-noise 0 on CPU) → Tasks 3/5; "explicitly general finding" → Task 6 §5.
-- **Placeholder scan:** `docs/2026-07-XX-...` is the run-date convention used by prior findings docs (named at write time), not a content placeholder. Known unknowns flagged with resolution paths: netcdf 2-D string API (Task 1 Step 2), uparea lookup source (Task 1 Step 3, NaN fallback defined), grad-mode t_days consistency assert.
+- **Placeholder scan:** `research/findings/2026-07-XX-...` is the run-date convention used by prior findings docs (named at write time), not a content placeholder. Known unknowns flagged with resolution paths: netcdf 2-D string API (Task 1 Step 2), uparea lookup source (Task 1 Step 3, NaN fallback defined), grad-mode t_days consistency assert.
 - **Type consistency:** `write_floor_netcdf(path, n_windows, n_slots, n_days, abs_residual, gauge_staids, uparea, seed, label)` matches between the test (Step 1) and impl (Step 2); `--mode floor` flags match between Tasks 1–2–5; file names `floor_rho90.nc`/`floor_rho180.nc` consistent across Tasks 2–3.

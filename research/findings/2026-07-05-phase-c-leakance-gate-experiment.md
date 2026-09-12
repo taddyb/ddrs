@@ -2,7 +2,7 @@
 
 Date: 2026-07-05
 Worktree: `zeta-sensitivity` (branch `worktree-zeta-sensitivity`)
-Program spec: `docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md` §5
+Program spec: `research/specs/2026-07-04-leakance-gate-program-design.md` §5
 Depends on: Phase A (channel/GW attributes, `merit_channel_attributes_v1.nc`),
 Phase B (objective floor fix — state-cache hotstart), C0 (multi-store attributes).
 Certification gate: the recovery-control-on-clean-objective result (R1); this

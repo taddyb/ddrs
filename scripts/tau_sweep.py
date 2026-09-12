@@ -1,6 +1,6 @@
 """Per-gauge tau sweep on a pre-trim hourly eval dump.
 
-Spec: docs/superpowers/specs/2026-08-05-per-gauge-tau-sweep-design.md
+Spec: research/specs/2026-08-05-per-gauge-tau-sweep-design.md
 
 Reads the DDRS_HOURLY_DUMP raw f32 (n_gauges, n_hours) + `.json` sidecar and
 the eval run's predictions.zarr, reconstructs daily predictions for each

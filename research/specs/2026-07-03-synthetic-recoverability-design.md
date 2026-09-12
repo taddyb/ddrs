@@ -3,8 +3,8 @@
 Date: 2026-07-03
 Worktree: `zeta-sensitivity` (branch `worktree-zeta-sensitivity`)
 Prior instruments:
-`docs/2026-07-02-leakance-diagnosis-findings.md` (H1–H7 diagnosis),
-`docs/2026-07-03-zeta-gradient-probe-findings.md` (P1/P2 refuted, P3 NO-GO).
+`research/findings/2026-07-02-leakance-diagnosis-findings.md` (H1–H7 diagnosis),
+`research/findings/2026-07-03-zeta-gradient-probe-findings.md` (P1/P2 refuted, P3 NO-GO).
 
 ## 1. Question
 

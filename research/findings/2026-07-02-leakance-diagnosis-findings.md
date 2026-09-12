@@ -1,9 +1,9 @@
 # Leakance low-zeta diagnosis — experiment report (2026-07-02)
 
-Spec: `docs/superpowers/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md`
-Lit review: `docs/2026-07-01-leakance-litreview.md`
+Spec: `research/specs/2026-07-01-leakance-low-zeta-diagnosis-design.md`
+Lit review: `research/findings/2026-07-01-leakance-litreview.md`
 Script: `scripts/leakance_diagnosis.py` (raw output archived in §6)
-Prior experiment: `docs/2026-07-01-leakance-hourly-findings.md` (the 2×2 that
+Prior experiment: `research/findings/2026-07-01-leakance-hourly-findings.md` (the 2×2 that
 motivated this)
 
 **One-line answer: zeta is small because the optimizer *chooses* small — it
@@ -162,7 +162,7 @@ theoretically valid for the arid West, but it is not what limits *this* model.
    further) with little zeta or skill change, because the binding constraint
    is the signal, not the box. **This supersedes the "widen K_D past 1e-6 —
    top follow-up" recommendation in
-   `docs/2026-07-01-leakance-hourly-findings.md` §5 item 2.**
+   `research/findings/2026-07-01-leakance-hourly-findings.md` §5 item 2.**
 3. **The 2×2's GO-marginal verdict stands** — this diagnosis explains the
    marginality (the term is real but only expressible near the training
    signal); it does not overturn the losing-subset skill gain under hourly
