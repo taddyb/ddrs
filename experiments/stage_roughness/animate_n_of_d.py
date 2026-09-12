@@ -1,0 +1,252 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy", "netCDF4", "matplotlib", "pillow", "scipy", "zarr>=3", "icechunk"]
+# ///
+"""Animate stage-dependent Manning roughness over a water year.
+
+With `params.stage_roughness`, Manning's n is no longer a fixed per-reach
+number. It breathes with the flow:
+
+    n(d) = n_0 · (d / d_ref)^(−gamma)
+
+so every reach is rougher at low flow and smoother in flood. This renders that
+as a GIF: one frame per day, the network coloured by n(d).
+
+**Where the depth comes from, and the one approximation.** Nothing exports
+per-reach daily depth, so it is recomputed here from the same closed form the
+solver inverts (`src/geometry.rs`):
+
+    d = ( Q · n_0 · (q+1) · d_ref^gamma / (p · √S) ) ^ ( 3 / (5 + 3q + 3·gamma) )
+
+`Q` is the discharge each reach carries. The honest version accumulates the
+upstream Q' through the network; `--discharge local` uses each reach's own Q'
+instead, which is much faster and fine for small networks where routing barely
+redistributes, but understates main-stem flow badly on CONUS. The mode used is
+stamped on every frame so a figure cannot lose its caveat.
+
+Run it on a run directory that has `plot/kan_parameters.nc` (i.e. one trained
+with `--plot`):
+
+    experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 1996
+    experiments/stage_roughness/animate_n_of_d.py <run-dir> --traces      # no map
+
+`--traces` skips the map and plots n(d) through time for a handful of reaches,
+which is the cheaper and often more legible view of the same thing.
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+from netCDF4 import Dataset
+
+
+def read_config_scalars(cfg_text: str) -> tuple[float, float]:
+    """`(gamma, d_ref)` from a run's config snapshot. Absent block ⇒ (0, 1)."""
+    if "stage_roughness:" not in cfg_text:
+        return 0.0, 1.0
+    block = cfg_text.split("stage_roughness:", 1)[1]
+    g = re.search(r"^\s+gamma:\s*([0-9.eE+-]+)", block, re.M)
+    d = re.search(r"^\s+d_ref:\s*([0-9.eE+-]+)", block, re.M)
+    return (float(g.group(1)) if g else 0.0, float(d.group(1)) if d else 1.0)
+
+
+def depth_from_discharge(q, n0, p, qs, slope, gamma, d_ref, depth_lb=0.01):
+    """Mirrors `compute_trapezoidal_geometry_gamma` in src/geometry.rs."""
+    q_eps = qs + 1e-6
+    num = np.maximum(q, 1e-4) * n0 * (q_eps + 1.0)
+    if gamma != 0.0 and d_ref != 1.0:
+        num = num * d_ref**gamma
+    den = p * np.sqrt(np.maximum(slope, 1e-8)) + 1e-8
+    expo = 3.0 / (5.0 + 3.0 * q_eps + 3.0 * gamma)
+    return np.maximum((num / den) ** expo, depth_lb)
+
+
+def manning_n(depth, n0, gamma, d_ref):
+    return n0 * (depth / d_ref) ** (-gamma) if gamma != 0.0 else np.broadcast_to(n0, depth.shape)
+
+
+def load_qprime(cfg_text: str, comids: np.ndarray, start: str, end: str) -> np.ndarray | None:
+    """Daily Q' for `comids` over [start, end), shape (T, N). None if unreadable."""
+    m = re.search(r"^\s+streamflow:\s*(\S+)", cfg_text, re.M)
+    if not m:
+        return None
+    path = m.group(1)
+    try:
+        import icechunk
+        import zarr
+
+        repo = icechunk.Repository.open(icechunk.local_filesystem_storage(path))
+        grp = zarr.open_group(repo.readonly_session("main").store, mode="r")
+        arr = grp["Qr"]
+        divide = np.asarray(grp["divide_id"][:])
+        time = grp["time"]
+        units = time.attrs.get("units", "days since 1980-01-01")
+        origin = np.datetime64(units.split("since")[-1].strip().split()[0])
+        days = origin + np.asarray(time[:]).astype("timedelta64[D]")
+        i0 = int(np.searchsorted(days, np.datetime64(start)))
+        i1 = int(np.searchsorted(days, np.datetime64(end)))
+        pos = {c: i for i, c in enumerate(divide)}
+        cols = np.array([pos.get(int(c), -1) for c in comids])
+        ok = cols >= 0
+        out = np.full((i1 - i0, comids.size), 1e-3, dtype=np.float64)
+        # Qr is (divide_id, time) or (time, divide_id); sniff by shape.
+        block = arr[:, i0:i1] if arr.shape[0] == divide.size else arr[i0:i1, :].T
+        out[:, ok] = np.asarray(block)[cols[ok], :].T
+        return out
+    except Exception as e:  # noqa: BLE001 - a missing store is a skip, not a crash
+        print(f"  ! could not read Q' from {path}: {e}")
+        return None
+
+
+def accumulate_upstream(q_local: np.ndarray, cfg_text: str, comids: np.ndarray) -> np.ndarray:
+    """Route Q' downstream by topological accumulation. Falls back to local."""
+    m = re.search(r"^\s+conus_adjacency:\s*(\S+)", cfg_text, re.M)
+    if not m:
+        print("  ! no conus_adjacency in config; using LOCAL discharge")
+        return q_local
+    try:
+        import zarr
+        from scipy.sparse import csr_matrix, eye
+        from scipy.sparse.linalg import spsolve_triangular
+
+        g = zarr.open_group(m.group(1), mode="r")
+        order = np.asarray(g["order"][:])
+        rows = np.asarray(g["indices_0"][:])
+        cols = np.asarray(g["indices_1"][:])
+        n = order.size
+        pos = {int(c): i for i, c in enumerate(order)}
+        keep = np.array([pos.get(int(c), -1) for c in comids])
+        if (keep < 0).any():
+            print("  ! parameter COMIDs not all in adjacency; using LOCAL")
+            return q_local
+        a = csr_matrix((np.ones(rows.size), (rows, cols)), shape=(n, n))
+        mat = (eye(n, format="csr") - a).tocsr()
+        full = np.full((q_local.shape[0], n), 1e-3)
+        full[:, keep] = q_local
+        out = np.empty_like(full)
+        for t in range(full.shape[0]):
+            out[t] = spsolve_triangular(mat, full[t], lower=True, unit_diagonal=True)
+        return out[:, keep]
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! accumulation failed ({e}); using LOCAL discharge")
+        return q_local
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("run_dir", type=Path)
+    ap.add_argument("--water-year", type=int, default=1996)
+    ap.add_argument("--discharge", choices=["accumulated", "local"], default="accumulated")
+    ap.add_argument("--traces", action="store_true", help="line plot instead of a map")
+    ap.add_argument("--n-traces", type=int, default=6)
+    ap.add_argument("--fps", type=int, default=12)
+    ap.add_argument("--out", type=Path, default=None)
+    a = ap.parse_args()
+
+    run = a.run_dir
+    nc = run / "plot" / "kan_parameters.nc"
+    if not nc.exists():
+        print(f"no {nc} — retrain with `--plot`")
+        return 1
+    cfg_text = (run / "config.yaml").read_text()
+    gamma, d_ref = read_config_scalars(cfg_text)
+    print(f"gamma = {gamma}, d_ref = {d_ref}")
+    if gamma == 0.0:
+        print("  NOTE gamma = 0, so n(d) is constant in time and the animation")
+        print("       will show a still frame. That is the correct answer for")
+        print("       this run, not a bug.")
+
+    ds = Dataset(nc)
+    comids = np.asarray(ds["COMID"][:], dtype=np.int64)
+    n0 = np.asarray(ds["n"][:], dtype=np.float64)
+    p = np.asarray(ds["p_spatial"][:], dtype=np.float64)
+    qs = np.asarray(ds["q_spatial"][:], dtype=np.float64)
+    slope = np.asarray(ds["slope"][:], dtype=np.float64)
+    print(f"{comids.size:,} reaches")
+
+    start, end = f"{a.water_year - 1}-10-01", f"{a.water_year}-10-01"
+    q_local = load_qprime(cfg_text, comids, start, end)
+    if q_local is None:
+        print("no Q' available; cannot animate")
+        return 1
+    q = q_local if a.discharge == "local" else accumulate_upstream(q_local, cfg_text, comids)
+    print(f"{q.shape[0]} days, discharge mode = {a.discharge}")
+
+    depth = depth_from_discharge(q, n0, p, qs, slope, gamma, d_ref)
+    n_t = manning_n(depth, n0, gamma, d_ref)
+    print(f"n(d): min {n_t.min():.4f}  median {np.median(n_t):.4f}  max {n_t.max():.4f}")
+    print(f"  ratio of network-median n at its highest vs lowest day: "
+          f"{np.median(n_t, axis=1).max() / np.median(n_t, axis=1).min():.3f}x")
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out = a.out or run / "plots" / (
+        f"n_of_d_wy{a.water_year}" + ("_traces.png" if a.traces else ".gif")
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    days = np.arange(q.shape[0])
+
+    if a.traces:
+        # Pick reaches spanning the discharge range, so the spread is visible.
+        rank = np.argsort(np.median(q, axis=0))
+        pick = rank[np.linspace(0, rank.size - 1, a.n_traces).astype(int)]
+        fig, ax = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+        for i in pick:
+            ax[0].plot(days, q[:, i], lw=0.9, label=f"COMID {comids[i]}")
+            ax[1].plot(days, n_t[:, i], lw=0.9)
+        ax[0].set_yscale("log")
+        ax[0].set_ylabel("discharge (m³/s)")
+        ax[0].legend(fontsize=7, ncol=2)
+        ax[1].set_ylabel("Manning's n(d)")
+        ax[1].set_xlabel(f"day of water year {a.water_year}")
+        ax[0].set_title(
+            f"roughness breathing with flow — gamma = {gamma}, "
+            f"discharge = {a.discharge}"
+        )
+        for x in ax:
+            x.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out, dpi=150, facecolor="white")
+        print(f"wrote {out}")
+        return 0
+
+    # Map frames. Positions come from the fabric when available; otherwise the
+    # reaches are laid out by (drainage rank, n) which still reads as a network
+    # gradient and needs no shapefile.
+    from PIL import Image
+
+    vmin, vmax = np.percentile(n_t, [2, 98])
+    frames = []
+    x = np.log10(np.maximum(np.median(q, axis=0), 1e-3))
+    y = n0
+    for t in range(0, q.shape[0], max(1, q.shape[0] // 180)):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        sc = ax.scatter(x, y, c=n_t[t], s=6, cmap="plasma_r", vmin=vmin, vmax=vmax)
+        ax.set_xlabel("log10 median discharge (m³/s)")
+        ax.set_ylabel("n₀ (roughness at d_ref)")
+        ax.set_title(
+            f"n(d), water year {a.water_year}, day {t}\n"
+            f"gamma = {gamma}, discharge = {a.discharge}"
+        )
+        fig.colorbar(sc, label="Manning's n(d)")
+        fig.tight_layout()
+        fig.canvas.draw()
+        frames.append(Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[..., :3]))
+        plt.close(fig)
+    frames[0].save(
+        out, save_all=True, append_images=frames[1:],
+        duration=int(1000 / a.fps), loop=0,
+    )
+    print(f"wrote {out}  ({len(frames)} frames)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
