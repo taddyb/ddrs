@@ -43,7 +43,8 @@ Cargo features · Worktree gotchas
 
 **`references/config.md`**
 Top level · `data_sources:` (8 fields, adjacency rule) · `experiment:` (incl.
-`optimizer`, grad-accum) → `experiment.loss:` (l1 / nnse-kge / kge / nse-batch) ·
+`optimizer`, grad-accum) → `experiment.loss:` (the loss-kind menu; see the
+file for the current list) ·
 `testing:` overlay (batch_size shifts meaning) · `kan_head:` →
 `kan_head.disaggregation:` (**the real fields — `use_precip` does not exist**) ·
 `params:` (incl. what `tau` actually is) → `parameter_ranges` → `attribute_minimums` ·
@@ -57,11 +58,8 @@ nonlinearity**), parity (must be bidirectional), fixtures · Why the zeta_accum
 headwater identity works · Checkpoint f16 drift
 
 **`references/traps.md`**
-Symptom → trap table · T1 stale binary · T2 DDR sandbox mismatch · T3 CUDA graphs
-mask NaN · T4 phantom-zero baseline · T5 flat training loss · T6 GPU eval OOM that
-never propagates · T7 silent kernel OOM on long CPU forwards · T8 transient icechunk
-read · T9 `.ddrs/` beside the config · T10 `--checkpoint` differs per binary ·
-Exit codes · Pre-flight checklist
+Symptom → trap table (the complete, numbered list lives there; read its own
+index rather than a summary here) · Exit codes · Pre-flight checklist
 
 **`references/research-status.md`**
 Gauge-set definitions (2,365 vs 2,698 vs 3,211 vs 5,224) · Benchmarks + the KGE
