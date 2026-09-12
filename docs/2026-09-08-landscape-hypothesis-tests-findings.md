@@ -1895,10 +1895,10 @@ that it learns `n` + `p_spatial` + `q_spatial` where the baseline learned `n` + 
 Same 2,365 gauges, same eval window, same optimizer budget, same seed, same everything else — the arm config is
 that run's own `config.yaml` with only the `kan_head` block changed.
 
-**Why this is worth taking seriously despite the size.** It is what §32.5 predicted, before the run.
-`channel_geometry.md` showed the downstream width exponent `b` is capped at `q·f` when `p` is constant, which is
-about 0.28 even with a perfect `q`, against Leopold & Maddock's 0.50. `p` is the only parameter that can supply
-the rest, through how it scales with river size. Letting it move should help, and it did.
+**The predicted mechanism is REFUTED — see §33.1.** §32.5 argued that with `p` constant the downstream width
+exponent is capped at `q·f`, and that `p` is the only parameter able to supply the rest through how it scales
+with river size. The skill gain is real, but it did not come from that: `p` scales *negatively* with discharge
+and the downstream geometry got worse, not better.
 
 ### What this is not, yet
 
@@ -1910,8 +1910,7 @@ the rest, through how it scales with river size. Letting it move should help, an
   `input_layer_kan`, `output_layer_kan` — so it takes the default path, which `tests/kan_head_groups.rs`
   asserts is bit-identical for the group case. But master-versus-now numerical equivalence for the whole
   training loop is argued, not verified. The cheap check is a `--max-mini-batches 2` run on both binaries.
-- **The mechanism is unconfirmed.** Whether `p` actually grew with river size, which is the claim, is free to
-  measure from the parameter dump and has not been done.
+- **The mechanism was measured and is refuted.** See §33.1.
 
 ### Also measured: the celerity convention is approximate
 
@@ -1931,3 +1930,60 @@ It vanishes at `q = 0` and `q = 1` (where `(2−q)(q+1)/2 = 1`) and peaks in bet
 matter if `q` were moved toward the Leopold & Maddock band. Inherited from DDR; changing it would move
 invariant 1, so it is documented rather than fixed. Test:
 `tests/stage_roughness.rs::documents_the_preexisting_beta_approximation`.
+
+### 33.1 Skill went up and the channel geometry went down
+
+`experiments/head_arch/downstream_geometry.py` fits the downstream exponents the way
+`channel_geometry.md` defines them, at a common baseflow specific discharge across all 346,321 reaches. The
+model reaches Leopold & Maddock's `b ≈ 0.50` through
+
+```
+  b = beta + q · f          beta = dlog(p) / dlog(Q)
+```
+
+so with `p` pinned, `beta = 0` and `b` cannot exceed `q·f`. That cap was the whole argument for freeing `p`.
+
+| model | median q | median p | beta | q·f | **b** | f |
+|---|---|---|---|---|---|---|
+| `p` fixed at 21 (`2026-09-10T21-21-48Z`) | 0.0843 | 21.00 | 0.000 | 0.046 | **0.099** | 0.550 |
+| `p` learnable (`2026-09-11T23-24-04Z`) | 0.2951 | 5.85 | **−0.144** | 0.163 | **0.004** | 0.551 |
+| Leopold & Maddock | — | — | — | — | **0.50** | 0.40 |
+
+`q` more than tripled, which lifted `q·f` from 0.046 to 0.163 exactly as intended. But **`p` shrinks as rivers
+grow** (`beta = −0.144`), which cancels that and more. The net downstream width exponent fell from 0.099 to
+**0.004**: channel width is now essentially constant from headwater to main stem, where reality grows it as
+`Q^0.5`.
+
+**So freeing `p` bought +0.008 NSE and made the channel geometry worse.** The two moved in opposite directions.
+
+### 33.2 What the gain actually came from
+
+Measuring the trained trunk for this model (`--checkpoint` mode, same method as §32.2):
+
+| | trunk eff. rank | PC1 share | rho(n, q) | affine R² |
+|---|---|---|---|---|
+| two parameters (`n`, `q`) | **1.38** | 0.846 | 0.997 | **0.9924** |
+| three parameters (`n`, `p`, `q`) | **1.64** | 0.768 | 0.681 | **0.4580** |
+
+Adding a third output **partly breaks the rank-1 collapse**. The trunk carries a little more (1.38 → 1.64) and,
+far more visibly, the outputs stop being the same field: the share of `q`'s pre-activation explained by `n`'s
+falls from 99.2 % to 45.8 %. The residual is not noise either — it correlates +0.601 with `meanslope`.
+
+The fields also separate onto different attributes for the first time. `q` is now slope-driven (rho = +0.665
+with `meanslope`, against +0.325 with elevation), while `n` stays soil- and size-driven (+0.624 sand, −0.494
+`log10_uparea`). In the two-parameter model every field had the same correlation profile to within a few
+hundredths (§32's table).
+
+So the honest account of the +0.008 is: **not the geometry mechanism, but the head escaping some of its own
+collapse**, which is a different and more interesting reason than the one predicted.
+
+### 33.3 Why this matters more than the skill number
+
+This is selective equifinality caught in the act. Given freedom, the model used `p` for whatever helped the
+daily hydrograph and spent none of it on making channels physically sensible, because the objective cannot see
+channel width at all (§30: the width exponent lives in the scale channel, where flashiness is null at −0.045).
+A model that fits better and describes the river worse is exactly what the paper claims a distributed
+differentiable model does when its parameters are unidentifiable.
+
+It also means **`b` should be reported alongside NSE for every future arm**. Skill alone would have recorded
+this run as a straightforward improvement.
