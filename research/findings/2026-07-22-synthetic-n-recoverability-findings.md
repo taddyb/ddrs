@@ -33,7 +33,7 @@ stores. Recovered n/q/p (via `dump_parameters`) is compared to the truth donor.
 ## Arm-1 preview (distributed) — NOT a verdict
 
 Computed over all 346,321 CONUS reaches vs `truth_leopold_maddock.nc`
-(notebook: `output/synthetic_n/plots/synthetic_n_recovery_distributed.ipynb`):
+(notebook: `research/figures/synthetic-n/synthetic_n_recovery_distributed.ipynb`):
 
 | Quantity | Value |
 |---|---|
