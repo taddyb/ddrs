@@ -318,7 +318,7 @@ workspace exists. Starting a global train from a CONUS workspace is
 therefore `ddrs sources use global && ddrs plan --workflow train && ddrs run
 --workflow train`.
 
-Any store meeting the DDR Q′ contract (`docs/nh-qprime-store-contract.md`)
+Any store meeting the DDR Q′ contract (`docs/book/nh-qprime-store-contract.md`)
 registers as a group in one command:
 
 ```bash
