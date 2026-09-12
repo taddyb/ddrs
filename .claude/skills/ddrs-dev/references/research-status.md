@@ -613,7 +613,7 @@ n was already converged by update 20 of 60.
   for any hour-scale signal. Training also runs at tau=3, so gradients have
   always been ~half a day misaligned — retrain at corrected tau is the open
   test (freeze the tau protocol first). Instrument: `DDRS_HOURLY_DUMP` env var
-  on `evaluate` + `scripts/tau_sweep.py`. Authority:
+  on `evaluate` + `research/archive/scripts/tau_sweep.py`. Authority:
   `research/findings/2026-08-06-tau-sweep-pilot-findings.md` incl. §5a corrections.
   **Interpolation arms (§5c, same day):** replicated on the standard 2,365-gauge
   population — argmax tau=18–20, small-basin global tau=19 beats baseline

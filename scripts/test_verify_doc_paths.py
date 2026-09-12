@@ -81,8 +81,8 @@ def main() -> int:
 
     # Proves the WARN_GLOBS widening (src/**/*.rs, tests/**/*.rs,
     # ddrs-py/**/*.rs) actually reaches Rust doc comments: a `.rs` file citing
-    # a dead path must be surfaced as a "warn:" line, but — because it is
-    # WARN, not STRICT — must not fail the build on its own.
+    # a dead path must be surfaced as a "warn:" line, but, because it is
+    # WARN, not STRICT, must not fail the build on its own.
     with tempfile.TemporaryDirectory() as d:
         root = Path(d) / "rust-doc-comment"
         root.mkdir()

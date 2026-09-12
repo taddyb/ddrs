@@ -50,19 +50,19 @@ WARN_GLOBS = (
 
 # Known limitations. Only backtick-quoted paths and markdown link targets
 # are checked (PATH_RE and LINK_RE below both require the backticks / link
-# syntax). An unquoted path sitting in bare prose or parentheses — e.g. a
-# doc comment reading "(see docs/foo.md)" instead of "(see `docs/foo.md`)"
-# — is invisible to this script and will not be reported even when dead.
+# syntax). An unquoted path sitting in bare prose or parentheses (e.g. a
+# doc comment reading "(see docs/foo.md)" instead of "(see `docs/foo.md`)")
+# is invisible to this script and will not be reported even when dead.
 # This was a deliberate trade, not an oversight: matching bare path-like
 # tokens would also match every directory mentioned in prose, every example
 # shell command, every partial path fragment in a sentence, and an early
-# draft of this verifier that tried it produced 288 findings — a gate that
+# draft of this verifier that tried it produced 288 findings: a gate that
 # noisy gets switched off, which protects nothing. So: cite paths in
 # backticks (or as a markdown link) if you want them checked. A bare path
 # needs a human sweep (grep) to catch, same as before this script existed.
 # A backtick-quoted URL is also never extracted as a candidate in the first
 # place: PATH_RE's path character class excludes ":", so it cannot match
-# across the "://" in "https://host/path/to/file.pdf" — a real example is
+# across the "://" in "https://host/path/to/file.pdf": a real example is
 # docs/book/reference/hydraulic-geometry-literature-2026-09-08.md:277,
 # where a NASA URL happens to contain a "docs/...pdf" segment that is not a
 # repository path at all.

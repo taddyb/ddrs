@@ -223,7 +223,7 @@ pub struct ReconciliationResult {
 /// silently paper over.
 ///
 /// Gate thresholds calibrated empirically against the real 505-gauge
-/// overlap (`examples/pretrain_reconciliation_check.rs`, 1998-2013): an
+/// overlap (`research/archive/examples/pretrain_reconciliation_check.rs`, 1998-2013): an
 /// initial `correlation >= 0.98` bar excluded 280/505 gauges, but 263 of
 /// those had a perfectly healthy ratio (median 1.015) and failed purely on
 /// correlation in the 0.92-0.98 range -- normal day-to-day noise between

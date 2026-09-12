@@ -629,12 +629,6 @@ dataset to free GPU memory first. Mirrors DDR's `scripts/train_and_test.py`.
 | `compare_ddr_sandbox` | V1 cross-language regression vs DDR (`< 1e-3 m³/s`); reads `fixtures/sandbox/`, writes `output/ddrs_vs_ddr.{csv,png}` |
 | `benchmark_hydrograph` | Fixture-free routing sanity check; writes `output/hydrograph.{csv,png}` |
 | `dump_init_params` | Sweep all CONUS reaches through a freshly-initialised head |
-| `save_random_kan` | Throwaway smoke helper: build a `KanHead` from the YAML's `kan_head` section |
-| `kan_sensitivity_sweep`, `kan_disagg_trained_sensitivity` | KAN-interpretability sensitivity sweeps |
-| `disagg_boundary_verification`, `kan_disagg_mass_balance_real` | Disaggregation mass-balance / boundary verification |
-| `disagg_precip_normalization_discriminator`, `disagg_transfer_diagnostic`, `kan_disagg_real_storm_shift` | Disaggregation diagnostics |
-| `pretrain_disagg_verify`, `pretrain_reconciliation_check` | Pretraining verification |
-| `pretrain_disagg_storm_compare`, `pretrain_disagg_capacity_storm_compare`, `pretrain_disagg_window72_storm_compare` | Storm-day visual comparisons per pretraining variant |
 
 Only the first two are standing gates. The rest are experiment-specific —
 read each file's `//!` docstring for its inputs and assumptions.

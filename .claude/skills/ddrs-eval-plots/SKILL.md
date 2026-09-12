@@ -249,7 +249,7 @@ was still ruled NO-GO — passing it is necessary, not sufficient.
   not a trained model.
 - Debugging gradient parity against DDR → `examples/compare_ddr_sandbox.rs`.
 - **H5/H6 selective-equifinality plots** — campaign CLOSED, both **INCONCLUSIVE**.
-  The authoritative analysis is `scripts/h5_h6_audit_analysis.py` +
+  The authoritative analysis is `research/archive/scripts/h5_h6_audit_analysis.py` +
   `research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md`. Do **not** regenerate the v1
   figures: the `f_n ≥ 2/3` bars used an unpaired variance estimate (the correct
   paired test has 15–40× smaller variance), and the `min × 1.05` sublevel contour
