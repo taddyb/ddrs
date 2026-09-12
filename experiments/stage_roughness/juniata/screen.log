@@ -1,0 +1,13 @@
+=== control  gamma=0.0  q=[0.0,1.0]
+[2026-09-12T03:49:22Z] median NSE (finite only): 0.7903
+[2026-09-12T03:49:22Z] median KGE (finite only): 0.8810
+=== gamma-only  gamma=0.183  q=[0.0,1.0]
+[2026-09-12T03:49:39Z] median NSE (finite only): 0.8630
+[2026-09-12T03:49:39Z] median KGE (finite only): 0.9256
+=== q-only  gamma=0.0  q=[0.4,0.9]
+[2026-09-12T03:49:57Z] median NSE (finite only): 0.7657
+[2026-09-12T03:49:57Z] median KGE (finite only): 0.8650
+=== at-a-station  gamma=0.183  q=[0.4,0.9]
+[2026-09-12T03:50:15Z] median NSE (finite only): 0.8486
+[2026-09-12T03:50:15Z] median KGE (finite only): 0.9172
+=== DONE
