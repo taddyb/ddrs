@@ -4,7 +4,7 @@
 //! forward/loss/backward step and `_test` in
 //! `~/projects/ddr/scripts/train_and_test.py:43-119` for inference.
 //!
-//! Verification ladder (see `.claude/specs/2026-05-17-sp4-training-design.md`):
+//! Verification ladder (see `research/specs/2026-05-17-sp4-training-design.md`):
 //!   V1 — single small batch, frozen scalar params, loss matches DDR.
 //!   V2 — all filtered gauges in one batch, same frozen params.
 //!   V3 — full training loop runs end-to-end without divergence.

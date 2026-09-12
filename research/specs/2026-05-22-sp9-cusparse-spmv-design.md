@@ -365,7 +365,7 @@ No changes outside the sparse module + the call sites in mmc_op.
 ## Next steps
 
 1. You review this spec.
-2. After approval: write `.claude/specs/2026-05-22-sp9-cusparse-spmv-plan.md`
+2. After approval: write `research/plans/2026-05-22-sp9-cusparse-spmv-plan.md`
    with the full task-by-task plan (cuSPARSE setup, three new functions,
    dispatch wiring, V8 bit-match test).
 3. Subagent-driven execution per SP-6/7/8 precedent.

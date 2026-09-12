@@ -8,7 +8,7 @@
 
 **Tech Stack:** cudarc 0.19.7 cuSPARSE bindings (already a transitive dep), cubecl Handles for GPU memory, BURN 0.21 backend primitives. No new crate dependencies.
 
-**Spec:** `.claude/specs/2026-05-22-sp9-cusparse-spmv-design.md`
+**Spec:** `research/specs/2026-05-22-sp9-cusparse-spmv-design.md`
 
 ---
 

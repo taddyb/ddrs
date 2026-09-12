@@ -17,8 +17,8 @@ happens at SP-4's device boundary.
 **Tech Stack:** Existing crates only — `ndarray`, `serde`, `serde_yaml`,
 `rand`, `chrono`, `std::collections::{BTreeSet, HashMap}`.
 
-**Spec:** `.claude/specs/2026-05-17-sp3-dataset-design.md`
-**Parent:** `.claude/specs/2026-05-17-train_and_test-replication-design.md`
+**Spec:** `research/specs/2026-05-17-sp3-dataset-design.md`
+**Parent:** `research/specs/2026-05-17-train_and_test-replication-design.md`
 
 **DDR reference (read-only, cite line numbers):**
 - `~/projects/ddr/src/ddr/geodatazoo/merit.py::Merit::_collate_gages` (~245-330)

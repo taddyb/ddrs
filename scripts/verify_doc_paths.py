@@ -36,8 +36,10 @@ STRICT_GLOBS = (
 # a citation whose form is deliberately wrong because it is shown as an
 # example of what not to write.
 IGNORE_MARKER = "verify-doc-paths: ignore"
-# Prose documentation: reported, never fatal.
-WARN_GLOBS = ("docs/**/*.md", "README.md")
+# Prose documentation: reported, never fatal. Rust doc comments are included
+# here (not STRICT) because a citation there is worth surfacing but should
+# not fail a build over a comment edit.
+WARN_GLOBS = ("docs/**/*.md", "README.md", "src/**/*.rs", "tests/**/*.rs", "ddrs-py/**/*.rs")
 
 FILE_EXT = r"rs|py|md|ya?ml|toml|sh|json|nc|ipynb|dbf|shp|gpkg|mpk|zarr|ic|csv"
 PATH_RE = re.compile(rf"`([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?::(\d+(?:-\d+)?))?`")

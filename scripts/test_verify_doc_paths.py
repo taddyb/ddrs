@@ -79,6 +79,25 @@ def main() -> int:
                 check(f"{name}: names the token",
                       want_token in proc.stdout, f"stdout={proc.stdout!r}")
 
+    # Proves the WARN_GLOBS widening (src/**/*.rs, tests/**/*.rs,
+    # ddrs-py/**/*.rs) actually reaches Rust doc comments: a `.rs` file citing
+    # a dead path must be surfaced as a "warn:" line, but — because it is
+    # WARN, not STRICT — must not fail the build on its own.
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "rust-doc-comment"
+        root.mkdir()
+        scaffold(root, "")  # empty CLAUDE.md: nothing strict to fail on
+        (root / "src" / "orphan.rs").write_text(
+            "//! See `src/does_not_exist.rs` for background.\n"
+        )
+        proc = run_on(root)
+        check("rust doc comment citation is scanned: reported as warn",
+              "warn:" in proc.stdout and "src/does_not_exist.rs" in proc.stdout,
+              f"stdout={proc.stdout!r}")
+        check("rust doc comment citation is scanned: does not fail the build",
+              proc.returncode == 0,
+              f"got {proc.returncode}, stdout={proc.stdout!r}")
+
     # Pins the real interface: later tasks invoke the verifier with no
     # arguments from the repository root, which run_on() above never
     # exercises because it always passes --root. Deliberately does NOT

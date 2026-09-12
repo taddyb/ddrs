@@ -2,7 +2,7 @@
 
 **Status:** Draft, pending user review
 **Date:** 2026-05-21
-**Parent:** `.claude/specs/2026-05-20-sp6-cusparse-gpu-solve-design.md`
+**Parent:** `research/specs/2026-05-20-sp6-cusparse-gpu-solve-design.md`
 **Reference:**
 - SP-6 close-out: CPU = 5.58 min, CUDA = 6.10 min on 3-mini-batch smoke. Losses bit-exact between paths; CUDA is 10% SLOWER.
 - The bottleneck is two-fold: host syncs (`B::sync(device)` + `cuStreamSynchronize`) and the n-element host roundtrip of `x` at the end of every `cusparseSpSV_solve`.
@@ -268,5 +268,5 @@ These resolve the three sanity-check questions from the brainstorming session:
 ## Next steps
 
 1. You review this spec and request changes or approve.
-2. After approval: invoke `superpowers:writing-plans` to produce the SP-7 implementation plan (`.claude/specs/2026-05-21-sp7-cusparse-stream-share-plan.md`).
+2. After approval: invoke `superpowers:writing-plans` to produce the SP-7 implementation plan (`research/plans/2026-05-21-sp7-cusparse-stream-share-plan.md`).
 3. After plan approval: subagent-driven execution per the SP-4/5/6 pattern.

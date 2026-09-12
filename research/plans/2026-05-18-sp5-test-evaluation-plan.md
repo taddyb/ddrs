@@ -16,8 +16,8 @@ contiguous in hourly time (unlike SP-3's `(rho-1)*24` training trim). A new
 **Tech Stack:** Existing BURN 0.21 + zarrs 0.23 + ndarray + chrono + new
 `clap = "4"` for the CLI binary.
 
-**Spec:** `.claude/specs/2026-05-18-sp5-test-evaluation-design.md`
-**Parent:** `.claude/specs/2026-05-17-train_and_test-replication-design.md`
+**Spec:** `research/specs/2026-05-18-sp5-test-evaluation-design.md`
+**Parent:** `research/specs/2026-05-17-train_and_test-replication-design.md`
 
 **Verification ladder:**
 - **V4:** single-batch full-test-period match against DDR reference, frozen

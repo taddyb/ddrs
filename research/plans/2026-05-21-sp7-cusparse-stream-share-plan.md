@@ -8,8 +8,8 @@
 
 **Tech Stack:** Rust 1.94+, BURN 0.21 (`Cuda<f32, i32>`), `cudarc 0.19` (cuSPARSE + driver), patched `cubecl-cuda 0.10` + `burn-cubecl 0.21` via git forks.
 
-**Spec:** `.claude/specs/2026-05-21-sp7-cusparse-stream-share-design.md`
-**Parent:** `.claude/specs/2026-05-20-sp6-cusparse-gpu-solve-design.md`
+**Spec:** `research/specs/2026-05-21-sp7-cusparse-stream-share-design.md`
+**Parent:** `research/specs/2026-05-20-sp6-cusparse-gpu-solve-design.md`
 
 **Verification:**
 - **V5 (correctness, preserved):** synthetic 100-reach lower-tri bit-match between `NdArray<f32>` Cpu and `Cuda<f32, i32>` Cuda paths — `x`, `grad_a`, `grad_b` within `1e-3` abs / `1e-4` rel. Must still pass after the rewrite.

@@ -2,7 +2,7 @@
 
 **Status:** Draft, pending user review
 **Date:** 2026-05-20
-**Parent:** `.claude/specs/2026-05-17-train_and_test-replication-design.md`
+**Parent:** `research/specs/2026-05-17-train_and_test-replication-design.md`
 **Reference:**
 - The smoking gun: `src/sparse.rs:335` (`forward_primitive`) — CPU forward solve forces D→H + H→D every timestep.
 - The other CPU bottleneck: `src/sparse.rs:380` (`CsrSolveOp::backward`) — pulls `a_values + grad_out` to host, runs `back_sub_upper_transposed`, builds `grada` per-nnz on CPU.
@@ -356,5 +356,5 @@ session:
 
 1. You review this spec and request changes or approve.
 2. After approval: invoke `superpowers:writing-plans` to produce the
-   SP-6 implementation plan (`.claude/specs/2026-05-20-sp6-cusparse-gpu-solve-plan.md`).
+   SP-6 implementation plan (`research/plans/2026-05-20-sp6-cusparse-gpu-solve-plan.md`).
 3. After plan approval: subagent-driven execution per the SP-4/SP-5 pattern.

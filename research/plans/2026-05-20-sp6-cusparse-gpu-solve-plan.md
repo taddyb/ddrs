@@ -8,8 +8,8 @@
 
 **Tech Stack:** Rust 1.94+, BURN 0.21 (`Cuda<f32, i32>`, autodiff custom `Backward`), `cudarc 0.19` with `cusparse` feature (verified present in `~/.cargo/registry/.../cudarc-0.19.7/src/cusparse/`), existing `cubecl-cuda` (for stream sharing + grada kernel).
 
-**Spec:** `.claude/specs/2026-05-20-sp6-cusparse-gpu-solve-design.md`
-**Parent:** `.claude/specs/2026-05-17-train_and_test-replication-design.md`
+**Spec:** `research/specs/2026-05-20-sp6-cusparse-gpu-solve-design.md`
+**Parent:** `research/specs/2026-05-17-train_and_test-replication-design.md`
 
 **Verification:** V5 — synthetic 100-reach lower-triangular pattern; forward `x`, backward `gradb`, and `grada` per-nnz match between `NdArray<f32>` + `Cpu` solver and `Cuda<f32, i32>` + `Cuda` solver within `1e-5` relative.
 

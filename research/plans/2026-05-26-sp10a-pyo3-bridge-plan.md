@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021, `pyo3 = "0.22"`, `numpy = "0.22"`, `burn` 0.21 with `ndarray` + `std` features, `serde_json` (already a ddrs dep), `maturin` build backend, `uv` for the Python side.
 
-**Spec reference:** `.claude/specs/2026-05-26-sp10a-pyo3-bridge-design.md`. Read it first.
+**Spec reference:** `research/specs/2026-05-26-sp10a-pyo3-bridge-design.md`. Read it first.
 
 ---
 
@@ -152,7 +152,7 @@ Write `/home/tbindas/projects/ddrs/ddrs-py/src/lib.rs`:
 ```rust
 //! ddrs-py: PyO3 bindings for ddrs.
 //!
-//! See `.claude/specs/2026-05-26-sp10a-pyo3-bridge-design.md` for design.
+//! See `research/specs/2026-05-26-sp10a-pyo3-bridge-design.md` for design.
 
 use pyo3::prelude::*;
 
@@ -373,7 +373,7 @@ Replace `/home/tbindas/projects/ddrs/ddrs-py/src/lib.rs`:
 ```rust
 //! ddrs-py: PyO3 bindings for ddrs.
 //!
-//! See `.claude/specs/2026-05-26-sp10a-pyo3-bridge-design.md` for design.
+//! See `research/specs/2026-05-26-sp10a-pyo3-bridge-design.md` for design.
 
 use pyo3::prelude::*;
 

@@ -122,7 +122,7 @@ Non-skippable. Authority to STOP the plan and force re-scope if findings
 diverge from the working hypothesis.
 
 **Deliverable:** `tests/sp8_diagnosis.rs` instrumented run + a short report in
-`.claude/specs/2026-05-22-sp8-diagnosis-findings.md` containing:
+`research/findings/2026-05-22-sp8-diagnosis-findings.md` containing:
 1. The full disassembly comment from cubecl's `scatter_kernel_t_f32_i_i32`
    (read the cubecl source — it's a JIT'd kernel; we want the macro source it
    compiles from).
@@ -323,7 +323,7 @@ master tip.
 ## Next steps
 
 1. You review this spec.
-2. After approval: write `.claude/specs/2026-05-22-sp8-mc-timestep-fusion-plan.md`
+2. After approval: write `research/plans/2026-05-22-sp8-mc-timestep-fusion-plan.md`
    with the full task-by-task plan (including the analytical backward
    derivation that this spec deferred).
 3. Subagent-driven execution per SP-6/SP-7 precedent.

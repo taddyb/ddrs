@@ -2,7 +2,7 @@
 
 **Status:** Draft, pending user review
 **Date:** 2026-05-18
-**Parent spec:** `.claude/specs/2026-05-17-train_and_test-replication-design.md`
+**Parent spec:** `research/specs/2026-05-17-train_and_test-replication-design.md`
 **Prior sub-projects:** SP-1 (static data), SP-2 (icechunk), SP-3 (collate),
 SP-4 (training loop). All landed and integration-validated against DDR.
 
@@ -442,6 +442,6 @@ This catches:
 ## Next steps after this spec is approved
 
 Invoke the writing-plans skill to produce a task-by-task implementation plan
-(`.claude/specs/2026-05-18-sp5-test-evaluation-plan.md`) covering all 9
+(`research/plans/2026-05-18-sp5-test-evaluation-plan.md`) covering all 9
 phases listed above. Then execute via subagent-driven-development (same
 pattern as SP-1..4).

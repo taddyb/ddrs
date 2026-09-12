@@ -8,7 +8,7 @@
 
 **Tech Stack:** BURN 0.21 (`Tensor`, `Autodiff`, `Backward<B, N>`, `Gradients`, `Ops`, `OpsKind`, `NoCheckpointing`), existing `CsrPattern`/`AValuesAssembler`/`triangular_csr_solve` from `src/sparse/mod.rs`. No new deps.
 
-**Spec:** `.claude/specs/2026-05-22-sp8-mc-timestep-fusion-design.md`
+**Spec:** `research/specs/2026-05-22-sp8-mc-timestep-fusion-design.md`
 
 ---
 
@@ -30,7 +30,7 @@
 
 - `src/routing/mmc_op.rs` — `TimestepOp` + `TimestepState` + analytical `Backward` impl.
 - `tests/sp8_diagnosis.rs` — Task 1 instrumented test that runs a short train and collects scatter source data.
-- `.claude/specs/2026-05-22-sp8-diagnosis-findings.md` — written by Task 1 (committed).
+- `research/findings/2026-05-22-sp8-diagnosis-findings.md` — written by Task 1 (committed).
 - `tests/sp8_gradcheck.rs` — Task 3 math-correctness gate (numerical vs analytical, NdArray).
 - `tests/sp8_v7_perf.rs` — Task 5 V7a hard perf gate.
 - `tests/sp8_v7_profile.rs` — Task 6 V7b hard profile gate.
@@ -78,7 +78,7 @@ Parent order is **always** `[n, q_spatial, p_spatial, q_t, q_prime_t]`. Don't pe
 
 **Files:**
 - Create: `tests/sp8_diagnosis.rs`
-- Create: `.claude/specs/2026-05-22-sp8-diagnosis-findings.md`
+- Create: `research/findings/2026-05-22-sp8-diagnosis-findings.md`
 
 - [ ] **Step 1: Write the instrumented diagnosis test**
 
@@ -94,7 +94,7 @@ Create `tests/sp8_diagnosis.rs`:
 //!   cargo test --release --test sp8_diagnosis -- --ignored --nocapture
 //!
 //! This test does NOT assert anything. It collects evidence the human reviews
-//! and commits to `.claude/specs/2026-05-22-sp8-diagnosis-findings.md`.
+//! and commits to `research/findings/2026-05-22-sp8-diagnosis-findings.md`.
 
 use std::path::Path;
 use std::process::Command;
@@ -194,7 +194,7 @@ Read the matched files. Identify:
 
 - [ ] **Step 5: Write the findings doc**
 
-Create `.claude/specs/2026-05-22-sp8-diagnosis-findings.md`:
+Create `research/findings/2026-05-22-sp8-diagnosis-findings.md`:
 
 ```markdown
 # SP-8 Task 1: Scatter hotspot diagnosis findings
@@ -234,7 +234,7 @@ OR
 
 ```bash
 git add tests/sp8_diagnosis.rs Cargo.toml \
-    .claude/specs/2026-05-22-sp8-diagnosis-findings.md
+    research/findings/2026-05-22-sp8-diagnosis-findings.md
 git commit -m "SP-8 Task 1: scatter hotspot diagnosis
 
 Adds tests/sp8_diagnosis.rs (ignored) that runs nsys on bin/train and

@@ -8,7 +8,7 @@
 
 **Tech Stack:** cudarc 0.19.7 raw driver API (`cudarc::driver::result::{stream,graph}::*` + `cudarc::driver::sys::CUgraphExec` / `CUgraph`), cubecl-cuda 0.10 (existing), BURN 0.21 (existing). No new crate dependencies.
 
-**Spec:** `.claude/specs/2026-05-26-sp10-cuda-graphs-design.md`
+**Spec:** `research/specs/2026-05-26-sp10-cuda-graphs-design.md`
 
 ---
 
@@ -256,7 +256,7 @@ pub mod cuda_graph;
 //! per timestep so the CPU issues 1 `cuGraphLaunch` instead of ~100
 //! `cuLaunchKernel`s.
 //!
-//! See `.claude/specs/2026-05-26-sp10-cuda-graphs-design.md`.
+//! See `research/specs/2026-05-26-sp10-cuda-graphs-design.md`.
 
 pub mod capture;
 pub mod scratch;

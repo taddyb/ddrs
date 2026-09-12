@@ -16,9 +16,9 @@ fixture-export step.
 **Tech Stack:** `netcdf` v0.12 (HDF5-backed), `csv` v1 + `serde`,
 `serde_json` (new), `ndarray` v0.16, existing `DataError` + `IdIndex<T>`.
 
-**Spec:** `.claude/specs/2026-05-17-sp1-static-data-design.md`
+**Spec:** `research/specs/2026-05-17-sp1-static-data-design.md`
 
-**Parent spec:** `.claude/specs/2026-05-17-train_and_test-replication-design.md`
+**Parent spec:** `research/specs/2026-05-17-train_and_test-replication-design.md`
 
 **DDR reference files (read-only, cite line numbers in comments):**
 - `~/projects/ddr/src/ddr/io/readers.py` — `read_gage_info` (~lines 100-160),

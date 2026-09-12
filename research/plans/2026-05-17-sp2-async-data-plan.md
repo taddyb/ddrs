@@ -17,10 +17,10 @@ whichever compiles first against the v2 crate.
 `zarrs` (already in use for `ConusAdjacencyStore`), `chrono::NaiveDate`,
 `ndarray`.
 
-**Spec:** `.claude/specs/2026-05-17-sp2-async-data-design.md`
+**Spec:** `research/specs/2026-05-17-sp2-async-data-design.md`
 
 **Parent spec:**
-`.claude/specs/2026-05-17-train_and_test-replication-design.md`
+`research/specs/2026-05-17-train_and_test-replication-design.md`
 
 **DDR reference (read-only, cite line numbers in comments):**
 

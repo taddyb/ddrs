@@ -8,7 +8,7 @@
 
 **Tech Stack:** mdBook (Rust), `mdbook-katex`, `mdbook-mermaid`, GitHub Actions, YAML frontmatter, small JSON state file.
 
-**Spec:** `.claude/specs/2026-05-29-ddrs-docs-design.md`
+**Spec:** `research/specs/2026-05-29-ddrs-docs-design.md`
 
 ---
 
