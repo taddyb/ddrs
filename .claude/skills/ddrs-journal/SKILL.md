@@ -28,7 +28,8 @@ Manual: `python3 scripts/journal.py --mode status` (what is pending),
 ## Filling an entry
 
 Four fields. Keep the whole entry under ~15 lines; if the conclusion needs more,
-it has earned a `docs/YYYY-MM-DD-<topic>-findings.md` and the entry links to it.
+it has earned a `research/findings/YYYY-MM-DD-<topic>-findings.md` and the entry
+links to it.
 
 **Question** — what we wanted to find out, phrased so "no" is a possible answer.
 

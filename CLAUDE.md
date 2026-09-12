@@ -542,7 +542,7 @@ caught at the next session start, not immediately. Entries before 2026-09-10 are
 ledger-only by construction.
 
 The journal is the index of the research, not a replacement for it: long-form
-results still earn a `docs/YYYY-MM-DD-<topic>-findings.md`, and a durable fact
+results still earn a `research/findings/YYYY-MM-DD-<topic>-findings.md`, and a durable fact
 still belongs in the skill library in the same session that produced it. Rules for
 writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
 

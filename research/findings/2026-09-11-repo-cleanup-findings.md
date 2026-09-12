@@ -559,6 +559,259 @@ phase boundary, not a partial one:
   green. This task does not push and does not open a PR; that is Task 15's
   Step 5.
 
+**Update (2026-09-12):** all five items above are complete. Section 8 below
+records what actually happened, including findings Phase 1 had no way to
+predict. This section is left as written, since it is a correct record of
+what was still open at the time Task 9 wrote it.
+
+---
+
+## 8. Phase 2: the book tree holds only the book
+
+Tasks 10 through 14 did the restructure this document described in section 6
+as not yet done. Measured at this task's HEAD:
+
+- `book.toml`'s `src` now points at `docs/book/` (Task 10, commit `cd4ec55`).
+  `find target/book -type f | sort` before and after the move differs by
+  exactly 10 removals (the 9 `docs/figures/` PNGs plus `docs/images/.gitkeep`)
+  and 0 additions; every one of the 18 `.html` output files is
+  byte-identical, so no published URL moved. `docs/` now contains exactly one
+  entry, `book`.
+- `research/` now holds `archive`, `figures`, `findings`, `journal`, `plans`,
+  `specs`, `why-analysis` (Task 11, commit `5f2771a`), 135 `.md` files total
+  (38 findings, 40 specs, 44 plans, 7 why-analysis, 5 journal, 1 archive),
+  consolidating `docs/superpowers/` and `.claude/specs/` by pure rename: the
+  move's own commit reports 144 files changed, 0 insertions, 0 deletions, and
+  `git log --follow` still traces every moved file through its pre-move
+  history.
+- 406 references were repointed at the new `research/` paths (Task 12,
+  commit `ec7014d` plus four fix rounds ending `cafc6d2`); 68 were left
+  because they are historical quotations of the pre-move layout inside
+  documents describing that layout (the cleanup's own spec, plan, findings
+  doc, and the 2026-07-30 audit), and one coincidental `docs/superpowers/`
+  text match that is prose about a grep's expected output, not a path.
+- `research/archive/{scripts,examples}/` holds 24 retired scripts and 13
+  retired examples (Task 13, commit `8fd0c6d`), `examples/*.rs` is down to
+  4 (`benchmark_hydrograph`, `compare_ddr_sandbox`, `dump_init_params`,
+  `leak_probe`) from 17, under an admission rule keyed to a citing findings
+  document or plan declaring the campaign closed, or to nothing citing the
+  artifact at all, never to filename similarity.
+- The 8 tracked files under gitignored `output/synthetic_n/plots/` moved to
+  `research/figures/synthetic-n/` as `git mv` renames (Task 14, commit
+  `ca68012`); `git ls-files output/` is empty.
+
+Measured now: the citation gate is at 0 strict failures, 80 prose warnings
+(`python3 scripts/verify_doc_paths.py`); `cargo check --examples --tests`
+exits 0; `cargo test --test ddr_sandbox_match --test gridded_bundle` is 6/6;
+`mdbook build` is clean.
+
+---
+
+## 9. Findings Phase 2 surfaced that Phase 1 had no way to know
+
+### 9.1 A number we nearly shipped as an achievement was a scope change, not a cleanup
+
+The citation gate's prose-warning count fell from roughly 516 mid-run to 80.
+That looks like thorough hygiene. It is almost entirely Task 11 moving 135
+documents from `docs/` (which `verify_doc_paths.py`'s `WARN_GLOBS` scans) to
+`research/` (which it does not scan). The documents were not fixed; the
+scanned set shrank out from under them. Stating the drop as a hygiene
+improvement in the PR description would have been exactly the kind of false
+claim this cleanup exists to remove.
+
+**Ruling:** `research/**` stays unscanned, on purpose, by both tiers of the
+gate. A findings document, a spec, or a plan is an immutable record: its path
+citations are snapshots of what was true when it was written, not claims
+about what is true now. Linting an immutable record against the current tree
+is a category error, since a findings doc from three moves ago is *supposed*
+to cite paths that no longer exist. Scanning `research/**` would emit
+hundreds of warnings about correctly-historical paths and recreate the
+288-noise problem the verifier was originally tuned to escape. This decision
+is now a comment in `scripts/verify_doc_paths.py` next to `WARN_GLOBS`,
+converting what started as an accident of the move into a documented
+decision a future contributor can read without having to reconstruct it.
+
+### 9.2 Archiving by filename would have silently broken a live test and orphaned a published gate
+
+The Task 13 brief listed `scripts/sp8_check_scatter.sh` and
+`scripts/sp10_check_launches.sh` for archiving, on the strength of both
+looking like closed-campaign spike checks from the sp8/sp10 series. Both are
+live. `tests/sp8_v7_profile.rs:21-24` spawns the first directly:
+`Command::new("bash").arg("scripts/sp8_check_scatter.sh").status().expect("spawn sp8_check_scatter.sh")`.
+`docs/book/reference/perf.md:194` and `:301` name the second as the current
+V10 gate command, with a measured result (29.2%) in the gates table. The
+implementer reversed both, against the brief, and was right to.
+
+The test that spawns `sp8_check_scatter.sh` is `#[ignore]`d, so archiving the
+script would not have failed CI. It would have failed silently, for whoever
+next ran the profiling gate with `--ignored`, who would have seen a missing
+file and had no reason to connect it to a repository cleanup weeks earlier.
+This is the headline argument for writing the archive admission rule against
+what a findings document or plan says about an artifact's campaign status,
+never against whether its filename resembles a closed campaign's vocabulary,
+alongside the `examples/leak_probe.rs` near-miss from Phase 1 (section 3.8
+above: a "leak" filename that is an active autograd-tape-leak repro, not a
+leakance artifact).
+
+### 9.3 A citation broke twice in one cleanup, and only a widened gate caught the second break
+
+`src/sparse/mod.rs:11` cited `.claude/references/ddrs-burn-autograd.md` at
+branch start. Task 2 repointed it to `docs/reference/burn-autograd.md`, which
+was correct at the time. Task 10's book move then relocated that file to
+`docs/book/reference/burn-autograd.md`, silently re-breaking the citation
+Task 2 had just fixed. Nothing in Task 10's own scope caught this, because
+Task 10's gate run only covered the book pages it was moving, not doc
+comments elsewhere in `src/`. The break was only found when Task 12's fix
+round 1 widened `WARN_GLOBS` to `src/**/*.rs` for an unrelated reason (the
+`.claude/specs/` reference cleanup) and the wider scan turned up this file
+along with it. The citation now reads `docs/book/reference/burn-autograd.md`.
+
+The lesson: a citation fixed early in a multi-step restructure is not fixed
+for the rest of the restructure. It can be re-broken by a later, unrelated
+step, and nothing catches that except running the gate, at its fullest
+coverage, after every step, rather than trusting the last green run.
+
+### 9.4 A commit message self-certified a false claim about its own diff
+
+Commit `ec7014d` ("docs: repoint 406 references at research/") ends its
+message with "Touches `src/` and `scripts/` doc comments/docstrings only; no
+logic changed." That is false for `scripts/`: `scripts/journal.py`'s
+`journal_dir()` (line 80-81) changed from returning
+`root / "docs" / "journal"` to `root / "research" / "journal"`, a real
+runtime behavior change, not a comment edit, plus two hardcoded paths in
+`scripts/test_journal.py` changed alongside it. The change itself is correct
+and necessary (`docs/journal/` no longer exists after Task 11), and
+`python3 scripts/test_journal.py` passes. The defect is narrower and more
+interesting than a bug: a task whose entire purpose was auditing the
+precision of claims against source mischaracterized its own diff in its own
+commit message. The commit is several back in the branch's history and is
+not worth rewriting to fix prose in a message; recording it here is the
+correction.
+
+### 9.5 A sweep that returned zero was itself wrong, and nearly went unchecked
+
+Checking whether any stale `docs/` citation remained inside the newly-moved
+book pages, the controller ran:
+
+```bash
+grep -rn "docs/" docs/book | grep -v "docs/book"
+```
+
+and got zero hits, which was nearly reported as proof the book was clean.
+The sweep was wrong, not the result: `grep -rn` prefixes every matching line
+with its own filename, and every filename under `docs/book/` itself contains
+the substring `docs/book`, so the second `grep -v` discarded every line the
+first `grep` had found, including real hits. Re-running without the
+self-defeating filter surfaced the genuine stale citation (fixed in commit
+`cafc6d2`) and one false positive, a `docs/` segment inside a NASA URL
+(`https://gmao.gsfc.nasa.gov/.../docs/yamazaki.pdf`) that is not a repository
+path at all, which is why the verifier's own skip list starts with `http`.
+
+This is the same failure shape as the defects this cleanup exists to find: a
+check that looks correct and silently discards the evidence it exists to
+surface, committed by the person checking for exactly that failure mode.
+**Lesson: when a sweep returns zero, verify the sweep before trusting the
+zero.**
+
+### 9.6 Two smaller items, recorded briefly
+
+**The 21-item pre-existing citation backlog.** Task 12 deliberately left 21
+dead or convention-violating citations unfixed, named and measured rather
+than silently absorbed into the "406 rewritten" figure: 9 unresolved paths
+that never existed in this tree and predate this cleanup entirely
+(`src/dag_algo/mod.rs`, `src/algo/mod.rs`, `scripts/build_subdivided_adjacency.py`
+×2, `src/ddr/`, `scripts/train.py`, three `tests/routing/test_*.py` Python
+mirrors), 9 "line citation into `src/` is not allowed" convention violations
+in `src/` doc comments (a style issue, not a dead link), 1 wildcard-slug
+placeholder for a campaign writeup that was never authored
+(`research/findings/2026-07-1x-disagg-72h-window-findings.md`, cited from
+`src/nn/disagg_head.rs:117`), and 2 `examples/*/README.md` references to a
+nonexistent `extract_bundle.py`. All 21 are reproduced by the current
+`python3 scripts/verify_doc_paths.py` run. A measured backlog someone chose
+not to fix in this cleanup is a known quantity; an unexamined one is not.
+
+**The five `*-handoff.md` documents split by accident.** `research/findings/`
+holds three (`2026-06-07-checkpoint-resume-handoff.md`,
+`2026-06-11-global-data-sources-handoff.md`,
+`2026-07-01-leakance-hourly-experiment-handoff.md`) and `research/plans/`
+holds two (`2026-06-06-gpu-device-config-handoff.md`,
+`2026-06-06-sigfpe-wukong-debug-handoff.md`), all five of the same genre
+(a mid-experiment handoff), split purely by which of `docs/` or
+`.claude/specs/` each one started in, not by any ruling about where a
+handoff document belongs. This is the one place the three-way
+findings/specs/plans split does not explain itself: a reader hunting "the
+SIGFPE handoff" by genre would check `research/findings/` first and miss it.
+A renames-only task could not have fixed this without inventing a new
+judgment call outside its scope, so it stands as a known wart rather than a
+silently-accepted one.
+
+---
+
+## 10. Process findings, continued: five more lessons from Phase 2
+
+Continuing the numbering from section 4 above (lessons 1 through 10 were
+Phase 1's).
+
+11. **A scope change can look like a quality improvement if you only read the
+    summary number.** The citation gate's prose-warning count falling from
+    roughly 516 to 80 reads as hygiene; it is almost entirely 135 documents
+    leaving the scanned set. Any before/after count needs its denominator
+    checked, not just its value. See section 9.1.
+
+12. **An admission rule stated against a citing document, not a filename,
+    is the whole point, and it only proves its worth when it overrides a
+    plan that used filenames.** The sp8/sp10 scripts were listed for
+    archiving by name-matching against "spike check"; both are live, one
+    spawned directly by an `#[ignore]`d test whose failure mode would have
+    been invisible to CI. See section 9.2.
+
+13. **A fix made early in a multi-step restructure is not durable against the
+    later steps.** `src/sparse/mod.rs:11` broke, was fixed, and broke again
+    from an unrelated later move, and was only caught because an unrelated
+    later gate-widening happened to re-scan it. The practice that generalizes:
+    run the widest-coverage gate after every step, not just the step that
+    seems related. See section 9.3.
+
+14. **A commit message is a claim like any other, and needs the same
+    verification.** "No logic changed" in `ec7014d`'s message is false for
+    `scripts/journal.py`. The change itself was correct; the self-description
+    of it was not checked before being written. See section 9.4.
+
+15. **A sweep returning zero is a claim, not a proof, until the sweep itself
+    is checked.** `grep -rn "docs/" docs/book | grep -v "docs/book"` returns
+    zero by construction, not because the tree is clean: `grep -n` prefixes
+    every line with a filename that itself contains the excluded string. See
+    section 9.5.
+
+---
+
+## 11. `CLAUDE.md` line count, reconfirmed
+
+`CLAUDE.md` is still **588** lines, unchanged since section 5's measurement
+at the end of Phase 1. None of Tasks 10 through 14 touched `CLAUDE.md`; this
+task's own edits (the "When in doubt" paths, the research-journal path, and
+the doc-conventions table in `.claude/skills/ddrs-dev/references/research-status.md`)
+changed text in place on existing lines rather than adding or removing any,
+so the count held. Re-run `wc -l CLAUDE.md` rather than trust this sentence.
+
+---
+
+## 12. Final gate results (whole branch, 2026-09-12)
+
+```
+python3 scripts/test_verify_doc_paths.py        # 21/21 pass
+python3 scripts/verify_doc_paths.py             # 0 unresolved in agent context, 80 in prose docs
+cargo check --examples --tests                  # exit 0 (pre-existing warnings only)
+cargo test --test ddr_sandbox_match --test gridded_bundle   # 6/6 pass
+mdbook build                                    # clean
+find target/book -type f | sort                 # differs from the pre-move snapshot by
+                                                 #   exactly the 9 figures PNGs + images/.gitkeep;
+                                                 #   all 18 .html outputs byte-identical
+```
+
+This is the state the branch's single pull request (Task 15, this task) is
+opened against.
+
 ---
 
 ## 7. Reproduce

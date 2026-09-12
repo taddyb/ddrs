@@ -209,9 +209,10 @@ The house rules that produced the results above, worth keeping:
 |---|---|---|
 | spec (before code runs) | `research/specs/` | `YYYY-MM-DD-<slug>-design.md` |
 | plan (tasks from a spec) | `research/plans/` | `YYYY-MM-DD-<slug>.md` |
-| findings (after it ran) | `docs/` | `YYYY-MM-DD-<slug>-findings.md` |
-| handoff (mid-experiment) | `docs/` | `YYYY-MM-DD-<slug>-handoff.md` |
-| reference (data contract, API) | `docs/book/reference/` or `docs/` | descriptive, no date |
+| findings (after it ran) | `research/findings/` | `YYYY-MM-DD-<slug>-findings.md` |
+| handoff (mid-experiment) | `research/findings/` | `YYYY-MM-DD-<slug>-handoff.md` |
+| reference (data contract, API) | `docs/book/reference/` | descriptive, no date |
+| closed-campaign tooling | `research/archive/{scripts,examples}/` | original filename, under the admission rule in its README |
 
 A findings doc opens with the header block (spec / plan / script / prior finding),
 then a **one-line verdict** before any section, then §1 pre-registered hypotheses,

@@ -42,6 +42,22 @@ IGNORE_MARKER = "verify-doc-paths: ignore"
 # (tests/fixtures/README.md, examples/*/README.md, ddrs-py/README.md), so
 # those trees are globbed for *.md alongside *.rs; config/ and scripts/ carry
 # no markdown today, so they are not.
+#
+# research/** is deliberately NOT in this list, even in warn mode, even
+# though it holds 100+ markdown files with path citations of its own. A
+# findings doc, spec, or plan is an immutable record: its paths are snapshots
+# of what was true when it was written, not claims about what is true now.
+# Linting an immutable record against the current tree is a category error,
+# since a findings doc from three moves ago is SUPPOSED to cite paths that no
+# longer exist. It is a historical account of what happened at that path, not
+# a forward-looking reference. Scanning it would emit hundreds of warnings
+# about correctly-historical paths, recreating the 288-noise problem this
+# verifier was tuned to escape (see the STRICT_GLOBS docstring above). This
+# was an explicit decision, not an oversight: the 2026-09-11 repo-cleanup move
+# took about 135 documents out of docs/ (which WAS scanned) into research/
+# (which is not), and the prose-warning count falling from roughly 516 to
+# roughly 80 is almost entirely that scope change, not a hygiene improvement;
+# see the findings doc for that run.
 WARN_GLOBS = (
     "docs/**/*.md", "README.md",
     "src/**/*.rs", "tests/**/*.rs", "ddrs-py/**/*.rs",

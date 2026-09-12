@@ -139,8 +139,12 @@ gh pr checks --watch                                # CI status for the current 
 `"standalone --workflow eval needs a --from-run <run-id> flag"`, and `--from-run`
 is unimplemented (`src/cli/run.rs`). Use `--workflow train-and-test`, or the
 legacy `eval` binary against an existing checkpoint. **`ddrs init` is a dead stub**
-(exits 2, `src/bin/ddrs.rs`); use `ddrs plan`. Both are still documented as
-working in README.md and `docs/` — see `research/findings/2026-07-30-docs-and-skills-audit.md`.
+(exits 2, `src/bin/ddrs.rs`); use `ddrs plan`. Both WERE documented as working in
+README.md and the book as of the 2026-07-30 audit; both are now correctly
+documented as broken in `README.md` and `docs/book/usage/running.md` (fixed in
+the 2026-09-11 cleanup's Task 8). See
+`research/findings/2026-07-30-docs-and-skills-audit.md` and
+`research/findings/2026-09-11-repo-cleanup-findings.md`.
 
 ## Verifying a run did what you think
 
@@ -270,8 +274,8 @@ same session that produced the knowledge — do not leave it only in a findings
 doc. If a rule here is superseded, correct it in place with the new nuance
 rather than deleting it.
 
-**The mdBook under `docs/` is now the canonical prose documentation** — it is a
-strict superset of the deleted `.claude/references/` copies. <!-- verify-doc-paths: ignore --> The old
+**The mdBook under `docs/book/` is now the canonical prose documentation** — it
+is a strict superset of the deleted `.claude/references/` copies. <!-- verify-doc-paths: ignore --> The old
 `regenerate-docs` skill was removed: its input contract pointed at
 `.claude/references/*.md` frontmatter that no longer exists, its
 `.regenerate-state.json` was never created, and its dataflow diagram published an
