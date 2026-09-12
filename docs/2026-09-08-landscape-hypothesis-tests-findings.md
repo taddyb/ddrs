@@ -2129,3 +2129,148 @@ The implementation stands and is verified: `gamma = 0` is bit-identical to the h
 (`tests/stage_roughness.rs`), the backward is gradient-exact at `gamma = 0.35` across all five parents
 (`tests/sp8_gradcheck.rs`), and the control arm here reproduced `head_shared_linear` to four decimals on a
 different binary.
+
+## 36. Learned stage-dependent roughness: code audit, prior art, and the CONUS read-out
+
+Reads the learned-`gamma` arm (`config/experiments/sr_gamma_learned.yaml`) against its matched control
+`head_shared_linear` (`2026-09-12T03-53-34Z`, 0.7458 / 0.7619) and the global-constant arm `gamma = 0.35`
+(`2026-09-12T06-06-19Z`, 0.7362 / 0.7588, §35). Before the read-out, the implementation was audited end to end,
+which is where the section starts, because the audit changed what got run.
+
+### 36.1 The equations, checked by hand
+
+The model family is `n(d) = n_0 · (d/d_ref)^(−gamma)` substituted into Manning for a section whose top width
+follows `w = p·d^q`. Three consequences, all verified against `src/geometry.rs`, `src/routing/mmc_op.rs` S2–S17
+and `src/experiment/adjoint/hydraulics.rs`:
+
+1. **Depth inversion stays closed form.** `Q = (1/n_0)·d^gamma·R^(2/3)·√S·A` with the power-law section gives
+   `d = (Q·n_0·(q+1)·d_ref^gamma / (p·√S))^(3/(5+3q+3·gamma))`. The code applies exactly this: the exponent
+   denominator gains `3·gamma` and the numerator gains `d_ref^gamma` (which is `1.0` for the learned field, since
+   config load requires no `stage_roughness` block there and `stage_roughness_params()` then returns
+   `d_ref = 1`).
+2. **Velocity carries the factor too.** `v = (1/n_0)·(d/d_ref)^gamma·R^(2/3)·√S`. Applying the stage law to
+   the depth inversion but not to the velocity would move the depth exponent while leaving the velocity exponent
+   at Manning's `2f/3`; `tests/stage_roughness.rs::exponents_match_theory_and_gamma_moves_velocity` pins the
+   realised exponents `f = 3/(5+3q+3·gamma)`, `b = q·f`, `m = 1 − b − f` at `gamma ∈ {0, 0.183, 0.4}`.
+3. **Celerity gains one term.** With `dA/dd = T` for any section, `c = dQ/dA = v·[beta_trap + gamma·A/(T·d)]`,
+   where `beta_trap = 5/3 − (4/3)·A·√(1+z²)/(T·P)` is the pre-existing fixed-shape trapezoid convention. The
+   increment is exact under that convention
+   (`tests/stage_roughness.rs::stage_roughness_celerity_increment_is_exact`, rel. error < 1e-4); the convention
+   itself is approximate by up to 2.25 % because the section reshapes as it fills, which is inherited from DDR,
+   measured, and deliberately unfixed (`documents_the_preexisting_beta_approximation`).
+
+`gamma = 0` takes the historical code path bit for bit (`compare_ddr_sandbox` still reports ABSOLUTE MATCH at
+1.5e-5 m³/s; `gamma_zero_is_bit_identical`).
+
+### 36.2 The gradient, checked by hand and by finite differences
+
+A learned `gamma` enters the forward in three places and the hand-written backward (invariant 4) has one term
+for each, all read from the same saved primitives:
+
+| forward site | term | backward |
+|---|---|---|
+| S5 exponent `3/(5+3q+3·gamma)` | `∂exp/∂gamma = −9/(5+3q+3·gamma)²`, the same expression as `∂exp/∂q` | B5 |
+| S15 velocity `(d/d_ref)^gamma` | `∂v/∂gamma = v·ln(d/d_ref)`; also a new explicit `∂v/∂d = gamma·v/d` | B15 |
+| S17 celerity `+gamma·A/(T·d)` | `∂c/∂gamma = v·A/(T·d)`; also `∂/∂A, ∂/∂T, ∂/∂d` of the new term | B17 |
+
+The `d_ref^gamma` numerator factor contributes nothing because `d_ref = 1` whenever `gamma` is learned. The two
+new depth paths (B15, B17) join the depth accumulator before the `depth_lb` clamp mask, which is right because
+the clamped depth is a constant there. `tests/sp8_gradcheck.rs` compares all six parents against central finite
+differences with `gamma = 0.35` both as a global constant and as a learned per-reach tensor (19 tests, all pass).
+`gamma` is a real autograd parent through `TimestepGammaOp`, the six-parent sibling of `TimestepOp`; a tensor
+that is not a parent never receives a gradient, which is the trap the sibling exists to avoid.
+
+### 36.3 What the audit found: the eval path never saw the learned gamma
+
+`src/training/forward.rs` has three hand-written readers of the head's output map — `forward` (training),
+`forward_eval_core` (eval, behind `forward_eval`), and `probe_forward` — and only the first had been taught about
+`gamma`. The other two built `SpatialParameters { gamma: None }`, so the solver fell back to the config scalar,
+which is 0 for a learned-gamma run. **The first learned-gamma CONUS arm (`2026-09-12T13-38-27Z`) therefore
+trained the right model and was about to score a different one**, at `gamma = 0`, with no error and plausible
+numbers. It was stopped at eval chunk 80/366.
+
+The fix threads `gamma` through all three readers, makes the landscape objective refuse a learned-gamma arm
+instead of routing it at 0, exports the per-reach `gamma` field to `plot/kan_parameters.nc`, and adds
+`tests/gamma_eval_parity.rs`: one head routed through `forward`, `forward_eval` and `probe_forward` must give the
+same hydrograph. Before the fix it diverged by 2.1e-2 relative; after, they agree to f32 round-off, and a table
+over every optional head output (`p_spatial`, `x_storage`, `gamma`, the three leakance fields) now runs on every
+`cargo test`. The three readers stay separate on purpose (WET); the table is the price. Trap T14 in
+`ddrs-dev/references/traps.md`.
+
+The relaunch (`2026-09-12T16-30-14Z`, binary `0844cf8`) reproduces the killed arm's training bit for bit — its
+third accumulated batch loss, 0.294693, is identical — so nothing about the training result is in question;
+only the eval numbers below are new.
+
+The same pass found five test crates (`celerity_beta`, `cunge_x`, `negative_discharge_counter`,
+`positivity_clamp`, `cuda_backward_parity`) that no longer compiled against the 13-argument
+`timestep_forward`. "All 7 gate suites green" in the previous handoff was true of the suites it named and false
+of `cargo test`.
+
+### 36.4 Prior art and physical realism, for the reviewer
+
+Roughness that falls with stage is standard river hydraulics, not a modelling convenience:
+
+- **Semi-logarithmic resistance laws.** Keulegan-type relations give `1/√f ∝ log(R/k_s)`, so Manning's `n`
+  (which absorbs `R^(1/6)/√f`) falls as relative submergence `R/k_s` rises. Limerinos (1970) fitted exactly this
+  to natural channels: `n = 0.0926·R^(1/6) / (1.16 + 2.0·log10(R/d_84))`.
+- **Power laws in depth.** Jarrett (1984), for high-gradient streams, `n = 0.39·S^0.38·R^(−0.16)`: a stage
+  exponent of −0.16 on hydraulic radius, which is the same form as this model with `gamma ≈ 0.16` and sits next
+  to the 0.183 the at-a-station exponents imply (§2 of the design doc). Ferguson's (2007) variable-power equation
+  reproduces the same decline across the shallow-to-deep transition; Bjerklie et al. (2005) compare these forms
+  on natural rivers and find the depth dependence necessary.
+- **Hydraulic geometry.** Leopold & Maddock's at-a-station velocity exponent (`m ≈ 0.34`) exceeds the `2f/3`
+  that constant-`n` Manning allows; the gap is precisely a stage-dependent roughness, which is the argument the
+  design doc made from the exponents alone.
+
+So the functional form has a literature and a physical mechanism (drowning of the bed material). What a reviewer
+will push on, and what the numbers below have to answer:
+
+1. **Monotone only in-bank.** Every relation above is for in-channel flow. Overbank flow raises composite
+   roughness sharply (which is why operational routing such as the National Water Model carries a separate,
+   larger compound-channel `n`). A single decreasing power law is wrong above bankfull; on daily CONUS routing
+   the exposure is the largest floods at the largest rivers, exactly where §35's improvement in the width
+   exponent came from. This is a modelling limitation to state, not hide.
+2. **`n_0` is not Manning's `n`.** It is roughness at `d_ref = 1 m`. Published `n` maps from `gamma = 0` runs
+   are not comparable; the parameter dump names the variable `gamma` and this document names the change.
+3. **Identifiability.** A gauge observes a network sum (fact 5 in the `ddrs-dev` skill), and a per-reach
+   `gamma` adds one more field with only that supervision. The registered prediction in the config banner —
+   `rho(n, gamma) > 0.9`, `gamma` as another relabelled copy of `n` — is the thing §36.5 measures, and a
+   "yes" would argue for `gamma` as a physical constant, not a learned field.
+4. **The celerity convention** is approximate at the 1–2 % level (36.1). `K = L/c` and `c ∝ 1/n`, so the
+   learned roughness absorbs the smooth part; it does not affect the comparison between arms, which share it.
+5. **It deviates from DDR**, so the KAN-head parity fixtures do not cover it; the manifest's config snapshot
+   records the deviation.
+
+### 36.5 Read-out
+
+_TODO after the relaunch finishes: median NSE/KGE against 0.7458 / 0.7619 (control) and 0.7362 / 0.7588
+(gamma = 0.35); downstream `b`, `f`, `beta` from `experiments/head_arch/downstream_geometry.py`; learned
+gamma distribution (dump summary line: median, p10, p90, frac@floor, frac@ceil); rho(n, gamma) and the
+trunk effective rank from `head_arch_screen --checkpoint` + `analyze.py`; verdict on the registered
+prediction; n(d) animation (`--view area`, water year 2000) and the 3D surface; whether the per-reach
+breathing ratio moved from the constant arm's 1.91x._
+
+### 36.6 Routing lag against the summed Q', on the two finished arms
+
+Asked directly: does routing add a delay, and is it the delay the gauges ask for?
+`experiments/stage_roughness/routing_lag.py` cross-correlates daily anomalies over the full 15-year eval window
+and takes the lag (whole days) that maximises the correlation, per gauge, for three pairs.
+
+| drainage area (km²) | n | summed Q' → routed | summed Q' → observed | routed → observed | r(summed, obs) | r(routed, obs) |
+|---|---|---|---|---|---|---|
+| < 300 | 491 | 0 [0, 0] | 0 [0, 1] | 0 [0, 1] | 0.865 | 0.856 |
+| 300–1,000 | 776 | 0 [0, 0] | 0 [0, 1] | 0 [0, 1] | 0.888 | 0.887 |
+| 1,000–3,000 | 617 | 0 [0, 1] | 0 [0, 2] | 0 [0, 1] | 0.882 | 0.896 |
+| 3,000–10,000 | 343 | 1 [0, 2] | 1 [0, 3] | 0 [0, 1] | 0.885 | 0.911 |
+| 10,000–30,000 | 126 | 1 [1, 3] | 1 [0, 4] | 0 [−1, 2] | 0.883 | 0.922 |
+| > 30,000 | 12 | 2 [1, 4] | 2 [1, 8] | 0 [0, 4] | 0.850 | 0.891 |
+
+(control arm `gamma = 0`; median [p10, p90]. The `gamma = 0.35` arm is the same to within one gauge class.)
+
+The router adds the lag the observations ask for — 0 days below ~1,500 km², one day through 30,000 km², two
+above — at 69.9 % of gauges, and the residual routed-to-observed lag is 0 at 75.1 %. The gain in correlation
+from routing grows with basin size (+0.03 to +0.04 above 3,000 km²) and is nil below 1,000 km², where the
+summed Q' already has the right timing at daily resolution. Two cautions: daily output cannot resolve a
+sub-day lag, so most of CONUS reads as 0 by construction; and the examples
+(`plots/routing_lag_examples_wy2000.png`) show that for basins under a few thousand km² the routed and summed
+series are nearly on top of each other — routing's visible work there is peak attenuation, not delay.
