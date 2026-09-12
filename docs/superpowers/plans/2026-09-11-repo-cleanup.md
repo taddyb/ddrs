@@ -803,15 +803,42 @@ Six of the audit's findings were drifted `file:line` citations. Re-pinning numbe
 
 **Files:**
 - Modify: `CLAUDE.md` (the "Conventions specific to this repo" section)
-- Modify: `.claude/skills/ddrs-dev/references/{config,gauge-population,traps,testing}.md` as needed
+- Modify: `.claude/ARCHITECTURE.md`, `.claude/REACH-SUBDIVISION.md`
+- Modify: `.claude/skills/ddrs-dev/SKILL.md`, `.claude/skills/ddrs-dev/references/gauge-population.md`
+- Modify: `.claude/skills/ddrs-eval-plots/references/channel_geometry.md`
+- Modify: `scripts/verify_doc_paths.py`, `scripts/test_verify_doc_paths.py` (Step 4's enforcement)
 
 - [ ] **Step 1: Find every remaining `src/…:NN` citation in agent context**
 
 ```bash
-grep -rnoE 'src/[A-Za-z0-9_/]+\.rs:[0-9]+(-[0-9]+)?' CLAUDE.md .claude/skills/
+grep -rnoE 'src/[A-Za-z0-9_/]+\.rs:[0-9]+(-[0-9]+)?' \
+  CLAUDE.md .claude/skills/ .claude/ARCHITECTURE.md \
+  .claude/PHYSICS-CORRECTIONS.md .claude/REACH-SUBDIVISION.md
 ```
 
-Expected: about nine, three of which Task 4 already removed.
+Enumerated during execution: **thirteen**, not the nine this plan originally estimated,
+and they reach three files the estimate missed. Note the glob above includes the three
+`.claude/*.md` agent notes, which the earlier narrower grep skipped.
+
+| Citation | Disposition |
+|---|---|
+| `ARCHITECTURE.md:255` `src/routing/mmc.rs:289-294` | convert |
+| `ARCHITECTURE.md:256` `src/sandbox.rs:88-89` | convert |
+| `REACH-SUBDIVISION.md:17` and `:210` `src/config.rs:491-576` | convert (a range spanning a whole struct; cite the type, not the span) |
+| `REACH-SUBDIVISION.md:142` `src/routing/mmc.rs:144` | convert |
+| `REACH-SUBDIVISION.md:202` `src/data/store/zarr.rs:121-122` | convert |
+| `REACH-SUBDIVISION.md:214` `src/routing/mmc.rs:267-273` | convert |
+| `ddrs-dev/SKILL.md:142` `src/cli/run.rs:322` | convert to a bare `src/cli/run.rs`, no symbol. Same ruling as Task 4: the string sits in the generic `fn dispatch_backend<I>`, so a symbol would mislead |
+| `ddrs-dev/SKILL.md:144` `src/bin/ddrs.rs:167` | convert to a bare `src/bin/ddrs.rs`. The real `Cmd::Init` arm is near 193 and will drift again |
+| `gauge-population.md:44` `src/data/store/gage_csv.rs:62` | convert |
+| `ddrs-eval-plots/references/channel_geometry.md:11` `src/geometry.rs:37-67` | convert. A reviewer verified this range is currently exact, which is precisely why it will drift unnoticed |
+| `config.md:138` `src/config.rs:113` | **LEAVE IT.** Task 7 deletes the whole obsolete `use_precip` sentence containing it. Converting a citation that is about to be removed wastes work and collides |
+| `gauge-population.md:53` `src/data/store/zarr.rs:128` | **LEAVE IT.** Task 7 owns this line: the citation is wrong AND the claim beside it is wrong (the body is `indices_0.is_empty()`, not an `order` length test). Task 7's content fix produces the symbol citation |
+
+**Note what this enumeration proves.** `ddrs-dev/SKILL.md:142` and `:144` carry the
+same two drifted citations Task 4 just corrected in `CLAUDE.md`. The skill had copied
+`CLAUDE.md` and inherited its errors, which is the duplication-propagates-staleness
+mechanism this whole cleanup is about, caught in the act.
 
 - [ ] **Step 2: Convert each to `file.rs::symbol`**
 
@@ -866,14 +893,18 @@ can drift.
 - [ ] **Step 5: Verify**
 
 ```bash
-grep -rnoE 'src/[A-Za-z0-9_/]+\.rs:[0-9]+' CLAUDE.md .claude/skills/
+grep -rnoE 'src/[A-Za-z0-9_/]+\.rs:[0-9]+' \
+  CLAUDE.md .claude/skills/ .claude/ARCHITECTURE.md \
+  .claude/PHYSICS-CORRECTIONS.md .claude/REACH-SUBDIVISION.md
 python3 scripts/test_verify_doc_paths.py
 python3 scripts/verify_doc_paths.py
 ```
 
-Expected: the grep returns nothing; the test suite passes including the two amended
-cases; the verifier exits 0, meaning every new `::symbol` citation resolved to a real
-item and no banned line citation remains.
+Expected: the grep returns **exactly the two citations Step 1 told you to leave**
+(`config.md:138` and `gauge-population.md:53`), both of which Task 7 removes; the test
+suite passes including the two amended cases; and the verifier's strict count does not
+rise. It cannot reach zero until Task 7 closes, because that task still owns
+`ddrs-dev/SKILL.md:262` and the eight deliberate non-paths.
 
 - [ ] **Step 6: Commit**
 
@@ -908,7 +939,7 @@ EOF
 | `ddrs-dev/SKILL.md:172` | "`adjoint` (the only study so far)" | `adjoint` and `landscape` |
 | `ddrs-dev/references/build-and-env.md:16` | "(`docs/setup.md` claims otherwise, it is wrong.)" | Delete the parenthetical. `docs/setup.md:74-85` says the same thing |
 | `ddrs-dev/references/config.md:180` | "Four validators run at `Config::from_yaml_file`, plus one at dataset open" | Nine run directly, plus a nested `validate_subdivision_reaches_the_builder`, plus one at dataset open. Add the missing `validate_enforce_positivity` row to the guards table |
-| `ddrs-dev/references/gauge-population.md:52-53` | `is_headwater` at `zarr.rs:128`, "`order` length > 1" | `src/data/store/zarr.rs::is_headwater`, whose body is `self.indices_0.is_empty()`: it tests edge count, not `order` length |
+| `ddrs-dev/references/gauge-population.md:52-53` | `is_headwater` at `zarr.rs:128`, "`order` length > 1" | `src/data/store/zarr.rs::is_headwater`, whose body is `self.indices_0.is_empty()`: it tests edge count, not `order` length. **Task 6 deliberately left this citation for you**, because the claim beside it is wrong too and one edit should fix both |
 | `ddrs-run/SKILL.md:245` | "`ddrs experiment <name>`: **Not on master.**" | It is on master. `src/experiment/{adjoint,landscape}` and the `Experiment` subcommand all exist. Delete the row from the does-not-work table and cross-reference `ddrs-dev/SKILL.md`'s working description |
 
 Confirm each before editing:
