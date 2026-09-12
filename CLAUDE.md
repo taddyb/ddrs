@@ -467,12 +467,15 @@ by construction; measured on 1,841 CONUS gauges, `frac c1 < 0` got WORSE (93.0 %
 to 98.79 % at `max_pieces: 8`). Both coefficients are non-negative only inside a
 window `2(1−2X)` wide, which is 1.4 % at the measured CONUS median X = 0.4966,
 and a static piece count cannot hold a flow-varying `Cr` inside it. It does
-nearly eliminate `Cr > 2` (3.93 % to 0.31 %), via the length clamp.
+nearly eliminate `c3 < 0` (3.93 % to 0.31 %) and `Cr > 2`
+(2.10 % to 0.16 %), via the length clamp.
 
 Correct, gated off, stays in-tree as the measurement apparatus. Do not re-open
 the "Cr ≈ 1 implies non-negative" argument without reading
-`.claude/REACH-SUBDIVISION.md`, which has the enable preconditions and all seven
-fields.
+`.claude/REACH-SUBDIVISION.md`, which has the enable preconditions, the
+Δx_target formula, and five of the seven fields by name. The remaining two,
+`reference_discharge_coefficient` and `reference_discharge_exponent`, are
+documented in `src/config.rs`.
 
 ## Baseline
 
