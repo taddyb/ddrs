@@ -38,9 +38,28 @@ STRICT_GLOBS = (
 IGNORE_MARKER = "verify-doc-paths: ignore"
 # Prose documentation: reported, never fatal. Rust doc comments are included
 # here (not STRICT) because a citation there is worth surfacing but should
-# not fail a build over a comment edit.
-WARN_GLOBS = ("docs/**/*.md", "README.md", "src/**/*.rs", "tests/**/*.rs", "ddrs-py/**/*.rs")
+# not fail a build over a comment edit. Markdown lives outside docs/ too
+# (tests/fixtures/README.md, examples/*/README.md, ddrs-py/README.md), so
+# those trees are globbed for *.md alongside *.rs; config/ and scripts/ carry
+# no markdown today, so they are not.
+WARN_GLOBS = (
+    "docs/**/*.md", "README.md",
+    "src/**/*.rs", "tests/**/*.rs", "ddrs-py/**/*.rs",
+    "tests/**/*.md", "examples/**/*.md", "ddrs-py/**/*.md",
+)
 
+# Known limitations. Only backtick-quoted paths and markdown link targets
+# are checked (PATH_RE and LINK_RE below both require the backticks / link
+# syntax). An unquoted path sitting in bare prose or parentheses — e.g. a
+# doc comment reading "(see docs/foo.md)" instead of "(see `docs/foo.md`)"
+# — is invisible to this script and will not be reported even when dead.
+# This was a deliberate trade, not an oversight: matching bare path-like
+# tokens would also match every directory mentioned in prose, every example
+# shell command, every partial path fragment in a sentence, and an early
+# draft of this verifier that tried it produced 288 findings — a gate that
+# noisy gets switched off, which protects nothing. So: cite paths in
+# backticks (or as a markdown link) if you want them checked. A bare path
+# needs a human sweep (grep) to catch, same as before this script existed.
 FILE_EXT = r"rs|py|md|ya?ml|toml|sh|json|nc|ipynb|dbf|shp|gpkg|mpk|zarr|ic|csv"
 PATH_RE = re.compile(rf"`([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?::(\d+(?:-\d+)?))?`")
 DIR_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/)`")
