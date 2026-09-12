@@ -166,14 +166,35 @@ are no dead links.
   campaigns. `Cargo.toml` declares no `[[example]]` entries and no test depends on
   any of them, so removing them cannot break a gate.
 
-### 2.5 The mdBook publishes research narrative
+### 2.5 The mdBook publishes the figures, not the narrative
 
-`book.toml` sets `src = "docs"` and `.github/workflows/docs.yml` deploys to GitHub
-Pages from `master`. mdBook renders only files reachable from `SUMMARY.md` and copies
-everything else in the source tree verbatim, so 36 findings docs (592 KB),
-`docs/superpowers/` (1.5 MB) and `docs/figures/` (7.2 MB) ship as unlinked assets
-beside a 14-page book. The repository is public, so this is not new exposure; it is
-build-output clutter and a `docs/` root that reads as a junk drawer.
+**This finding was overstated in an earlier revision and is corrected here.** The
+original text claimed that 36 findings docs, `docs/superpowers/` and `docs/figures/`
+all ship as unlinked assets. Measured against the pre-move build at `a54bcbb`, that is
+wrong for the prose:
+
+| Source material | In `target/book`? |
+|---|---|
+| 43 non-`SUMMARY` `.md` files under `docs/` (findings, specs, plans, why-analysis, journal) | **No.** Zero `.md` files appear in the build output |
+| `docs/figures/` PNGs | **Yes**, all 9, and they are 7.2 MB of a 15 MB build |
+
+mdBook ignores markdown that `SUMMARY.md` does not reach, but copies other file types
+from the source tree as static assets. So the research *prose* was never published, and
+only the figures were.
+
+`book.toml` still sets `src = "docs"` and `.github/workflows/docs.yml` still deploys to
+GitHub Pages from `master`, so the split is still worth doing. Its justification is now
+narrower and should be stated accurately in the pull request:
+
+1. A `docs/` root holding both a 14-page book and 43 unrelated research documents is a
+   junk drawer, and a reader cannot tell which files are published.
+2. `docs.yml`'s path filter is `docs/**`, so editing any findings doc triggers a docs
+   deploy that cannot change the site. Narrowing it to `docs/book/**` stops that.
+3. The figures genuinely are published unlinked, and moving them to `research/figures/`
+   removes 7.2 MB from the deployed site.
+
+Do NOT repeat the original "9.3 MB of research narrative is published" framing
+anywhere. It is false.
 
 ---
 

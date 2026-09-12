@@ -1828,11 +1828,19 @@ the plan.
 
 ## Phase 2: the book tree holds only the book
 
-`book.toml` had `src = "docs"`, so mdBook copied 36 findings docs,
-`docs/superpowers/` and `docs/figures/` (9.3 MB total) into the published
-site as unlinked assets beside a 14-page book. It now points at
-`docs/book/`. Published URLs are unchanged, proven by diffing
-`find target/book -type f` before and after.
+`book.toml` had `src = "docs"`, so the 14-page book shared a directory with
+43 unrelated research documents and a reader could not tell which files were
+published. It now points at `docs/book/`, and `docs.yml`'s path filter
+narrows from `docs/**` to `docs/book/**`, so editing a findings doc no
+longer triggers a deploy that cannot change the site.
+
+Measured, to correct an overstatement in an earlier revision of the design:
+mdBook ignores markdown that `SUMMARY.md` does not reach, so the research
+prose was never published. The figures were: all 9 of `docs/figures/` were
+copied, 7.2 MB of a 15 MB build, and they move to `research/figures/`.
+
+Published URLs are unchanged, proven by diffing `find target/book -type f`
+before and after.
 
 `research/` holds findings, specs, plans, why-analysis, figures, journal
 and archive. `.claude/specs/` folds in: the same spec-and-plan series as
