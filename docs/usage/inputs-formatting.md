@@ -144,7 +144,10 @@ params:
   log_space_parameters:
     - p_spatial
   sparse_solver: cuda    # opt-in for GPU cuSPARSE solve
-  use_cuda_graphs: true  # SP-10: forward CUDA Graph capture+replay
+  use_cuda_graphs: false # flipped from true on 2026-08-19: the SP-10
+                          # captured kernel hardcodes the legacy celerity
+                          # and can't run the corrected physics that
+                          # ddr_match's deprecation made default
 
 testing:
   start_time: 1995/10/01
@@ -471,12 +474,20 @@ value overrides the default; an empty/absent one keeps it.
 
 | Key | Type | Merit YAML | Rust default | Effect |
 |---|---|---|---|---|
-| `tau` | u32 | unset → 3 | 3 | UTC→local phase offset of the daily-aggregation trim window (see below) |
+| `tau` | u32 | unset → 9 | 9 (loader's `unwrap_or(9)`; the struct literal's `3` is the pre-2026-08-08 value and is never seen via a YAML load) | UTC→local phase offset of the daily-aggregation trim window (see below) |
 | `sparse_solver` | `"cpu"` \| `"cuda"` | `cuda` | `Cpu` | Picks the CSR triangular solve backend |
-| `use_cuda_graphs` | bool | `true` | `false` | Enables per-timestep CUDA-graph capture+replay |
+| `use_cuda_graphs` | bool | `false` | `false` | Enables per-timestep CUDA-graph capture+replay. Flipped from `true` to `false` on 2026-08-19; see `ddr_match` below |
+| `ddr_match` | bool | unset → `false` | `false` (flipped from `true` on 2026-08-19, DeepGroundwater/ddr#192) | Selects the legacy DDR-parity physics (`true`, DEPRECATED) vs the corrected physics (`false`, default). Its default flip is *why* `use_cuda_graphs`'s shipped value changed: the captured kernel hardcodes the legacy celerity, so `use_cuda_graphs: true` now requires the deprecated `ddr_match: true` and is rejected otherwise at config load |
+| `enforce_positivity` | bool | unset → `false` | `false` | Floors the Muskingum coefficients to stay non-negative at runtime. Requires `ddr_match: false` |
+| `subdivision.enabled` | bool | unset → `false` | `false` | Build-time reach-length normalization in the managed adjacency builder (off-by-default measurement apparatus; see `.claude/REACH-SUBDIVISION.md`) |
 | `use_leakance` | bool | unset → `false` | `false` | Enables the GW–SW water-loss term in routing |
 | `leakance_losing_only` | bool | unset → `true` | **`true`** | Clamps the leakance head term to `max(0, depth − d_gw)` so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | f32 | unset → `0.7` | `0.7` | Reaches with `corridor_impervious` **strictly greater than** this get `zeta ≡ 0` and zero gradient to their leakance params |
+
+`ddr_match` changes more than its own physics branch: with no `ddr_match:`
+concept, earlier passes documented `use_cuda_graphs`'s shipped value as a
+flat fact that didn't depend on which physics mode was default. That is
+the gap that let the 2026-08-19 flip go unnoticed here.
 
 Parsing of `sparse_solver` accepts both lower and upper case (`cpu`,
 `CPU`, `cuda`, `CUDA`); anything else panics with
@@ -544,18 +555,21 @@ misbehaving:
 
 ## Defaults
 
-The YAML in `config/merit_training.yaml` is **CUDA-on**:
+The YAML in `config/merit_training.yaml` is **CUDA-on for the sparse
+solver, graph-capture off**:
 
 ```yaml
 params:
-  sparse_solver: cuda    # SP-9 (commit dbcf6e6) — was cpu before
-  use_cuda_graphs: true  # SP-10 (commit e35af29) — was false before
+  sparse_solver: cuda     # SP-9 (commit dbcf6e6) — was cpu before
+  use_cuda_graphs: false  # flipped back to the Rust default on 2026-08-19
+                          # with the ddr_match deprecation (was true since
+                          # SP-10, commit e35af29)
 ```
 
-The Rust-side `Params::default()` is still `Cpu` +
-`use_cuda_graphs: false`, because the routing solver constructs a
-sensible default without a YAML — but every code path that loads
-`merit_training.yaml` opts into the GPU.
+The Rust-side `Params::default()` is `Cpu` + `use_cuda_graphs: false`.
+Every code path that loads `merit_training.yaml` opts into the GPU
+triangular solve via `sparse_solver: cuda`, but `use_cuda_graphs` now
+agrees with its Rust default.
 
 CPU-only override is one line each:
 
@@ -634,10 +648,13 @@ same but in `Config`, `ConfigRaw`, and the `From<ConfigRaw>` block.
   `n`) parses fine and silently changes the denorm formula for whatever
   matched. There's no compile-time check; the only guard is the merit
   YAML test asserting the exact list (currently `["p_spatial"]`).
-- **YAML defaults moved across SPs.** `sparse_solver` flipped to `cuda`
-  in SP-9 (commit `dbcf6e6`); `use_cuda_graphs` flipped to `true` in
-  SP-10 (commit `e35af29`). Don't hard-code the assumption that either
-  is `false` in tests — read the YAML or set them explicitly.
+- **YAML defaults moved across SPs, and again after SP-10.** `sparse_solver`
+  flipped to `cuda` in SP-9 (commit `dbcf6e6`); `use_cuda_graphs` flipped to
+  `true` in SP-10 (commit `e35af29`), then back to `false` on 2026-08-19 when
+  the `ddr_match` deprecation made the corrected physics default (the
+  captured kernel hardcodes the legacy celerity). Don't hard-code the
+  assumption that either key holds any particular value in tests — read the
+  YAML or set them explicitly.
 - **`kan_head` vs `mlp`.** The section is `kan_head:`; `mlp:` is kept
   only as a serde alias for older configs. Prefer `kan_head:` in new
   files.

@@ -65,11 +65,14 @@ plain `git clone && cargo build` works — no sibling clones to wire up.
 3. **CUDA Toolkit 12+ with a CUDA-12-capable driver.** Validated on
    driver 575.57.08 (8× A100, sm_80) and a desktop RTX 4080. ddrs's
    current `config/merit_training.yaml` defaults to `sparse_solver:
-   cuda` and `use_cuda_graphs: true`, so the GPU path is exercised on
-   every default training run. The CUDA device ordinal is selectable
-   via the top-level `device:` key in the config (default `0`); on a
-   multi-GPU host, set e.g. `device: 1` to keep training off the
-   display/shared GPU.
+   cuda` and `use_cuda_graphs: false` (flipped 2026-08-19 with the
+   `ddr_match` deprecation; see
+   [Comparing to DDR](reference/ddr-comparison.md#regenerating-fixtures)),
+   so the cuSPARSE triangular-solve path is exercised on every default
+   training run; the CUDA-graph capture path is not. The CUDA device
+   ordinal is selectable via the top-level `device:` key in the config
+   (default `0`); on a multi-GPU host, set e.g. `device: 1` to keep
+   training off the display/shared GPU.
 
    > **A CUDA toolkit is required to *compile*, even for CPU-only use.**
    > `burn-cuda` and `cudarc` (the latter with the
@@ -88,9 +91,9 @@ plain `git clone && cargo build` works — no sibling clones to wire up.
 4. **DDR reference repository** at `~/projects/ddr` for V1 fixture
    regeneration. `scripts/export_ddr_sandbox.py` runs under DDR's `uv`
    venv to produce the CSVs that `examples/compare_ddr_sandbox.rs`
-   reads back to verify the port. NB: a valid V1 fixture currently
-   requires the desktop's DDR working tree — see
-   [Comparing to DDR](reference/ddr-comparison.md).
+   reads back to verify the port. Any DDR checkout at or past
+   DeepGroundwater/ddr#192 is a valid reference; see
+   [Comparing to DDR](reference/ddr-comparison.md#regenerating-fixtures).
 
 There is one more pinned dependency worth naming, though it is an
 ordinary git dependency (not a `[patch.crates-io]` override) and needs
@@ -306,12 +309,14 @@ changed) to pull the new commits.
 
   This must run under DDR's `uv` venv — the script imports DDR-side
   modules that are not on ddrs's side. See
-  [Comparing to DDR](reference/ddr-comparison.md) for the fixture
-  caveat about the desktop DDR working tree.
-- **CUDA defaults are on.** `config/merit_training.yaml` ships with
-  `sparse_solver: cuda` and `use_cuda_graphs: true`. To run on the CPU,
-  do **not** hand-edit the YAML — `ddrs run` takes a `--backend` flag
-  (`src/bin/ddrs.rs`, `default_value = "cuda"`):
+  [Comparing to DDR](reference/ddr-comparison.md#regenerating-fixtures)
+  for the fixture-regeneration procedure.
+- **The cuSPARSE solver is on by default; CUDA-graph capture is not.**
+  `config/merit_training.yaml` ships with `sparse_solver: cuda` and
+  `use_cuda_graphs: false` (flipped 2026-08-19; see
+  [Comparing to DDR](reference/ddr-comparison.md#regenerating-fixtures)).
+  To run on the CPU, do **not** hand-edit the YAML — `ddrs run` takes a
+  `--backend` flag (`src/bin/ddrs.rs`, `default_value = "cuda"`):
 
   ```bash
   ddrs run --workflow train --backend cpu
@@ -387,8 +392,9 @@ DDRS_FORCE_GRAPHS=1 cargo run --release --example compare_ddr_sandbox
 ```
 
 This routes the example through the `Cuda<f32, i32>` inner backend
-with `use_cuda_graphs=true` regardless of the YAML. Both runs must
-report `ABSOLUTE MATCH` for a clean setup.
+regardless of the YAML (the env var only swaps which backend runs the
+example; it does not enable graph capture). Both runs must report
+`ABSOLUTE MATCH` for a clean setup.
 
 ### Cargo features
 

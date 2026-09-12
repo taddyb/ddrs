@@ -97,7 +97,7 @@ that only re-export are omitted throughout.
 | `src/sandbox.rs` | 5-reach RAPID sandbox fixture loader + smoke test, used by `compare_ddr_sandbox` and the `ddrs plan` GPU probe. | (the DDR sandbox fixture) |
 | `src/error.rs` | CLI error type mapping onto process `ExitCode`. | — |
 | `src/cli/` | The `ddrs` lifecycle: `plan`, `run`, `show`, `status`, `gc`, `sources`, `import`, plus manifests, lockfiles, workspace layout, and the run-log `tee`. | `ddr/scripts/` |
-| `src/bin/` | Binary entry points: `ddrs.rs` (canonical), the deprecated `train`/`eval`/`train_and_test`, `dump_parameters`, `probe_zeta_gradient`, and the `pretrain_disagg_*` family. | `ddr/scripts/` |
+| `src/bin/` | Binary entry points: `ddrs.rs` (primary CLI), the deprecated `train`/`eval`/`train_and_test` trio, `dump_parameters`, the `pretrain_disagg_*` family, and the `probe_*` family. | `ddr/scripts/` |
 
 ### `src/data/`
 
@@ -153,7 +153,12 @@ builds the CONUS network; `gauges.rs` extracts per-gauge subgraphs;
 `ddr_engine/core/zarr_io.py`; `cache.rs` content-addresses them into
 `<workspace_root>/adjacency/<key>/`. `validate.rs` is separate — it
 runs up-front existence checks on *explicitly configured* adjacency zarr
-paths, so a typo fails before the run starts.
+paths, so a typo fails before the run starts. `gridded.rs` reads DDR's
+gridded (ISIMIP DDM30) **sub-reach** adjacency zarr and relabels it into
+the existing subdivided store layout (parent = cell, pieces = sub-reaches).
+`subdivide.rs` is the off-by-default, build-time reach-length
+normalization toward `Δx ≈ c_ref·Δt` (`params.subdivision`); it is a pure
+preprocessing step with no BURN and no dependence on training state.
 
 The crate splits along four orthogonal axes: routing (`routing/`,
 `sparse/`, `geometry.rs`), data (`data/`, `adjacency/`), neural network

@@ -61,14 +61,20 @@ module map and [Algorithm](algorithm.md) for the per-step math.
 > [Performance & CUDA Graphs](reference/perf.md).
 
 The forward CUDA-graph capture path landed in commit `e35af29`
-("SP-10 close — forward CUDA Graphs at V7a=0.385"). Defaults in
-`config/merit_training.yaml` are now `sparse_solver: cuda` +
-`use_cuda_graphs: true`. The V1 invariant
+("SP-10 close — forward CUDA Graphs at V7a=0.385"). At SP-10 close,
+defaults in `config/merit_training.yaml` were `sparse_solver: cuda` +
+`use_cuda_graphs: true`. **This no longer holds:** `use_cuda_graphs`
+flipped to `false` on 2026-08-19 when the `ddr_match` deprecation made
+the corrected physics default, because the captured kernel hardcodes
+the legacy celerity (see
+[Comparing to DDR](reference/ddr-comparison.md#regenerating-fixtures)).
+`sparse_solver: cuda` is still the default. The V1 invariant
 (`cargo run --release --example compare_ddr_sandbox` reports `ABSOLUTE
-MATCH` with `max abs < 1e-3 m³/s`) holds on both the CPU `NdArray`
-backend and the `DDRS_FORCE_GRAPHS=1` CUDA-capture path. The backward
-path still runs SP-9 direct-launch — backward CUDA graph capture is
-candidate work for SP-11.
+MATCH` with `max abs < 1e-3 m³/s`) holds on both the default CPU
+`NdArray` backend and the `DDRS_FORCE_GRAPHS=1` CUDA backend path (the
+env var only selects the `Cuda<f32, i32>` inner backend; it does not
+enable graph capture). The backward path still runs SP-9 direct-launch
+— backward CUDA graph capture is candidate work for SP-11.
 
 ## Critical invariants
 

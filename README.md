@@ -209,9 +209,11 @@ key; it was removed when the head became unconditionally precip-driven.)
 ### Choosing the training objective
 
 `experiment.loss.kind` selects the objective — `l1` (default), `nnse-kge`, `kge`,
-or — once PR #31 lands — `nse-batch` (dHBV's batch-NSE, which pairs with
-`experiment.optimizer: adadelta`). See CLAUDE.md §"Training objective" for why
-the menu exists and what each term buys.
+or `nse-batch` (dHBV's batch-NSE, which pairs with `experiment.optimizer:
+adadelta`). Both shipped in `24cb4d0` (2026-07-30; see
+`nse_batch_loss_kind_parses` and `optimizer_defaults_to_adam_and_parses_adadelta`
+in `src/config.rs`). See CLAUDE.md §"Training objective" for why the menu
+exists and what each term buys.
 
 ### Advanced
 

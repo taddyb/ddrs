@@ -11,7 +11,9 @@ status `2` (`src/bin/ddrs.rs:167-170`; asserted by `tests/cli_init_stub.rs`).
 
 Configuration defaults come from `config/merit_training.yaml`, the verbatim
 mirror of DDR's `merit_training_config.yaml`, which ships with
-`sparse_solver: cuda` and `use_cuda_graphs: true`.
+`sparse_solver: cuda` and `use_cuda_graphs: false` (flipped 2026-08-19 with
+the `ddr_match` deprecation; see
+[Comparing to DDR](../reference/ddr-comparison.md#regenerating-fixtures)).
 
 ## What it is
 
@@ -324,6 +326,31 @@ ddrs import <store> --name <group>     # validate + write config/sources/<group>
 ddrs import <store> --name <group> --force   # overwrite an existing group
 ```
 
+### Paper studies (`ddrs experiment`)
+
+`ddrs --workspace .ddrs experiment <name>` runs a study from the checked-in
+bundle `experiments/<name>/` over already-trained runs (arms are run ids;
+latest checkpoint directory; flat `.mpk` checkpoints are refused). Output
+lands in `.ddrs/experiments/<name>/<UTC ts>/`.
+
+```bash
+ddrs experiment <name> \
+  --bundle <dir>            # bundle directory override (default: experiments/<name>)
+  --backend <cpu|cuda>      # default: cpu (NdArray, deterministic)
+  --arms <a,b,c>            # comma-separated subset of arm names from experiment.yaml
+  --max-gauges <n>          # stop after this many gauges (smoke runs)
+  --skip-validate           # skip the finite-difference gate (reruns only)
+  --jobs <n>                # run this many arms concurrently (default: all selected arms)
+  --dry-run                 # select gauges, write gauges.csv, and stop
+  --shard <I/K>             # process 1/K of the gauge population; suffixes the
+                             # run directory with -shard-I-of-K
+```
+
+Two studies exist: `adjoint` (inflow-gradient influence map) and
+`landscape` (per-gauge loss landscape in channel-parameter log-multiplier
+space), dispatched by `spec.study` in `src/cli/experiment.rs`. An
+unrecognized study name is rejected at load with the list of known studies.
+
 ### Diagnostic and tooling binaries
 
 These are current tools, not deprecated shims.
@@ -459,15 +486,20 @@ sparse path:
 
 ```yaml
 params:
-  sparse_solver: cuda    # cpu | cuda — selects ndarray vs cuSPARSE SpMV
-  use_cuda_graphs: true  # CUDA backend only; forward-only graph capture+replay
+  sparse_solver: cuda     # cpu | cuda — selects ndarray vs cuSPARSE SpMV
+  use_cuda_graphs: false  # CUDA backend only; forward-only graph capture+replay
 ```
 
-The shipped defaults (the literal above) are CUDA-on; the *code* defaults, if
-a key is absent, are `sparse_solver: cpu` and `use_cuda_graphs: false`
-(`src/config.rs:407-411, 453-454`). On CPU-only machines you can override the
-YAML, or just pass `--backend cpu` to `ddrs run` / `train` / `eval` /
-`dump_parameters`, which patches both keys in memory.
+The shipped `sparse_solver` is CUDA-on; `use_cuda_graphs` ships `false`
+(flipped from `true` on 2026-08-19 with the `ddr_match` deprecation; see
+[Comparing to DDR](../reference/ddr-comparison.md#regenerating-fixtures)).
+The *code* defaults, if a key is absent, are `sparse_solver: cpu` and
+`use_cuda_graphs: false` (the `#[default]` variant of `enum SparseSolver`
+and `Params::use_cuda_graphs`'s field default in `impl Default for Params`,
+`src/config.rs`). On CPU-only
+machines you can override the YAML, or just pass `--backend cpu` to
+`ddrs run` / `train` / `eval` / `dump_parameters`, which patches both keys
+in memory.
 
 `use_cuda_graphs: true` paired with `sparse_solver: cpu` is a silent no-op:
 the captured kernel sequence assumes the cuSPARSE path, and the CPU sparse
@@ -515,6 +547,15 @@ Defaults for every weight are `1.0`; `kge_clamp` is `10.0` and `eps` is `0.1`
 (matching DDR's `hydrograph_loss`). All metrics are per-gauge masked, then
 averaged. Autograd is untouched — the loss is a drop-in scalar on the routed
 predictions.
+
+`experiment.use_grad_accum` (default `false`) and `experiment.grad_accum_steps`
+control optimizer micro-batching: with `use_grad_accum: true`,
+`grad_accum_steps` micro-batches (each `batch_size` gauges) are summed into
+one optimizer step before the weights move, at the peak memory of a single
+micro-batch. `use_grad_accum: true` requires `grad_accum_steps >= 2`;
+rejected at config load otherwise. Iterations per epoch shrink by roughly
+`grad_accum_steps`, so keep total optimizer-update count in mind when
+comparing to a single-batch run.
 
 ## Reference
 

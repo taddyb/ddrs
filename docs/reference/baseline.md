@@ -144,7 +144,7 @@ gracefully throughout (see [NaN handling](#nan-handling), below).
 
 You do not invoke the baseline directly — it rides along with the
 standard lifecycle commands. See [Running the code](../usage/running.md)
-for the full `init → plan → run` flow.
+for the full `plan → run` flow.
 
 ```bash
 # `ddrs plan` computes the baseline as a side effect and prints the table.
@@ -383,7 +383,7 @@ without spinning up icechunk repos.
 
 ## See also
 
-- [Running the code](../usage/running.md) — the `init → plan → run`
+- [Running the code](../usage/running.md) — the `plan → run`
   lifecycle that drives the baseline.
 - [Reading outputs](../usage/outputs.md) — the run-directory layout the
   `baseline/` files live in.

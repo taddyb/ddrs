@@ -38,25 +38,30 @@ fused `#[cube]` kernels as the real fix, per-batch pool fragmentation).
 ## Toggles
 
 Two booleans under `params:` in the training YAML control the entire
-perf stack — but **the Rust defaults and the shipped-YAML values are
-opposites**, so it matters a great deal whether a config sets the keys at
-all:
+perf stack — but **the Rust default and the shipped-YAML value for
+`sparse_solver` are opposites** (`use_cuda_graphs` now agrees with its
+Rust default, `false`, since the 2026-08-19 flip below), so it matters a
+great deal whether a config sets the keys at all:
 
 | Key | Rust default (key omitted) | `config/merit_training.yaml` |
 |---|---|---|
-| `sparse_solver` | **`cpu`** — `SparseSolver::#[default] Cpu`, `src/config.rs:407-410` | `cuda` (line 138) |
-| `use_cuda_graphs` | **`false`** — `src/config.rs:454` | `true` (line 141) |
+| `sparse_solver` | **`cpu`**: the `#[default]` variant of `enum SparseSolver` (`src/config.rs`) | `cuda` (line 138) |
+| `use_cuda_graphs` | **`false`**: `Params::use_cuda_graphs`'s field default in `impl Default for Params` (`src/config.rs`) | `false` (line 143) |
 
-The fast path is therefore **opt-in**. A config that omits both keys runs
-the CPU sparse solver with no graph capture, silently and without
-warning — which is exactly what the DDR sandbox does (see
+The fast path is therefore **opt-in** for `sparse_solver`. A config that
+omits both keys runs the CPU sparse solver with no graph capture, silently
+and without warning — which is exactly what the DDR sandbox does (see
 [Comparing to DDR](ddr-comparison.md)). The values that pass the gates
 today, as shipped in `config/merit_training.yaml`:
 
 ```yaml
 params:
-  sparse_solver: cuda    # YAML value since commit dbcf6e6 (SP-9 close)
-  use_cuda_graphs: true  # YAML value since the SP-10 close commit (e35af29)
+  sparse_solver: cuda     # YAML value since commit dbcf6e6 (SP-9 close)
+  use_cuda_graphs: false  # flipped back to the Rust default on 2026-08-19
+                          # with the ddr_match deprecation: the captured
+                          # kernel hardcodes the legacy celerity and cannot
+                          # run the corrected physics that is now default.
+                          # See "Comparing to DDR" -> Regenerating fixtures.
 ```
 
 To force the CPU-only baseline (e.g. for debugging or a fairness
