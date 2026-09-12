@@ -1,6 +1,6 @@
 # Testing: gates, inventory, authoring
 
-70 test files, 233 `#[test]` fns. Full suite runs in 2–5 minutes on the dev machine.
+The full suite runs in a few minutes on the dev machine and must pass clean.
 Each `tests/*.rs` compiles as its own crate; `mod common;` pulls `tests/common.rs`.
 
 **Do not hard-code test counts in docs.** Prior skills claimed "leakance_gradcheck
@@ -111,6 +111,20 @@ enables `.githooks/pre-push`, which runs `ddr_sandbox_match` +
 broken checkout fails locally rather than in CI). Bypass with
 `git push --no-verify`.
 
+## Citation gate (added 2026-09-11)
+
+```bash
+python3 scripts/verify_doc_paths.py
+```
+
+Catches a `file:line` or `file.rs::symbol` citation in `CLAUDE.md` or
+`.claude/skills/**` that does not resolve against the current tree: a drifted
+line number, a renamed or moved function, a deleted path. Must exit 0 (zero
+strict failures) on any change to `CLAUDE.md` or `.claude/skills/`; prose
+citations in `docs/` are warn-only and do not fail the gate. Inside `src/`,
+cite `file.rs::symbol`, never a line number; the verifier rejects a `src/`
+line citation outright rather than trusting it to stay pinned.
+
 ## What covers what
 
 | Area | Tests |
@@ -122,6 +136,7 @@ broken checkout fails locally rather than in CI). Bypass with
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
 | Leakance | `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` |
+| Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
 | Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |

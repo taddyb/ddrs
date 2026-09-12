@@ -96,8 +96,8 @@ Sparse + custom backward is a perf pass for later; the public API
 | `src/routing/utils.rs` | `routing/utils.py` | `denormalize`, `triangular_solve_lower`, `compute_hotstart_discharge` |
 | `src/routing/mmc.rs` | `routing/mmc.py` | `MuskingumCunge` engine |
 | `tests/geometry.rs` | — (Python tests via mmc only) | Geometry sanity + gradients |
-| `tests/routing_utils.rs` | `tests/routing/test_routing_utils.py` | Denormalize + triangular solve |
-| `tests/mmc.rs` | `tests/routing/test_mmc.py` | Hotstart, coefficients, forward, autodiff |
+| `tests/routing_utils.rs` | `tests/routing/test_routing_utils.py` | Denormalize + triangular solve | <!-- verify-doc-paths: ignore -->
+| `tests/mmc.rs` | `tests/routing/test_mmc.py` | Hotstart, coefficients, forward, autodiff | <!-- verify-doc-paths: ignore -->
 
 ## SP-8 fused MC timestep (2026-05-22, partial)
 
@@ -252,8 +252,8 @@ allows step 1 above to work.
   does not test what it claims.** `DDRS_FORCE_GRAPHS=1` only selects the
   CUDA *backend* (`examples/compare_ddr_sandbox.rs`, `.is_ok()` — so `=0`
   triggers it too). Capture additionally requires
-  `use_cuda_graphs && sparse_solver == Cuda` (`src/routing/mmc.rs:289-294`),
-  and the sandbox builds from `Config::default()` (`src/sandbox.rs:88-89`)
+  `use_cuda_graphs && sparse_solver == Cuda` (`src/routing/mmc.rs::setup_inputs`),
+  and the sandbox builds from `Config::default()` (`src/sandbox.rs::parse_config_csv`)
   = `use_cuda_graphs: false` + `SparseSolver::Cpu`, with
   `fixtures/sandbox/config.csv` setting neither key. So the recorded run
   exercised the CUDA backend with the **CPU** sparse solver and **no
@@ -303,8 +303,8 @@ gc). First-run flow is `init → plan → init → run`:
   workflow, writes a manifest with config + source fingerprints + git SHA
   + outputs. `--plot` chains `dump_parameters::dump`.
 
-Full design at `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
-Implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+Full design at `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+Implementation plan at `research/plans/2026-05-30-ddrs-cli-lifecycle.md`.
 
 The `dispatch()` inside `cli::run::run` is a v1 stub (always returns
 `RunStatus::Failed`); real workflow execution is wired in a follow-up

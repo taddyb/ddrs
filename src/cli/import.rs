@@ -1,7 +1,7 @@
 //! `ddrs import` — validate a Q' store against the DDR store contract and
 //! register it as a named data-source group.
 //!
-//! One command turns a conforming store (see docs/nh-qprime-store-contract.md)
+//! One command turns a conforming store (see docs/book/nh-qprime-store-contract.md)
 //! into a routable dataset:
 //!
 //! ```text

@@ -1,7 +1,7 @@
 # synthetic_n_teacher.yaml — synthetic-n recoverability ground-truth generator.
 # GENERATED from aorc2f_distributed_frozen_chunk1.yaml — teacher world: full
 # simulation window, standard benchmark Q' store, no leakance.
-# Spec: docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md
+# Spec: research/specs/2026-07-22-synthetic-n-recoverability-design.md
 
 mode: training
 workflow: train-and-test

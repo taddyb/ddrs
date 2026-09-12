@@ -119,9 +119,14 @@ Named "save files" for the `data_sources:` block, stored under
 |---|---|---|
 | `conus` | dHBV2 UH retrospective (daily) | Default CONUS source; MHPI cluster paths + managed adjacency |
 | `conus-hourly` | dHBV2 UH retrospective + AORC precip | Feeds the daily→hourly disaggregation head. Not simply `conus` plus one key — it uses workstation paths and explicit adjacency zarr |
+| `conus-gridded` | dHBV2 UH retrospective regridded onto DDM30 cells | ISIMIP DDM30 (0.5°) gridded routing on DDR's sub-reach adjacency; 620 gauges |
 | `global` | Global zarr-v2 Q' stores | 2.94M reaches |
 | `daily-lstm` | CudaLSTM unit-catchment forwards (daily) | NH LSTM output |
 | `hourly-lstm` | MTS-LSTM unit-catchment forwards (hourly-native) | NH LSTM output; no disagg |
+
+A few experimental/scratch groups also ship in-repo beyond this table, so
+`ddrs sources list` output is never a surprise; the rows above are the
+supported, documented ones.
 
 Switching datasets never requires hand-editing `ddrs.yaml`:
 
@@ -155,7 +160,7 @@ they can serve as reference examples. After import:
 ddrs sources use <group> && ddrs plan && ddrs run --workflow train
 ```
 
-See `docs/nh-qprime-store-contract.md` for the full producer/consumer contract.
+See `docs/book/nh-qprime-store-contract.md` for the full producer/consumer contract.
 
 ### Leakance (experimental, NOT promotable)
 
@@ -177,7 +182,7 @@ campaign established that zeta cannot be constrained from gauged discharge alone
 per-reach distribution. The term is code-complete and gradient-exact; it is left
 in place as the anchor for the paper's selective-equifinality axis. Do not
 attempt to promote it without reading
-`docs/2026-07-06-leakance-nogo-scientific-summary.md`.
+`research/findings/2026-07-06-leakance-nogo-scientific-summary.md`.
 
 ### Daily→hourly disaggregation head
 
@@ -209,9 +214,11 @@ key; it was removed when the head became unconditionally precip-driven.)
 ### Choosing the training objective
 
 `experiment.loss.kind` selects the objective — `l1` (default), `nnse-kge`, `kge`,
-or — once PR #31 lands — `nse-batch` (dHBV's batch-NSE, which pairs with
-`experiment.optimizer: adadelta`). See CLAUDE.md §"Training objective" for why
-the menu exists and what each term buys.
+or `nse-batch` (dHBV's batch-NSE, which pairs with `experiment.optimizer:
+adadelta`). Both shipped in `24cb4d0` (2026-07-30; see
+`nse_batch_loss_kind_parses` and `optimizer_defaults_to_adam_and_parses_adadelta`
+in `src/config.rs`). See CLAUDE.md §"Training objective" for why the menu
+exists and what each term buys.
 
 ### Advanced
 

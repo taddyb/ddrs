@@ -1,7 +1,7 @@
 # Harvest the basin-median trained Manning n at every gauge of the AREA-BALANCED p = 21 model
 # (run 2026-09-08T14-06-12Z-train-and-test), so the factor-two roughness difference against the
 # gages_3000 model can be measured across the full shared population instead of the 30 gauges of
-# findings §9. See §22 of docs/2026-09-08-landscape-hypothesis-tests-findings.md.
+# findings §9. See §22 of research/findings/2026-09-08-landscape-hypothesis-tests-findings.md.
 #
 # The trained field n0 is a KAN forward pass and does NOT depend on the evaluation window, so this
 # runs a deliberately short window purely to harvest n0/q0 cheaply. Its loss and NSE columns are

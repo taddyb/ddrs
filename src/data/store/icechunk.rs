@@ -197,7 +197,7 @@ pub struct StreamflowStore {
 }
 
 /// Which axis of `Qr` is the divide axis. The contract
-/// (`docs/nh-qprime-store-contract.md`) is `(divide_id, time)`, but DDR's
+/// (`docs/book/nh-qprime-store-contract.md`) is `(divide_id, time)`, but DDR's
 /// `build_gridded_qprime.py` writes `(time, divide_id)`, and zarrs answers an
 /// out-of-range subset with fill values rather than an error — so a layout
 /// guess that is wrong reads NaN silently. Dimension names decide when present;
@@ -292,7 +292,7 @@ impl StreamflowStore {
     }
 }
 
-/// Contract checks for an hourly time axis (docs/nh-qprime-store-contract.md):
+/// Contract checks for an hourly time axis (docs/book/nh-qprime-store-contract.md):
 /// must start at hour 0 of a calendar day and step by exactly 1 hour.
 /// The full scan is cheap (~2.8 MB of i64 for 40 years of hours).
 fn validate_hourly_axis(time_i64: &[i64], path: &Path) -> Result<()> {
@@ -317,7 +317,7 @@ fn validate_hourly_axis(time_i64: &[i64], path: &Path) -> Result<()> {
 
 /// Parse the CF `units` attribute of a time coordinate and return the epoch
 /// plus the native axis resolution. Supported forms (see
-/// docs/nh-qprime-store-contract.md):
+/// docs/book/nh-qprime-store-contract.md):
 ///   "days since YYYY-MM-DD[ HH:MM:SS]"  → Daily
 ///   "hours since YYYY-MM-DD[ HH:MM:SS]" → Hourly
 /// Anything else is a hard error naming the store and the units string — a

@@ -67,7 +67,7 @@ and key order do not break the match).
 
 Consequence of the group lookup path: a run launched with
 `--config config/experiments/foo.yaml` **never** gets a group segment, because
-`active_group` looks in `config/experiments/config/sources/`, which does not
+`active_group` looks in `config/experiments/config/sources/`, which does not <!-- verify-doc-paths: ignore -->
 exist. Launch from the repo root against `./ddrs.yaml` if you want the dataset
 named in the run id.
 
@@ -125,7 +125,7 @@ Groups shipped in-repo: `conus`, `conus-gridded`, `conus-hourly`,
 ## `ddrs import <STORE>`
 
 Validates a Q' store against the DDR store contract
-(`docs/nh-qprime-store-contract.md`) and registers it as a source group.
+(`docs/book/nh-qprime-store-contract.md`) and registers it as a source group.
 
 | Flag | Notes |
 |---|---|

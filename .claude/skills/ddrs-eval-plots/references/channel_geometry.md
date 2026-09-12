@@ -8,7 +8,7 @@ on whether `p_spatial` / `q_spatial` are physically sensible, because the
 attribute NetCDF carries **no width or depth variable** to validate against
 (29 vars, none of them width/depth — checked 2026-08-03).
 
-## The equations (mirrors `src/geometry.rs:37-67`)
+## The equations (mirrors `src/geometry.rs::compute_trapezoidal_geometry`)
 
 Given Manning's `n`, Leopold-Maddock `p` and `q`, bed slope `S`, and discharge `Q`:
 

@@ -565,7 +565,7 @@ where
 
 /// Write the eval-time per-reach zeta diagnostic — the `|zeta| > 0.01 m³/s`
 /// GO/NO-GO magnitude bar for the leakance experiment
-/// (`scripts/leakance_subset_analysis.py::maybe_load_zeta` reads the `zeta`
+/// (`research/archive/scripts/leakance_subset_analysis.py::maybe_load_zeta` reads the `zeta`
 /// variable from `<run_dir>/kan_parameters.nc`).
 ///
 /// `zeta` = eval-window mean |zeta| per reach; `zeta_net` = mean signed zeta

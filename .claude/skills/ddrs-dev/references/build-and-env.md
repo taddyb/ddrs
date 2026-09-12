@@ -13,7 +13,7 @@ Verified against `Cargo.toml` and source on 2026-07-30.
   `use burn_cuda::Cuda;` is unconditional in `src/sparse/dispatch.rs`,
   `src/routing/mmc.rs`, `src/cli/run.rs`, `src/training/driver.rs`,
   `src/cli/system.rs`. CPU *execution* is supported via `--backend cpu`; CPU-only
-  *compilation* is not. (`docs/setup.md` claims otherwise — it is wrong.)
+  *compilation* is not.
   Two facts from the 2026-09-03 CI bring-up that apply to any CPU-only box:
   the toolkit must be **CUDA 12.4 or newer** (`src/sparse/cusparse.rs` calls
   `cusparseSpSV_updateMatrix`, absent from Ubuntu's `nvidia-cuda-toolkit`
@@ -67,7 +67,7 @@ cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_sandbox.py
 > `ddr_match` is deprecated). The old rule — only the desktop's working tree
 > with unpushed `geometry/trapezoidal.py` work — applied before #192 landed;
 > a PRE-#192 clean clone still diverges ~1% (max abs ≈ 0.55 m³/s). Details:
-> `docs/reference/ddr-comparison.md` §Regenerating fixtures.
+> `docs/book/reference/ddr-comparison.md` §Regenerating fixtures.
 
 **KAN parity** — `tests/fixtures/` (tracked, unlike `/fixtures/`), loaded behind
 `#[cfg(feature = "fixtures")]`. Regenerate under DDR's venv with
@@ -93,5 +93,5 @@ Worktrees live in `.claude/worktrees/<name>/` (gitignored). Two gotchas:
   can silently run a stale main-tree binary from inside a worktree. Use absolute
   paths or `cargo run`.
 - Fresh worktrees lack gitignored `fixtures/` and `output/`. Copy `fixtures/` from
-  the main tree (watch for accidental nesting into `fixtures/fixtures/`) and
+  the main tree (watch for accidental nesting into `fixtures/fixtures/`) and <!-- verify-doc-paths: ignore -->
   `mkdir -p output`.

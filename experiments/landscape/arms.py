@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Cross-arm (inflow input) figures for the alpha-landscape study (spec
-section 7.3, docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md).
+section 7.3, research/specs/2026-09-07-adjoint-landscape-design.md).
 
 Arms here are different inflow inputs -- separate runs, so the trained
 fields (n0, p0, q0) differ per reach AND per arm. For a chosen reference arm

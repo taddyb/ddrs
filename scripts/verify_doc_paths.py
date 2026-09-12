@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Verify that every citation in agent-loaded context resolves.
+
+CLAUDE.md and .claude/skills/** are loaded into an agent's context, so a
+dead citation there is the most expensive kind of wrong line in the repo.
+This script extracts every backtick-quoted path, `file:line` citation,
+markdown link target and `file.rs::symbol` citation from those files and
+checks that the path exists and that every `file.rs::symbol` citation
+names a real item. It deliberately does not validate the `:line` number
+itself: a citation that drifted from line 1066 to line 1202 still points
+at a line that exists, so no existence check can catch that drift. The
+remedy is the symbol-citation policy, which Task 6 will make this script
+enforce by refusing `src/` line citations outright. Book pages under docs/
+are scanned in warn mode, because their line citations are a reading aid
+rather than a contract.
+
+    python3 scripts/verify_doc_paths.py          # strict, exit 1 on failure
+    python3 scripts/verify_doc_paths.py --list    # print every citation found
+"""
+from __future__ import annotations
+
+import argparse
+import re
+from pathlib import Path
+
+# Agent context: a dead citation here fails the run.
+STRICT_GLOBS = (
+    "CLAUDE.md",
+    ".claude/skills/**/*.md",
+    ".claude/ARCHITECTURE.md",
+    ".claude/PHYSICS-CORRECTIONS.md",
+    ".claude/REACH-SUBDIVISION.md",
+)
+# A line carrying this marker is exempt: it cites a DDR-side path, a template,
+# a path that deliberately does not exist (a trap describing a wrong path), or
+# a citation whose form is deliberately wrong because it is shown as an
+# example of what not to write.
+IGNORE_MARKER = "verify-doc-paths: ignore"
+# Prose documentation: reported, never fatal. Rust doc comments are included
+# here (not STRICT) because a citation there is worth surfacing but should
+# not fail a build over a comment edit. Markdown lives outside docs/ too
+# (tests/fixtures/README.md, examples/*/README.md, ddrs-py/README.md), so
+# those trees are globbed for *.md alongside *.rs; config/ and scripts/ carry
+# no markdown today, so they are not.
+#
+# research/** is deliberately NOT in this list, even in warn mode, even
+# though it holds 100+ markdown files with path citations of its own. A
+# findings doc, spec, or plan is an immutable record: its paths are snapshots
+# of what was true when it was written, not claims about what is true now.
+# Linting an immutable record against the current tree is a category error,
+# since a findings doc from three moves ago is SUPPOSED to cite paths that no
+# longer exist. It is a historical account of what happened at that path, not
+# a forward-looking reference. Scanning it would emit hundreds of warnings
+# about correctly-historical paths, recreating the 288-noise problem this
+# verifier was tuned to escape (see the STRICT_GLOBS docstring above). This
+# was an explicit decision, not an oversight: the 2026-09-11 repo-cleanup move
+# took about 135 documents out of docs/ (which WAS scanned) into research/
+# (which is not), and the prose-warning count falling from roughly 516 to
+# roughly 80 is almost entirely that scope change, not a hygiene improvement;
+# see the findings doc for that run.
+WARN_GLOBS = (
+    "docs/**/*.md", "README.md",
+    "src/**/*.rs", "tests/**/*.rs", "ddrs-py/**/*.rs",
+    "tests/**/*.md", "examples/**/*.md", "ddrs-py/**/*.md",
+)
+
+# Known limitations. Only backtick-quoted paths and markdown link targets
+# are checked (PATH_RE and LINK_RE below both require the backticks / link
+# syntax). An unquoted path sitting in bare prose or parentheses (e.g. a
+# doc comment reading "(see docs/foo.md)" instead of "(see `docs/foo.md`)")
+# is invisible to this script and will not be reported even when dead.
+# This was a deliberate trade, not an oversight: matching bare path-like
+# tokens would also match every directory mentioned in prose, every example
+# shell command, every partial path fragment in a sentence, and an early
+# draft of this verifier that tried it produced 288 findings: a gate that
+# noisy gets switched off, which protects nothing. So: cite paths in
+# backticks (or as a markdown link) if you want them checked. A bare path
+# needs a human sweep (grep) to catch, same as before this script existed.
+# A backtick-quoted URL is also never extracted as a candidate in the first
+# place: PATH_RE's path character class excludes ":", so it cannot match
+# across the "://" in "https://host/path/to/file.pdf": a real example is
+# docs/book/reference/hydraulic-geometry-literature-2026-09-08.md:277,
+# where a NASA URL happens to contain a "docs/...pdf" segment that is not a
+# repository path at all.
+FILE_EXT = r"rs|py|md|ya?ml|toml|sh|json|nc|ipynb|dbf|shp|gpkg|mpk|zarr|ic|csv"
+PATH_RE = re.compile(rf"`([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?::(\d+(?:-\d+)?))?`")
+DIR_RE = re.compile(r"`([A-Za-z0-9_.][A-Za-z0-9_./-]*/)`")
+SYM_RE = re.compile(r"`([A-Za-z0-9_./-]+\.rs)::([A-Za-z0-9_]+)`")
+LINK_RE = re.compile(rf"\]\(([A-Za-z0-9_.][A-Za-z0-9_./-]*\.(?:{FILE_EXT}))(?:#[A-Za-z0-9_-]+)?\)")
+
+# A token is a repo citation only if it is rooted in a directory this
+# repository actually has, or is a file at the repo root. Everything else is
+# a bare filename ("kan.py"), a runtime artifact ("head.mpk"), a
+# machine-specific data path, or an external tree, and flagging those would
+# bury the real failures and get the gate switched off.
+ROOTS = (
+    "src/", "tests/", "docs/", "config/", "scripts/", "examples/",
+    ".claude/", ".github/", ".githooks/", "fixtures/", "research/",
+    "experiments/", "vendor/", "ddrs-py/",
+)
+# Gitignored or generated, so their absence proves nothing.
+SKIP_PREFIXES = (".ddrs", "output/", "target/", "examples/fixtures/")
+# Already excluded by every extraction regex's character class, so this
+# check is unreachable today; kept as a guard in case those classes widen.
+SKIP_CHARS = set("<>*{}$…")
+# Rust items a `file.rs::symbol` citation may name.
+ITEM_KINDS = ("fn", "struct", "enum", "trait", "type", "const", "static", "mod", "impl", "macro_rules!")
+
+
+def is_citation(root: Path, token: str) -> bool:
+    """True when the token claims to name something in this repository."""
+    if SKIP_CHARS & set(token) or token.startswith(SKIP_PREFIXES):
+        return False
+    if "/.ddrs" in token:   # a gitignored workspace nested under a real dir
+        return False
+    if token.startswith(ROOTS):
+        return True
+    # A bare name counts only if it names a real file at the repo root, so
+    # that CLAUDE.md and Cargo.toml are checked and kan.py is not.
+    return "/" not in token.rstrip("/") and (root / token).exists()
+
+
+def symbol_defined(source: Path, name: str) -> bool:
+    text = source.read_text(encoding="utf-8", errors="replace")
+    return any(re.search(rf"\b{kind}\s+{re.escape(name)}\b", text) for kind in ITEM_KINDS)
+
+
+def citations(text: str):
+    """Yield (line_no, kind, token, detail) for every citation.
+
+    `detail` is the symbol name for a "symbol" citation, the bare `:NN`
+    line-number suffix (digits only, no leading colon) for a "path"
+    citation that carried one, and None otherwise.
+    """
+    for n, line in enumerate(text.splitlines(), 1):
+        for m in SYM_RE.finditer(line):
+            yield n, "symbol", m.group(1), m.group(2)
+        for m in PATH_RE.finditer(line):
+            yield n, "path", m.group(1), m.group(2)
+        for m in LINK_RE.finditer(line):
+            yield n, "path", m.group(1), None
+        for m in DIR_RE.finditer(line):
+            yield n, "dir", m.group(1), None
+
+
+def check_file(root: Path, doc: Path, listing: bool) -> list[str]:
+    failures = []
+    text = doc.read_text(encoding="utf-8", errors="replace")
+    exempt = {n for n, line in enumerate(text.splitlines(), 1) if IGNORE_MARKER in line}
+    for line_no, kind, token, detail in citations(text):
+        if line_no in exempt:
+            continue
+        if not is_citation(root, token):
+            continue
+        rel = doc.relative_to(root)
+        if kind == "path" and detail and token.startswith("src/"):
+            failures.append(
+                f"{rel}:{line_no}: line citation into src/ is not allowed, "
+                f"cite file.rs::symbol instead of {token}:{detail}"
+            )
+            continue
+        target = root / token
+        if listing:
+            tag = f"::{detail}" if kind == "symbol" else (f":{detail}" if detail else "")
+            print(f"{rel}:{line_no}: {kind} {token}{tag}")
+        # Skill references cite their own siblings, so try the citing file's
+        # directory before giving up. An .ic or .zarr store is a directory, so
+        # existence rather than file-ness is the test.
+        for base in (root, doc.parent, doc.parent.parent):
+            if (base / token).exists():
+                target = base / token
+                break
+        if not target.exists():
+            failures.append(f"{rel}:{line_no}: unresolved {token}")
+        elif kind == "dir" and not target.is_dir():
+            failures.append(f"{rel}:{line_no}: not a directory {token}")
+        elif kind == "symbol" and not symbol_defined(target, detail):
+            failures.append(f"{rel}:{line_no}: unresolved {token}::{detail}")
+    return failures
+
+
+def collect(root: Path, globs) -> list[Path]:
+    seen = []
+    for g in globs:
+        seen.extend(sorted(p for p in root.glob(g) if p.is_file()))
+    return seen
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
+    ap.add_argument("--list", action="store_true", help="print every citation found")
+    args = ap.parse_args()
+    root = Path(args.root).resolve()
+
+    strict = []
+    for doc in collect(root, STRICT_GLOBS):
+        strict.extend(check_file(root, doc, args.list))
+    warn = []
+    for doc in collect(root, WARN_GLOBS):
+        warn.extend(check_file(root, doc, args.list))
+
+    for f in warn:
+        print(f"warn: {f}")
+    for f in strict:
+        print(f"FAIL: {f}")
+    print(f"\n{len(strict)} unresolved in agent context, {len(warn)} in prose docs")
+    return 1 if strict else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

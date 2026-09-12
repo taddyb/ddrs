@@ -1,5 +1,5 @@
 //! Per-gauge loss landscape in channel-parameter (log-multiplier) space.
-//! Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md
+//! Spec: research/specs/2026-09-07-adjoint-landscape-design.md
 
 pub mod objective;
 pub mod output;

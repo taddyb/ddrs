@@ -68,7 +68,7 @@ impl RandomSampler {
 /// Source of mini-batches for the training loop. Either generates batches
 /// on the fly via `RandomSampler` (default) or replays a captured order
 /// via `ReplaySampler` (matched-batch parity experiment — see spec
-/// `docs/superpowers/specs/2026-06-04-matched-batch-replay-design.md`).
+/// `research/specs/2026-06-04-matched-batch-replay-design.md`).
 pub enum BatchSource {
     Shuffle(RandomSampler),
     Replay(ReplaySampler),

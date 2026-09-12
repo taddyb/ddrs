@@ -40,7 +40,7 @@ use crate::config::{LossConfig, LossKind};
 /// (score all days by routing one extra day of q' per window) is ~1% more
 /// training signal and needs +1-day window plumbing; deliberately not
 /// done — see the 2026-08-09 discussion in
-/// `docs/2026-08-06-tau-sweep-pilot-findings.md` §5i.
+/// `research/findings/2026-08-06-tau-sweep-pilot-findings.md` §5i.
 ///
 /// Returns `(G, T_days)` where `T_days = T_hours_trimmed // 24`.
 pub fn tau_trim_and_downsample<B: Backend>(

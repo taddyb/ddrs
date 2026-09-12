@@ -7,7 +7,7 @@
 //! checkpoint recorded. Outputs land in
 //! `<workspace>/experiments/<name>/<UTC ts>/` with a manifest.
 //!
-//! Spec: `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+//! Spec: `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
 pub mod adjoint;
 pub mod landscape;

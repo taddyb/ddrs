@@ -1,6 +1,6 @@
 # equif_daily_lstm_disagg.yaml — selective-equifinality arm R2
 # Q': daily CudaLSTM (NH), precip-driven disaggregation head (mass-preserving daily->hourly).
-# Spec: docs/superpowers/specs/2026-07-06-lstm-equifinality-cpu-design.md
+# Spec: research/specs/2026-07-06-lstm-equifinality-cpu-design.md
 # Constants across all equif_* arms: seed 42, 5 epochs, rho 90, warmup 5,
 # L1 loss, train 1981/10/01-1995/09/30, eval 1995/10/01-2010/09/30, CPU.
 

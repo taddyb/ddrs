@@ -485,7 +485,7 @@ impl LeakanceOverride {
 /// reach in the batch's column order (same order as `divide_comids`);
 /// `None` passes the head's own output through unchanged. Built for the
 /// H5/H6 selective-equifinality parameter-swap tests
-/// (`docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`)
+/// (`research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`)
 /// — eval-path only, the training `forward` never sees this type.
 #[derive(Default)]
 pub struct RoutingParamOverride {

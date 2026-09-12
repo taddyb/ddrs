@@ -16,17 +16,17 @@ environment · Workflow (pick family → read reference → generate/report/run)
 Missing inputs · Interpreting what you plotted (baseline bar, convergence, zeta) ·
 Conventions · When NOT to use · Files
 
-**`references/hydrograph.md`** (98 lines)
+**`references/hydrograph.md`**
 Inputs (predictions zarr schema; user selection) · Notebook template · Notes
 (warmup, `obs<=0` sentinel, per-slice metrics)
 
-**`references/metrics.md`** (211 lines)
+**`references/metrics.md`**
 Inputs (predictions zarr; **raw-f32 baseline**; optional gauges CSV) · Metric helper
 (`ddr.validation.Metrics` field list) · Notebook template: box plot of 6 metrics,
 NSE CDF, drainage-area boxplots, gauge map · **§Is this a win?** — the baseline bar
 and the two population traps · Notes
 
-**`references/parameter_map.md`** (455 lines)
+**`references/parameter_map.md`**
 Inputs (`plot/kan_parameters.nc` variables; MERIT fabric) · Notebook template ·
 Global-fabric runs (incl. producing the NetCDF for a managed-adjacency run) ·
 Companion cells: distribution histogram, parameter vs log10(drainage area) hexbin ·
@@ -40,7 +40,7 @@ hydraulic-geometry exponents vs Leopold & Maddock** — the only internal test o
 whether `p_spatial`/`q_spatial` are physically sensible, since the attributes
 carry no width or depth to validate against · plausibility bands
 
-**`references/parity.md`** (235 lines)
+**`references/parity.md`**
 Init-time parity (when to use, inputs, load → histograms → pass/fail, KS criterion) ·
 Trained parity (inputs, load → per-distribution stats → histograms → per-reach
 scatter → verdict, KS + Spearman criteria)
@@ -249,8 +249,8 @@ was still ruled NO-GO — passing it is necessary, not sufficient.
   not a trained model.
 - Debugging gradient parity against DDR → `examples/compare_ddr_sandbox.rs`.
 - **H5/H6 selective-equifinality plots** — campaign CLOSED, both **INCONCLUSIVE**.
-  The authoritative analysis is `scripts/h5_h6_audit_analysis.py` +
-  `docs/2026-07-09-h5-h6-equifinality-v2-findings.md`. Do **not** regenerate the v1
+  The authoritative analysis is `research/archive/scripts/h5_h6_audit_analysis.py` +
+  `research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md`. Do **not** regenerate the v1
   figures: the `f_n ≥ 2/3` bars used an unpaired variance estimate (the correct
   paired test has 15–40× smaller variance), and the `min × 1.05` sublevel contour
   saturated — it swallowed 100–105 of 121 grid points. Both instruments are refuted.

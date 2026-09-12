@@ -35,10 +35,10 @@ Most wrong numbers in this repo are population confusions, not arithmetic errors
 
 | Quantity | NSE | KGE | Source |
 |---|---|---|---|
-| **Summed-Q′ baseline (dHBV2-UH store) — the CONUS bar** | **0.6781** | **0.7172** | `docs/2026-06-23-precip-disaggregation-findings.md` |
+| **Summed-Q′ baseline (dHBV2-UH store) — the CONUS bar** | **0.6781** | **0.7172** | `research/findings/2026-06-23-precip-disaggregation-findings.md` |
 | **Best documented trained result** — precip-driven disagg + L1, run `2026-06-23T02-49-12Z-conus-hourly-train-and-test` | **0.7152** | **0.7106** | same |
 | Δ vs baseline | **+0.037** | **−0.007** | same |
-| **p = 21 fixed, `nse-batch` + Adam, daily flat (no disagg), gages_3000 population**, run `2026-09-08T15-55-52Z-conus-train-and-test` | **0.7200** | **0.7537** | `.ddrs/runs/<id>/plots/metrics_summary.json`; own-baseline recompute on the same 2,365 gauges 0.6785 / 0.7171, so Δ **+0.042 / +0.037**, the first dual win on the dHBV2-UH store. Gain grows with drainage area: +0.02 below 1,000 km², +0.11 at 5k–10k, +0.16 at 10k–30k. First run whose parameters plateaued (n median 0.130 → 0.053 by epoch 10, then < 0.4 % of range per 10 epochs). Findings: `docs/2026-09-08-p21-nse-batch-conus-findings.md`. |
+| **p = 21 fixed, `nse-batch` + Adam, daily flat (no disagg), gages_3000 population**, run `2026-09-08T15-55-52Z-conus-train-and-test` | **0.7200** | **0.7537** | `.ddrs/runs/<id>/plots/metrics_summary.json`; own-baseline recompute on the same 2,365 gauges 0.6785 / 0.7171, so Δ **+0.042 / +0.037**, the first dual win on the dHBV2-UH store. Gain grows with drainage area: +0.02 below 1,000 km², +0.11 at 5k–10k, +0.16 at 10k–30k. First run whose parameters plateaued (n median 0.130 → 0.053 by epoch 10, then < 0.4 % of range per 10 epochs). Findings: `research/findings/2026-09-08-p21-nse-batch-conus-findings.md`. |
 | Precip-disagg + `nnse-kge` (`2026-06-24T00-03-01Z`) | 0.710 | 0.710 | no dual win |
 | Precip + temperature, L1 (`2026-06-24T02-10-49Z`) | 0.716 | 0.709 | temp does not earn its keep |
 | daily-OFF flat repeat-24 (`2026-06-05T01-41-16Z`) | 0.700 | 0.724 | |
@@ -65,7 +65,7 @@ do not repeat the blanket claim undated, and do not upgrade it to a result eithe
 
 ### Leakance (GW–SW exchange): **CLOSED — NO-GO, 2026-07-06**
 
-Authority: `docs/2026-07-06-leakance-nogo-scientific-summary.md`. Read §3 before
+Authority: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md`. Read §3 before
 proposing any retry.
 
 The term is code-complete and gradient-exact. **Do not remove it.** But it is not
@@ -97,8 +97,8 @@ in any form.**
 
 ### Selective equifinality (H1–H6): **all INCONCLUSIVE or REFUTED-not-clean**
 
-Authority: `docs/2026-07-07-lstm-equifinality-v2-findings.md` and
-`docs/2026-07-09-h5-h6-equifinality-v2-findings.md`.
+Authority: `research/findings/2026-07-07-lstm-equifinality-v2-findings.md` and
+`research/findings/2026-07-09-h5-h6-equifinality-v2-findings.md`.
 
 | # | Registered verdict | Key number |
 |---|---|---|
@@ -124,15 +124,15 @@ Trained medians on 2,365 gauges: AORC2F distributed 0.3437/0.3256 · AORC2F lump
 0.5259/0.5175 · daily-lstm 0.5674/0.6169 · hourly-lstm 0.5543/0.4852. None beats the
 0.7152/0.7106 benchmark.
 
-⚠️ **Every "Δ vs own baseline" figure in `docs/2026-07-16-*` and
-`docs/2026-07-07-lstm-equifinality-findings.md` is population-inconsistent** — the
+⚠️ **Every "Δ vs own baseline" figure in `research/findings/2026-07-16-*` and
+`research/findings/2026-07-07-lstm-equifinality-findings.md` is population-inconsistent** — the
 baseline column is the 3,211-gauge median (including phantom zeros) while the trained
 column is 2,365 gauges. Recomputed population-matched, the hourly-lstm "+0.022 NSE
 gain from routing" **reverses to −0.051**. Those docs need a correction note.
 
 ### Synthetic-n recoverability — INTERIM, 1 of 4 arms
 
-`docs/2026-07-22-synthetic-n-recoverability-findings.md`. S1–S5 are **not yet
+`research/findings/2026-07-22-synthetic-n-recoverability-findings.md`. S1–S5 are **not yet
 computable**. Arm-1 preview (explicitly not a verdict): n median abs err 0.0354,
 corr(truth, recovered) 0.736, slope vs `log10_uparea` −0.0193 recovered vs −0.0421
 true (right sign, ~54% attenuated). Two caveats that must travel with any S3 result:
@@ -151,7 +151,7 @@ paper's R1–R5.
 | "leakance is identifiable" (any phrasing) | Explicitly forbidden by the NO-GO summary §7 |
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
-| Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T11 |
+| Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T13 |
 | The 84-gauge full-year census (`landscape-p21-census41/2026-09-09T01-52-19Z`), or any census run on a binary before `964f062`, for "share of gauges at optimum" | Unbounded Newton step landed on the search-box corner and reported zero iterations, which read as already-at-optimum; superseded by the 2,365-gauge sharded census, §Landscape census above |
 | The (n, q) landscape with a depth axis by default | User: the axis should show post-transformation q, not depth |
 | alpha_q_star or q half-widths as a reported optimum | The Hessian at the optimum is a saddle along q at 53 % of well-fit gauges (§Why gauges are not at their roughness optimum, F). Confirm with the 1-D line scan at n\* before quoting a q optimum |
@@ -171,8 +171,8 @@ numbers and were conflated) · global fabric 2,939,408 reaches, 6,051 gauges ·
 BURN 0.21 · rskan tag `v0.1.3` · V1 gate < 1e-3 m³/s.
 
 The sparse backward lives in **`src/sparse/`** (`mod.rs`, `dispatch.rs`,
-`cusparse.rs`) — four retired skills and CLAUDE.md cite a non-existent
-`src/sparse.rs`. `TimestepLeakanceOp: Backward<I,8>` is defined in
+`cusparse.rs`): four retired skills (and, until fixed, CLAUDE.md) cited it as
+a file, src/sparse.rs, which does not exist. `TimestepLeakanceOp: Backward<I,8>` is defined in
 `src/routing/mmc_op.rs`, not in `src/routing/leakance.rs` (which exports
 `zeta_forward` / `zeta_backward` / `ZetaGrads`).
 
@@ -207,11 +207,12 @@ The house rules that produced the results above, worth keeping:
 
 | Doc type | Location | Naming |
 |---|---|---|
-| spec (before code runs) | `docs/superpowers/specs/` | `YYYY-MM-DD-<slug>-design.md` |
-| plan (tasks from a spec) | `docs/superpowers/plans/` | `YYYY-MM-DD-<slug>.md` |
-| findings (after it ran) | `docs/` | `YYYY-MM-DD-<slug>-findings.md` |
-| handoff (mid-experiment) | `docs/` | `YYYY-MM-DD-<slug>-handoff.md` |
-| reference (data contract, API) | `docs/reference/` or `docs/` | descriptive, no date |
+| spec (before code runs) | `research/specs/` | `YYYY-MM-DD-<slug>-design.md` |
+| plan (tasks from a spec) | `research/plans/` | `YYYY-MM-DD-<slug>.md` |
+| findings (after it ran) | `research/findings/` | `YYYY-MM-DD-<slug>-findings.md` |
+| handoff (mid-experiment) | `research/findings/` | `YYYY-MM-DD-<slug>-handoff.md` |
+| reference (data contract, API) | `docs/book/reference/` | descriptive, no date |
+| closed-campaign tooling | `research/archive/{scripts,examples}/` | original filename, under the admission rule in its README |
 
 A findings doc opens with the header block (spec / plan / script / prior finding),
 then a **one-line verdict** before any section, then §1 pre-registered hypotheses,
@@ -224,8 +225,8 @@ was invalidated by a stale binary and the manifest did not reveal it.
 
 ## Adjoint influence map — pair PoC (2026-09-04) + 41-gauge nested-reference population (2026-09-05), one seed
 
-Authority: `docs/2026-09-05-adjoint-influence-conus-findings.md` (population) and
-`docs/2026-09-04-adjoint-influence-poc-findings.md` (Juniata pair, with the
+Authority: `research/findings/2026-09-05-adjoint-influence-conus-findings.md` (population) and
+`research/findings/2026-09-04-adjoint-influence-poc-findings.md` (Juniata pair, with the
 dhbv2-dist correction). Handoff + tables:
 `.ddrs/experiments/adjoint-conus/2026-09-05T16-28-57Z/figures/{HANDOFF,STATS,README}.md`.
 
@@ -245,7 +246,7 @@ arm (max rel. err 0.02–0.17 %).
   ~0.9 is not typical). Downstream bias sign follows the product: dhbv2-dist
   over-predicts at 14/20 gauges, dhbv2-lumped under-predicts at 13/20.
 - **"Mass loss" is NOT mass loss (checks 3–4, 2026-09-07,
-  `docs/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`).** The inflow
+  `research/findings/2026-09-07-adjoint-volume-functional-checks-3-4-findings.md`).** The inflow
   gradient is exactly zero at source hours where lateral inflow sits at the
   `discharge` clamp floor, so the raw time-mean volume sensitivity of an
   intermittent reach collapses to its wet-hour fraction (0.13–0.21 at the Cannonball
@@ -272,7 +273,7 @@ arm (max rel. err 0.02–0.17 %).
 
 ## Adjoint seed-to-seed noise floor — UH arm seeds 42/43 (2026-09-07)
 
-Authority: `docs/2026-09-07-adjoint-seed-noise-floor-findings.md`. Bundle
+Authority: `research/findings/2026-09-07-adjoint-seed-noise-floor-findings.md`. Bundle
 `experiments/adjoint-uh-seeds` (arms `uh-seed42`, `uh-seed43`; UH retrospective
 inflow, `gages_2000_area_balanced.csv`, 30 epochs, identical config except
 seed), scored against the 5-arm cross-arm reference above (41 gauges, 38 with a
@@ -295,9 +296,9 @@ target/release/ddrs --workspace .ddrs experiment adjoint-uh-seeds --backend cpu
 
 ## Per-gauge loss landscape — UH arm sample case, Newport + Mapleton Depot (2026-09-07), two seeds
 
-Authority: `docs/2026-09-07-landscape-uh-juniata-findings.md` (see §2b for the
+Authority: `research/findings/2026-09-07-landscape-uh-juniata-findings.md` (see §2b for the
 seed replicate), spec
-`docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`. Measures NSE-batch
+`research/specs/2026-09-07-adjoint-landscape-design.md`. Measures NSE-batch
 loss at one gauge over basin-uniform log-multipliers on (n, p, q), the FD Hessian
 of the adjoint gradient, the damped Newton optimum, and behavioural half-widths
 per eigenvector. **Verdict (instrument): PASS**, but the multiplier
@@ -329,7 +330,7 @@ pending the 8-gauge run and cross-arm placement.**
 
 ## Landscape hypothesis tests (spec §7): census, trajectory, inputs (2026-09-08)
 
-Authority: `docs/2026-09-08-landscape-hypothesis-tests-findings.md`. Runs: census
+Authority: `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`. Runs: census
 `.ddrs/experiments/landscape-uh-census/2026-09-08T13-52-27Z/` (8 gauges, UH seeds 42/43);
 trajectory `.ddrs/experiments/landscape-uh-trajectory/2026-09-08T15-04-23Z/` (seed 42, init
 to epoch 30); inputs `.ddrs/experiments/landscape-arms/2026-09-08T15-15-36Z/` (5 inflow arms).
@@ -380,7 +381,7 @@ decision).
 
 ## Fixed width coefficient p (2026-09-08)
 
-Authority: `docs/2026-09-08-fixed-p-assessment.md`. p = 21 (the DDR default)
+Authority: `research/findings/2026-09-08-fixed-p-assessment.md`. p = 21 (the DDR default)
 is a dissertation-stage field fit to Juniata gages, not a literature constant.
 In this model n and p enter depth only as the ratio n/p, so a gauge identifies
 that ratio and not n and p separately. The only verified downstream
@@ -433,7 +434,7 @@ not of removing the n/p degeneracy. See findings doc §8 for the full twin compa
 
 ## Landscape census, all 2,365 test gauges, p = 21 model (2026-09-09)
 
-Authority: `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §11-13.
+Authority: `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` §11-13.
 
 **Window policy (user decision 2026-09-09).** Every landscape bundle now uses full water
 years: `window_days: 365` (one water year, `n_windows: 1`) or `window_days: 0` (the whole
@@ -476,7 +477,7 @@ under 0.02 NSE).
 batch's n is set by population composition (see the gages_3000 vs area-balanced comparison
 above), not by any individual gauge: the loss surface in n is nearly flat at most gauges, so
 the gradient that sets the batch optimum comes from wherever the population happens to weight
-it, not from a well-conditioned per-gauge signal. Map: `docs/figures/2026-09-09-conus_n_gap_p21_wy2000.png`
+it, not from a well-conditioned per-gauge signal. Map: `research/figures/2026-09-09-conus_n_gap_p21_wy2000.png`
 (`experiments/landscape/conus_map.py`): the |ln(n*/n)| panel is red over much of the East and
 the West Coast (wants slower routing), the gain panel is blue almost everywhere except the
 large rivers.
@@ -496,9 +497,9 @@ loss barely moves.
 
 ## Why gauges are not at their roughness optimum (2026-09-09, swarm synthesis)
 
-Authority: `docs/2026-09-09-why-not-at-optimum-findings.md` (six-analyst swarm synthesis, reports
-`docs/why-analysis/A-flat-q.md`, `B-clamping.md`, `C-weak-gradient.md`, `D-inflow-bias.md`,
-`E-training-side.md`, `F-equifinality.md`) and `docs/2026-09-08-landscape-hypothesis-tests-findings.md`
+Authority: `research/findings/2026-09-09-why-not-at-optimum-findings.md` (six-analyst swarm synthesis, reports
+`research/why-analysis/A-flat-q.md`, `B-clamping.md`, `C-weak-gradient.md`, `D-inflow-bias.md`,
+`E-training-side.md`, `F-equifinality.md`) and `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`
 §14.
 
 **Five-year census facts** (`landscape-p21-all-5yr/merged`, WY1996 to WY2000, all 2,365 gauges,
@@ -613,8 +614,8 @@ n was already converged by update 20 of 60.
   for any hour-scale signal. Training also runs at tau=3, so gradients have
   always been ~half a day misaligned — retrain at corrected tau is the open
   test (freeze the tau protocol first). Instrument: `DDRS_HOURLY_DUMP` env var
-  on `evaluate` + `scripts/tau_sweep.py`. Authority:
-  `docs/2026-08-06-tau-sweep-pilot-findings.md` incl. §5a corrections.
+  on `evaluate` + `research/archive/scripts/tau_sweep.py`. Authority:
+  `research/findings/2026-08-06-tau-sweep-pilot-findings.md` incl. §5a corrections.
   **Interpolation arms (§5c, same day):** replicated on the standard 2,365-gauge
   population — argmax tau=18–20, small-basin global tau=19 beats baseline
   0.674 vs 0.645 (WY1996). Linear/quadratic q' upsampling
@@ -725,7 +726,7 @@ n was already converged by update 20 of 60.
 
 ## Training convergence: the p = 21 CONUS model had not converged (2026-09-10, SETTLED)
 
-Authority: `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §19, §21, §21.3, §21.4.
+Authority: `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` §19, §21, §21.3, §21.4.
 Reproduce: `experiments/landscape/trainwin_compare.py <testing-merged> <training-merged> --out <dir>`.
 
 Run `2026-09-08T15-55-52Z-conus-train-and-test`, checkpoint `epoch_30_mb_1`. Measured at 2,124 (testing) and
@@ -750,7 +751,7 @@ skill**. The exception is `n_reach > 200`, where the displacement is coherent an
 to the NSE optimum also raises KGE at 81 % of gridded gauges (§24), so it does not trade one metric for the other.
 
 **Ranked consequence:** more optimizer updates (smaller accumulation, more epochs, or a flatter lr schedule) moves
-to the top of `docs/2026-09-09-why-not-at-optimum-findings.md` §4, ahead of the attribute and architecture changes.
+to the top of `research/findings/2026-09-09-why-not-at-optimum-findings.md` §4, ahead of the attribute and architecture changes.
 
 **Gotcha:** `landscape-p21-all-trainwin-diag` runs `newton_iters: 0`, so its `alpha_n_star` is identically zero.
 Never join it to another census on that column; doing so yields a confident-looking 27.7 % sign agreement and an

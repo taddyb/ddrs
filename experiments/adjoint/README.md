@@ -13,7 +13,7 @@ from the existing routing backward) and reduces it to three quantities:
 | **volume** | `d[Σ_t Q_g]/dq'`: fraction of a reach's inflow volume the gauge sees. ≈1 upstream by mass conservation; the sanity gate. |
 | **residual** | `d[mean(Q̄_g − obs)]/dq'` over four seasonal windows: which reaches the gauge's bias is attributed to. |
 
-Spec: `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+Spec: `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 Leakance is out of scope.
 
 ## Run

@@ -1,6 +1,6 @@
 //! `ddrs` CLI entrypoint. Dispatches to subcommands defined in
 //! `ddrs::cli::*`. See spec at
-//! `docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
+//! `research/specs/2026-05-30-ddrs-cli-lifecycle-design.md`.
 
 use std::path::PathBuf;
 
@@ -99,7 +99,7 @@ enum Cmd {
         #[arg(long)] json: bool,
     },
     /// Validate a Q' store against the DDR store contract
-    /// (docs/nh-qprime-store-contract.md) and register it as a data-source
+    /// (docs/book/nh-qprime-store-contract.md) and register it as a data-source
     /// group under config/sources/.
     Import {
         /// Path to the Q' store (icechunk repo or global zarr).

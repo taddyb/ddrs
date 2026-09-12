@@ -114,7 +114,7 @@ pub struct DisaggHeadConfig {
     /// chunk is free to receive more or less than its own observed value,
     /// which is what lets a storm that spans a day boundary be represented
     /// as one continuous rise instead of being artificially clipped at
-    /// hour 0/23. Verified (`docs/2026-07-1x-disagg-72h-window-findings.md`):
+    /// hour 0/23. Verified (`research/findings/2026-07-1x-disagg-72h-window-findings.md`):
     /// a standalone 3-day-chunk pretrain on real USGS hourly data showed
     /// smooth cross-day storm shapes (vs. climatology's persistent blocky
     /// steps at the old day boundaries) and a real peak-timing improvement
