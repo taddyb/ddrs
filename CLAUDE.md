@@ -456,7 +456,8 @@ Every rival explanation (gradient starvation, objective noise, uninformative
 inputs, sign ambiguity) was individually refuted.
 
 Verdict and refutations: `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3
-Enable steps, ranges, gates, zeta diagnostic: `ddrs-dev/references/config.md`
+Enable steps, ranges, zeta diagnostic: `ddrs-dev/references/config.md`
+Gates: `ddrs-dev/references/testing.md`
 
 ## Reach subdivision (`params.subdivision`, NO-GO, off by default)
 
@@ -470,8 +471,8 @@ nearly eliminate `Cr > 2` (3.93 % to 0.31 %), via the length clamp.
 
 Correct, gated off, stays in-tree as the measurement apparatus. Do not re-open
 the "Cr ≈ 1 implies non-negative" argument without reading
-`.claude/REACH-SUBDIVISION.md`. Enable steps and fields:
-`ddrs-dev/references/config.md`
+`.claude/REACH-SUBDIVISION.md`, which has the enable preconditions and all seven
+fields.
 
 ## Baseline
 
