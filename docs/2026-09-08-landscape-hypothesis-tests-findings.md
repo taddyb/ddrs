@@ -1916,8 +1916,11 @@ and the downstream geometry got worse, not better.
     micro 3/4  loss=0.092350  n=5312  median_n=0.13324      both
   ```
 
-  So both sets of changes are numerically inert at their defaults, and the +0.008 is attributable to
-  `p_spatial` becoming learnable rather than to any code change. Reproduce with
+  The full comparison runs **100 mini-batches over 50 epochs and the two logs are identical line for
+  line, all 500 lines**, so the equivalence is not just at initialisation: it survives fifty epochs of
+  accumulated drift, where any real numerical difference would have amplified. Both sets of changes are
+  inert at their defaults, and the +0.008 is attributable to `p_spatial` becoming learnable rather than
+  to any code change. Reproduce with
   `experiments/head_arch/` — the check is a `run --workflow train --max-mini-batches 2` on each binary with
   the same config (note `--max-mini-batches` caps mini-batches PER EPOCH, not in total).
 - **The mechanism was measured and is refuted.** See §33.1.
