@@ -9,11 +9,12 @@ restructure on top of this corrected text.
 
 **One-line verdict:** every claim the 2026-09-11 design (`docs/superpowers/specs/2026-09-11-repo-cleanup-design.md`)
 flagged as verified-wrong in `CLAUDE.md`, the four skills, and the book pages
-was corrected; a new gate (`scripts/verify_doc_paths.py`) now fails the build
-if a future edit drifts a citation the same way; and the review loop that
-executed the plan caught roughly seven errors that originated in the plan
-itself against about one implementer slip, which is this run's own strongest
-argument for keeping that loop in Phase 2.
+was corrected; a new gate (`scripts/verify_doc_paths.py`) fails the build if a
+future edit drifts a citation the same way, wired into `.github/workflows/ci.yml`'s
+`test` job and `.githooks/pre-push` in the fix wave that closed this document; and
+the review loop that executed the plan caught roughly seven errors that originated
+in the plan itself against about one implementer slip, which is this run's own
+strongest argument for keeping that loop in Phase 2.
 
 ---
 
@@ -174,6 +175,13 @@ and resolves it against the tree. A citation in `CLAUDE.md` or
 code); the same failure inside a `docs/` prose page is a warning only, because
 Phase 1 deliberately left the book's drift toward Phase 2's restructure rather
 than hand-fixing all of it. Section 4.8 records the rule's own history.
+
+The gate did not run in any automation until the fix wave that closed this
+document: it is now a step in `.github/workflows/ci.yml`'s `test` job (both
+the verifier and its own test run first, before the CUDA toolkit install, so
+a dead citation fails in under a second instead of waiting behind the debug
+build) and a step in `.githooks/pre-push` (opt-in per clone via `git config
+core.hooksPath .githooks`).
 
 ---
 
@@ -513,8 +521,11 @@ Task 5's compression of the leakance and reach-subdivision sections to status
 blocks took the file from 684 to 577, then to 578 and 581 across two fix
 rounds that corrected the numeric errors in section 3.2. Task 6 added the
 seven-line "cite symbols, not lines" convention paragraph, landing at 588.
-Tasks 7 and 8 touched other files and left `CLAUDE.md` unchanged, and so did
-every Phase 2 task (10 through 14): none of them touched the file either.
+Tasks 7 and 8 touched other files and left `CLAUDE.md`'s line count unchanged,
+and so did every Phase 2 task (10 through 14): none of them changed the count
+either. Three of those commits did edit the file's text: `16adb9c` (1 line),
+`cd4ec55` (5 lines), and `ec7014d` (11 lines), each an equal number of
+insertions and deletions, which is why the count held through all three.
 
 **Measured now, at Task 15's HEAD, by running `wc -l CLAUDE.md`: 588 lines,**
 the same value reached at the end of Phase 1 and unchanged through the whole
@@ -732,20 +743,30 @@ nonexistent `extract_bundle.py`. All 21 are reproduced by the current
 `python3 scripts/verify_doc_paths.py` run. A measured backlog someone chose
 not to fix in this cleanup is a known quantity; an unexamined one is not.
 
-**The five `*-handoff.md` documents split by accident.** `research/findings/`
-holds three (`2026-06-07-checkpoint-resume-handoff.md`,
-`2026-06-11-global-data-sources-handoff.md`,
-`2026-07-01-leakance-hourly-experiment-handoff.md`) and `research/plans/`
-holds two (`2026-06-06-gpu-device-config-handoff.md`,
-`2026-06-06-sigfpe-wukong-debug-handoff.md`), all five of the same genre
-(a mid-experiment handoff), split purely by which of `docs/` or
-`.claude/specs/` each one started in, not by any ruling about where a
-handoff document belongs. This is the one place the three-way
-findings/specs/plans split does not explain itself: a reader hunting "the
-SIGFPE handoff" by genre would check `research/findings/` first and miss it.
-A renames-only task could not have fixed this without inventing a new
-judgment call outside its scope, so it stands as a known wart rather than a
-silently-accepted one.
+**The five `*-handoff.md` documents split by accident, now fixed.** All five
+now live in `research/findings/`, per `.claude/skills/ddrs-dev/references/research-status.md`'s
+rule that a handoff document belongs there regardless of which of `docs/` or
+`.claude/specs/` it started in. The fix wave that closed this document moved
+the two that were still in `research/plans/` and repointed the one live
+citation the cleanup's own review had missed, `docs/book/reference/ddr-comparison.md`.
+
+**Known, sized follow-up, deliberately not done in the fix wave.** Roughly 30
+citations inside `research/findings/` Reproduce blocks point at `scripts/...`
+and `examples/...` paths for artifacts that Task 13 moved to
+`research/archive/{scripts,examples}/`. `scripts/verify_doc_paths.py`
+deliberately does not scan `research/`, on the theory that a findings doc is
+an immutable historical record and its citations are snapshots of what was
+true when written. That theory does not hold for a Reproduce block: it is
+phrased as a present-tense instruction ("run this command"), not a
+description of the past, so a reader following it today hits a path that no
+longer exists. The counter-argument not yet resolved: fixing all 30 is a
+historical-document edit at roughly the same scale as this wave's six fixes,
+and unlike this wave's fixes, none of the 30 was flagged as a false claim by
+this cleanup's own review, so the decision of whether and how to make
+Reproduce blocks present-tense-correct belongs to whoever owns that tradeoff,
+not to a fix wave sized around six specific, reviewer-identified defects.
+This paragraph records the argument so the next person inherits the
+reasoning, not just the defect count.
 
 ---
 
@@ -792,7 +813,7 @@ the numbering continuity is stated here rather than implied by position.
 ## 10. Final gate results (whole branch, 2026-09-12)
 
 ```
-python3 scripts/test_verify_doc_paths.py        # 21/21 pass
+python3 scripts/test_verify_doc_paths.py        # 23/23 pass
 python3 scripts/verify_doc_paths.py             # 0 unresolved in agent context, 80 in prose docs
 cargo check --examples --tests                  # exit 0 (pre-existing warnings only)
 cargo test --test ddr_sandbox_match --test gridded_bundle   # 6/6 pass

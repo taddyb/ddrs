@@ -2,7 +2,7 @@
 
 **Prompt (user):** p (the Leopold–Maddock width coefficient) has little effect; make it a simple function, learn only
 n and q, and draw the loss landscapes over (n, q). q is an exponent and therefore the more effective lever.
-**Literature and provenance:** `docs/reference/hydraulic-geometry-literature-2026-09-08.md` (verified metadata only).
+**Literature and provenance:** `docs/book/reference/hydraulic-geometry-literature-2026-09-08.md` (verified metadata only).
 
 ## 1. What p and q do in this model (`src/geometry.rs`)
 

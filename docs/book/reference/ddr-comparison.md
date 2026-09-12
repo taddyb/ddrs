@@ -175,7 +175,7 @@ touching ddrs.
 > ddrs commit — that is a wrong-reference artifact, not a port bug.
 > Until the DDR-side geometry work is pushed, only the desktop's DDR tree
 > generates a valid V1 fixture. See
-> `research/plans/2026-06-06-sigfpe-wukong-debug-handoff.md`
+> `research/findings/2026-06-06-sigfpe-wukong-debug-handoff.md`
 > §Outcome for the full investigation.
 
 In short: if a freshly cloned DDR makes V1 drift by ~1%, suspect the
