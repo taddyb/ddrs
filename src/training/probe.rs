@@ -147,6 +147,13 @@ pub fn probe_forward<I: Backend>(
         .find(|(n, _)| n.as_str() == "p_spatial")
         .map(|(_, t)| t.clone())
         .or_else(|| params_map.get("p_spatial").cloned());
+    // Stage-roughness exponent, same treatment as p_spatial (mirrors `forward`).
+    let gamma_param: Option<Tensor<Autodiff<I>, 1>> = leaves
+        .leaves
+        .iter()
+        .find(|(n, _)| n.as_str() == "gamma")
+        .map(|(_, t)| t.clone())
+        .or_else(|| params_map.get("gamma").cloned());
 
     // Mirrors forward.rs:214-230: leakance fields only when use_leakance is true.
     let (k_d, d_gw, leakance_factor) = if cfg.params.use_leakance {
@@ -188,7 +195,7 @@ pub fn probe_forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
-            gamma: None,
+            gamma: gamma_param,
             k_d,
             d_gw,
             leakance_factor,

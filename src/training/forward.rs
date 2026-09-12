@@ -706,6 +706,11 @@ fn forward_eval_core<I: Backend>(
     let n_ad = Tensor::<Autodiff<I>, 1>::from_inner(n_param);
     let q_ad = Tensor::<Autodiff<I>, 1>::from_inner(q_param);
     let p_ad = p_param.map(Tensor::<Autodiff<I>, 1>::from_inner);
+    // Stage-roughness exponent, when the head emits it. Mirrors `forward`:
+    // the eval path once passed `gamma: None` here, so a head trained with a
+    // learned gamma was scored at gamma = 0 — a different model, with no
+    // error. Pinned by `tests/gamma_eval_parity.rs`.
+    let gamma_ad = params_map.get("gamma").cloned().map(Tensor::<Autodiff<I>, 1>::from_inner);
     let x_ad = Tensor::<Autodiff<I>, 1>::from_inner(x_storage);
     let k_d_ad = k_d_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
     let d_gw_ad = d_gw_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
@@ -720,9 +725,7 @@ fn forward_eval_core<I: Backend>(
         SpatialParameters {
             n: n_ad,
             q_spatial: q_ad,
-            // Frozen-parameter eval: gamma comes from the config scalar, not
-            // from a head, so there is nothing to learn here.
-            gamma: None,
+            gamma: gamma_ad,
             p_spatial: p_ad,
             k_d: k_d_ad,
             d_gw: d_gw_ad,

@@ -75,10 +75,13 @@ def main() -> int:
         area = 10.0**upa
         Q = Q_SPEC * area
 
-        # Stage roughness, if this run used it.
+        # Stage roughness, if this run used it: a per-reach field when the head
+        # learned it (`gamma` variable in the NetCDF), else the config scalar.
         cfg = (RUNS / rid / "config.yaml").read_text()
         g = 0.0
-        if "stage_roughness:" in cfg:
+        if "gamma" in ds.variables:
+            g = np.asarray(ds["gamma"][:], dtype=np.float64)
+        elif "stage_roughness:" in cfg:
             m = re.search(r"^\s+gamma:\s*([0-9.eE+-]+)", cfg.split("stage_roughness:", 1)[1], re.M)
             g = float(m.group(1)) if m else 0.0
 

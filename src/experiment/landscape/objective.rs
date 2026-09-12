@@ -148,6 +148,13 @@ where
         // `InfluenceContext::open`'s learnable/fixed log line, so the two
         // never disagree.
         let section = ctx.cfg.kan_head.as_ref().ok_or("arm config has no kan_head section")?;
+        if section.learnable_parameters.iter().any(|s| s == "gamma") {
+            return Err("the landscape objective has no `gamma` axis and does not carry the \
+                        head's learned gamma field, so it would route this arm at gamma = 0 \
+                        — a different model from the one trained. Add gamma to the objective \
+                        before probing a learned-gamma arm."
+                .into());
+        }
         let active = [
             section.learnable_parameters.iter().any(|s| s == "n"),
             section.learnable_parameters.iter().any(|s| s == "p_spatial"),

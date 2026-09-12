@@ -250,6 +250,11 @@ where
     let mut kd_phys: Vec<f32> = Vec::new();
     let mut dgw_phys: Vec<f32> = Vec::new();
     let mut lfac_phys: Vec<f32> = Vec::new();
+    // Stage-roughness exponent, only when it is a learned KAN output. A global
+    // `params.stage_roughness.gamma` is a config scalar, not a field, and is
+    // read from the run's config snapshot by the plotting scripts.
+    let dump_gamma = learn_has("gamma");
+    let mut gamma_phys: Vec<f32> = Vec::new();
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -279,6 +284,15 @@ where
             p_phys.extend(p_d.into_data().to_vec::<f32>().unwrap());
         } else {
             p_phys.extend(std::iter::repeat(p_default).take(rows));
+        }
+
+        if dump_gamma {
+            let g_d = denormalize(
+                raw["gamma"].clone(),
+                cfg.params.parameter_ranges.gamma,
+                is_log("gamma"),
+            );
+            gamma_phys.extend(g_d.into_data().to_vec::<f32>().unwrap());
         }
 
         // Muskingum X: denormalize when learnable, else the routing constant 0.3.
@@ -354,6 +368,21 @@ where
         );
     }
 
+    if dump_gamma {
+        let mut gs = gamma_phys.clone();
+        gs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| gs[((p * (gs.len() - 1) as f64).round() as usize).min(gs.len() - 1)];
+        let [lo, hi] = cfg.params.parameter_ranges.gamma;
+        let at_floor = gs.iter().filter(|&&x| x <= lo + 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        let at_ceil = gs.iter().filter(|&&x| x >= hi - 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        eprintln!(
+            "learned gamma over {} reaches: min={:.4} p10={:.4} median={:.4} p90={:.4} max={:.4}  \
+             frac@floor={:.1}%  frac@ceil={:.1}%  (range [{lo}, {hi}])",
+            gs.len(), gs[0], pct(0.10), pct(0.50), pct(0.90), gs[gs.len() - 1],
+            at_floor * 100.0, at_ceil * 100.0
+        );
+    }
+
     // ---------- 6. Write NetCDF4 ----------
     let slope_lb = cfg.params.attribute_minimums.slope;
     let comids_i64: Vec<i64> = conus.parent_order.iter().map(|c| c.0).collect();
@@ -377,6 +406,7 @@ where
         } else {
             None
         },
+        if dump_gamma { Some(gamma_phys.as_slice()) } else { None },
     )
     .map_err(CliError::Other)?;
 
@@ -487,6 +517,11 @@ where
     let mut kd_phys: Vec<f32> = Vec::new();
     let mut dgw_phys: Vec<f32> = Vec::new();
     let mut lfac_phys: Vec<f32> = Vec::new();
+    // Stage-roughness exponent, only when it is a learned KAN output. A global
+    // `params.stage_roughness.gamma` is a config scalar, not a field, and is
+    // read from the run's config snapshot by the plotting scripts.
+    let dump_gamma = learn_has("gamma");
+    let mut gamma_phys: Vec<f32> = Vec::new();
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -516,6 +551,15 @@ where
             p_phys.extend(p_d.into_data().to_vec::<f32>().unwrap());
         } else {
             p_phys.extend(std::iter::repeat(p_default).take(rows));
+        }
+
+        if dump_gamma {
+            let g_d = denormalize(
+                raw["gamma"].clone(),
+                cfg.params.parameter_ranges.gamma,
+                is_log("gamma"),
+            );
+            gamma_phys.extend(g_d.into_data().to_vec::<f32>().unwrap());
         }
 
         // Muskingum X: denormalize when learnable, else the routing constant 0.3.
@@ -591,6 +635,21 @@ where
         );
     }
 
+    if dump_gamma {
+        let mut gs = gamma_phys.clone();
+        gs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| gs[((p * (gs.len() - 1) as f64).round() as usize).min(gs.len() - 1)];
+        let [lo, hi] = cfg.params.parameter_ranges.gamma;
+        let at_floor = gs.iter().filter(|&&x| x <= lo + 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        let at_ceil = gs.iter().filter(|&&x| x >= hi - 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        eprintln!(
+            "learned gamma over {} reaches: min={:.4} p10={:.4} median={:.4} p90={:.4} max={:.4}  \
+             frac@floor={:.1}%  frac@ceil={:.1}%  (range [{lo}, {hi}])",
+            gs.len(), gs[0], pct(0.10), pct(0.50), pct(0.90), gs[gs.len() - 1],
+            at_floor * 100.0, at_ceil * 100.0
+        );
+    }
+
     // ---------- 6. Write NetCDF4 ----------
     let slope_lb = cfg.params.attribute_minimums.slope;
     let comids_i64: Vec<i64> = conus.parent_order.iter().map(|c| c.0).collect();
@@ -614,6 +673,7 @@ where
         } else {
             None
         },
+        if dump_gamma { Some(gamma_phys.as_slice()) } else { None },
     )
     .map_err(CliError::Other)?;
 
@@ -940,6 +1000,7 @@ fn write_netcdf(
     slope: &[f32],
     checkpoint: &str,
     leakance: Option<(&[f32], &[f32], &[f32])>,
+    gamma: Option<&[f32]>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut file = netcdf::create(path)?;
 
@@ -998,6 +1059,16 @@ fn write_netcdf(
         v.put_values(leakance_factor, ..)?;
         v.put_attribute("long_name", "leakance gating/scaling factor")?;
         v.put_attribute("units", "dimensionless")?;
+    }
+
+    // Stage-dependent roughness exponent, n(d) = n_0·(d/d_ref)^(−gamma) — only
+    // when learned per reach. `n` above is then n_0, the roughness at d_ref.
+    if let Some(gamma) = gamma {
+        let mut v = file.add_variable::<f32>("gamma", &["COMID"])?;
+        v.put_values(gamma, ..)?;
+        v.put_attribute("long_name", "stage-roughness exponent, n(d) = n_0 (d/d_ref)^(-gamma)")?;
+        v.put_attribute("units", "dimensionless")?;
+        v.put_attribute("d_ref", "1.0 m")?;
     }
 
     Ok(())

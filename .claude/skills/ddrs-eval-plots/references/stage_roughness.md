@@ -17,13 +17,49 @@ the year.
 
 ```bash
 # line traces — cheaper, usually the more legible view
-experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 1996 --traces
+experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --traces
 
-# the GIF
-experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 1996
+# the GIF: x = log10 drainage area, y = n(d), one frame per day (default view)
+experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000
+
+# the older (log10 median discharge, n_0) scatter coloured by n(d)
+experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --view scatter
+
+# static 3D surface + heatmap: median n(d) per drainage-area bin per day
+experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --view 3d
 ```
 
-Both write into `<run-dir>/plots/`.
+All write into `<run-dir>/plots/`, named `n_of_d_wy<year>_<view>.gif` (or
+`_3d.png` / `_3d_heatmap.png` / `_traces.png`). `--max-frames` (default 366)
+caps the GIF at one frame per day; `--max-points` (80,000) subsamples the
+reaches drawn per frame, while the black per-bin median line always uses every
+live reach.
+
+**Which view to read.** The `area` view is the one that answers "how does
+roughness vary with river size and with the season": the black line is the
+per-drainage-area-bin median n(d) that day, the grey band is that line's
+envelope over the year, and the cloud is coloured by that day's discharge. The
+`scatter` view (the original) only shows that n(d) breathes, not where.
+
+**`gamma` source.** If the run LEARNED gamma (`gamma` in
+`kan_head.learnable_parameters`), `plot/kan_parameters.nc` carries a per-reach
+`gamma` variable (written by `dump_parameters` since 2026-09-12) and the script
+uses it, with `d_ref = 1`. Otherwise it reads the global
+`params.stage_roughness.gamma` from the config snapshot as before. The title
+says which.
+
+## Companion: routing lag against the summed Q'
+
+`experiments/stage_roughness/routing_lag.py <run-id> [--water-year 2000]`
+cross-correlates daily anomalies over the whole eval window and reports, per
+gauge and by drainage-area class, the lag (whole days) from summed Q' to
+routed, from summed Q' to observed, and the residual routed-to-observed lag,
+plus three example hydrographs with all three series. Writes
+`<run>/plots/routing_lag.png`, `routing_lag_examples_wy<year>.png`,
+`routing_lag.csv`. On the 2026-09-12 CONUS arms the router adds a median 0 d
+below ~1,500 km², 1 d at 3,000–30,000 km² and 2 d above, which is the lag the
+gauges ask for at ~70 % of sites; daily resolution cannot resolve less than a
+day, so a sub-day travel time reads as 0.
 
 ## Requirements
 

@@ -21,6 +21,7 @@ is what a future session needs, not the narrative.
 | Baseline predicts ~0 (FHV −100 %) on a new Q′ store, no error | T11 |
 | Fresh checkout/worktree fails in `cudarc`'s build script: `Unsupported cuda toolkit version` | T12 |
 | Training crawls; GPU is resident but idle at single-digit utilisation | T13 |
+| Eval metrics belong to a different model than the one trained (a new head output changes training loss but not eval) | T14 |
 
 ---
 
@@ -297,3 +298,24 @@ computed (mark one leaf `require_grad`, call `backward()`, discard the grads). `
 backward per eval (about 2x the forward-only time). Reading `.inner()` does not release anything. A tape-free
 forward would need the engine to be generic over the inner backend; not done.
 
+## T14 — A head output the eval path never reads (2026-09-12)
+
+`src/training/forward.rs` has THREE hand-written readers of the KAN output
+map, kept deliberately separate (WET): `forward` (training),
+`forward_eval_core` (eval, behind `forward_eval` / `forward_eval_reaches`), and
+`probe_forward` (`src/training/probe.rs`). Each builds `SpatialParameters` by
+naming every key. A key added to `forward` but not to the other two is not an
+error: the solver takes its fallback (`None` ⇒ the config scalar, ⇒ 0 for
+`gamma`) and the eval scores a model that was never trained. No warning, no
+NaN, metrics look plausible.
+
+That is what the first learned-`gamma` CONUS arm did
+(`2026-09-12T13-38-27Z`, stopped in eval). The landscape objective
+(`src/experiment/landscape/objective.rs`) has the same shape and now REFUSES a
+learned-gamma arm rather than routing it at `gamma = 0`.
+
+**Rule.** A new `SpatialParameters` field is added to all three readers in the
+same commit, and to the table in `tests/gamma_eval_parity.rs`, which routes one
+head through `forward` and `forward_eval` and asserts the hydrographs agree.
+That test is the discriminator: it fails at ~2e-2 relative when a reader is
+missing the key and passes at f32 round-off when it is not.
