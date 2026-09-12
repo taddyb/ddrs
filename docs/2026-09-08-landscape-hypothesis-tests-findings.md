@@ -1987,3 +1987,50 @@ differentiable model does when its parameters are unidentifiable.
 
 It also means **`b` should be reported alongside NSE for every future arm**. Skill alone would have recorded
 this run as a straightforward improvement.
+
+## 34. The matched control: the +0.000 displacement was the budget, not the loss
+
+PR #42 reported that the derivative-loss model's 400-gauge stratified census gave a **median signed roughness
+displacement of +0.000**, gauges sitting exactly at their own optimum, and said plainly that without a matched
+control the number could not be attributed to the loss rather than to the optimizer budget. Both models had 500
+updates; only one had the time-derivative term. The control has now finished: the same 400 gauges stratified by
+basin size, the same objective, window and Newton search, run against the `nse-batch` model.
+
+Well-fit gauges (`nse0 > 0.3`, finite optimum), 400 per arm:
+
+| arm | n | median a* | median \|a*\| | \|a*\| < 0.10 | \|a*\| < 0.25 |
+|---|---|---|---|---|---|
+| `nse-batch` (control) | 358 | **−0.001** | 0.383 | 17.0 % | 33.5 % |
+| `nse-deriv` | 359 | **+0.000** | 0.376 | **24.8 %** | 37.0 % |
+
+**The headline number is not the loss.** The control lands at −0.001, indistinguishable from the derivative
+model's +0.000. Sitting at the median optimum is a property of running 500 optimizer updates, which is §27's
+result, not of the derivative term. Any reading of PR #42 that credits the loss for it should be corrected.
+
+**But the derivative term does help, modestly and significantly.** Paired on the 357 gauges both arms resolved:
+
+| | median a* | median \|a*\| |
+|---|---|---|
+| `nse-batch` | −0.001 | 0.385 |
+| `nse-deriv` | +0.000 | **0.366** |
+
+- median change in \|a*\|: **−0.058**
+- the derivative model is closer to its own optimum at **57.7 %** of gauges
+- Wilcoxon on the paired \|a*\|: **p = 0.0038**
+
+So the term tightens identifiability rather than relocating the optimum, which is exactly what §28's curvature
+probe predicted: it sharpens the valley (3.04x deeper, 92.8 % of gauges) without moving where the valley sits
+(sign agreement 88.7 %). The census now shows that sharpening translating into gauges actually sitting nearer
+their optima, with the share within 0.10 log units rising from 17.0 % to 24.8 %.
+
+### What this settles and what it does not
+
+Settled: the derivative term is a real if modest improvement in how well a gauge determines its own roughness,
+it is statistically significant on a paired test, and it is not responsible for the +0.000 median that PR #42
+led with.
+
+Not settled: whether that improvement is worth its cost. §20 bounds the entire roughness channel at about 0.09
+NSE, the derivative model scored a null on skill (+0.0007 NSE, +0.0012 KGE, journal entry for
+`2026-09-11T06-38-49Z`), and §29 showed it drove `q` to its bounds at 64 % of reaches. A better-identified
+roughness that buys no skill and wrecks the width exponent is not obviously a good trade. The recommendation in
+PR #42 stands: do not make `nse-batch-deriv` the default.
