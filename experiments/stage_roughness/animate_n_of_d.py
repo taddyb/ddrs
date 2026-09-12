@@ -177,11 +177,37 @@ def main() -> int:
     q = q_local if a.discharge == "local" else accumulate_upstream(q_local, cfg_text, comids)
     print(f"{q.shape[0]} days, discharge mode = {a.discharge}")
 
+    # ~42k CONUS fabric reaches have no Q' prediction and read as the 1e-3
+    # fill (CLAUDE.md, data sources). Their discharge never moves, so their
+    # n(d) is a flat line: including them puts dead reaches in the traces and
+    # drags the breathing ratio toward 1. Keep only reaches whose discharge
+    # actually varies.
+    # Ask the question directly: does this reach's flow actually move over the
+    # year? A relative-std threshold is too weak — numerical noise from the
+    # accumulation solve sneaks dead reaches through at std/mean ~ 1e-9.
+    # Two conditions, both needed. (1) Does the flow actually move over the
+    # year? A relative-std threshold is too weak — noise from the accumulation
+    # solve sneaks dead reaches through at std/mean ~ 1e-9. (2) Is the flow
+    # physically meaningful? Reaches carrying 1e-9 m3/s sit pinned at the depth
+    # floor, so their n(d) is an artefact of the clamp, not of hydraulics.
+    Q_FLOOR = 1e-3  # m3/s, one litre per second
+    live = ((q.max(axis=0) / np.maximum(q.min(axis=0), 1e-30)) > 1.01) & (
+        np.median(q, axis=0) > Q_FLOOR
+    )
+    n_dead = int((~live).sum())
+    if n_dead:
+        print(f"  excluding {n_dead:,} reaches ({100 * n_dead / live.size:.1f}%) with no Q' "
+              f"prediction or median flow below {Q_FLOOR} m3/s")
+
     depth = depth_from_discharge(q, n0, p, qs, slope, gamma, d_ref)
     n_t = manning_n(depth, n0, gamma, d_ref)
-    print(f"n(d): min {n_t.min():.4f}  median {np.median(n_t):.4f}  max {n_t.max():.4f}")
+    nl = n_t[:, live]
+    print(f"n(d) over live reaches: min {nl.min():.4f}  median {np.median(nl):.4f}  max {nl.max():.4f}")
     print(f"  ratio of network-median n at its highest vs lowest day: "
-          f"{np.median(n_t, axis=1).max() / np.median(n_t, axis=1).min():.3f}x")
+          f"{np.median(nl, axis=1).max() / np.median(nl, axis=1).min():.3f}x")
+    per_reach = nl.max(axis=0) / np.maximum(nl.min(axis=0), 1e-12)
+    print(f"  per-reach breathing, median {np.median(per_reach):.3f}x, "
+          f"p90 {np.percentile(per_reach, 90):.3f}x")
 
     import matplotlib
     matplotlib.use("Agg")
@@ -194,8 +220,10 @@ def main() -> int:
     days = np.arange(q.shape[0])
 
     if a.traces:
-        # Pick reaches spanning the discharge range, so the spread is visible.
-        rank = np.argsort(np.median(q, axis=0))
+        # Pick LIVE reaches spanning the discharge range, so the spread is
+        # visible and no flat sentinel lines get in.
+        live_idx = np.flatnonzero(live)
+        rank = live_idx[np.argsort(np.median(q[:, live_idx], axis=0))]
         pick = rank[np.linspace(0, rank.size - 1, a.n_traces).astype(int)]
         fig, ax = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
         for i in pick:
@@ -222,13 +250,14 @@ def main() -> int:
     # gradient and needs no shapefile.
     from PIL import Image
 
-    vmin, vmax = np.percentile(n_t, [2, 98])
+    vmin, vmax = np.percentile(n_t[:, live], [2, 98])
     frames = []
-    x = np.log10(np.maximum(np.median(q, axis=0), 1e-3))
-    y = n0
+    live_idx = np.flatnonzero(live)
+    x = np.log10(np.maximum(np.median(q[:, live_idx], axis=0), 1e-3))
+    y = n0[live_idx]
     for t in range(0, q.shape[0], max(1, q.shape[0] // 180)):
         fig, ax = plt.subplots(figsize=(8, 5))
-        sc = ax.scatter(x, y, c=n_t[t], s=6, cmap="plasma_r", vmin=vmin, vmax=vmax)
+        sc = ax.scatter(x, y, c=n_t[t, live_idx], s=6, cmap="plasma_r", vmin=vmin, vmax=vmax)
         ax.set_xlabel("log10 median discharge (m³/s)")
         ax.set_ylabel("n₀ (roughness at d_ref)")
         ax.set_title(

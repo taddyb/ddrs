@@ -2047,3 +2047,85 @@ NSE, the derivative model scored a null on skill (+0.0007 NSE, +0.0012 KGE, jour
 `2026-09-11T06-38-49Z`), and §29 showed it drove `q` to its bounds at 64 % of reaches. A better-identified
 roughness that buys no skill and wrecks the width exponent is not obviously a good trade. The recommendation in
 PR #42 stands: do not make `nse-batch-deriv` the default.
+
+## 35. Stage-dependent roughness on CONUS: the single-basin screen did not generalise
+
+`n(d) = n_0·(d/d_ref)^(−gamma)` (design doc `2026-09-12-stage-dependent-roughness-design.md`, Phase 1:
+`gamma` is a fixed global value, not a KAN output). Juniata screened it at 20 s per arm and gave a smooth
+single-peaked response, +0.091 NSE at `gamma = 0.35` against a control that reproduced the documented
+0.7903 / 0.8810 exactly. The matched CONUS pair, identical in every other respect and both on the same binary:
+
+| | `gamma = 0` | `gamma = 0.35` | change |
+|---|---|---|---|
+| **median NSE** | **0.7458** | **0.7362** | **−0.0096** |
+| median KGE | 0.7619 | 0.7588 | −0.0031 |
+| downstream `b` (L&M 0.50) | 0.004 | **0.098** | **+0.094** |
+| downstream `f` (L&M 0.40) | 0.551 | **0.484** | −0.067, toward L&M |
+| median `q` | 0.295 | 0.408 | +0.113 |
+| `beta` = dlog p / dlog Q | −0.144 | −0.082 | +0.062, less wrong |
+| trunk effective rank | 1.64 | **1.36** | −0.28 |
+| affine R² (`n`, `q`) | 0.458 | **0.976** | +0.518 |
+| `n(d)` breathing, per reach (median) | 1.000x | **1.910x** | — |
+
+**Juniata was misleading, by a lot and with the wrong sign.** +0.091 on one gauge became −0.0096 on 2,365.
+The Juniata sample is the documented fast end-to-end check and it is genuinely useful for mechanics, but it
+does not predict CONUS for this parameter. `gamma = 0.35` was chosen from a smooth interior optimum on a
+single basin, which looked like exactly the kind of evidence that should generalise, and did not.
+
+This was foreseeable and was partly foreseen. §2 of the design doc and the commit that recorded the Juniata
+sweep both flagged that the optimum sat at 0.35 against a literature-motivated 0.183, and that at the trained
+`q ≈ 0.084` the model already had an at-a-station velocity exponent of 0.381 against an observed 0.34 — so
+raising `gamma` was moving the static exponents *away* from observation while improving single-basin skill.
+The CONUS result is what that warning looks like when it comes true.
+
+The roughness really does breathe: over water year 1996 the typical live CONUS reach swings its Manning's
+`n` by **1.91x** between its driest and wettest day (p90 3.26x), against a network-median swing of only 1.29x
+— the spatial average is small because reaches peak on different days, so the per-reach number is the one to
+quote. That measurement requires excluding **188,646 reaches (54.5 %)** that carry no Q' prediction or sit at
+physically meaningless flows; they plot as flat lines and bias the statistic toward 1. See
+`.claude/skills/ddrs-eval-plots/references/stage_roughness.md`.
+
+### 35.1 Skill and physical plausibility are anti-correlated, in both directions
+
+Put §33.1 and this section side by side. Both are matched single-variable changes off the same baseline:
+
+| change | Δ median NSE | Δ downstream `b` |
+|---|---|---|
+| free `p_spatial` (§33.1) | **+0.0082** | **−0.095** |
+| add `gamma = 0.35` (§35) | **−0.0096** | **+0.094** |
+
+The two are near-perfect mirror images: roughly **0.01 NSE traded against 0.095 in the width exponent**, in
+whichever direction the change happens to push. One change bought skill by making the channel less physical;
+the other bought physics by giving up skill; neither bought both.
+
+That is a stronger statement than §30's "the objective cannot see channel width". It is not indifference. The
+daily-discharge objective **actively prefers** the physically wrong channel, and the preference is measurable
+and roughly symmetric. Any arm tuned on skill alone will drift away from defensible geometry, which is exactly
+why §33.3 now requires `b` next to every NSE.
+
+### 35.2 `gamma` deepened the output collapse
+
+Unexpected, and it cuts against the §32 story. Adding `gamma` moved the trained trunk from rank 1.64 back down
+to 1.36, and the share of `q`'s pre-activation explained by `n`'s from 45.8 % up to 97.6 % — almost all the way
+back to the two-parameter model's 99.2 %.
+
+A plausible reading, untested: stage-dependent roughness gives the *router* a flow-dependent travel time for
+free, so the network no longer needs spread in its parameter fields to produce the same routing behaviour, and
+collapses further. If that is right, it is a general caution: adding physical capacity to the solver can
+reduce what the learned parameters have to carry, and therefore make the parameters less identifiable rather
+than more. Worth testing directly before it is believed.
+
+### 35.3 Verdict
+
+**Do not adopt `gamma` at 0.35.** It costs about 0.01 NSE, and while it improves the downstream exponents
+substantially it also deepens the head collapse.
+
+What is not settled is whether some *smaller* `gamma` sits on the good side of the trade — `b` improved by
+0.094 for a skill cost of 0.0096, and a value near the literature-motivated 0.183 was never run on CONUS. The
+right next experiment is a CONUS sweep of `gamma ∈ {0.1, 0.183}`, scored on **both** NSE and `b`, not a
+re-tune on Juniata. Two arms, about 4.5 h.
+
+The implementation stands and is verified: `gamma = 0` is bit-identical to the historical solver
+(`tests/stage_roughness.rs`), the backward is gradient-exact at `gamma = 0.35` across all five parents
+(`tests/sp8_gradcheck.rs`), and the control arm here reproduced `head_shared_linear` to four decimals on a
+different binary.

@@ -58,22 +58,59 @@ right order of magnitude and the right spatial pattern.
 Falls back to `local` with a printed warning if the adjacency is missing or the
 parameter COMIDs are not all in it, rather than failing.
 
-## Verified on Juniata
+## Dead reaches: the filter that has to be there
 
-Run `experiments/stage_roughness/juniata/.ddrs/runs/2026-09-12T03-54-46Z-train-and-test`
-(213 reaches, `gamma = 0.35`, water year 1996, accumulated discharge):
+**54.5 % of CONUS reaches must be excluded or the figure lies.** Two problems,
+both silent:
+
+- ~42k MERIT reaches carry no Q' prediction and read as the `0.001` fill
+  (CLAUDE.md, data sources). With upstream accumulation the count of reaches
+  whose flow never moves reaches **147,040**, since a dead reach fed only by
+  dead reaches stays dead.
+- Others carry physically meaningless flows around `1e-9 m³/s`, which sit pinned
+  at `attribute_minimums.depth`, so their `n(d)` is an artefact of the clamp
+  rather than hydraulics.
+
+Both classes plot as **flat lines**, and because the trace picker samples across
+the discharge rank they get picked preferentially. They also drag the breathing
+statistic toward 1. The script now requires a reach to both vary
+(`max/min > 1.01`) and carry a median flow above `1e-3 m³/s`.
+
+A relative-standard-deviation threshold is NOT enough: noise from the
+accumulation solve pushes dead reaches past `std/mean > 1e-9`. Ask the question
+directly.
+
+## Verified numbers
+
+Juniata, `2026-09-12T03-54-46Z-train-and-test` (213 reaches, `gamma = 0.35`,
+water year 1996, accumulated discharge) — every reach live, no filtering needed:
 
 ```
 n(d): min 0.0516  median 0.1487  max 0.4132
 ratio of network-median n, wettest day vs driest: 2.312x
 ```
 
+CONUS, `2026-09-12T06-06-19Z-train-and-test` (`gamma = 0.35`), after excluding
+188,646 dead reaches:
+
+```
+n(d) over live reaches: min 0.0154  median 0.1567  max 0.7506
+network-median n, wettest day vs driest:  1.286x
+per-reach breathing: median 1.910x, p90 3.256x
+```
+
+**Report the per-reach number, not the network-median one.** The network median
+barely moves (1.29x) because CONUS reaches peak on different days and the
+spatial average smooths it out. What a hydrologist wants to know is what happens
+at a reach: **the typical CONUS reach very nearly doubles its roughness between
+its driest and wettest day.**
+
 **What the traces should look like**, and the check that the pipeline is wired
-correctly: the `n(d)` panel is the discharge panel upside down. Every reach's
-roughness drops sharply on flood peaks and climbs back through recessions, and
-the reaches sort by size — headwaters ride at `n ≈ 0.20–0.30`, the main stem at
-`n ≈ 0.07–0.12`. If `n(d)` does not track the inverse of the hydrograph, the
-discharge join is wrong.
+correctly: the `n(d)` panel is the discharge panel upside down. Flashy reaches
+drop sharply on every flood peak and climb back through recessions; the main
+stem sits low and steady; reaches sort by size, headwaters riding high. If
+`n(d)` does not track the inverse of the hydrograph, the discharge join is
+wrong.
 
 ## Scaling to CONUS
 
@@ -95,8 +132,11 @@ nearly everywhere. Published `n` numbers from `gamma = 0` runs are therefore not
 comparable to `n_0` from a stage-roughness run — see the do-not-use list in
 `ddrs-dev`'s `references/research-status.md`.
 
-The 2.3x swing is the point of the whole term: it is a flow-dependent travel
-time, which is the thing findings §30 identified as the channel daily discharge
-can actually constrain. Design and gates:
+The swing is the point of the whole term: it is a flow-dependent travel time,
+which findings §30 identified as the channel daily discharge can actually
+constrain. But note the verdict in §35 — on CONUS `gamma = 0.35` cost about
+0.01 median NSE while improving the downstream width exponent from 0.004 to
+0.098, so a pretty animation is not evidence the term should be adopted. Design
+and gates:
 `docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`,
 `tests/stage_roughness.rs`.
