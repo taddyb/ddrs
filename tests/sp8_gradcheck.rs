@@ -44,7 +44,25 @@ fn linear_chain_sparse() -> SparseAdjacency {
 }
 
 fn mock_cfg() -> Config {
+    mock_cfg_gamma(0.0)
+}
+
+/// Same fixture with stage-dependent roughness switched on.
+///
+/// `gamma > 0` opens three gradient paths that do not exist at `gamma = 0`:
+/// the depth exponent's denominator (B5), the velocity's explicit
+/// `(d/d_ref)^gamma` (B15), and the celerity's `gamma·A/(T·d)` (B17). Two of
+/// those feed NEW contributions into the depth accumulator, so the whole
+/// geometry chain below depth is re-weighted. None of it is exercised by the
+/// forward-only checks in `tests/stage_roughness.rs`.
+fn mock_cfg_gamma(gamma: f32) -> Config {
     let mut cfg = Config::default();
+    if gamma != 0.0 {
+        cfg.params.stage_roughness = Some(ddrs::config::StageRoughnessSection {
+            gamma,
+            d_ref: 1.0,
+        });
+    }
     cfg.params.parameter_ranges.n = [0.01, 0.1];
     cfg.params.parameter_ranges.q_spatial = [0.1, 0.9];
     cfg.params.parameter_ranges.p_spatial = [1.0, 200.0];
@@ -140,7 +158,11 @@ struct GradTensors {
 }
 
 fn compute_analytical_grad(parent: Parent) -> Vec<f32> {
-    let cfg = mock_cfg();
+    compute_analytical_grad_gamma(parent, 0.0)
+}
+
+fn compute_analytical_grad_gamma(parent: Parent, gamma: f32) -> Vec<f32> {
+    let cfg = mock_cfg_gamma(gamma);
     let adj = linear_chain_sparse();
     let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
     let pattern = Arc::new(CsrPattern::from_sparse(&adj));
@@ -181,7 +203,11 @@ fn compute_analytical_grad(parent: Parent) -> Vec<f32> {
 }
 
 fn compute_fd_grad(parent: Parent) -> Vec<f32> {
-    let cfg = mock_cfg();
+    compute_fd_grad_gamma(parent, 0.0)
+}
+
+fn compute_fd_grad_gamma(parent: Parent, gamma: f32) -> Vec<f32> {
+    let cfg = mock_cfg_gamma(gamma);
     let adj = linear_chain_sparse();
     let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
     let pattern = Arc::new(CsrPattern::from_sparse(&adj));
@@ -305,4 +331,64 @@ fn gradcheck_q_prime_t() {
     let a = compute_analytical_grad(Parent::QPrimeT);
     let fd = compute_fd_grad(Parent::QPrimeT);
     compare_grads("q_prime_t", &a, &fd);
+}
+
+// ===========================================================================
+// Stage-dependent roughness: the same five gradients with `gamma > 0`.
+//
+// These are the gate for the hand-written backward terms added with
+// `params.stage_roughness`. `tests/stage_roughness.rs` checks the FORWARD
+// (exponents, celerity identity, bit-identity at gamma = 0) and says nothing
+// about gradients; this says nothing about the forward. Both are needed.
+// ===========================================================================
+
+const GAMMA: f32 = 0.35;
+
+fn gradcheck_with_gamma(name: &str, parent: Parent) {
+    let analytical = compute_analytical_grad_gamma(parent, GAMMA);
+    let fd = compute_fd_grad_gamma(parent, GAMMA);
+    compare_grads(&format!("{name} (gamma={GAMMA})"), &analytical, &fd);
+}
+
+#[test]
+fn gradcheck_n_stage_roughness() {
+    gradcheck_with_gamma("n", Parent::N);
+}
+
+#[test]
+fn gradcheck_q_spatial_stage_roughness() {
+    gradcheck_with_gamma("q_spatial", Parent::QSpatial);
+}
+
+#[test]
+fn gradcheck_p_spatial_stage_roughness() {
+    gradcheck_with_gamma("p_spatial", Parent::PSpatial);
+}
+
+#[test]
+fn gradcheck_q_t_stage_roughness() {
+    gradcheck_with_gamma("q_t", Parent::QT);
+}
+
+#[test]
+fn gradcheck_q_prime_t_stage_roughness() {
+    gradcheck_with_gamma("q_prime_t", Parent::QPrimeT);
+}
+
+/// The gamma terms must actually change the gradient, or the tests above would
+/// pass on a backward that silently ignored `gamma` entirely.
+#[test]
+fn gamma_changes_the_gradients_it_is_supposed_to() {
+    let g0 = compute_analytical_grad_gamma(Parent::N, 0.0);
+    let g1 = compute_analytical_grad_gamma(Parent::N, GAMMA);
+    let rel: f32 = g0
+        .iter()
+        .zip(&g1)
+        .map(|(a, b)| (a - b).abs() / a.abs().max(1e-12))
+        .fold(0.0, f32::max);
+    assert!(
+        rel > 1e-3,
+        "gamma={GAMMA} left dL/dn essentially unchanged (max rel {rel:.2e}); \
+         the backward is probably ignoring it"
+    );
 }
