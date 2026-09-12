@@ -212,20 +212,78 @@ struct BetaGrads<I: Backend> {
     g_side_slope: Tensor<I, 1>,
 }
 
-/// The accumulated parent gradients produced by [`timestep_backward_core`], in
-/// parent order `[n, q_spatial, p_spatial, q_t, q_prime_t]`, plus `ggamma` when
+/// Which of the op's parents are tracked by autograd, i.e. will actually
+/// receive a gradient. Built from `ops.parents` by each `Backward` impl.
+///
+/// A parent that is not tracked — `p_spatial` when it is a fixed constant,
+/// `q_t` at the first timestep (the hotstart state), `q_prime_t` in ordinary
+/// training (the lateral inflow is data; only the adjoint study lifts it) —
+/// used to have its gradient computed and then thrown away. The shared chain
+/// through the solve and the geometry is needed by every parent and is never
+/// skipped; the mask only gates each parent's FINAL assembly, plus the one
+/// O(nnz) piece that belongs to a single parent (B24's `N^T·gi_t` for `q_t`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ParentMask {
+    pub n: bool,
+    pub q_spatial: bool,
+    pub p_spatial: bool,
+    pub q_t: bool,
+    pub q_prime_t: bool,
+    pub gamma: bool,
+}
+
+impl ParentMask {
+    pub const ALL: ParentMask = ParentMask {
+        n: true,
+        q_spatial: true,
+        p_spatial: true,
+        q_t: true,
+        q_prime_t: true,
+        gamma: true,
+    };
+}
+
+/// The parent gradients produced by [`timestep_backward_core`], in parent
+/// order `[n, q_spatial, p_spatial, q_t, q_prime_t]`, plus `gamma` when
 /// stage-dependent roughness is a learned per-reach field.
-pub(crate) struct FiveGrads<I: Backend> {
-    pub gn_total: Tensor<I, 1>,
-    pub gq_spatial: Tensor<I, 1>,
-    pub gp_total: Tensor<I, 1>,
-    pub gq_t_total: Tensor<I, 1>,
-    pub gq_prime_t: Tensor<I, 1>,
-    /// `Some` only when `state.gamma_t` is `Some`, i.e. gamma is the sixth
-    /// parent. Accumulated from the three places gamma enters the forward:
-    /// the depth exponent (B5), the velocity's `(d/d_ref)^gamma` (B15), and
-    /// the celerity's `gamma·A/(T·d)` (B17).
-    pub ggamma: Option<Tensor<I, 1>>,
+///
+/// Each is `Some` exactly when the corresponding [`ParentMask`] flag was set
+/// (and, for `gamma`, when `state.gamma_t` is `Some`). The ops register
+/// whatever is `Some` on whatever parent is tracked, and `register_parent`
+/// panics if a tracked parent arrives without a gradient.
+pub(crate) struct ParentGrads<I: Backend> {
+    pub n: Option<Tensor<I, 1>>,
+    pub q_spatial: Option<Tensor<I, 1>>,
+    pub p_spatial: Option<Tensor<I, 1>>,
+    pub q_t: Option<Tensor<I, 1>>,
+    pub q_prime_t: Option<Tensor<I, 1>>,
+    /// Accumulated from the three places gamma enters the forward: the depth
+    /// exponent (B5), the velocity's `(d/d_ref)^gamma` (B15), and the
+    /// celerity's `gamma·A/(T·d)` (B17).
+    pub gamma: Option<Tensor<I, 1>>,
+}
+
+/// Register `grad` on `parent` when the parent is tracked. A tracked parent
+/// with no gradient means the mask handed to the core disagreed with
+/// `ops.parents`, which is a plumbing bug, so it panics rather than skipping.
+fn register_parent<I: Backend + 'static>(
+    grads: &mut Gradients,
+    parent: Option<burn::backend::autodiff::NodeId>,
+    grad: Option<Tensor<I, 1>>,
+    name: &str,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if let Some(id) = parent {
+        let g = grad.unwrap_or_else(|| {
+            panic!("parent `{name}` is tracked but the backward produced no gradient for it")
+        });
+        let prim = match g.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        };
+        grads.register::<I>(id, prim);
+    }
 }
 
 /// Shared analytical backward body for both [`TimestepOp`] (5 parents) and
@@ -242,8 +300,9 @@ pub(crate) struct FiveGrads<I: Backend> {
 pub(crate) fn timestep_backward_core<I: Backend + 'static>(
     state: &TimestepState<I>,
     grad_out: I::FloatTensorPrimitive,
+    mask: ParentMask,
     zeta_hook: impl FnOnce(&Tensor<I, 1>) -> Option<ZetaGeomGrads<I>>,
-) -> FiveGrads<I>
+) -> ParentGrads<I>
 where
     I::FloatTensorPrimitive: 'static,
 {
@@ -265,7 +324,8 @@ where
         let gy = wrap(grad_out);
 
         let n_t = wrap(state.n.clone());
-        let _q_spatial = wrap(state.q_spatial.clone());
+        // `state.q_spatial` is not read: every q path goes through the saved
+        // `q_eps` (S1), and B1 is the identity.
         let p_spatial = wrap(state.p_spatial.clone());
         let q_t = wrap(state.q_t.clone());
         let q_prime_t = wrap(state.q_prime_t.clone());
@@ -279,16 +339,17 @@ where
         let depth = wrap(state.depth.clone());
         let top_width = wrap(state.top_width.clone());
         let side_slope = wrap(state.side_slope.clone());
-        let _bottom_width = wrap(state.bottom_width.clone());
+        let bottom_width = wrap(state.bottom_width.clone());
         let hyd_radius = wrap(state.hydraulic_radius.clone());
         let velocity_un = wrap(state.velocity_unclamped.clone());
-        let _velocity_cl = wrap(state.velocity_clamped.clone());
+        let velocity_cl = wrap(state.velocity_clamped.clone());
         let celerity = wrap(state.celerity.clone());
         let k_muskingum = wrap(state.k_muskingum.clone());
         let denom = wrap(state.denom.clone());
-        let _c1 = wrap(state.c1.clone());
-        let _c2 = wrap(state.c2.clone());
-        let _c3 = wrap(state.c3.clone());
+        // `state.c1` is not read: gc1 comes from the assembled A-values (B26),
+        // and the c1..c4 VALUES are recovered from k, X and dt at B23-B20.
+        let c2_t = wrap(state.c2.clone());
+        let c3_t = wrap(state.c3.clone());
         let c4 = wrap(state.c4.clone());
         let i_t = wrap(state.i_t.clone());
         let x_sol = wrap(state.x_sol.clone());
@@ -367,22 +428,29 @@ where
         //   gq_t_from_S25 = c3 · gb_rhs                (partial)
         //   gq_prime_t = c4 · gb_rhs                   (final)
         // ===========================================================
-        let c2_t = wrap(state.c2.clone());
-        let c3_t = wrap(state.c3.clone());
         let gc2 = gb_rhs.clone() * i_t.clone();
         let gc3 = gb_rhs.clone() * q_t.clone();
         let gc4 = gb_rhs.clone() * q_prime_t.clone();
         let gi_t = c2_t.clone() * gb_rhs.clone();
         let gq_t_from_s25 = c3_t.clone() * gb_rhs.clone();
-        let gq_prime_t = c4.clone() * gb_rhs.clone();
+        // `q_prime_t` is a parent only in the adjoint study (it lifts the
+        // lateral inflow as a leaf); in training it is data.
+        let gq_prime_t = mask.q_prime_t.then(|| c4.clone() * gb_rhs.clone());
 
         // ===========================================================
         // B24. i_t = N · q_t  →  gq_t_from_S24 = N^T · gi_t
+        // The one O(nnz) piece that belongs to a single parent; skipped when
+        // `q_t` is untracked (the hotstart state at the first timestep).
         // ===========================================================
-        let gi_t_prim = unwrap(gi_t);
-        let gq_t_from_s24_prim =
-            sparse::spmv_backward_primitive::<I>(&state.pattern, gi_t_prim, &device, state.use_cuda);
-        let gq_t_from_s24 = wrap(gq_t_from_s24_prim);
+        let gq_t_from_s24 = mask.q_t.then(|| {
+            let gi_t_prim = unwrap(gi_t);
+            wrap(sparse::spmv_backward_primitive::<I>(
+                &state.pattern,
+                gi_t_prim,
+                &device,
+                state.use_cuda,
+            ))
+        });
 
         // ===========================================================
         // B23-B20. Chain rule through c1..c4 → k_muskingum.
@@ -576,7 +644,7 @@ where
         // ===========================================================
         let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
         let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
-        let wp = _bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
+        let wp = bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
         let area = hyd_radius.clone() * wp.clone();
 
         // ===========================================================
@@ -639,7 +707,7 @@ where
                 / (top_width.clone() * wp.clone())
                 * (4.0 / 3.0);
             let beta = -g_term.clone() + (5.0 / 3.0);
-            let gbeta = gcelerity.clone() * _velocity_cl.clone();
+            let gbeta = gcelerity.clone() * velocity_cl.clone();
             let mut grads = BetaGrads {
                 g_area: -gbeta.clone() * g_term.clone() / area.clone(),
                 g_top_width: gbeta.clone() * g_term.clone() / top_width.clone(),
@@ -671,7 +739,7 @@ where
                 // A, T and d so it is well defined at gamma = 0.
                 let ggamma_s17 = gamma_t.as_ref().map(|_| {
                     gcelerity.clone()
-                        * _velocity_cl.clone()
+                        * velocity_cl.clone()
                         * area.clone()
                         / (top_width.clone() * depth.clone())
                 });
@@ -767,7 +835,7 @@ where
         let half_d = depth.clone() * 0.5;
         let gtw_from_s12 = garea.clone() * half_d.clone();
         let gbw_from_s12 = garea.clone() * half_d.clone();
-        let gd_from_s12 = garea * (top_width.clone() + _bottom_width.clone()) * 0.5;
+        let gd_from_s12 = garea * (top_width.clone() + bottom_width.clone()) * 0.5;
 
         // ===========================================================
         // B11. bottom_width = max(bw_raw, bottom_width_lb)
@@ -932,30 +1000,36 @@ where
         // ===========================================================
         // B1. q_eps = q_spatial + 1e-6  →  ∂q_eps/∂q_spatial = 1
         // ===========================================================
-        let mut gq_spatial = gqeps_from_s8 + gqeps_from_s7 + gqeps_from_s5 + gqeps_from_s2;
-        if let Some(zg) = zeta_geom.as_ref() {
-            gq_spatial = gq_spatial + zg.g_q_eps.clone();
-        }
+        let gq_spatial = mask.q_spatial.then(|| {
+            let g = gqeps_from_s8 + gqeps_from_s7 + gqeps_from_s5 + gqeps_from_s2;
+            match zeta_geom.as_ref() {
+                Some(zg) => g + zg.g_q_eps.clone(),
+                None => g,
+            }
+        });
 
         // ===========================================================
-        // Final accumulations on the 5 parents:
+        // Final assembly, one parent at a time, each gated on the mask.
+        // Everything above this point is shared and was computed regardless.
         // ===========================================================
-        let gn_total = gn_from_s15 + gn_from_s2;
-        let mut gp_total = gp_from_s7 + gp_from_s3;
-        if let Some(zg) = zeta_geom.as_ref() {
-            gp_total = gp_total + zg.g_p_spatial.clone();
-        }
+        let gn = mask.n.then(|| gn_from_s15 + gn_from_s2);
+        let gp = mask.p_spatial.then(|| {
+            let g = gp_from_s7 + gp_from_s3;
+            match zeta_geom.as_ref() {
+                Some(zg) => g + zg.g_p_spatial.clone(),
+                None => g,
+            }
+        });
         // q_t reaches the loss through the S25 RHS (c3·q_t), the S24 SpMV
         // (N·q_t), the S2 depth chain — and, under `ddr_match: false`, a
         // FOURTH path: the Cunge X at S19 (B19).
-        let gq_t_total = gq_t_from_s25 + gq_t_from_s24 + gq_t_from_s2;
-        let gq_t_total = match x_grads.as_ref() {
-            Some(xg) => gq_t_total + xg.g_q_t.clone(),
-            None => gq_t_total,
-        };
-
-        // Touch unused intermediate bindings to silence dead-code warnings.
-        let _ = (_q_spatial, _velocity_cl);
+        let gq_t = gq_t_from_s24.map(|from_s24| {
+            let g = gq_t_from_s25 + from_s24 + gq_t_from_s2;
+            match x_grads.as_ref() {
+                Some(xg) => g + xg.g_q_t.clone(),
+                None => g,
+            }
+        });
 
         // Sum gamma's three contributions. All three are Some together or None
         // together, gated on `state.gamma_t`, so a partial sum cannot happen.
@@ -967,14 +1041,15 @@ where
                  three are gated on state.gamma_t"
             ),
         };
+        let ggamma = if mask.gamma { ggamma } else { None };
 
-        FiveGrads {
-            gn_total,
-            gq_spatial,
-            gp_total,
-            gq_t_total,
-            gq_prime_t,
-            ggamma,
+        ParentGrads {
+            n: gn,
+            q_spatial: gq_spatial,
+            p_spatial: gp,
+            q_t: gq_t,
+            q_prime_t: gq_prime_t,
+            gamma: ggamma,
         }
     }
 }
@@ -998,34 +1073,26 @@ where
              sixth parent needed to give it a gradient"
         );
         let [p_n, p_qsp, p_psp, p_qt, p_qpt] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: false,
+        };
 
         let grad_out = grads.consume::<I>(&ops.node);
 
-        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-            match t.into_primitive() {
-                TensorPrimitive::Float(p) => p,
-                _ => unreachable!(),
-            }
-        };
-
         // No leakance ⇒ hook returns None ⇒ pre-leakance math, byte-identical.
-        let g = timestep_backward_core::<I>(&state, grad_out, |_gb_rhs| None);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
 
-        if let Some(node) = p_n {
-            grads.register::<I>(node.id, unwrap(g.gn_total));
-        }
-        if let Some(node) = p_qsp {
-            grads.register::<I>(node.id, unwrap(g.gq_spatial));
-        }
-        if let Some(node) = p_psp {
-            grads.register::<I>(node.id, unwrap(g.gp_total));
-        }
-        if let Some(node) = p_qt {
-            grads.register::<I>(node.id, unwrap(g.gq_t_total));
-        }
-        if let Some(node) = p_qpt {
-            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
-        }
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
     }
 }
 
@@ -1058,38 +1125,25 @@ where
             "TimestepGammaOp requires a per-reach gamma in the saved state"
         );
         let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_gamma] = ops.parents;
-
-        let grad_out = grads.consume::<I>(&ops.node);
-        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-            match t.into_primitive() {
-                TensorPrimitive::Float(p) => p,
-                _ => unreachable!(),
-            }
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt, &p_gamma].map(|p| p.as_ref().map(|n| n.id));
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: ids[5].is_some(),
         };
 
-        let g = timestep_backward_core::<I>(&state, grad_out, |_gb_rhs| None);
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
 
-        if let Some(node) = p_n {
-            grads.register::<I>(node.id, unwrap(g.gn_total));
-        }
-        if let Some(node) = p_qsp {
-            grads.register::<I>(node.id, unwrap(g.gq_spatial));
-        }
-        if let Some(node) = p_psp {
-            grads.register::<I>(node.id, unwrap(g.gp_total));
-        }
-        if let Some(node) = p_qt {
-            grads.register::<I>(node.id, unwrap(g.gq_t_total));
-        }
-        if let Some(node) = p_qpt {
-            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
-        }
-        if let Some(node) = p_gamma {
-            let gg = g.ggamma.expect(
-                "gamma is a tracked parent but the backward produced no gradient                  for it; state.gamma_t and the parent must agree",
-            );
-            grads.register::<I>(node.id, unwrap(gg));
-        }
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, ids[5], g.gamma, "gamma");
     }
 }
 
@@ -1119,6 +1173,16 @@ where
     ) {
         let state = ops.state;
         let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        // `mask` below is the impervious mask; this one is the parent mask.
+        let parent_mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: false,
+        };
 
         let grad_out = grads.consume::<I>(&ops.node);
 
@@ -1154,7 +1218,7 @@ where
             I::FloatTensorPrimitive,
             I::FloatTensorPrimitive,
         )> = None;
-        let g = timestep_backward_core::<I>(&state.base, grad_out, |gb_rhs| {
+        let g = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, |gb_rhs| {
             let zg = crate::routing::leakance::zeta_backward::<I>(
                 gb_rhs.clone(),
                 depth.clone(),
@@ -1180,21 +1244,11 @@ where
         });
 
         // Register the 5 base parents (zeta geom already folded in by `core`).
-        if let Some(node) = p_n {
-            grads.register::<I>(node.id, unwrap(g.gn_total));
-        }
-        if let Some(node) = p_qsp {
-            grads.register::<I>(node.id, unwrap(g.gq_spatial));
-        }
-        if let Some(node) = p_psp {
-            grads.register::<I>(node.id, unwrap(g.gp_total));
-        }
-        if let Some(node) = p_qt {
-            grads.register::<I>(node.id, unwrap(g.gq_t_total));
-        }
-        if let Some(node) = p_qpt {
-            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
-        }
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
 
         // Register the 3 leakance parents.
         let (g_k_d, g_d_gw, g_fac) =

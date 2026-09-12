@@ -227,6 +227,76 @@ fn compute_analytical_grad_inner(parent: Parent, gamma: f32, learned: bool) -> V
     g.into_data().to_vec::<f32>().unwrap()
 }
 
+/// Like `compute_analytical_grad_inner(parent, gamma, true)` but with EVERY
+/// parent tracked, so the op's backward runs with a full `ParentMask` instead
+/// of a single-entry one. Reads `parent`'s gradient.
+fn compute_analytical_grad_all_tracked(parent: Parent, gamma: f32) -> Vec<f32> {
+    let cfg = mock_cfg();
+    let adj = linear_chain_sparse();
+    let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &device);
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let mk = |data: &[f32]| -> Tensor<AB, 1> { Tensor::from_floats(data, &device).require_grad() };
+    let n_t = mk(&n_vec);
+    let qsp_t = mk(&qsp_vec);
+    let psp_t = mk(&psp_vec);
+    let qt_t = mk(&qt_vec);
+    let qpt_t = mk(&qpt_vec);
+    let gamma_t = mk(&vec![gamma; N]);
+    let q_next = timestep_forward::<I>(
+        &cfg,
+        &pattern,
+        &assembler,
+        n_t.clone(),
+        qsp_t.clone(),
+        psp_t.clone(),
+        qt_t.clone(),
+        qpt_t.clone(),
+        Tensor::from_floats(adj.length_m.as_slice(), &device),
+        Tensor::from_floats(adj.slope.as_slice(), &device),
+        Tensor::from_floats(vec![0.3f32; N].as_slice(), &device),
+        false,
+        Some(gamma_t.clone()),
+    );
+    let grads = q_next.sum().backward();
+    let g = match parent {
+        Parent::N => n_t.grad(&grads),
+        Parent::QSpatial => qsp_t.grad(&grads),
+        Parent::PSpatial => psp_t.grad(&grads),
+        Parent::QT => qt_t.grad(&grads),
+        Parent::QPrimeT => qpt_t.grad(&grads),
+        Parent::Gamma => gamma_t.grad(&grads),
+    };
+    g.expect("grad").into_data().to_vec::<f32>().unwrap()
+}
+
+/// The backward assembles each parent's gradient only when that parent is
+/// tracked (`ParentMask`). Whatever the mask, a tracked parent's gradient
+/// must be bit-identical: the mask may skip work, never change it. Compares
+/// every parent's gradient with only itself tracked against all six tracked.
+#[test]
+fn parent_gradients_do_not_depend_on_which_other_parents_are_tracked() {
+    for parent in [
+        Parent::N,
+        Parent::QSpatial,
+        Parent::PSpatial,
+        Parent::QT,
+        Parent::QPrimeT,
+        Parent::Gamma,
+    ] {
+        let alone = compute_analytical_grad_inner(parent, GAMMA, true);
+        let all = compute_analytical_grad_all_tracked(parent, GAMMA);
+        assert_eq!(alone.len(), all.len());
+        for (i, (a, b)) in alone.iter().zip(&all).enumerate() {
+            assert!(
+                a == b,
+                "{parent:?}[{i}]: gradient changed with the parent mask ({a} alone vs {b} all tracked)"
+            );
+        }
+    }
+}
+
 fn compute_fd_grad(parent: Parent) -> Vec<f32> {
     compute_fd_grad_gamma(parent, 0.0)
 }

@@ -12,6 +12,11 @@
 //! (`2026-09-12T13-38-27Z-train-and-test`, caught before its eval finished).
 //! This test pins the property directly: for a head that emits `gamma`, the
 //! two entry points must produce the same routed hydrograph.
+//!
+//! The three readers of the head's output map — `forward`, `forward_eval_core`
+//! and `probe_forward` — are kept as separate hand-written copies on purpose.
+//! The price of that is this table: every optional head output is routed
+//! through all three and must agree. Add a row when you add an output.
 
 mod common;
 
@@ -26,6 +31,7 @@ use ddrs::data::{RhoWindow, Staid};
 use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
 use ddrs::sparse::SparseAdjacency;
 use ddrs::training::forward::{forward, forward_eval};
+use ddrs::training::probe::probe_forward;
 use ndarray::Array2;
 
 type AB = Autodiff<InnerBackend>;
@@ -98,17 +104,18 @@ fn to_vec<B: Backend>(t: Tensor<B, 2>) -> Vec<f32> {
     t.into_data().to_vec::<f32>().unwrap()
 }
 
-/// Route the same head through both entry points and return `(train, eval)`.
-fn both_paths(outputs: &[&str]) -> (Vec<f32>, Vec<f32>) {
+/// Route the same head through the three readers and return
+/// `(train, eval, probe)` gauge hydrographs.
+fn all_paths(outputs: &[&str], cfg: &ddrs::config::Config) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let device = TestDevice::default();
     let (n, t, f) = (5usize, 48usize, 4usize);
-    let cfg = mock_config(); // ddr_match: false, no stage_roughness block, gamma range [0, 0.5]
     let head_ad = head(f, outputs, &device);
     let head_inner: KanHead<InnerBackend> = head_ad.valid();
+    let tensors_ad = minimal_routing_tensors::<AB>(n, t, f, &device);
 
-    let train = forward::<InnerBackend>(&cfg, &minimal_routing_tensors::<AB>(n, t, f, &device), &head_ad, &device, false).inner();
+    let train = forward::<InnerBackend>(cfg, &tensors_ad, &head_ad, &device, false).inner();
     let eval = forward_eval::<InnerBackend>(
-        &cfg,
+        cfg,
         &minimal_routing_tensors::<InnerBackend>(n, t, f, &device),
         &head_inner,
         &device,
@@ -117,7 +124,15 @@ fn both_paths(outputs: &[&str]) -> (Vec<f32>, Vec<f32>) {
         None,
         None,
     );
-    (to_vec(train), to_vec(eval))
+    // No lifted leaves: the probe must then be the training forward exactly.
+    let (probe, _leaves) = probe_forward::<InnerBackend>(cfg, &tensors_ad, &head_ad, &device, &[]);
+    (to_vec(train), to_vec(eval), to_vec(probe.inner()))
+}
+
+fn both_paths(outputs: &[&str]) -> (Vec<f32>, Vec<f32>) {
+    // ddr_match: false, no stage_roughness block, gamma range [0, 0.5]
+    let (train, eval, _) = all_paths(outputs, &mock_config());
+    (train, eval)
 }
 
 fn assert_same(label: &str, a: &[f32], b: &[f32]) {
@@ -162,4 +177,37 @@ fn learned_gamma_field_is_not_zero_at_init() {
     // Normalised head output in (0, 1); denormalised into [0, 0.5]. A sigmoid
     // read-out cannot produce exactly 0, and the spread must be non-trivial.
     assert!(g.iter().all(|v| *v > 0.05 && *v < 0.95), "gamma at init: {g:?}");
+}
+
+/// The table. One row per optional head output; each routes through all three
+/// readers. `use_leakance` rows need the flag, the other rows must not set it
+/// (the readers panic if the head lacks the leakance keys while it is on).
+#[test]
+fn every_optional_head_output_reaches_all_three_readers() {
+    let base = mock_config();
+    let mut leak = mock_config();
+    leak.params.use_leakance = true;
+    leak.params.use_cuda_graphs = false;
+    let rows: [(&str, &[&str], &ddrs::config::Config); 6] = [
+        ("n, q only (p fixed)", &["n", "q_spatial"], &base),
+        ("p_spatial", &["n", "q_spatial", "p_spatial"], &base),
+        ("x_storage", &["n", "q_spatial", "p_spatial", "x_storage"], &base),
+        ("gamma", &["n", "q_spatial", "p_spatial", "gamma"], &base),
+        (
+            "leakance",
+            &["n", "q_spatial", "p_spatial", "K_D", "d_gw", "leakance_factor"],
+            &leak,
+        ),
+        (
+            "everything",
+            &["n", "q_spatial", "p_spatial", "x_storage", "gamma", "K_D", "d_gw", "leakance_factor"],
+            &leak,
+        ),
+    ];
+    for (label, outputs, cfg) in rows {
+        let (train, eval, probe) = all_paths(outputs, cfg);
+        assert!(train.iter().all(|v| v.is_finite()), "{label}: non-finite");
+        assert_same(&format!("{label}: eval"), &train, &eval);
+        assert_same(&format!("{label}: probe"), &train, &probe);
+    }
 }
