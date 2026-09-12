@@ -2323,3 +2323,43 @@ summed Q' already has the right timing at daily resolution. Two cautions: daily 
 sub-day lag, so most of CONUS reads as 0 by construction; and the examples
 (`plots/routing_lag_examples_wy2000.png`) show that for basins under a few thousand km² the routed and summed
 series are nearly on top of each other — routing's visible work there is peak attenuation, not delay.
+
+### 36.7 The small-constant sweep: a monotone trade, no interior optimum
+
+Two more constant arms, `gamma = 0.1` (`2026-09-12T20-38-08Z`) and `gamma = 0.183`
+(`2026-09-12T20-36-00Z`), each a one-line change from the `0.35` config, run in parallel on CPU from binary
+`7d3bd49`. With the control and the learned arm that is five points on one axis:
+
+| gamma | run | NSE | KGE | `b` (L&M 0.50) | `f` (0.40) | median `q` | negative solves | per-gauge dNSE, % up |
+|---|---|---|---|---|---|---|---|---|
+| 0 (control) | `03-53-34Z` | 0.7458 | 0.7619 | 0.004 | 0.551 | 0.295 | 0.0137 % | — |
+| 0.1 | `20-38-08Z` | 0.7456 | 0.7620 | −0.017 | 0.543 | 0.289 | 0.0211 % | −0.0001, 48 % |
+| 0.183 | `20-36-00Z` | 0.7416 | 0.7611 | 0.065 | 0.532 | 0.351 | 0.0295 % | −0.0005, 43 % |
+| 0.35 | `06-06-19Z` | 0.7362 | 0.7588 | 0.098 | 0.484 | 0.408 | 0.0381 % | −0.0015, 38 % |
+| learned (median 0.22) | `16-30-14Z` | 0.7420 | 0.7624 | −0.017 | 0.550 | 0.261 | 0.0309 % | −0.0006, 43 % |
+
+Three readings.
+
+1. **The trade is monotone and roughly linear.** Skill falls and the width exponent rises together as the
+   constant grows: about 0.03 of `b` per 0.01 of NSE across 0.183 and 0.35. There is no interior value that
+   keeps the geometry and the skill, which answers §35.3's open question in the negative. At 0.1 the term is
+   inert on every axis, including geometry.
+2. **The head compensates the same way at every constant.** Median `q` rises with gamma (0.29, 0.35, 0.41)
+   and the peak bias grows slightly more negative; the roughness law makes floods faster and sharper in
+   isolation, and the head answers by widening the channel and damping them back. `b` improves as a side
+   effect of that compensation, not because the objective asked for geometry.
+3. **The learned field is the 0.183 arm's skill with the control's geometry.** Same NSE to within 0.001,
+   `b` back at zero, `q` at its lowest. Given gamma as a free direction the head lowers `q` and lets gamma
+   carry the stage dependence, which is the degeneracy argued in §36.5.
+
+Negative pre-clamp solves rise with gamma, from 0.014 % to 0.038 % of reach-timesteps: still one solve in
+several thousand, floored to 1e-4 m³/s, and every micro-batch has a few. It is the Muskingum coefficient
+window (`.claude/REACH-SUBDIVISION.md`), not an instability, but it is a real cost of the term and the
+stage law roughly doubles it.
+
+**Verdict on the constant-versus-learned question.** Neither is promotable on skill. If the paper wants
+the geometry argument, the constant is the only form that delivers it, at a known price; if it wants a
+learned physical field as a positive example next to the `q`/`p` negatives, the learned gamma is that,
+ordered by river size and uncorrelated with `n`, and it costs nothing. The experiment that would separate
+"gamma is degenerate with q" from "gamma is unidentifiable" is to learn gamma with `q` held fixed; it has
+not been run.

@@ -210,14 +210,17 @@ Three matched CONUS arms off the 500-update `nse-batch` baseline, all on 2,365 g
 | control `gamma = 0` (`head_shared_linear`) | `2026-09-12T03-53-34Z` | 0.7458 / 0.7619 | 0.004 | 1.64 | |
 | constant `gamma = 0.35` | `2026-09-12T06-06-19Z` | 0.7362 / 0.7588 | **0.098** | 1.36 | Juniata said +0.091; CONUS −0.0096 |
 | **learned `gamma` per reach** | `2026-09-12T16-30-14Z` | 0.7420 / 0.7624 | −0.017 | **1.96** | rho(n, gamma) = **0.30**, not > 0.9 |
+| constant `gamma = 0.1` | `2026-09-12T20-38-08Z` | 0.7456 / 0.7620 | −0.017 | — | inert on every axis |
+| constant `gamma = 0.183` | `2026-09-12T20-36-00Z` | 0.7416 / 0.7611 | 0.065 | — | two thirds of 0.35's geometry, half its cost |
 
 - **Do not cite Juniata as a predictor for this parameter** (§35): +0.091 there became −0.0096 on CONUS.
 - **The registered prediction "learned gamma is `n` relabelled" was refuted.** `gamma` tracks the width
   channel instead (rho(p, gamma) 0.89, rho(q, gamma) 0.76), is physically ordered (median 0.236 below
   100 km² falling to 0.149 above 10,000 km²), and raised the trunk rank. §35.2's "more solver physics ⇒
   deeper collapse" was drawn from the constant arm and does not generalise — do not quote it as a rule.
-- **Neither arm is promotable.** The constant buys geometry at a skill cost; the learned field buys neither.
-  The open experiment is the small-constant sweep `gamma ∈ {0.1, 0.183}` scored on NSE *and* `b`.
+- **No arm is promotable, and the sweep is CLOSED (2026-09-12, §36.7):** skill falls and `b` rises together,
+  roughly linearly in the constant, with no interior optimum; 0.1 is inert. Do not re-run constants.
+  The one unrun discriminator is learning `gamma` with `q` fixed (degeneracy vs unidentifiability).
 - **`n_0` is not Manning's `n`** (roughness at `d_ref = 1 m`); do not compare it to `n` from `gamma = 0` runs.
 - **Eval-path trap (T14).** `2026-09-12T13-38-27Z` (killed in eval) trained this arm correctly but would have
   scored it at `gamma = 0`; any number from that run id is invalid. The relaunch above supersedes it.
