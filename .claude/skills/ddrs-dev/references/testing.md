@@ -1,6 +1,6 @@
 # Testing: gates, inventory, authoring
 
-70 test files, 233 `#[test]` fns. Full suite runs in 2–5 minutes on the dev machine.
+The full suite runs in a few minutes on the dev machine and must pass clean.
 Each `tests/*.rs` compiles as its own crate; `mod common;` pulls `tests/common.rs`.
 
 **Do not hard-code test counts in docs.** Prior skills claimed "leakance_gradcheck

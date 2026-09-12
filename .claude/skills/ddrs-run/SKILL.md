@@ -117,7 +117,7 @@ ddrs sources save my-group        # snapshot the current data_sources block
 
 **`ddrs sources` resolves groups at `<config dir>/config/sources/`.** Run it from
 the repo root against `./ddrs.yaml`. Pointing `--config` at
-`config/experiments/foo.yaml` makes it look in `config/experiments/config/sources/`
+`config/experiments/foo.yaml` makes it look in `config/experiments/config/sources/` <!-- verify-doc-paths: ignore -->
 and report *"no groups"*. The groups are fine, the lookup was wrong.
 
 Switching is textual: the whole `data_sources:` block is replaced, so keys that
@@ -242,10 +242,12 @@ content-addressed and expensive to rebuild.
 |---|---|
 | `ddrs run --workflow eval` | Fails: *"standalone --workflow eval needs a --from-run <run-id> flag"*, and `--from-run` is unimplemented. Use `train-and-test`, or the legacy `eval` binary against a checkpoint. |
 | `ddrs init` | Removed. Prints *"ddrs init has been merged into ddrs plan"*. Use `ddrs plan`. |
-| `ddrs experiment <name>` | **Not on master.** The subcommand and `src/experiment/` live on the `experiment-adjoint` branch. On master it exits with *"unrecognized subcommand"*. |
 | `ddrs run --epochs 10` | No such flag. `experiment.epochs` is YAML-only; edit the config. |
 | `ddrs run --checkpoint <dir>` | No such flag. Resume goes through `experiment.checkpoint:` in the config. |
 | A typo'd config key | Now a load error naming the key. Every config section sets `deny_unknown_fields` as of 2026-09-09; before that a typo silently took its default, which was the most common cause of "my config change did nothing". On an older binary, that silence is still the first thing to suspect. |
+
+`ddrs experiment <name>` is on master (`src/experiment/{adjoint,landscape}`);
+see `ddrs-dev`'s description of the working command.
 
 ## Red flags: stop and re-check preflight
 

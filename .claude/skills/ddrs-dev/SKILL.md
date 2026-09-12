@@ -35,13 +35,13 @@ config reference, test-authoring patterns, and the current research status.
 **This file** — Five costly facts · Change→gate table · Commands · Verifying a run ·
 Maintenance
 
-**`references/build-and-env.md`** (80 lines)
+**`references/build-and-env.md`**
 Hard prerequisites (cmake; CUDA toolkit is required even for CPU-only builds) ·
 Fork pins (13 burn, 11 cubecl, rskan tag) + resolution failure modes · Fixtures
 (V1 sandbox, KAN parity, the wrong-reference caveat) · Gitignored artifacts ·
 Cargo features · Worktree gotchas
 
-**`references/config.md`** (194 lines)
+**`references/config.md`**
 Top level · `data_sources:` (8 fields, adjacency rule) · `experiment:` (incl.
 `optimizer`, grad-accum) → `experiment.loss:` (l1 / nnse-kge / kge / nse-batch) ·
 `testing:` overlay (batch_size shifts meaning) · `kan_head:` →
@@ -50,26 +50,26 @@ Top level · `data_sources:` (8 fields, adjacency rule) · `experiment:` (incl.
 Load-time guards + their error substrings · Adding a routing parameter · Adding a
 boolean flag · Enabling leakance
 
-**`references/testing.md`** (127 lines)
+**`references/testing.md`**
 Tier gates A/B/C/D with exact commands · What covers what (test → area map) ·
 Acceptance thresholds · Authoring patterns: gradcheck (**ε depends on the parent's
 nonlinearity**), parity (must be bidirectional), fixtures · Why the zeta_accum
 headwater identity works · Checkpoint f16 drift
 
-**`references/traps.md`** (212 lines)
+**`references/traps.md`**
 Symptom → trap table · T1 stale binary · T2 DDR sandbox mismatch · T3 CUDA graphs
 mask NaN · T4 phantom-zero baseline · T5 flat training loss · T6 GPU eval OOM that
 never propagates · T7 silent kernel OOM on long CPU forwards · T8 transient icechunk
 read · T9 `.ddrs/` beside the config · T10 `--checkpoint` differs per binary ·
 Exit codes · Pre-flight checklist
 
-**`references/research-status.md`** (213 lines)
+**`references/research-status.md`**
 Gauge-set definitions (2,365 vs 2,698 vs 3,211 vs 5,224) · Benchmarks + the KGE
 claim restated · Closed campaigns: leakance NO-GO, selective equifinality H1–H6,
 Q′-store waves, synthetic-n interim · **Do-not-use list** · Structural constants ·
 Evidence standard · Doc conventions · Open questions
 
-**`references/gauge-population.md`** (100 lines)
+**`references/gauge-population.md`**
 Regenerating `gages_2000_area_balanced.csv` (one command, seed 42, all-local
 inputs) · Relative `DA_VALID` (`ABS_DIFF/DRAIN_SQKM ≤ 10%`) vs the scale-biased
 absolute criterion · The filter funnel (coverage in both configured windows,
@@ -169,7 +169,9 @@ per-arm outputs, and `figures/` from the bundle's `plots.py`. Training,
 baselines, and `status`/`gc` are deliberately not integrated. Spec:
 `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
-**`adjoint`** (the only study so far): gradient of routed gauge discharge w.r.t.
+Two studies ship: `adjoint` and `landscape`.
+
+**`adjoint`**: gradient of routed gauge discharge w.r.t.
 hourly lateral inflow at every upstream reach — read from the existing routing
 backward by lifting the inflow tensor as a `require_grad` leaf
 (`src/experiment/adjoint/influence.rs`; no `Backward` impl touched, Tier C).
@@ -182,6 +184,15 @@ gate 0.1–0.9 %, ~15 s per gauge-arm for daily stores (56 s hourly-lstm), 9
 backwards per gauge-arm. Findings: `docs/2026-09-04-adjoint-influence-poc-findings.md`.
 Gates: `cargo test --release --test adjoint_influence`, `cargo test --lib experiment`.
 Figures: `~/projects/ddr/.venv/bin/python experiments/adjoint/plots.py <out dir>`.
+
+**`landscape`** (`src/experiment/landscape/`): per-gauge loss landscape over
+the channel parameters (Manning's `n`, Leopold–Maddock `p`, `q`) in
+log-multiplier space around a trained run, via the same adjoint machinery: it
+locates where large-batch training left each gauge relative to that gauge's
+own optimum. Design: `docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md`.
+Findings: `docs/2026-09-07-landscape-uh-juniata-findings.md`,
+`docs/2026-09-08-landscape-hypothesis-tests-findings.md`. Gate: `cargo test
+--lib experiment`.
 
 ## Juniata single-catchment sample (`examples/juniata/`)
 
@@ -251,15 +262,18 @@ reader now sniffs the axis order (traps.md T11).
 
 ## Maintenance
 
-Three skills live in this repo: this one (build / code / configure / test / debug),
+Four skills live in this repo: this one (build / code / configure / test / debug),
 `ddrs-run` (launch, watch, resume, and audit runs; the full `ddrs` command
-reference), and `ddrs-eval-plots` (visualize and interpret run output). When a run,
-eval, or export completes, update the relevant section here in the same session that
-produced the knowledge — do not leave it only in a findings doc. If a rule here is
-superseded, correct it in place with the new nuance rather than deleting it.
+reference), `ddrs-eval-plots` (visualize and interpret run output), and
+`ddrs-journal` (the running record in `docs/journal/`, wired into `ddrs run` and
+`ddrs experiment` via `.claude/settings.json` hooks calling `scripts/journal.py`).
+When a run, eval, or export completes, update the relevant section here in the
+same session that produced the knowledge — do not leave it only in a findings
+doc. If a rule here is superseded, correct it in place with the new nuance
+rather than deleting it.
 
 **The mdBook under `docs/` is now the canonical prose documentation** — it is a
-strict superset of the deleted `.claude/references/` copies. The old
+strict superset of the deleted `.claude/references/` copies. <!-- verify-doc-paths: ignore --> The old
 `regenerate-docs` skill was removed: its input contract pointed at
 `.claude/references/*.md` frontmatter that no longer exists, its
 `.regenerate-state.json` was never created, and its dataflow diagram published an

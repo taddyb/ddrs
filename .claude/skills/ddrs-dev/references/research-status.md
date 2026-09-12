@@ -171,8 +171,8 @@ numbers and were conflated) · global fabric 2,939,408 reaches, 6,051 gauges ·
 BURN 0.21 · rskan tag `v0.1.3` · V1 gate < 1e-3 m³/s.
 
 The sparse backward lives in **`src/sparse/`** (`mod.rs`, `dispatch.rs`,
-`cusparse.rs`) — four retired skills and CLAUDE.md cite a non-existent
-`src/sparse.rs`. `TimestepLeakanceOp: Backward<I,8>` is defined in
+`cusparse.rs`): four retired skills (and, until fixed, CLAUDE.md) cited it as
+a file, src/sparse.rs, which does not exist. `TimestepLeakanceOp: Backward<I,8>` is defined in
 `src/routing/mmc_op.rs`, not in `src/routing/leakance.rs` (which exports
 `zeta_forward` / `zeta_backward` / `ZetaGrads`).
 

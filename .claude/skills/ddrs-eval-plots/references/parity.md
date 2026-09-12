@@ -112,7 +112,7 @@ distributions on the exact same CONUS reaches.
 ### When to use
 
 After running DDRS's `train-and-test` workflow at `seed=42` AND DDR's
-`scripts/train_and_test.py` at the same `seed=42`. Both runs must use identical
+`scripts/train_and_test.py` at the same `seed=42`. <!-- verify-doc-paths: ignore --> Both runs must use identical
 hyperparameters (`grid=50, k=2`, the same 10 attribute names in the same order,
 the same 3 learnable params, 5 epochs).
 

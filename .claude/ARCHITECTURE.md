@@ -96,8 +96,8 @@ Sparse + custom backward is a perf pass for later; the public API
 | `src/routing/utils.rs` | `routing/utils.py` | `denormalize`, `triangular_solve_lower`, `compute_hotstart_discharge` |
 | `src/routing/mmc.rs` | `routing/mmc.py` | `MuskingumCunge` engine |
 | `tests/geometry.rs` | — (Python tests via mmc only) | Geometry sanity + gradients |
-| `tests/routing_utils.rs` | `tests/routing/test_routing_utils.py` | Denormalize + triangular solve |
-| `tests/mmc.rs` | `tests/routing/test_mmc.py` | Hotstart, coefficients, forward, autodiff |
+| `tests/routing_utils.rs` | `tests/routing/test_routing_utils.py` | Denormalize + triangular solve | <!-- verify-doc-paths: ignore -->
+| `tests/mmc.rs` | `tests/routing/test_mmc.py` | Hotstart, coefficients, forward, autodiff | <!-- verify-doc-paths: ignore -->
 
 ## SP-8 fused MC timestep (2026-05-22, partial)
 

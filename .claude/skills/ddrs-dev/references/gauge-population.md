@@ -49,8 +49,8 @@ incident, traps.md T4).
    years. Bar used: ≥ 80% non-NaN days in each window. Sensitivity on the
    5,528 pool: any-data 3,636 · ≥50% 2,948 · ≥80% 2,512 · ≥90% 2,392 ·
    100% 2,168.
-3. **Non-headwater subgraph exists.** Mirror `GageSubgraph::is_headwater`
-   (`src/data/store/zarr.rs:128`): zarr group present AND `order` length > 1.
+3. **Non-headwater subgraph exists.** Mirror `src/data/store/zarr.rs::is_headwater`:
+   `self.indices_0.is_empty()`, which tests edge count, not `order` length.
    Single-divide gauges have empty upstream sets → all-zero summed-Q'
    predictions. Dropped 97 of 2,512 → eligible pool 2,415.
 4. **Area-balanced subsample.** Keep ALL basins ≥ 5,000 km² (they carry the

@@ -5,7 +5,7 @@ description: Use when a ddrs run or experiment has finished, when a journal entr
 
 # ddrs research journal
 
-`docs/journal/YYYY-MM.md` is the running record of what we tried and what came of
+`docs/journal/YYYY-MM.md` is the running record of what we tried and what came of <!-- verify-doc-paths: ignore -->
 it. Facts are written for you by `scripts/journal.py` (hooked on `ddrs run` and
 `ddrs experiment`). Judgement is yours.
 

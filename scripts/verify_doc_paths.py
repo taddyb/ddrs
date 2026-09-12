@@ -32,7 +32,9 @@ STRICT_GLOBS = (
     ".claude/REACH-SUBDIVISION.md",
 )
 # A line carrying this marker is exempt: it cites a DDR-side path, a template,
-# or a path that deliberately does not exist (a trap describing a wrong path).
+# a path that deliberately does not exist (a trap describing a wrong path), or
+# a citation whose form is deliberately wrong because it is shown as an
+# example of what not to write.
 IGNORE_MARKER = "verify-doc-paths: ignore"
 # Prose documentation: reported, never fatal.
 WARN_GLOBS = ("docs/**/*.md", "README.md")

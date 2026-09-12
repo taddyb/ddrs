@@ -70,11 +70,6 @@ is rejected alongside `gridded_network` (the store is already split by DDR).
 | `use_grad_accum` | false | Master switch for optimizer micro-batching |
 | `grad_accum_steps` | none | Micro-batches accumulated into one optimizer step, with exact valid-count weighting |
 
-> `optimizer` / `use_grad_accum` / `grad_accum_steps` / `loss.kind: nse-batch` land
-> with the gradient-accumulation work (PR #31, branch `exp_train`). If you are on a
-> commit without them, `nse-batch` fails config load with
-> `unknown variant 'nse-batch'`.
-
 Under `use_grad_accum: true`, `--max-mini-batches` counts optimizer **STEPS**, not
 mini-batches.
 
@@ -135,8 +130,7 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 
 > **There is no `use_precip`, `use_attributes`, or `use_temp` key.** They were
 > removed in `334f0fe` ("rework disaggregation head to KAN + basin-normalized
-> precip"). CLAUDE.md, `src/config.rs:113`'s comment, and
-> `config/sources/conus-hourly.yaml:5` all still reference the phantom key.
+> precip").
 > **Current contract:** presence of the `disaggregation:` block ⇒ the head always
 > consumes precip ⇒ `data_sources.aorc_precip` is mandatory, else
 > `MeritGagesDataset::open` errors. It cannot silently degrade to flat repeat-24.
@@ -190,7 +184,9 @@ consumed when listed in `learnable_parameters`; otherwise routing uses a constan
 
 ## Load-time guards
 
-Four validators run at `Config::from_yaml_file`, plus one at dataset open.
+Ten validators run directly at `Config::from_yaml_file`, plus a nested
+`validate_subdivision_reaches_the_builder` (called from `validate_subdivision`
+when subdivision is enabled), plus one at dataset open.
 
 | Guard | Rejects | Error substring |
 |---|---|---|
@@ -201,12 +197,15 @@ Four validators run at `Config::from_yaml_file`, plus one at dataset open.
 | | `gridded_network` + `geospatial_fabric` | `"gridded_network"` + `"geospatial_fabric"` |
 | | `gridded_network` + explicit adjacency pair | `"gridded_network"` + `"conus_adjacency"` |
 | `validate_subdivision` | `subdivision.enabled: true` + `gridded_network` | `"params.subdivision"` + `"gridded_network"` |
+| | nested `validate_subdivision_reaches_the_builder`: `enabled: true` + explicit `conus_adjacency`/`gages_adjacency` pointing at a non-subdivided store | `"params.subdivision"` + `"conflicts with the explicit"` |
 | `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
 | `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
+| `validate_enforce_positivity` | `enforce_positivity: true` + `ddr_match: true` | `"requires \`ddr_match: false\`"` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |
 | `validate_grad_accum` | `grad_accum_steps: 0` | `"grad_accum_steps: 0"` |
 | | `use_grad_accum: true` with steps < 2 | `"requires grad_accum_steps: N with N >= 2"` |
+| `validate_loss` | `loss.deriv-weight` non-finite or negative | `"deriv-weight"` |
 | `validate_disagg_vs_resolution` (runtime, `src/data/dataset.rs`) | `disaggregation:` + hourly-native streamflow store | hard error |
 
 ## Adding a new routing parameter
