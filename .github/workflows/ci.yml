@@ -37,13 +37,29 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # Debuginfo off for the CI debug build (debug_assertions and overflow
+    # checks stay on, so every debug-gated test still runs). Full debuginfo
+    # for ~110 test crates that each statically link burn/cubecl/netcdf/hdf5
+    # is most of the target size; run 34728425177 (2026-09-13) died in the
+    # linker with "ld terminated with signal 7 [Bus error]", which is what
+    # a full disk looks like mid-link, after the branch added a handful of
+    # test crates. Env-only, so local builds keep their debuginfo.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       # ubuntu-latest's default free space (~14 GB usable) is exhausted by
       # the burn/cubecl/netcdf-static debug build plus every example binary
       # (cargo test compiles examples too) — observed "No space left on
-      # device" mid-build. Preinstalled SDKs this repo never uses.
+      # device" mid-build. Preinstalled SDKs this repo never uses; the
+      # second line adds the other large preinstalled bundles (haskell
+      # toolchain, swift, boost, CodeQL, JDKs, docker images), ~20 GB more.
       - name: Free disk space
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo rm -rf /usr/local/.ghcup /usr/share/swift /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/lib/jvm
+          sudo docker system prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       # plotters (examples) needs fontconfig headers on Linux; cargo test
@@ -86,8 +102,11 @@ jobs:
         run: sudo apt-get install -y libnvidia-compute-560
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-debug
+          shared-key: ci-debug-nodebuginfo
       - run: cargo test --features fixtures --no-fail-fast
+      - name: Disk after build (evidence for the next time this job goes red)
+        if: always()
+        run: df -h / | tail -1 && du -sh target 2>/dev/null || true
 
   # Release routing-acceptance gates: DDR sandbox parity (example exits 1
   # unless ABSOLUTE MATCH) + Juniata end-to-end metric floors.
