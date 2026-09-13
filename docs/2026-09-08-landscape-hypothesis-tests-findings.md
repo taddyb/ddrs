@@ -2505,3 +2505,73 @@ Caveats: 14 gauges, one seed, one window; the trained point is not at the optimu
 500-update convergence issue of §21, visible as the black dot sitting off the stripe's centre), and gamma's
 multiplicative perturbation of a field whose median is 0.067 spans 0.02–0.2, inside the box but on the low
 side. A stratified-400 census with the same axes is the natural next run (about 6 h sharded).
+
+## 38. The inflow arms: roughness as a fingerprint of the runoff product (in progress, 2026-09-13)
+
+The Beven-challenges study (`experiments/beven-inflow-arms`): the n_0 + gamma head with the channel fixed
+(p = 21, q = 0.65), the same 2,365 gauges, observations, network and 500-update recipe, trained on five
+AORC-forced unit-catchment products. The retrospective arm `23-39-03Z` (§37) is the reference. Three of five
+arms are in as this is written; the distributed dHBV2 and hydroDL LSTM arms are in eval, the hourly MTS-LSTM
+arm trains overnight (its hourly-native store costs ~2 min per mini-batch against 13 s for the daily ones).
+
+Two stores had to be rechunked first: the dHBV2 and hydroDL AORC products were stored as 100–200 divides by the
+full 41-year time axis, so every 90-day batch decompressed whole rows and training ran 6x slow;
+`scripts/rechunk_qprime_store.py` rewrites them to the retrospective's (3080, 468) layout (30 s per store,
+verified bit-identical). Trap T15 in the ddrs-dev skill.
+
+### 38.1 Skill, and what routing added to each product
+
+| arm | run | summed-Q' baseline NSE / KGE | routed NSE / KGE | routing adds |
+|---|---|---|---|---|
+| retrospective (reference) | `2026-09-12T23-39-03Z` | 0.678 / 0.717 | 0.7391 / 0.7592 | +0.061 |
+| NH daily LSTM | `2026-09-13T13-55-03Z` | 0.531 / 0.616 | 0.6359 / 0.6580 | +0.105 |
+| dHBV2 lumped, AORC | `2026-09-13T13-56-50Z` | **0.007** / 0.432 | 0.5826 / 0.5951 | **+0.576** |
+| dHBV2 distributed, AORC | `2026-09-13T17-22-30Z` | pending | pending | |
+| hydroDL LSTM, AORC | `2026-09-13T17-21-58Z` | pending | pending | |
+| NH hourly MTS-LSTM | `2026-09-13T14-14-46Z` | pending | pending | |
+
+The lumped dHBV2 product has essentially no daily skill unrouted and is routed to 0.58 by a two-parameter
+roughness law: the routing is doing most of the work, and the next subsection says with what.
+
+### 38.2 The learned fields are product-specific
+
+`experiments/stage_roughness/cross_arm_fields.py` (figure `beven-inflow-arms/cross_arm_fields.png`):
+
+| product | n_0 median | reaches at the n_0 ceiling | gamma median | reaches with gamma = 0 | rho(n_0, gamma) | n_0 by size, 10–100 km² → >10,000 km² |
+|---|---|---|---|---|---|---|
+| retrospective | 0.058 | 0 % | 0.067 | 0 % | +0.90 | 0.066 → 0.063 |
+| NH daily LSTM | 0.096 | 0 % | 0.247 | 0 % | −0.50 | 0.076 → 0.193 |
+| dHBV2 lumped | 0.246 | **27 %** | 0.003 | **38 %** | −1.00 | 0.249 → 0.226 |
+
+Per-reach rank agreement of n_0 between products is 0.15 to 0.44; the range-normalised cross-arm spread of
+n_0 per reach is 0.79 of the box (gamma 0.49) over all 346,321 reaches. Three products, three different laws
+of roughness against river size from the same gauges: flat and low on the retrospective, rising with size on
+the LSTM (large rivers rough, headwaters smooth), pinned at the ceiling everywhere on the lumped dHBV2 with
+the stage law switched off. The learned field is a fingerprint of the inflow product, not a property of the
+channel; the paper's H1 (geometry converges across arms) is refuted for roughness by construction, and this
+is the sharpest form of the "bias absorber" claim (H2).
+
+**The absorption is product-wide, not gauge-wise.** Within any one product, the basin-median n_0 barely
+tracks that product's own per-gauge inflow error (Spearman |rho| ≤ 0.15 against volume ratio, peak bias or
+summed-Q' NSE, n = 2,361). Across products, the whole field shifts with the product's median peak bias
+(summed Q' FHV −10 %, −18 %, −27 % against n_0 0.065, 0.085, 0.248). The routing learns a global correction
+for what the product does to all basins at once, and spatial detail second.
+
+### 38.3 The (n_0, gamma) landscapes per product
+
+Same 14-gauge population as §37.4, same protocol, three shards per arm (~3 h each).
+
+| arm | gauges in | median \|H_gg\|/\|H_nn\| trained (optimum) | H_gg > 0 trained | gamma at bound | median NSE gain |
+|---|---|---|---|---|---|
+| retrospective (§37.4) | 14 | 0.024 (0.028) | 8/14 | 6/14 | 0.010 |
+| NH daily LSTM | 12 | **0.125** (0.031) | 5/12 | 6/12 | 0.014 |
+| dHBV2 lumped | 13 | 0.008 (0.009) | 7/13 | 3/13 | 0.005 |
+
+Even the curvature along gamma is a property of the product: an order of magnitude larger on the LSTM
+inflow than on the lumped dHBV2 at the trained point, and no arm passes either pre-registered bar. The
+per-gauge optima and their cross-arm angles (the "detached routing" test) will be tabulated when all five
+arms are in; the pairwise comparison uses `experiments/landscape/census.py` on two arms at a time.
+
+Figures per arm: `landscape-inflow-<arm>/n_gamma_planes.png` and `n_gamma_surfaces_3d.png`; per-arm plot
+sets under each run's `plots/` (gamma field, low/high-flow maps, area GIF, 3D surface, basin GIF, routing
+lag, dams).

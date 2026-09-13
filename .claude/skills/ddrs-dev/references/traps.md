@@ -22,6 +22,7 @@ is what a future session needs, not the narrative.
 | Fresh checkout/worktree fails in `cudarc`'s build script: `Unsupported cuda toolkit version` | T12 |
 | Training crawls; GPU is resident but idle at single-digit utilisation | T13 |
 | Eval metrics belong to a different model than the one trained (a new head output changes training loss but not eval) | T14 |
+| Training runs 6x slower than the 3.5 s/micro-batch pace on a new Q′ store, CPU pegged in decompression | T15 |
 
 ---
 
@@ -319,3 +320,17 @@ same commit, and to the table in `tests/gamma_eval_parity.rs`, which routes one
 head through `forward` and `forward_eval` and asserts the hydrographs agree.
 That test is the discriminator: it fails at ~2e-2 relative when a reader is
 missing the key and passes at f32 round-off when it is not.
+
+## T15 — A Q′ store chunked along the full time axis (2026-09-13)
+
+The trainer reads a 90-day window for a few hundred divides per batch. A store chunked `(divides, full
+time)` — the dHBV2 and hydroDL AORC2f products were `(200, 14976)` and `(100, 14976)` — forces every batch
+to decompress whole 41-year rows: 72–96 s per accumulated mini-batch against 13 s on the retrospective's
+`(3080, 468)` layout, with the load average at 50–60 from zstd threads and three parallel arms pegged.
+Symptom looks like CPU oversubscription; it is I/O amplification.
+
+**Fix.** `scripts/rechunk_qprime_store.py <src.ic> <dst.ic>` copies Qr, divide_id and time into a new
+icechunk repo with `(3080, 468)` chunks (30 s per store, verified bit-identical), and the configs point at
+the `_rechunked.ic` copy. Check `chunks` on any new product before training on it:
+`zarr.open_group(repo.readonly_session("main").store)["Qr"].chunks`. The hourly-native store is chunked
+`(3080, 11232)` and is inherently ~10x slower per batch (2.2 min per mini-batch); budget for it.
