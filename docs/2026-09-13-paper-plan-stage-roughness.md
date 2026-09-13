@@ -35,9 +35,9 @@ Manning's 2f/3, and it has textbook support (Limerinos, Jarrett, Ferguson). Lear
 looked identifiable: median 0.22, ordered by river size, rho(n, gamma) 0.30. Learned with the channel fixed
 (the design adopted 2026-09-13) it collapses: median 0.07 and rho(n_0, gamma) 0.90, a single monotone curve.
 The earlier ordering was gamma riding p and q. Skill is unchanged in every arm. The (n_0, gamma) landscape on
-13 gauges confirms the geometry of the valley (§37.4): NSE contours on the n-gamma plane are vertical
+14 gauges confirms the geometry of the valley (§37.4): NSE contours on the n-gamma plane are vertical
 stripes at every basin larger than a few reaches, median |H_gg|/|H_nn| 0.024 against the 0.25 bar, gamma
-driven to its bound at five optima at no cost. This is the
+driven to its bound at six optima at no cost. This is the
 sharpest form of the thesis: the daily hydrograph identifies Manning's n at the depth the reach usually runs,
 and nothing about how n changes with depth.
 

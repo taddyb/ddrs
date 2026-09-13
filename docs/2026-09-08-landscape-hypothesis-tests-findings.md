@@ -2460,8 +2460,8 @@ residual box plots, a map of dam reaches coloured by residual with the Midwest b
 `landscape.axes: [n, gamma, q_spatial]` (q fixed, so slot 2 is inert). 15 gauges spanning 5 to 213 reaches,
 one 5-year testing window (1995-10-01 to 2000-09-29), central-difference Hessian at h = 0.05, damped Newton
 (8 iterations, alpha capped at ±1.1 = a factor 3), 11×11 grids on the n-gamma and stiff-sloppy planes. Five
-shards, about 20 min per gauge. One listed staid is not in the eval population; 13 of the remaining 14 are in
-as this is written, the 14th (13317000, the largest) still running. Pre-registered bars, as for q in §29: median
+shards, about 20 min per gauge (64 min for the 802-reach basin). One listed staid is not in the eval population,
+so 14 gauges. Pre-registered bars, as for q in §29: median
 |H_gg| / |H_nn| ≥ 0.25 and H_gg > 0 at ≥ 70 % of well-fit gauges.
 
 | gauge | reaches | NSE trained → optimum | alpha* (n_0, gamma) | H_nn at trained | H_gg at trained | ratio |
@@ -2479,16 +2479,17 @@ as this is written, the 14th (13317000, the largest) still running. Pre-register
 | 01567000 | 213 | 0.867 → 0.867 | +0.00, +0.01 | 4.0e-1 | 2.3e-3 | 0.006 |
 | 07068000 | 113 | 0.772 → 0.772 | −0.00, −0.00 | 1.1e-1 | 2.6e-3 | 0.023 |
 | 14166000 | 181 | 0.864 → 0.866 | +0.10, −0.04 | 4.5e-2 | 6.0e-3 | 0.134 |
+| 13317000 | 802 | 0.953 → 0.955 | −0.62, **−1.10** | 3.3e-2 | −8.0e-4 | 0.024 |
 
-Summary over the 13: median |H_gg| / |H_nn| **0.024** at the trained point (0.034 at the optimum); H_gg > 0
-at 8 of 13 trained points and 12 of 13 optima; gamma driven to the alpha bound (a factor 3 smaller) at 5 of 13
-optima with essentially no change in loss at three of them; median NSE gain to the per-gauge optimum 0.011.
+Summary over the 14: median |H_gg| / |H_nn| **0.024** at the trained point (0.028 at the optimum); H_gg > 0
+at 8 of 14 trained points and 13 of 14 optima; gamma driven to the alpha bound (a factor 3 smaller) at 6 of 14
+optima with essentially no change in loss at four of them; median NSE gain to the per-gauge optimum 0.010.
 Figure `n_gamma_planes.png` in the study directory: at every gauge but the two smallest basins the NSE contours
 on the n-gamma plane are vertical stripes, i.e. the loss is a function of n_0 alone across a factor of three in
 gamma either way.
 
 **Both bars fail.** The magnitude bar by a factor of ten (0.024 against 0.25; q managed 0.062), the sign bar at
-the trained point (62 %, against 70 %). The two exceptions to the stripe pattern, 11274500 (ratio 0.88) and
+the trained point (57 %, against 70 %). The two exceptions to the stripe pattern, 11274500 (ratio 0.88) and
 12451000 (0.34), are the two basins where n_0's own curvature is smallest (5e-2 and −2.5e-3), so the ratio is
 large because the denominator is tiny, not because gamma is constrained; 12451000's whole plane spans 0.006 NSE.
 
@@ -2500,7 +2501,7 @@ is the cleanest statement of the paper's thesis produced so far: the daily hydro
 roughness at one effective depth per gauge and nothing about its dependence on stage, even when that
 dependence is the only physical degree of freedom left in the channel.
 
-Caveats: 13 gauges, one seed, one window; the trained point is not at the optimum in n_0 at most gauges (the
+Caveats: 14 gauges, one seed, one window; the trained point is not at the optimum in n_0 at most gauges (the
 500-update convergence issue of §21, visible as the black dot sitting off the stripe's centre), and gamma's
 multiplicative perturbation of a field whose median is 0.067 spans 0.02–0.2, inside the box but on the low
 side. A stratified-400 census with the same axes is the natural next run (about 6 h sharded).
