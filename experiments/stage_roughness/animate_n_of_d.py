@@ -43,6 +43,10 @@ Views (`--view`):
     scatter  the older (log10 median discharge, n_0) layout coloured by n(d).
     3d       a static surface: x = log10 drainage area (binned), y = day of
              water year, z = median n(d) in the bin. PNG, not a GIF.
+    maps     CONUS maps on the MERIT river lines: n(d) on each reach's LOW-flow
+             day (10th-percentile discharge of the year) and HIGH-flow day
+             (90th), the ratio n_low / n_high, and the depth ratio d_high /
+             d_low that drives it. PNG.
 
 `--traces` skips the map and plots n(d) through time for a handful of reaches,
 which is the cheaper and often more legible view of the same thing.
@@ -191,7 +195,9 @@ def main() -> int:
     ap.add_argument("--water-year", type=int, default=1996)
     ap.add_argument("--discharge", choices=["accumulated", "local"], default="accumulated")
     ap.add_argument("--traces", action="store_true", help="line plot instead of a map")
-    ap.add_argument("--view", choices=["area", "scatter", "3d"], default="area")
+    ap.add_argument("--view", choices=["area", "scatter", "3d", "maps"], default="area")
+    ap.add_argument("--fabric", default="/home/tbindas/projects/ddr/data/merit/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp")
+    ap.add_argument("--flow-pcts", type=float, nargs=2, default=[10.0, 90.0], help="per-reach low/high flow percentiles")
     ap.add_argument("--n-traces", type=int, default=6)
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--max-frames", type=int, default=366, help="subsample days beyond this")
@@ -308,6 +314,62 @@ def main() -> int:
     live_idx = np.flatnonzero(live)
     step = max(1, int(np.ceil(q.shape[0] / a.max_frames)))
     frame_days = range(0, q.shape[0], step)
+
+    if a.view == "maps":
+        # Per-reach low-flow and high-flow days by that reach's own discharge
+        # percentiles, so every reach is compared at its own regime.
+        lo_p, hi_p = a.flow_pcts
+        q_live = q[:, live_idx]
+        q_lo = np.percentile(q_live, lo_p, axis=0)
+        q_hi = np.percentile(q_live, hi_p, axis=0)
+        i_lo = np.argmin(np.abs(q_live - q_lo), axis=0)
+        i_hi = np.argmin(np.abs(q_live - q_hi), axis=0)
+        cols = np.arange(live_idx.size)
+        n_lo, n_hi = n_t[i_lo, live_idx], n_t[i_hi, live_idx]
+        d_lo, d_hi = depth[i_lo, live_idx], depth[i_hi, live_idx]
+        ratio_n = n_lo / n_hi
+        ratio_d = d_hi / d_lo
+        print(f"n at low flow: median {np.median(n_lo):.4f}; at high flow: median {np.median(n_hi):.4f}")
+        print(f"n_low/n_high: median {np.median(ratio_n):.3f} (p10 {np.percentile(ratio_n, 10):.3f}, p90 {np.percentile(ratio_n, 90):.3f}); "
+              f"d_high/d_low: median {np.median(ratio_d):.2f}")
+        import geopandas as gpd
+        import pandas as pd
+        import pyogrio
+        gdf = pyogrio.read_dataframe(a.fabric, columns=["COMID", "uparea"]).set_index("COMID")
+        gdf = gdf.loc[gdf.index.intersection(comids[live_idx])]
+        idx = pd.Index(comids[live_idx])
+        pos = idx.get_indexer(gdf.index.values)
+        for name, arr in [("n_lo", n_lo), ("n_hi", n_hi), ("ratio_n", ratio_n), ("ratio_d", ratio_d)]:
+            gdf[name] = arr[pos]
+        print(f"{len(gdf):,} live reaches joined to the fabric")
+        lw = np.clip(0.15 + 0.35 * np.log10(np.maximum(gdf["uparea"].values, 1.0)) / 5.0, 0.15, 1.2)
+        gdf["lw"] = lw
+        # draw biggest rivers last so they stay visible
+        gdf = gdf.sort_values("uparea")
+        vmin, vmax = np.percentile(np.concatenate([n_lo, n_hi]), [2, 98])
+        fig, axes = plt.subplots(2, 2, figsize=(18, 11))
+        panels = [
+            ("n_lo", f"Manning's n(d) on each reach's LOW-flow day (P{lo_p:.0f} discharge)", "plasma_r", vmin, vmax, False),
+            ("n_hi", f"Manning's n(d) on each reach's HIGH-flow day (P{hi_p:.0f} discharge)", "plasma_r", vmin, vmax, False),
+            ("ratio_n", "roughness swing: n_low / n_high  (1 = no stage dependence)", "cividis", 1.0, np.percentile(ratio_n, 98), False),
+            ("ratio_d", "depth swing driving it: d_high / d_low", "viridis", 1.0, np.percentile(ratio_d, 98), True),
+        ]
+        for ax, (col, title, cmap, lo, hi, logc) in zip(axes.ravel(), panels):
+            import matplotlib.colors as mcolors
+            norm = mcolors.LogNorm(vmin=max(lo, 1e-3), vmax=hi) if logc else mcolors.Normalize(vmin=lo, vmax=hi)
+            gdf.plot(ax=ax, column=col, cmap=cmap, norm=norm, linewidth=gdf["lw"].values, rasterized=True)
+            ax.set_title(title, fontsize=11)
+            ax.set_axis_off()
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm); sm.set_array([])
+            fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.01)
+        fig.suptitle(f"water year {a.water_year}, {gamma_label}, discharge = {a.discharge}; "
+                     f"{len(gdf):,} live reaches (dead reaches excluded)", fontsize=12)
+        fig.tight_layout()
+        out = a.out or run / "plots" / f"n_of_d_wy{a.water_year}_maps.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=160, facecolor="white")
+        print(f"wrote {out}")
+        return 0
 
     if a.view in ("area", "3d"):
         log_area = load_log10_uparea(cfg_text, comids)

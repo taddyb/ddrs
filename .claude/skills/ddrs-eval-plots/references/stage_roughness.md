@@ -27,7 +27,21 @@ experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --view
 
 # static 3D surface + heatmap: median n(d) per drainage-area bin per day
 experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --view 3d
+
+# CONUS maps on the MERIT river lines: n(d) on each reach's low-flow (P10) and
+# high-flow (P90) day, the swing n_low/n_high, and the depth swing d_high/d_low
+experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --view maps
 ```
+
+**Maps view.** Per-reach low and high flow are that reach's own 10th and 90th
+percentile discharge days of the water year (`--flow-pcts`), so every reach is
+compared at its own regime; the fabric is
+`~/projects/ddr/data/merit/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp`
+(`--fabric`), lines widened with drainage area, dead reaches excluded. Read the
+bottom row together: the roughness swing is `(d_high/d_low)^gamma`, so a large
+swing needs both a sizeable gamma and a flashy reach. Learned-gamma run
+`2026-09-12T16-30-14Z`, water year 2000: median n 0.129 at low flow, 0.100 at
+high flow; swing median 1.23x (p90 1.58x) against a depth swing median 2.65x.
 
 All write into `<run-dir>/plots/`, named `n_of_d_wy<year>_<view>.gif` (or
 `_3d.png` / `_3d_heatmap.png` / `_traces.png`). `--max-frames` (default 366)
