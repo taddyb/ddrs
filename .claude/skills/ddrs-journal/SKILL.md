@@ -1,11 +1,11 @@
 ---
 name: ddrs-journal
-description: Use when a ddrs run or experiment has finished, when a journal entry in docs/journal/ has unfilled TODO fields, or when recording what a training run or experiment concluded.
+description: Use when a ddrs run or experiment has finished, when a journal entry in research/journal/ has unfilled TODO fields, or when recording what a training run or experiment concluded.
 ---
 
 # ddrs research journal
 
-`docs/journal/YYYY-MM.md` is the running record of what we tried and what came of
+`research/journal/YYYY-MM.md` is the running record of what we tried and what came of <!-- verify-doc-paths: ignore -->
 it. Facts are written for you by `scripts/journal.py` (hooked on `ddrs run` and
 `ddrs experiment`). Judgement is yours.
 
@@ -28,7 +28,8 @@ Manual: `python3 scripts/journal.py --mode status` (what is pending),
 ## Filling an entry
 
 Four fields. Keep the whole entry under ~15 lines; if the conclusion needs more,
-it has earned a `docs/YYYY-MM-DD-<topic>-findings.md` and the entry links to it.
+it has earned a `research/findings/YYYY-MM-DD-<topic>-findings.md` and the entry
+links to it.
 
 **Question** — what we wanted to find out, phrased so "no" is a possible answer.
 

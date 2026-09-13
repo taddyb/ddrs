@@ -1,6 +1,6 @@
 # recoverability_teacher.yaml — synthetic losing-reach recoverability (positive control).
 # GENERATED from leakance_hourly_on.yaml — teacher world: testing window = training axis ±1 day, real USGS obs
-# Spec: docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md
+# Spec: research/specs/2026-07-03-synthetic-recoverability-design.md
 
 mode: training
 workflow: train-and-test

@@ -3,7 +3,7 @@
 //! routing backward. This test proves the leaf is on the tape and the
 //! gradient matches a central finite difference on a 4-reach chain.
 //!
-//! Spec: docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md §4.
+//! Spec: research/specs/2026-09-03-ddrs-experiment-adjoint-design.md §4.
 
 mod common;
 

@@ -7,7 +7,7 @@
 //!   cargo test --release --test sp8_diagnosis -- --ignored --nocapture
 //!
 //! This test does NOT assert anything. It collects evidence the human reviews
-//! and commits to `.claude/specs/2026-05-22-sp8-diagnosis-findings.md`.
+//! and commits to `research/findings/2026-05-22-sp8-diagnosis-findings.md`.
 
 use std::path::Path;
 use std::process::Command;

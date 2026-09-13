@@ -1,5 +1,5 @@
 //! Stage-1 adjoint reachability probe (spec:
-//! docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md).
+//! research/specs/2026-07-02-zeta-gradient-probe-design.md).
 //!
 //! Gradients of the training objective w.r.t. the per-reach NORMALIZED
 //! KAN-head outputs, read at a FIXED head (no optimizer step ever).

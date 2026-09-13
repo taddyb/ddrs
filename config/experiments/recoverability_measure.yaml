@@ -1,6 +1,6 @@
 # recoverability_measure.yaml — synthetic losing-reach recoverability (positive control).
 # GENERATED from leakance_hourly_on.yaml — measurement pass: eval-with-zeta over the training axis
-# Spec: docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md
+# Spec: research/specs/2026-07-03-synthetic-recoverability-design.md
 
 mode: training
 workflow: train-and-test

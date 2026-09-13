@@ -45,6 +45,13 @@ jobs:
       - name: Free disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - uses: actions/checkout@v4
+      # Doc citation gate: stdlib-only Python, no Rust toolchain needed, so
+      # it runs before the CUDA toolkit install and fails fast (under a
+      # second) instead of waiting behind a debug build for a dead citation.
+      - name: Doc citation gate
+        run: |
+          python3 scripts/test_verify_doc_paths.py
+          python3 scripts/verify_doc_paths.py
       - uses: dtolnay/rust-toolchain@stable
       # plotters (examples) needs fontconfig headers on Linux; cargo test
       # compiles examples even though it does not run them.

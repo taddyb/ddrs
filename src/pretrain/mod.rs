@@ -3,7 +3,7 @@
 //! hourly streamflow (`src/data/store/camels_hourly.rs`) + real NLDAS hourly
 //! precip (bundled in the same file), with zero second-model bias, before
 //! any weights are brought into the production routing pipeline. See
-//! `docs/2026-07-1x-disagg-real-pretrain-*.md` for the campaign writeup.
+//! `research/findings/2026-07-1x-disagg-real-pretrain-*.md` for the campaign writeup.
 //!
 //! Not part of the production training/eval data path — `ddrs run` never
 //! touches this module. Entry point is `src/bin/pretrain_disagg.rs`.
@@ -223,7 +223,7 @@ pub struct ReconciliationResult {
 /// silently paper over.
 ///
 /// Gate thresholds calibrated empirically against the real 505-gauge
-/// overlap (`examples/pretrain_reconciliation_check.rs`, 1998-2013): an
+/// overlap (`research/archive/examples/pretrain_reconciliation_check.rs`, 1998-2013): an
 /// initial `correlation >= 0.98` bar excluded 280/505 gauges, but 263 of
 /// those had a perfectly healthy ratio (median 1.015) and failed purely on
 /// correlation in the 0.92-0.98 range -- normal day-to-day noise between

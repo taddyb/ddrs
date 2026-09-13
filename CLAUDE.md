@@ -26,7 +26,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
    flipped to `false`; see `.claude/PHYSICS-CORRECTIONS.md`). The old
    2026-06-06 "desktop-only reference" caveat is obsolete: any DDR checkout at
    or past #192 is a valid reference. See
-   `docs/reference/ddr-comparison.md` §Regenerating fixtures.
+   `docs/book/reference/ddr-comparison.md` §Regenerating fixtures.
 2. **f32 throughout the routing core.** No mixed precision. The DDR comparison
    sits at the f32 precision floor (~1e-7 rel diff per reach); any cast to
    f64/bf16 breaks reproducibility against the reference.
@@ -35,7 +35,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 4. **Don't replace the hand-written sparse backward** in `src/sparse/`
    (`CsrSolveOp impl Backward`) with autograd-tape unrolling. The whole point
    is O(nnz) tape entries per timestep, not O(n²). See
-   `docs/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `docs/book/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
 5. **The routing head is `rskan::KanLayer` via `src/nn/kan_head.rs`.** Do NOT
    reintroduce the prior MLP placeholder. The KAN head matches DDR-Python's
    `kan.py` exactly: `Linear(F, H) → KanLayer(H, H) × num_hidden_layers →
@@ -45,7 +45,7 @@ overview is in `~/projects/ddr/CLAUDE.md`.
 6. **rskan is a git dependency pinned to a tag.** When updating `rskan`, bump
    the tag in `Cargo.toml`'s `rskan = { git = ..., tag = ... }`, then re-run
    `tests/kan_head.rs` and the full parity sweep before merging.
-   `docs/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
+   `docs/book/reference/burn-autograd.md` for the BURN-0.21 recipe it uses.
 7. **KAN head parity vs DDR must pass on every PR that touches `src/nn/`,
    `Cargo.toml`'s rskan pin, or DDR's `nn/kan.py`.** Run:
    `cargo test --features fixtures --test kan_head_init_repro --test kan_head_init_parity --test kan_head_fixture_forward --test kan_head_fixture_backward`
@@ -117,7 +117,7 @@ cargo install --path .   # puts `ddrs` in ~/.cargo/bin/
 > This bit the 2026-07-01 leakance×hourly 2×2: the installed `ddrs` was from
 > **before** the disaggregation feature, so the hourly cell silently ran flat
 > repeat-24 (both cells byte-identical — a false "disagg no-op"; see
-> `docs/2026-07-01-leakance-hourly-experiment-handoff.md`).
+> `research/findings/2026-07-01-leakance-hourly-experiment-handoff.md`).
 >
 > After touching `src/`, do ONE of:
 > ```bash
@@ -148,21 +148,26 @@ ddrs gc --keep 5 --keep-successful             # prune .ddrs/runs/
 
 > **`ddrs run --workflow eval` does not work.** It returns
 > `"standalone --workflow eval needs a --from-run <run-id> flag"`
-> (`src/cli/run.rs:322`), and `--from-run` is unimplemented. Use
+> (`src/cli/run.rs`), and `--from-run` is unimplemented. Use
 > `--workflow train-and-test`, or the legacy `eval` binary against an existing
 > checkpoint. `ddrs init` is likewise a dead stub (exits 2,
-> `src/bin/ddrs.rs:167`) — use `ddrs plan`.
+> `src/bin/ddrs.rs`); use `ddrs plan`.
 
 **Paper studies** (`src/experiment/`, `src/cli/experiment.rs`): `ddrs --workspace
 .ddrs experiment <name>` runs a study from the checked-in bundle
 `experiments/<name>/` over already-trained runs (arms are run ids; latest
 directory checkpoint; flat `.mpk` refused) into `.ddrs/experiments/<name>/<ts>/`.
-First study: `adjoint` (inflow-gradient influence map). See the `ddrs-dev` skill
-and `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
+Two studies ship: `adjoint` (inflow-gradient influence map) and `landscape`
+(loss-landscape and watershed-perturbation probes, `src/experiment/landscape/`).
+See the `ddrs-dev` skill and
+`research/specs/2026-09-03-ddrs-experiment-adjoint-design.md`.
 
 **Data-source groups** (`src/cli/sources.rs`): named "save files" for the
 `data_sources:` block, stored as `config/sources/<name>.yaml` (tracked;
-`conus`, `conus-hourly`, `global`, `daily-lstm`, and `hourly-lstm` ship in-repo). Switching datasets never
+`conus`, `conus-hourly`, `conus-gridded`, `global`, `daily-lstm`, and
+`hourly-lstm` are the documented groups). `aorc_dhbv_distributed`,
+`conus-experimental`, and `conus-hydrodl2` also ship in-repo, so `ddrs sources
+list` output is never a surprise. Switching datasets never
 requires hand-editing `ddrs.yaml`:
 
 `conus-hourly` adds `aorc_precip:
@@ -194,7 +199,7 @@ workspace is therefore: `ddrs sources use global && ddrs plan --workflow
 train && ddrs run --workflow train`.
 
 **Importing a Q' store** (`src/cli/import.rs`): any store meeting the DDR Q'
-contract (`docs/nh-qprime-store-contract.md` — `Qr(divide_id, time)` f32
+contract (`docs/book/nh-qprime-store-contract.md` — `Qr(divide_id, time)` f32
 m³/s, CF `days since`/`hours since` axis) registers as a source group in one
 command:
 
@@ -246,11 +251,11 @@ return the recorder bases (`dir/head`, `dir/optim`; `CompactRecorder` appends
 Resume state is exact, but stored weights/moments are f16
 (`CompactRecorder` = `HalfPrecisionSettings`), so a resumed trajectory drifts
 slowly from the uninterrupted one — see
-`docs/2026-06-07-checkpoint-resume-handoff.md` follow-up #1.
+`research/findings/2026-06-07-checkpoint-resume-handoff.md` follow-up #1.
 
 Full design at
-`docs/superpowers/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
-implementation plan at `docs/superpowers/plans/2026-05-30-ddrs-cli-lifecycle.md`.
+`research/specs/2026-05-30-ddrs-cli-lifecycle-design.md` and the
+implementation plan at `research/plans/2026-05-30-ddrs-cli-lifecycle.md`.
 
 ### Workspace layout
 
@@ -289,14 +294,26 @@ Each prints a deprecation warning on entry pointing at the equivalent
 src/
 ├── routing/              Core MC solver (port of ddr/src/ddr/routing/)
 │   ├── mmc.rs            MuskingumCunge<I>: setup_inputs, forward, route_timestep
+│   ├── leakance.rs       Losing-stream zeta term (off by default, see below)
 │   ├── utils.rs          denormalize, hotstart, dense helpers
 │   └── mod.rs
-├── sparse.rs             CSR pattern + triangular solve + custom Backward
+├── sparse/               CSR pattern + triangular solve + custom Backward
 ├── geometry.rs           Trapezoidal channel geometry (Leopold & Maddock)
 ├── config.rs             Parameter ranges, attribute minimums, log-space flags
-├── nn/kan_head.rs        KAN head via rskan v0.1.3 — Linear→KanLayer×N→Linear
-│                         →Sigmoid, no inter-block ReLU (matches DDR `kan.py`).
-│                         Same I/O contract as the prior MLP placeholder.
+├── cuda_graph/           Captured-graph path for the CUDA backend
+├── nn/
+│   ├── kan_head.rs       KAN head via rskan v0.1.3: Linear→KanLayer×N→Linear
+│   │                     →Sigmoid, no inter-block ReLU (matches DDR `kan.py`)
+│   └── disagg_head.rs    Precip-conditioned daily→hourly disaggregation head
+├── adjacency/            Managed adjacency builder (fabric → zarr), incl.
+│                         gridded.rs (DDM30) and subdivide.rs (off by default)
+├── baseline/             Summed-Q' reference, cached under .ddrs/baselines/
+├── training/             Driver, loss, checkpointing, bootstrap
+├── pretrain/             Disaggregation-head pretraining
+├── experiment/           Paper studies: adjoint/ and landscape/
+├── cli/                  plan, run, show, status, gc, sources, import, experiment
+├── bin/                  ddrs (primary CLI); legacy train/eval/train_and_test;
+│                         dump_parameters; the pretrain_disagg* and probe_* families
 └── data/                 Live readers for DDR's training data (no export step)
     ├── ids.rs            Comid, Staid newtypes; IdIndex<T>
     ├── error.rs          DataError with source-path context
@@ -306,7 +323,9 @@ src/
 tests/                    Integration tests; each file is its own crate
 examples/                 compare_ddr_sandbox (regression), benchmark_hydrograph
 scripts/                  Python helpers run under DDR's uv venv
-spike_backward/           Isolated Cargo project for BURN API exploration; ignore
+vendor/                   Why [patch.crates-io] points at the taddyb/burn and
+                          taddyb/cubecl forks (see vendor/README.md)
+ddrs-py/                  maturin/PyO3 bindings, read-only CPU inference
 ```
 
 `.claude/ARCHITECTURE.md` has the per-timestep dataflow diagram and cold-start
@@ -343,7 +362,7 @@ sample: `examples/juniata_gridded/` (routed NSE 0.751 / KGE 0.730 vs baseline
 `config/sources/conus-gridded.yaml` (620 gauges via
 `scripts/snap_gridded_gauges.py`). Known deviations from DDR (per-cell KAN head,
 no `da_ratio` output correction) are in
-`docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
+`research/specs/2026-09-08-ddrs-gridded-routing-design.md` §7.
 DDR's gridded Q′ stores are `Qr(time, divide_id)`; the icechunk reader sniffs
 the axis order (`detect_time_major`) — see the ddrs-dev skill's trap T11.
 
@@ -405,11 +424,11 @@ which preserves prior behavior exactly — omit the block and nothing changes):
 - `nse-batch` — dHBV's `NSELossBatch`: mean over valid (day, gauge) of
   `(sim - obs)² / (σ_gauge + eps)²`, with σ fixed over the training period.
   Pairs with `experiment.optimizer: adadelta`, which is scale-free and ignores
-  the `learning_rate` schedule by design.
-  **Not on `master` yet** — `nse-batch`, `optimizer`, `use_grad_accum`, and
-  `grad_accum_steps` land with the gradient-accumulation work (PR #31, branch
-  `exp_train`). On a commit without them, `nse-batch` fails config load with
-  `unknown variant 'nse-batch'`.
+  the `learning_rate` schedule by design. Gradient accumulation
+  (`experiment.use_grad_accum`, `grad_accum_steps`) is also
+  available. Config load rejects `grad_accum_steps: 0` outright, and rejects
+  `use_grad_accum: true` paired with fewer than two steps, since accumulating a
+  single micro-batch is a silent no-op.
 
 The `nnse-kge` option exists because L1 and NSE are both maximized at a
 simulated variance *below* observed (NSE's optimum is at `α = r < 1`), so they
@@ -423,143 +442,40 @@ per-gauge masked (the driver already drops NaN gauges) then averaged, with
 Autograd is unchanged — it's a drop-in scalar on the routed predictions, so
 invariant 4 (the sparse backward) is untouched.
 
-## Leakance (experimental GW–SW water-loss term, off by default)
+## Leakance (CLOSED, NOT PROMOTABLE, 2026-07-06)
 
-**What it is.** A losing-stream correction subtracted from the routing RHS `b`
-at every timestep:
+A losing-stream term subtracted from the routing RHS `b`:
+`zeta = leakance_factor · area_z · K_D · (depth − d_gw)`, positive zeta means a
+losing reach. Code-complete and gradient-exact (`src/routing/leakance.rs`,
+`TimestepLeakanceOp`); `params.use_leakance` defaults false. Do NOT remove it.
 
-```
-zeta = leakance_factor · area_z · K_D · (depth − d_gw)
-area_z = (p · depth)^q_eps · length          (plan-view wetted area, m²)
-b ← b − zeta                                 (positive zeta = losing reach)
-```
+Do NOT re-open the question. A gauge measures the SUM of zeta over its upstream
+network, and that sum does not determine the per-reach distribution, so training
+constrains aggregate loss while carrying zero information about per-reach flux.
+Every rival explanation (gradient starvation, objective noise, uninformative
+inputs, sign ambiguity) was individually refuted.
 
-Ported from DDR `_compute_zeta` (commit c2bd0f9), later reverted on DDR master.
-Implementation: `src/routing/leakance.rs`. Gradient is analytical via
-`TimestepLeakanceOp: Backward<I,8>` — one extra autograd node per timestep,
-gradient-exact against finite differences.
+Verdict and refutations: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md` §3
+Enable steps, ranges, zeta diagnostic: `ddrs-dev/references/config.md`
+Gates: `ddrs-dev/references/testing.md`
 
-**How to enable.** Three config changes are required together:
+## Reach subdivision (`params.subdivision`, NO-GO, off by default)
 
-1. `params.use_leakance: true` — activates the term and forces
-   `use_cuda_graphs: false` (config load rejects the combination; CUDA
-   Graphs cannot capture the extra leakance kernel without a separate
-   capture path).
-2. Add `K_D`, `d_gw`, `leakance_factor` to `kan_head.learnable_parameters`
-   so the KAN head emits them.
-3. Add matching ranges to `params.parameter_ranges`:
-   - `K_D`: `[1e-8, 1e-6]` (log-space; hydraulic exchange rate, 1/s)
-   - `d_gw`: `[-2, 2]` (groundwater depth offset, m)
-   - `leakance_factor`: `[0, 1]` (dimensionless scale)
+A build-time normalization of reach length toward `Δx ≈ c_ref·Δt` inside the
+managed adjacency builder. Built to make the Muskingum coefficients non-negative
+by construction; measured on 1,841 CONUS gauges, `frac c1 < 0` got WORSE (93.0 %
+to 98.79 % at `max_pieces: 8`). Both coefficients are non-negative only inside a
+window `2(1−2X)` wide, which is 1.4 % at the measured CONUS median X = 0.4966,
+and a static piece count cannot hold a flow-varying `Cr` inside it. It does
+nearly eliminate `c3 < 0` (3.93 % to 0.31 %) and `Cr > 2`
+(2.10 % to 0.16 %), via the length clamp.
 
-**Gradient-exactness guard.** Any change to `src/routing/leakance.rs` or the
-leakance backward op must pass:
-
-```bash
-cargo test --test leakance_gradcheck       # analytical ≈ finite-difference
-cargo test --test leakance_off_parity      # byte-identical to no-leakance when off
-cargo test --test zeta_accum               # eval zeta diagnostic == what's subtracted from b
-cargo run --release --example compare_ddr_sandbox  # must still report ABSOLUTE MATCH
-```
-
-**Eval-time zeta diagnostic (the `|zeta| > 0.01 m³/s` GO/NO-GO bar).**
-`dump_parameters` exports the three *raw* leakance params, but zeta needs the
-routed per-timestep **depth** — so it can only be measured during eval. When
-leakance is active, `evaluate` accumulates per-reach `Σ|zeta|` and `Σzeta`
-across all eval timesteps (`MuskingumCunge::enable_zeta_accumulation`; the
-per-step zeta is recomputed inside `timestep_forward_leakance` from the SAME
-saved primitives the backward reads, so the reported value is exactly what was
-subtracted from `b_rhs` — `tests/zeta_accum.rs` proves this via the headwater
-identity `q_no_leak[0] − q_leak[0] == zeta[0]`). Means land in
-`<run_dir>/kan_parameters.nc` as `zeta` (mean |zeta|, m³/s) and `zeta_net`
-(signed; positive = losing reach), dimensioned by the EVAL network's COMIDs
-(gauge-subgraph union, not full CONUS) — exactly what
-`scripts/leakance_subset_analysis.py::maybe_load_zeta` reads. Writers:
-`ddrs run --workflow train-and-test` does it automatically in Phase 2; for an
-EXISTING checkpoint use the legacy eval binary (~10 min, no retrain):
-
-```bash
-cargo build --release --bin eval
-target/release/eval --config config/experiments/leakance_hourly_on.yaml \
-  --checkpoint .ddrs/runs/<id>/checkpoints/epoch_5_mb_9 \
-  --output /tmp/eval.zarr \
-  --zeta-output .ddrs/runs/<id>/kan_parameters.nc
-```
-
-The training path never enables accumulation — zero overhead, autograd
-untouched (invariant 4 intact).
-
-**Status (2026-07-06): CLOSED — NOT PROMOTABLE.** The full identifiability
-campaign (2×2 experiment, low-zeta diagnosis, gradient probe, synthetic
-recoverability control, Phase C promotion gate) concluded with a definitive
-**NO-GO**. The binding constraint is the observation operator: a gauge measures
-Σ(zeta) over its upstream network — the sum is not invertible for the per-reach
-distribution. Training constrains aggregate loss but carries zero information
-about per-reach flux. Every rival explanation (gradient starvation, objective
-noise, uninformative inputs, sign ambiguity) was individually REFUTED. The term
-remains code-complete and gradient-exact; do not remove it. Do NOT re-open
-without reading `docs/2026-07-06-leakance-nogo-scientific-summary.md` §3.
-
-Campaign docs (chronological):
-`docs/2026-07-01-leakance-hourly-findings.md`,
-`docs/2026-07-02-leakance-diagnosis-findings.md`,
-`docs/2026-07-03-zeta-gradient-probe-findings.md`,
-`docs/2026-07-04-synthetic-recoverability-findings.md`,
-`docs/2026-07-06-phase-c-findings.md`.
-
-## Reach subdivision (`params.subdivision`, off by default)
-
-**What it is.** A build-time (not runtime) normalization of reach length toward
-`Δx ≈ c_ref·Δt` inside the managed adjacency builder, so `Cr = Δt/K` lands near
-1. Two-sided: reaches longer than `Δx_target` are **split** into
-`m = min(ceil(L/Δx_target), max_pieces)` pieces of length `L/m` with `q' → q'/m`;
-shorter reaches have their **length clamped up** (never merged — merging would
-destroy junction topology), bounded by `max_clamp_factor`. The runtime just sees
-a bigger graph: no autograd change, no gradient path, `mmc_op.rs` untouched.
-
-**STATUS: NO-GO for its stated purpose (2026-08-05).** It was built to make the
-Muskingum coefficients non-negative by construction and retire
-`enforce_positivity`. Measured on 1,841 CONUS gauges with `enforce_positivity`
-off, `frac c1 < 0` gets **worse** (93.0 % off → 98.79 % at `max_pieces: 8`) and
-negative solves fall only 35 % for a 2.05× network, 1.5× step time and +23.9 %
-total channel length. Reason: both coefficients are non-negative only inside
-`[2X, 2(1−X)]`, a window of width `2(1−2X)` — **1.4 % wide at the measured CONUS
-median X = 0.4966** — and a static piece count cannot hold a flow-varying `Cr`
-inside it. It *does* nearly eliminate `Cr > 2` / `c3 < 0` (3.93 % → 0.31 %), via
-the length clamp rather than the splitting. The code is correct, gated off, and
-**stays in-tree** as the measurement apparatus. Do not re-open the "Cr ≈ 1 ⇒
-non-negative" argument without reading `.claude/REACH-SUBDIVISION.md`.
-
-**How to enable** (`params.subdivision.enabled: true`), and what will reject you:
-
-1. **Requires `geospatial_fabric`.** Subdivision runs inside the managed
-   adjacency builder, which explicit `conus_adjacency`/`gages_adjacency` paths
-   bypass — so `enabled: true` alongside them is a **config error**, not a
-   warning (`validate_subdivision_reaches_the_builder`, `src/config.rs:1066`).
-   Otherwise the flag would be *silently inert* while the manifest claimed
-   subdivision. The one allowed exception is an explicit path to a store already
-   built subdivided, detected from zarr metadata (`n_parent < n`).
-2. **Requires `use_cuda_graphs: false`** — a captured graph is sized to a fixed
-   reach count.
-3. **Requires retraining.** Every learned parameter was fit against the un-split
-   network's effective diffusion; checkpoints do not transfer.
-
-Fields (all seven are hashed into the adjacency cache key, so editing any one
-rebuilds the graph): `enabled` (false), `max_pieces` (8 — uncapped is infeasible:
-13.2× reaches, 9.2× solver critical path, and `Σm` cannot be pinned down),
-`reference_n` (0.05 — **a guess; the trained CONUS median is 0.130**, and this
-sets `dx_target` directly, so sweep it), `reference_discharge_coefficient`
-(0.01), `reference_discharge_exponent` (0.9), `min_length_fraction` (1.0; 0
-disables the short-reach clamp), `max_clamp_factor` (4.0 — unbounded, measured
-clamp factors reached 48,597×).
-
-Implementation: `src/adjacency/subdivide.rs` + `src/adjacency/cache.rs`;
-persistence of `parent_order`/`parent_offset` in `src/data/store/zarr.rs`
-(`IdIndex` is built from `parent_order`, since `order` gains duplicates).
-Gates: `cargo test --test subdivide --test subdivision_integration --test
-adjacency_parity --test gauge_mass_conservation`, plus `compare_ddr_sandbox`
-staying an ABSOLUTE MATCH. Design, measurements and gotchas:
-`.claude/REACH-SUBDIVISION.md`.
+Correct, gated off, stays in-tree as the measurement apparatus. Do not re-open
+the "Cr ≈ 1 implies non-negative" argument without reading
+`.claude/REACH-SUBDIVISION.md`, which has the enable preconditions, the
+Δx_target formula, and five of the seven fields by name. The remaining two,
+`reference_discharge_coefficient` and `reference_discharge_exponent`, are
+documented in `src/config.rs`.
 
 ## Baseline
 
@@ -599,7 +515,7 @@ Subsequent plans on the same input set are cache hits and instant for both.
 Implementation: `src/baseline/`. Mirrors
 `~/projects/ddr/scripts/summed_q_prime.py`.
 
-## Research journal (`docs/journal/`, added 2026-09-10)
+## Research journal (`research/journal/`, added 2026-09-10)
 
 One file per month, append-only, recording what we tried and what came of it.
 Two parts per month: a **ledger** with one row per completed run or experiment
@@ -626,7 +542,7 @@ caught at the next session start, not immediately. Entries before 2026-09-10 are
 ledger-only by construction.
 
 The journal is the index of the research, not a replacement for it: long-form
-results still earn a `docs/YYYY-MM-DD-<topic>-findings.md`, and a durable fact
+results still earn a `research/findings/YYYY-MM-DD-<topic>-findings.md`, and a durable fact
 still belongs in the skill library in the same session that produced it. Rules for
 writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
 
@@ -643,21 +559,30 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
 - **The sparse path uses a single `Arc<CsrPattern>` per network**, built once at
   `setup_inputs` and reused for every timestep. Don't rebuild per step.
 - **Configs are YAML to match DDR's tooling**, deserialized via `serde_yaml`.
+- **Cite symbols, not lines, inside `src/`.** Write
+  `src/config.rs::validate_subdivision_reaches_the_builder`, never
+  src/config.rs:1066. Line numbers drift silently and a 2026-09-11 audit
+  found six that had, by up to 136 lines. Line citations are fine for files
+  that do not move: the DDR reference tree, fixtures, and config YAML where
+  the line number is the content. `scripts/verify_doc_paths.py` checks that
+  every `file.rs::symbol` citation resolves.
 
 ## When in doubt
 
-- **Three skills cover this repo.** `ddrs-dev` — building, coding, configuring,
+- **Four skills cover this repo.** `ddrs-dev`: building, coding, configuring,
   testing, running, debugging; its `references/` carry the full config reference,
   the change→gate matrix, the trap catalog, and the authoritative research-status
   numbers. `ddrs-eval-plots` — evaluating and visualizing run output.
   `ddrs-journal` — recording what an experiment concluded (see §Research journal).
+  `ddrs-run`: the runbook for launching, watching, resuming, and auditing a
+  training or eval job.
   The other 16 skills were consolidated on 2026-07-30; see
-  `docs/2026-07-30-docs-and-skills-audit.md`.
-- Sparse / autograd questions → `docs/reference/burn-autograd.md`
+  `research/findings/2026-07-30-docs-and-skills-audit.md`.
+- Sparse / autograd questions → `docs/book/reference/burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`
   (which is verbatim from DDR's `merit_training_config.yaml`)
-- CLI behavior / lifecycle / manifest schema → `docs/superpowers/specs/`
-  (specs from `/superpowers brainstorming` runs) and `docs/superpowers/plans/`
+- CLI behavior / lifecycle / manifest schema → `research/specs/`
+  (specs from `/superpowers brainstorming` runs) and `research/plans/`
   (corresponding implementation plans).

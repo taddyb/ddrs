@@ -1,6 +1,6 @@
 # phase_c_on.yaml — Phase C leakance ON: enriched Phase-A inputs + losing-only clamp
 # + impervious hard-zero + widened K_D. Real USGS obs. GENERATED from leakance_hourly_on.yaml.
-# Doc: docs/2026-07-05-phase-c-leakance-gate-experiment.md
+# Doc: research/findings/2026-07-05-phase-c-leakance-gate-experiment.md
 # leakance_hourly_on.yaml — 2×2 experiment cell: HOURLY-ON
 #
 # Role in the 2×2 (forcing × leakance):
@@ -11,8 +11,8 @@
 # term identifiable. Paired against leakance_hourly_off (=the 2026-06-23T02-49-12Z run)
 # for the subset NSE/KGE delta.
 #
-# Spec: docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md
-# Plan task 12: docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md
+# Spec: research/specs/2026-06-29-leakance-hourly-feasibility-design.md
+# Plan task 12: research/plans/2026-06-29-leakance-hourly-feasibility.md
 #
 # Derived verbatim from:
 #   .ddrs/runs/2026-06-23T02-49-12Z-conus-hourly-train-and-test/config.yaml

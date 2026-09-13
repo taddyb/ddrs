@@ -137,7 +137,7 @@ def well_fit(df: pd.DataFrame) -> pd.DataFrame:
 def alignment(g: np.ndarray) -> float:
     """|mean(g)| / mean(|g|). 0 = per-gauge gradients cancel (a converged
     batch compromise); 1 = they all point the same way (descent unfinished).
-    Not robust: see docs/2026-09-08-landscape-hypothesis-tests-findings.md
+    Not robust: see research/findings/2026-09-08-landscape-hypothesis-tests-findings.md
     §21.3 -- per-gauge gradients are heavy-tailed, so this ratio of means is
     set by a handful of gauges. Kept for continuity; prefer the robust
     statistics in robust_alignment_lines()."""

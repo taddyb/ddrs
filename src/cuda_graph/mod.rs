@@ -5,7 +5,7 @@
 //! per timestep so the CPU issues 1 `cuGraphLaunch` instead of ~100
 //! `cuLaunchKernel`s.
 //!
-//! See `.claude/specs/2026-05-26-sp10-cuda-graphs-design.md`.
+//! See `research/specs/2026-05-26-sp10-cuda-graphs-design.md`.
 
 pub mod capture;
 pub mod geometry_kernel;

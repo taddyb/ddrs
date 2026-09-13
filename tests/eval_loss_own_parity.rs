@@ -1,5 +1,5 @@
 //! Layer-2 parity gate for the H5/H6 `eval-loss` probe mode
-//! (docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
+//! (research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
 //!
 //! Injecting a checkpoint's OWN `n`/`q_spatial`/`p_spatial` dump
 //! (`R1_kan_parameters.nc`, produced by `dump_parameters::write_netcdf`) as a

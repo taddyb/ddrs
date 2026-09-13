@@ -6,7 +6,7 @@
 //! streamflow, NOT that paper's (or any) model's output. It exists
 //! specifically to pretrain the disaggregation head (`src/nn/disagg_head.rs`)
 //! against real hourly ground truth with zero second-model bias — see
-//! `docs/2026-07-1x-disagg-real-pretrain-*.md`. Not part of the production
+//! `research/findings/2026-07-1x-disagg-real-pretrain-*.md`. Not part of the production
 //! training/eval data path.
 //!
 //! Layout: single NetCDF4 file, dims `(basin, date)`. `basin` is a

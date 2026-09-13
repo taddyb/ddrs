@@ -1,5 +1,5 @@
 # Per-gauge loss landscape in (n, p, q) log-multiplier space — sample case.
-# Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md
+# Spec: research/specs/2026-09-07-adjoint-landscape-design.md
 #   target/release/ddrs --workspace .ddrs experiment landscape-uh-juniata-wide --backend cpu
 study: landscape
 arms:

@@ -1,5 +1,5 @@
 //! Stage-1 adjoint reachability probe driver (spec:
-//! docs/superpowers/specs/2026-07-02-zeta-gradient-probe-design.md).
+//! research/specs/2026-07-02-zeta-gradient-probe-design.md).
 //!
 //! Samples training-style batches (same sampler + rho-window machinery as the
 //! training driver, but a LOCAL rng seeded from --seed), runs
@@ -41,7 +41,7 @@
 //!       values from a CSV; also writes a per-reach zeta answer-key netCDF.
 //!       Requires `params.use_leakance: true`.
 //!   (b) routing-parameter donor world (`--donor-params-nc`, docs:
-//!       docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md)
+//!       research/specs/2026-07-22-synthetic-n-recoverability-design.md)
 //!       — overrides ALL THREE of n/q_spatial/p_spatial from a
 //!       `dump_parameters::write_netcdf`-schema donor NetCDF (the same
 //!       mechanism `--mode eval-loss`'s "full-swap" composition uses).
@@ -78,7 +78,7 @@
 //!       --output output/floor_fix/floor_rho90.nc
 //!
 //! Post-hoc floor at warmup W: `nanmean(abs_residual[:, :, W:])` over the
-//! output netCDF. Spec: docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md §4.
+//! output netCDF. Spec: research/specs/2026-07-04-leakance-gate-program-design.md §4.
 //!
 //! Stage 5 (`--mode state-cache`): continuous-run day-boundary discharge cache
 //! for warm hotstart injection. Runs one continuous forward over the eval
@@ -98,7 +98,7 @@
 //!       --output output/floor_fix/state_cache_teacher.nc
 //!
 //! Stage 6 (`--mode eval-loss`): H5/H6 selective-equifinality parameter-swap
-//! test (docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
+//! test (research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
 //! Samples the SAME deterministic rho-window/gauge plan as floor/grad mode,
 //! then evaluates the training L1 loss over that fixed plan under each of
 //! `own`/`n-swap`/`geo-swap`/`full-swap` — injecting `n`/`q_spatial`/
@@ -267,7 +267,7 @@ struct Cli {
     /// teacher mode: same donor-NetCDF schema, but ALL THREE of
     /// n/q_spatial/p_spatial are always overridden together (no partial
     /// swap) — the synthetic-twin ground-truth generator (see
-    /// docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+    /// research/specs/2026-07-22-synthetic-n-recoverability-design.md).
     /// Optional; independent of --plant-file/--zeta-output.
     #[arg(long)]
     donor_params_nc: Option<PathBuf>,
@@ -1224,7 +1224,7 @@ fn run_teacher<I: Backend>(
     };
 
     // Optional n/q_spatial/p_spatial donor override (the synthetic-n
-    // routing-parameter twin — docs/superpowers/specs/2026-07-22-synthetic-n-
+    // routing-parameter twin — research/specs/2026-07-22-synthetic-n-
     // recoverability-design.md). Reuses the same --donor-params-nc /
     // load_comid_field / gather_by_comid / physical_to_normalized machinery
     // as --mode eval-loss's full-swap composition.
@@ -1652,7 +1652,7 @@ fn run_floor<I: Backend>(
 // ---------------------------------------------------------------------------
 
 /// The four H5/H6 parameter compositions
-/// (`docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`).
+/// (`research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md`).
 /// `own` needs no donor file; the other three swap a subset of
 /// `n`/`q_spatial`/`p_spatial` in from `--donor-params-nc`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -1986,14 +1986,14 @@ fn run_eval_loss<I: Backend>(
     let t_days = trimmed_days(rho, cfg.params.tau);
 
     // H5/H6 report the "training L1 loss" specifically (spec:
-    // docs/superpowers/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
+    // research/specs/2026-07-08-landscape-hypotheses-h5-h6-draft.md).
     // l1_loss_post_warmup below always computes L1 regardless of
     // experiment.loss.kind — assert the config agrees so a non-L1 config
     // can't silently produce numbers under the wrong objective.
     assert_eq!(
         exp.loss.kind,
         ddrs::config::LossKind::L1,
-        "eval-loss mode always computes L1 (docs/superpowers/specs/2026-07-08-\
+        "eval-loss mode always computes L1 (research/specs/2026-07-08-\
          landscape-hypotheses-h5-h6-draft.md); config has experiment.loss.kind={:?}",
         exp.loss.kind
     );
@@ -2306,7 +2306,7 @@ fn run_landscape<I: Backend>(
     assert_eq!(
         exp.loss.kind,
         ddrs::config::LossKind::L1,
-        "landscape mode always computes L1 (docs/superpowers/specs/2026-07-08-\
+        "landscape mode always computes L1 (research/specs/2026-07-08-\
          landscape-hypotheses-h5-h6-draft.md); config has experiment.loss.kind={:?}",
         exp.loss.kind
     );

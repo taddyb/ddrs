@@ -135,7 +135,7 @@ pub struct DataSources {
     /// the explicit zarr pair: `ddrs plan` turns it into ddrs's subdivided
     /// store layout (parent = grid cell, pieces = sub-reaches) plus per-gauge
     /// subgraphs under `.ddrs/adjacency/<key>/`. See
-    /// `docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md`.
+    /// `research/specs/2026-09-08-ddrs-gridded-routing-design.md`.
     #[serde(default)]
     pub gridded_network: Option<std::path::PathBuf>,
 }

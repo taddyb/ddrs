@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Fast local gate before any push:
+#   verify_doc_paths   : citation gate (CLAUDE.md, .claude/skills/**), no
+#                        dead path or line citation into src/. Stdlib-only
+#                        Python, runs first, under a second.
 #   ddr_sandbox_match  — DDR parity (invariant 1)
 #   gridded_bundle     — gridded (DDM30) ingestion contract against the
 #                        committed examples/juniata_gridded/ bundle
-# Both are debug tests that never skip, so a broken checkout fails here
-# rather than in CI. One cargo invocation, so the build is shared.
+# All three never skip, so a broken checkout fails here rather than in CI.
+# The two cargo tests share one invocation, so the build is shared.
 # Enable per-clone:  git config core.hooksPath .githooks
 # Bypass once:       git push --no-verify
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
+python3 scripts/test_verify_doc_paths.py
+python3 scripts/verify_doc_paths.py
 cargo test --test ddr_sandbox_match --test gridded_bundle

@@ -20,6 +20,7 @@ is what a future session needs, not the narrative.
 | Resumed run trains zero batches | T10 |
 | Baseline predicts ~0 (FHV −100 %) on a new Q′ store, no error | T11 |
 | Fresh checkout/worktree fails in `cudarc`'s build script: `Unsupported cuda toolkit version` | T12 |
+| A forward-only sweep (grid search, sensitivity scan) grows RSS without bound | T13 |
 
 ---
 
@@ -240,7 +241,7 @@ plain `plan` reports drift then refreshes the lock.
 6. Grep the smoke log for `streamflow resolution:` and the gauge-filter line.
 7. Check no other CUDA job is resident if you are using `--backend cuda`.
 
-## T11 Forward-only Autodiff evaluations retain the tape
+## T13 Forward-only Autodiff evaluations retain the tape
 
 **Symptom.** A process that runs many routing forwards without training (grid sweeps, sensitivity scans) grows
 without bound: about 18 MB per forward on the 5-reach sandbox at 2,142 steps, 20 MB per eval at Newport (213

@@ -4,7 +4,7 @@ Run under DDR's uv venv (it has icechunk + xarray + zarr):
 
     cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/make_streamflow_fixtures.py
 
-Layout matches the DDR Q' store contract (docs/nh-qprime-store-contract.md):
+Layout matches the DDR Q' store contract (docs/book/nh-qprime-store-contract.md):
 Qr(divide_id, time) f32 m^3/s, divide_id int64, CF int64 time axis.
 
 Deterministic values so tests can assert exact elements:
