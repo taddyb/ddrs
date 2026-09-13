@@ -69,7 +69,7 @@ data_sources:
   conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
   gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
   # Icechunk dHBV2 UH retrospective (divide-major, daily m³/s)
-  streamflow: /mnt/ssd1/data/icechunk/daily_hydrodl_lstm_aorc2f_merit_unit_catchments.ic
+  streamflow: /mnt/ssd1/data/icechunk/daily_hydrodl_lstm_aorc2f_merit_unit_catchments_rechunked.ic
   # Icechunk USGS daily observations
   observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
   gages: /home/tbindas/projects/ddr/references/gage_info/gages_3000.csv

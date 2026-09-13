@@ -4,7 +4,7 @@ data_sources:
   conus_adjacency: /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
   gages_adjacency: /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
   # Daily dHBV2 distributed AORC2f-forced streamflow
-  streamflow: /mnt/ssd1/data/icechunk/daily_dhbv2_distributed_aorc2f_merit_unit_catchments.ic
+  streamflow: /mnt/ssd1/data/icechunk/daily_dhbv2_distributed_aorc2f_merit_unit_catchments_rechunked.ic
   # USGS daily observations
   observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
   # 2000-area-balanced gage population
