@@ -2419,3 +2419,37 @@ not the slope of n against depth.
   gives the curvature along gamma at fixed n_0 and the orientation of the sloppy valley. The prediction
   from the collapse is a valley along the n(d)-preserving curve, i.e. H_gamma,gamma small against H_nn
   and the stiff eigenvector nearly along n_0.
+
+### 37.5 Do dams explain where roughness is high? A small, real, Midwest-concentrated signal
+
+User hypothesis (2026-09-13, from the low/high-flow roughness maps of the n_0 + gamma arm): the slow, rough
+stretches of the Mississippi basin in the Midwest coincide with dams, since an impounded reach runs deep and slow
+at every discharge and a model with a prescribed channel can only say so through n_0.
+
+Test (`experiments/stage_roughness/dam_roughness.py`): the 2,178 MERIT reaches hosting a HydroLAKES/GRanD
+reservoir outlet (DDR's `merit_reservoir_params.csv`; 2,144 reservoirs, 34 dam-controlled natural lakes), plus
+their neighbours one to three hops upstream (impounded) and downstream (regulated), against every other live
+reach in the same 0.25-dex drainage-area bin. Residual = n_0 minus the bin median of unaffected reaches.
+
+| n_0 residual, median | CONUS, n_0 + gamma arm | Midwest box (98–84 W, 36–47 N) |
+|---|---|---|
+| dam reach | +0.0025 (n = 2,178, p = 6e-6) | −0.005 (n = 338) |
+| 1–3 hops upstream | +0.0013 to +0.0006 | −0.009 to −0.010 |
+| 1–3 hops downstream | +0.0002 to +0.0013 (n.s.) | −0.002 to +0.004 |
+| all other reaches | 0 by construction | **−0.014** (n = 27,905) |
+
+Reading. CONUS-wide the dam effect is a few per cent of n_0 (0.057 against 0.058 at the median; the p-value is
+small because n is large). Inside the Midwest box the picture the user saw is real but inverted from the naive
+reading: Midwest reaches as a population are *smoother* than same-size reaches elsewhere (residual −0.014 on a
+base of 0.044), and it is the dam reaches and their regulated downstream neighbours that stand *out* of that
+background by +0.009 to +0.018, i.e. 20–40 % rougher than the surrounding unaffected reaches. The same ordering
+appears in the free-channel arm (`16-30-14Z`: Midwest dam reaches −0.010 against other −0.015). So dams do mark
+the rougher reaches within the Midwest, but they do not explain the region's roughness level, which is low, and the
+CONUS-wide association is weak.
+
+Caveats. The reservoir set is 0.6 % of reaches, and a reservoir's attenuation has to be absorbed over many reaches
+in a model with no storage term, so three hops is a short reach of the effect; the residual is against a size bin,
+not a regional baseline, which is why the Midwest column is negative for everyone; and n_0 in this arm is
+roughness at 1 m with a prescribed channel, so a deep impounded reach is rough by construction only if the model
+routes it at the wrong depth. Figure `plots/dam_roughness.png` in both run directories (n_0 against size by group,
+residual box plots, a map of dam reaches coloured by residual with the Midwest box drawn).
