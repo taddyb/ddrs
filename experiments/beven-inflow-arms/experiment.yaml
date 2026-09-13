@@ -22,7 +22,7 @@
 study: inflow-arms
 arms:
   - { name: dhbv2-lumped,   config: config/experiments/sr_n0_gamma_dhbv2_lumped.yaml,   product: "dHBV2 lumped, AORC2f, daily",         run: 2026-09-13T13-56-50Z-train-and-test }
-  - { name: dhbv2-dist,     config: config/experiments/sr_n0_gamma_dhbv2_dist.yaml,     product: "dHBV2 distributed, AORC2f, daily",    run: 2026-09-13T13-38-16Z-train-and-test }
+  - { name: dhbv2-dist,     config: config/experiments/sr_n0_gamma_dhbv2_dist.yaml,     product: "dHBV2 distributed, AORC2f, daily",    run: 2026-09-13T17-22-30Z-train-and-test }
   - { name: hydrodl-lstm,   config: config/experiments/sr_n0_gamma_hydrodl_lstm.yaml,   product: "hydroDL LSTM, AORC2f, daily",         run: 2026-09-13T13-38-21Z-train-and-test }
   - { name: nh-daily-lstm,  config: config/experiments/sr_n0_gamma_nh_daily_lstm.yaml,  product: "NeuralHydrology daily LSTM",           run: 2026-09-13T13-55-03Z-train-and-test }
   - { name: nh-hourly-lstm, config: config/experiments/sr_n0_gamma_nh_hourly_lstm.yaml, product: "NeuralHydrology hourly MTS-LSTM",      run: PENDING }
