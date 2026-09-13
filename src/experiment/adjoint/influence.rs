@@ -89,7 +89,12 @@ where
         // landscape study (`Objective::build`) broadcasts a constant for any
         // parameter not in `learnable_parameters`.
         let (mut learnable, mut fixed) = (Vec::new(), Vec::new());
-        for name in ["n", "p_spatial", "q_spatial"] {
+        // `gamma` is listed only when learned: a global constant is not a
+        // field, and "fixed at default" would misdescribe it.
+        for name in ["n", "p_spatial", "q_spatial", "gamma"] {
+            if name == "gamma" && !section.learnable_parameters.iter().any(|s| s == "gamma") {
+                continue;
+            }
             if section.learnable_parameters.iter().any(|s| s == name) {
                 learnable.push(name);
             } else {
