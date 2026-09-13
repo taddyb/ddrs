@@ -336,10 +336,68 @@ pub struct KanHeadConfigSection {
     pub k: usize,
     pub input_var_names: Vec<String>,
     pub learnable_parameters: Vec<String>,
+    /// Optional partition of `learnable_parameters` into independently
+    /// parameterized trunks, e.g. `[[n], [p_spatial, q_spatial]]`. Absent or
+    /// empty ⇒ one shared trunk feeding every output (historical
+    /// architecture, preserved byte-for-byte). Must partition
+    /// `learnable_parameters` exactly. See `src/nn/kan_head.rs`.
+    #[serde(default)]
+    pub parameter_groups: Vec<Vec<String>>,
+    /// Replace the `Linear(F, H)` input projection with a `KanLayer(F, H)`
+    /// (per-attribute splines instead of a linear mixing before any
+    /// nonlinearity). Breaks DDR `kan.py` parity — experiment arm only.
+    #[serde(default)]
+    pub input_layer_kan: bool,
+    /// Replace the `Linear(H, P)` read-out with a `KanLayer(H, P)`, so the
+    /// outputs stop being affine functionals of one shared latent (§31).
+    /// Breaks DDR `kan.py` parity — experiment arm only.
+    #[serde(default)]
+    pub output_layer_kan: bool,
+    /// B-spline grid range for the optional boundary KanLayers above. Inner
+    /// trunk layers keep rskan's `[-1, 1]`.
+    #[serde(default = "default_kan_grid_range")]
+    pub kan_grid_range: [f64; 2],
     /// Optional learnable daily→hourly forcing disaggregation. Absent ⇒ flat
     /// `repeat-24` (current behavior). See `src/nn/disagg_head.rs`.
     #[serde(default)]
     pub disaggregation: Option<DisaggregationSection>,
+}
+
+/// YAML `params.stage_roughness:` block. Absent (the default) ⇒ `gamma = 0`,
+/// which is byte-identical to every model trained before this existed.
+///
+/// Makes Manning's roughness depend on stage:
+///
+/// ```text
+///   n(d) = n_0 · (d / d_ref)^(−gamma)
+/// ```
+///
+/// **Why.** At one cross section `p`, `q`, `n` and slope are all constant in
+/// time, so Manning plus continuity lock the flood response onto a
+/// one-parameter curve: `m = (2/3)·f`. Observed at-a-station hydraulic geometry
+/// sits at `m ≈ 0.34` against `f ≈ 0.40`, i.e. off that curve. Roughness falling
+/// as the channel fills is the one physical term that can move `m` without
+/// breaking width and depth. See
+/// `docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`.
+///
+/// Two things change in the solver, both reducing exactly at `gamma = 0`:
+/// the depth exponent becomes `3/(5 + 3q + 3·gamma)`, and the celerity gains
+/// `beta += gamma · A/(T·d)`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageRoughnessSection {
+    /// Stage exponent. `0.0` = off. `0.183` reproduces observed at-a-station
+    /// hydraulic geometry when paired with `q = 0.65`.
+    ///
+    /// Phase 1 of the design: a single global value, NOT a learned per-reach
+    /// field. It becomes a KAN output only if the landscape probe shows it is
+    /// identifiable.
+    #[serde(default)]
+    pub gamma: f32,
+    /// Reference depth in metres. `n_0` is roughness AT THIS DEPTH, so changing
+    /// it re-scales `n_0` and makes published `n` values incomparable.
+    #[serde(default = "default_d_ref")]
+    pub d_ref: f32,
 }
 
 /// YAML `kan_head.disaggregation:` block (presence enables the head, unless
@@ -414,7 +472,11 @@ pub fn kan_config(
     .with_hidden_size(section.hidden_size)
     .with_num_hidden_layers(section.num_hidden_layers)
     .with_grid(section.grid)
-    .with_k(section.k);
+    .with_k(section.k)
+    .with_parameter_groups(section.parameter_groups.clone())
+    .with_input_layer_kan(section.input_layer_kan)
+    .with_output_layer_kan(section.output_layer_kan)
+    .with_kan_grid_range(section.kan_grid_range);
     match &section.disaggregation {
         Some(d) => cfg
             .with_disagg_enabled(true)
@@ -430,6 +492,12 @@ pub fn kan_config(
 
 fn default_grid() -> usize {
     5
+}
+fn default_d_ref() -> f32 {
+    1.0
+}
+fn default_kan_grid_range() -> [f64; 2] {
+    [-3.0, 3.0]
 }
 fn default_k() -> usize {
     3
@@ -497,11 +565,19 @@ pub struct ParameterRanges {
     pub d_gw: [f32; 2],
     /// Fractional leakance weight [0, 1]. Companion to `k_d`; same activation guard.
     pub leakance_factor: [f32; 2],
+    /// Stage-roughness exponent for `n(d) = n_0·(d/d_ref)^(−gamma)`, when it
+    /// is a learned KAN output rather than the global
+    /// `params.stage_roughness.gamma`. Upper bound 0.5 because the depth
+    /// exponent is `3/(5+3q+3·gamma)` and roughness grows without bound as
+    /// depth goes to zero; 0.183 reproduces observed at-a-station hydraulic
+    /// geometry when paired with `q ≈ 0.65`.
+    pub gamma: [f32; 2],
 }
 
 impl Default for ParameterRanges {
     fn default() -> Self {
         Self {
+            gamma: [0.0, 0.5],
             n: [0.015, 0.25],
             q_spatial: [0.0, 1.0],
             p_spatial: [1.0, 200.0],
@@ -676,6 +752,21 @@ pub struct Params {
     pub enforce_positivity: bool,
     /// Static reach subdivision (variable Δx). Off by default.
     pub subdivision: Subdivision,
+    /// Stage-dependent Manning roughness, `n(d) = n_0·(d/d_ref)^(−gamma)`.
+    /// Absent ⇒ `gamma = 0`, byte-identical to the historical solver.
+    pub stage_roughness: Option<StageRoughnessSection>,
+}
+
+impl Params {
+    /// `(gamma, d_ref)` for the solver. `(0.0, 1.0)` when the block is absent
+    /// or `gamma` is zero, which callers use to take the historical code path
+    /// verbatim rather than relying on `powf(0.0) == 1.0`.
+    pub fn stage_roughness_params(&self) -> (f32, f32) {
+        match &self.stage_roughness {
+            Some(sr) if sr.gamma != 0.0 => (sr.gamma, sr.d_ref),
+            _ => (0.0, 1.0),
+        }
+    }
 }
 
 fn default_ddr_match() -> bool {
@@ -703,6 +794,7 @@ impl Default for Params {
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
             subdivision: Subdivision::default(),
+            stage_roughness: None,
         }
     }
 }
@@ -729,6 +821,8 @@ struct ParamsRaw {
     enforce_positivity: Option<bool>,
     #[serde(default)]
     subdivision: Subdivision,
+    #[serde(default)]
+    stage_roughness: Option<StageRoughnessSection>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -746,6 +840,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(v) = r.parameter_ranges.get("x_storage") {
             p.parameter_ranges.x_storage = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("gamma") {
+            p.parameter_ranges.gamma = *v;
         }
         // DDR spells this uppercase (K_D); siblings are lowercase.
         if let Some(v) = r.parameter_ranges.get("K_D") {
@@ -822,6 +919,7 @@ impl From<ParamsRaw> for Params {
         // yields `Subdivision::default()` when the block is absent, which is
         // exactly what `Params::default()` carries.
         p.subdivision = r.subdivision;
+        p.stage_roughness = r.stage_roughness;
         p
     }
 }
@@ -975,6 +1073,18 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_stage_roughness(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_learned_gamma(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_fixed_q_spatial(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -1135,6 +1245,141 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
         return Err(
             "params: `use_leakance: true` requires `use_cuda_graphs: false` — the \
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// A head that does not emit `q_spatial` holds it at `params.defaults.q_spatial`
+/// (the n_0 + gamma design). The default must exist and sit inside the box,
+/// because the readers normalize it into the box and the engine denormalizes
+/// it back; a value outside would silently clamp.
+fn validate_fixed_q_spatial(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(head) = cfg.kan_head.as_ref() else { return Ok(()) };
+    if head.learnable_parameters.iter().any(|s| s == "q_spatial") {
+        return Ok(());
+    }
+    let [lo, hi] = cfg.params.parameter_ranges.q_spatial;
+    match cfg.params.defaults.get("q_spatial") {
+        None => Err("`q_spatial` is not in kan_head.learnable_parameters, so it is FIXED and \
+                     params.defaults must carry `q_spatial` (e.g. 0.65, the at-a-station \
+                     Leopold & Maddock value b/f)."
+            .into()),
+        Some(v) if !(lo..=hi).contains(v) => Err(format!(
+            "params.defaults.q_spatial = {v} lies outside params.parameter_ranges.q_spatial \
+             [{lo}, {hi}]; the fixed value must be inside the box."
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// True when `gamma` is a KAN output rather than a global constant.
+fn learns_gamma(cfg: &Config) -> bool {
+    cfg.kan_head
+        .as_ref()
+        .map(|k| k.learnable_parameters.iter().any(|s| s == "gamma"))
+        .unwrap_or(false)
+}
+
+/// Guards for a LEARNED per-reach `gamma`, which routes through the six-parent
+/// `TimestepGammaOp`.
+fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
+    if !learns_gamma(cfg) {
+        return Ok(());
+    }
+    let r = cfg.params.parameter_ranges.gamma;
+    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < 0.0 || r[1] <= r[0] || r[1] > 1.0 {
+        return Err(format!(
+            "params.parameter_ranges.gamma must be a valid range inside [0, 1] \
+             with lo < hi, got {r:?}. Channels get SMOOTHER as they fill so gamma \
+             is non-negative, and above 1 the depth exponent 3/(5+3q+3·gamma) \
+             collapses while roughness explodes as depth goes to zero."
+        ));
+    }
+    if cfg.params.ddr_match {
+        return Err(
+            "`gamma` in kan_head.learnable_parameters requires `ddr_match: false`. \
+             The deprecated ddr_match celerity is the constant 5/3, with no \
+             A/(T·d) term for the stage correction to attach to."
+                .to_string(),
+        );
+    }
+    if cfg.params.use_cuda_graphs {
+        return Err(
+            "`gamma` in kan_head.learnable_parameters requires \
+             `use_cuda_graphs: false`. The captured graph is ddr_match-only and \
+             bakes the constant-5/3 celerity in."
+                .to_string(),
+        );
+    }
+    if cfg.params.use_leakance {
+        return Err(
+            "`gamma` in kan_head.learnable_parameters is not supported together \
+             with `use_leakance: true`. Leakance routes through its own \
+             eight-parent op, which has no gamma parent, so gamma would silently \
+             receive no gradient."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_stage_roughness(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(sr) = cfg.params.stage_roughness.as_ref() else {
+        return Ok(());
+    };
+    if !sr.gamma.is_finite() || sr.gamma < 0.0 || sr.gamma > 1.0 {
+        return Err(format!(
+            "params.stage_roughness: `gamma` must be in [0, 1], got {}. Channels get \
+             SMOOTHER as they fill, so gamma is non-negative; above 1 the depth \
+             exponent 3/(5+3q+3·gamma) collapses and roughness explodes as depth → 0.",
+            sr.gamma
+        ));
+    }
+    if !sr.d_ref.is_finite() || sr.d_ref <= 0.0 {
+        return Err(format!(
+            "params.stage_roughness: `d_ref` must be > 0 metres, got {}",
+            sr.d_ref
+        ));
+    }
+    if sr.gamma == 0.0 {
+        return Ok(());
+    }
+    if learns_gamma(cfg) {
+        return Err(
+            "params.stage_roughness.gamma is a GLOBAL constant and `gamma` is \
+             also in kan_head.learnable_parameters. Pick one: remove the \
+             stage_roughness block to learn it per reach, or drop `gamma` from \
+             learnable_parameters to hold it fixed. Setting both silently makes \
+             the constant dead, because the learned field takes precedence."
+                .to_string(),
+        );
+    }
+    if sr.d_ref != 1.0 {
+        return Err(format!(
+            "params.stage_roughness: `d_ref` must be 1.0 while `gamma` is a single \
+             global value, got {}. With gamma global, `d_ref^gamma` is a constant on \
+             the Manning numerator and is therefore fully absorbed by the learned `n` \
+             field — it would be a second name for the same degree of freedom. The \
+             restriction lifts when gamma becomes a per-reach KAN output, where \
+             `d_ref^gamma` varies across reaches and stops being absorbable.",
+            sr.d_ref
+        ));
+    }
+    if cfg.params.ddr_match {
+        return Err(
+            "params.stage_roughness: `gamma > 0` requires `ddr_match: false`. The \
+             deprecated ddr_match celerity is the constant 5/3, which has no A/(T·d) \
+             term for the stage correction to attach to."
+                .to_string(),
+        );
+    }
+    if cfg.params.use_cuda_graphs {
+        return Err(
+            "params.stage_roughness: `gamma > 0` requires `use_cuda_graphs: false`. \
+             The CUDA-graph capture path is ddr_match-only by construction and bakes \
+             the constant-5/3 celerity into the captured graph."
                 .to_string(),
         );
     }
@@ -1636,7 +1881,7 @@ kan_head:
   hidden_size: 8
   num_hidden_layers: 1
   input_var_names: [a, b]
-  learnable_parameters: [n]
+  learnable_parameters: [n, q_spatial]
   disaggregation:
     freeze: true
 "#;
@@ -1867,7 +2112,7 @@ data_sources:
                     streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
                     gages: /dev/null/g.csv\n\
                     mlp:\n  hidden_size: 21\n  num_hidden_layers: 2\n  grid: 50\n  k: 2\n  \
-                    input_var_names: [meanP]\n  learnable_parameters: [n]\n";
+                    input_var_names: [meanP]\n  learnable_parameters: [n, q_spatial]\n";
         let path = std::env::temp_dir().join("ddrs_mlp_alias.yaml");
         std::fs::write(&path, yaml).unwrap();
         let cfg = Config::from_yaml_file(&path).expect("mlp alias must still parse");

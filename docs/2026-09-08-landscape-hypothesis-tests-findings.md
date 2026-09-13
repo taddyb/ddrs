@@ -1611,6 +1611,16 @@ This changes what is learned but not how much is identified, and it is still the
 
 ## 31. The KAN head is emitting one latent direction relabelled as two parameters
 
+> **PARTLY SUPERSEDED BY §32 (2026-09-11).** The measurements below on the *trained* fields stand. Three of the
+> inferences drawn from them do not, and should not be cited:
+> (a) that the head is structurally unable to represent independent patterns for its outputs — every topology,
+> the current one included, decorrelates two supervised targets to affine R^2 = 0.0000 (§32.3);
+> (b) that the trunk delivers "essentially one direction" — measured directly, its effective rank is 4.36 of 21
+> (§32.2);
+> (c) that the 10 attributes "carry roughly one usable direction" — their effective rank is 6.11 of 10 (§32.1).
+> The correct statement is that the collapse is an inductive bias under the routing gradient acting on a capable
+> architecture, and that the trunk is narrower than its inputs. See §32.5 for the three questions re-answered.
+
 The architecture is `Linear(F, H) -> KanLayer(H, H) x 2 -> Linear(H, P) -> Sigmoid` with `F = 10` attributes and
 `H = 21`. All learned parameters come from **one shared trunk**, separated only by the final `Linear(H, P)`.
 Measured on the learned fields over all 346,321 CONUS reaches (500-update `nse-batch` model):
@@ -1626,7 +1636,9 @@ Measured on the learned fields over all 346,321 CONUS reaches (500-update `nse-b
 The two learnable outputs are **the same spatial field read twice with different gains**. If the trunk's output
 were full rank, two independent rows of the final Linear layer would produce two unrelated combinations of 21
 hidden units. A near-perfect line on the pre-sigmoid scale means the trunk is delivering essentially one
-direction.
+direction. **(Superseded: the trunk's effective rank, measured directly at initialisation rather than inferred
+from outputs, is 4.36 of 21 — §32.2. The near-perfect line is a property of the trained state, not of the
+architecture's capacity.)**
 
 Across models: rho(n, q) is 0.727 at epoch 1 (near initialisation), **0.999** after 60 updates, **0.997** after
 500, and 0.869 for the derivative-loss model. Training makes the collapse worse, not better.
@@ -1642,17 +1654,21 @@ then multiplies.
 
 ### What this means for the three questions
 
-1. **"Is our KAN the problem?"** Yes, demonstrably, and this is the first architectural defect the study has
+1. **"Is our KAN the problem?"** ~~Yes, demonstrably, and this is the first architectural defect the study has
    found that is not about identifiability. A model whose two geometry-and-friction outputs are 98.7 % the same
-   latent direction cannot represent independent spatial patterns for them, whatever the data or the loss allows.
+   latent direction cannot represent independent spatial patterns for them, whatever the data or the loss
+   allows.~~ **WITHDRAWN — see §32.3.** The head *can* represent independent patterns; it does not under this
+   gradient. Read §32.5.
 2. **"A separate KAN for p and q?"** This is now the evidence-backed fix rather than an intuition. Separate trunks
    (or at minimum a wider trunk with a decorrelation penalty on the output heads) are what allow the fields to
    differ at all. Note the likely cause of the collapse: 10 attributes with a gradient-boosted ceiling of
    R^2 = 0.160 on the targets carry roughly one usable direction of information, and a 21-unit trunk trained on
    near-unanimous gradients has no reason to preserve more than that.
 3. **"A loss that assists p and q outside n?"** Still worth having, for the reasons in §30, but it is now clearly
-   the SECOND problem. **No objective can separate two outputs that are reading the same latent direction.** Fix
-   the architecture first, then re-ask whether the loss needs changing.
+   the SECOND problem. ~~**No objective can separate two outputs that are reading the same latent direction.**~~
+   **The premise is withdrawn (§32.2): at initialisation the outputs are not reading the same direction, because
+   the trunk carries 4.36 of them.** The §30 case for such an objective stands on its own merits. Fix the
+   architecture first, then re-ask whether the loss needs changing.
 
 ### Caveats
 
@@ -1666,9 +1682,826 @@ then multiplies.
 
 ### Suggested order of work
 
+**Steps 1 and 2 were carried out on 2026-09-11; see §32. Step 1 refuted the rank-1 reading.**
+
 1. Dump the trunk activations and compute their singular-value spectrum. One dominant singular value confirms
-   rank-1 outright.
+   rank-1 outright. **DONE — it does not: effective rank 4.36 of 21 (§32.2).**
 2. Separate heads or trunks per parameter group, retrain, and re-measure rho(n, q). Registered prediction: rho
    falls well below 0.9 and q stops reaching its bounds under the ordinary objective, with no skill change
    (§20 bounds the whole channel at about 0.09 NSE).
 3. Only then revisit the objective question of §30.
+
+## 32. The head is capable; the collapse is an inductive bias, not a wall
+
+§31 concluded "is our KAN the problem? Yes, demonstrably". That was too strong, and this section corrects it
+with three measurements §31 called for and one it did not anticipate. The apparatus is
+`src/bin/head_arch_screen.rs` plus `experiments/head_arch/analyze.py`, which compare head topologies in minutes
+rather than the ~2 h a CONUS training arm costs, because the head is a pure per-reach function of the attributes:
+no routing, no observations, no optimizer schedule. Seven topologies, `n` + `p_spatial` + `q_spatial` emitted by
+each, evaluated over the real CONUS attribute distribution.
+
+### 32.1 The inputs are not one-dimensional
+
+§31 guessed that "10 attributes with a gradient-boosted ceiling of R^2 = 0.160 carry roughly one usable
+direction". They do not. PCA of the ten z-scored production attributes over all 2,939,404 MERIT reaches
+(`experiments/head_arch/attribute_rank.py`, no Rust needed):
+
+| quantity | value |
+|---|---|
+| effective rank (participation ratio) | **6.11 of 10** |
+| directions holding 90 % of variance | 6 |
+| directions holding 99 % of variance | 10 |
+| PC1 share | 0.274 |
+
+PC1 is a wetness-and-vegetation axis (`meanP` −0.540, `SoilGrids1km_clay` −0.512, `NDVI` −0.503; the strongest
+pair is `meanP`–`NDVI` at r = +0.795). The two attributes §30 identified as carrying the identifiable channels
+load essentially zero on it: `log10_uparea` at −0.000 and `meanslope` at −0.040. **The scale channel and the
+timing channel are available to the head as separate directions.** So a collapse to one direction is not
+inherited from the data.
+
+The GBM ceiling of R^2 = 0.160 is a statement about how much of the *target* the attributes explain, not about
+how many directions they span. Conflating the two was the error.
+
+### 32.2 The trunk is rank 4.4, not rank 1
+
+§31's stated caveat was that it inferred the trunk's rank from the output fields rather than measuring it.
+`KanHead::trunk_activations` now exposes the penultimate activations directly. Singular spectrum of the centred
+`[N, H]` activation matrix, at initialisation, over a 4,027-reach stride sample of CONUS:
+
+| topology | H | effective rank | PC1 share | dims for 90 % |
+|---|---|---|---|---|
+| shared, Linear read-out (current) | 21 | **4.36** | 0.412 | 6 |
+| separate trunk per group | 21 | 4.36 | 0.412 | 6 |
+| KAN read-out | 21 | 4.36 | 0.412 | 6 |
+| KAN embedding + KAN read-out | 21 | **3.03** | 0.524 | 4 |
+| **depth 2 -> 4** | 21 | **3.41** | 0.450 | 5 |
+| **H 21 -> 64** | 64 | **6.41** | 0.249 | 10 |
+
+Two facts follow immediately, and neither was expected.
+
+**The H = 21 trunk throws away input directions.** The attributes carry 6.11; the trunk delivers 4.36. Three
+outputs reading a rank-4.4 latent through three rows of a `Linear(21, 3)` have to overlap. At H = 64 the trunk
+carries 6.41, essentially everything the inputs have.
+
+**Depth is the wrong knob, and it is actively harmful.** Two extra `KanLayer` blocks *reduce* effective rank from
+4.36 to 3.41. Each block applies per-edge splines on a `[-1, 1]` grid and sums over inputs; stacking them
+contracts the representation rather than enriching it. The KAN embedding arm is worse still at 3.03, because a
+`KanLayer(F, H)` on z-scored attributes puts much of its input outside the spline grid where only the
+`scale_base · SiLU` path survives.
+
+### 32.3 Every topology passes a supervised capacity control, including the current one
+
+This is the measurement that overturns §31's verdict. Two targets were built from the real attributes, one from
+`meanslope` and one from `log10_uparea` Gram-Schmidt orthogonalised against the first, then squashed into the
+head's own output range: each is exactly recoverable from the inputs and their mutual correlation is
++1.3e-3 by construction. Each topology was fitted to both, supervised, with Adam for 400 steps.
+
+| topology | loss, start -> end | rank corr between outputs | affine R^2 |
+|---|---|---|---|
+| shared, Linear read-out (current) | 0.0767 -> 0.000016 | +0.028 | **0.0000** |
+| separate trunk for {n} vs {p, q} | 0.0746 -> 0.000011 | +0.028 | 0.0000 |
+| one trunk per parameter | 0.0752 -> 0.000012 | +0.028 | 0.0000 |
+| KAN read-out | 0.0746 -> 0.000004 | +0.028 | 0.0000 |
+| KAN embedding + KAN read-out | 0.0769 -> 0.000001 | +0.027 | 0.0000 |
+| depth 2 -> 4 | 0.0767 -> 0.000002 | +0.028 | 0.0000 |
+| H 21 -> 64 | 0.0768 -> 0.000005 | +0.028 | 0.0000 |
+
+**The current head can emit two independent spatial fields.** It is not structurally incapable, and a separate
+KAN adds no capability it lacks. §31's claim that "a model whose two geometry-and-friction outputs are 98.7 %
+the same latent direction cannot represent independent spatial patterns for them" is false as stated: it cannot
+*under the routing gradient*, which is a different and weaker claim.
+
+The control does not discriminate between topologies, and that is the finding. It converts the question from
+"what restores a missing capability" into "what removes a bias", which is a question only a training arm can
+answer.
+
+### 32.4 What a KAN read-out does and does not fix
+
+Worth stating precisely, because the intuition that a nonlinear read-out decouples the outputs is half right.
+
+With `Linear(H, P)` the outputs are `logit(param_j) = w_j · h + b_j`. Two of them are *exactly* affinely related
+if and only if `h` is effectively rank 1 across reaches. A Linear read-out therefore does not force affinity on
+its own; it forces it in combination with a rank-1 latent, which is the §31 regime and not a property of the
+layer. `tests/kan_head_groups.rs` pins this at `hidden_size = 1`, where the relative residual of one logit column
+regressed on the other is at the f32 floor.
+
+With `KanLayer(H, P)` each output carries its own spline coefficients on every edge
+(`y[o] = sum_i sb[i,o]·SiLU(h[i]) + sp[i,o]·spline_{i,o}(h[i])`), so the affinity breaks. **It does not break the
+functional dependence.** Two different nonlinear functions of one scalar latent remain in lockstep: the same test
+asserts the rank correlation stays above 0.999 in the rank-1 case. A KAN read-out changes the shape of the
+coupling, not the fact of it.
+
+Decoupling the outputs requires a trunk that carries more than one direction. That is why `H 21 -> 64` is now an
+arm, and why it is the one to watch.
+
+### 32.5 What this licenses, and what still needs a training arm
+
+Answering the three questions of §31 again, corrected:
+
+1. **"Is our KAN the problem?"** Partly, and not in the way §31 said. It is not incapable. It is *narrower than
+   its inputs* (rank 4.36 against 6.11) and it hands training a coupling to start from. "Architectural defect"
+   should read "architectural bias".
+2. **"A separate KAN for p and q?"** It removes the inherited coupling but adds no capability. Whether removing
+   the bias changes where the routing gradient lands is exactly the open question, and it needs the CONUS arms.
+3. **"A loss that assists p and q outside n?"** §31 said no objective can separate two outputs reading the same
+   latent direction. With the trunk at rank 4.4 rather than 1, they are *not* reading the same direction at
+   initialisation, so that argument does not hold as stated. The §30 reasons for wanting such an objective
+   stand on their own.
+4. **"Is the KAN deep enough?"** No, and depth is the wrong question. Depth reduces the rank the trunk carries
+   (4.36 -> 3.41) and raises the coupling it inherits. Width does the opposite.
+
+### 32.6 The seed sweep: splitting and widening both decouple, depth does not
+
+A single initialisation cannot rank these topologies. For two random read-out rows over a latent of effective
+rank r, chance alone gives |rho| of order 1/sqrt(r). Eight seeds per arm, Spearman |rho(n, q)| on the
+4,027-reach sample, with each arm's own chance line from its own measured rank:
+
+| topology | median \|rho\| | IQR | chance line | median affine R^2 | share of seeds \|rho\| > 0.5 |
+|---|---|---|---|---|---|
+| shared, Linear read-out (current) | 0.466 | [0.328, 0.505] | **0.479** | 0.2065 | 0.375 |
+| depth 2 -> 4 | 0.488 | [0.160, 0.602] | **0.541** | 0.2476 | 0.500 |
+| KAN embedding + KAN read-out | 0.297 | [0.125, 0.750] | 0.575 | 0.0525 | 0.375 |
+| KAN read-out | 0.217 | [0.154, 0.406] | 0.479 | 0.0333 | 0.125 |
+| H 21 -> 64 | **0.105** | [0.077, 0.328] | 0.395 | 0.0413 | 0.125 |
+| separate trunk for {n} vs {p, q} | **0.091** | [0.068, 0.322] | 0.479 | 0.0334 | 0.250 |
+| one trunk per parameter | **0.086** | [0.037, 0.219] | 0.479 | 0.0139 | 0.250 |
+
+**The current head sits exactly on its chance line: 0.466 against 0.479.** Its output coupling at
+initialisation is fully accounted for by two arbitrary rows reading a rank-4.4 latent. There is nothing
+pathological in the initialisation, and equally nothing working in its favour.
+
+**Depth is at chance too, with the worst affine R^2 of any arm (0.2476) and the highest share of seeds above
+0.5.** Combined with its lower trunk rank this is the clearest negative result of the screen: adding
+`KanLayer` blocks does not help and plausibly hurts.
+
+**Splitting trunks and widening the trunk both land far below chance**, and they are not distinguishable from
+each other at eight seeds: medians 0.086 to 0.105 with heavily overlapping IQRs. They get there by different
+mechanisms, which is why both are training arms. Splitting gives each output group its own latent, so the
+shared-rank argument stops applying. Widening lowers the chance line itself, from 0.479 to 0.395, by carrying
+more of the input's 6.11 directions, and then lands well under it.
+
+**The KAN read-out roughly halves the coupling (0.217 against a 0.479 chance line) without touching the
+trunk**, which is consistent with §32.4: it breaks the affine tie but leaves the outputs reading the same
+latent. The KAN embedding arm is the least reliable of all, with an IQR reaching 0.750, and it has the lowest
+trunk rank; it is not promoted.
+
+### Registered predictions for the CONUS arms
+
+Four arms, differing only in `kan_head`, all learning `n` + `p_spatial` + `q_spatial`, all derived from the
+500-update `nse-batch` baseline `2026-09-10T21-21-48Z-conus-train-and-test`
+(`config/experiments/head_{shared_linear,split_trunk,wider,kan_readout}.yaml`):
+
+- **`head_shared_linear`** reproduces the §31 collapse with three outputs: Spearman rho(n, q) above 0.95 after
+  500 updates, and `q_spatial` piling up at both bounds.
+- **`head_wider` and `head_split_trunk` both fall well below the control.** §32.6 cannot separate them at
+  initialisation, and that is precisely what the training arms are for: they decouple by different mechanisms
+  (more directions to read, versus each group reading its own latent) and the routing gradient may reward one
+  and not the other.
+- **`head_kan_readout`** barely moves rho(n, q) at all. This is the discriminating prediction: if it *does* move,
+  the read-out was the binding constraint after all; if it does not, the trunk's capacity is.
+- **No arm changes median skill by more than about 0.01 NSE**, since §20 bounds the whole channel at roughly
+  0.09 NSE and §24 showed the NSE optimum costs no KGE.
+
+### Caveats
+
+- Every number in §32.1 to §32.4 is at **initialisation**. §31 measured rho(n, q) rising from 0.727 near
+  initialisation to 0.999 at 60 updates, so the trained outcome is not implied by the prior. The arms are the
+  test.
+- The capacity control's targets are near-linear functions of the inputs, which is a far easier ask than the
+  routing problem. It bounds capability from below; it says nothing about what a weak gradient will find.
+- The trunk spectra of §32.2 are measured at one seed. The eight-seed sweep of §32.6 corroborates the ordering
+  indirectly but does not re-measure rank per seed.
+- Eight seeds is enough to separate the control from the split and wide arms (0.466 against 0.086 to 0.105) and
+  not enough to separate those two from each other.
+- The trunk spectrum is measured on a 4,027-reach stride sample, not all 346,321 reaches.
+
+
+## 33. Making `p_spatial` learnable is worth about +0.008 NSE (one seed, one arm)
+
+The first of the four head-topology arms finished before the chain was stopped, and it carries a result that
+is not about head topology at all.
+
+`head_shared_linear` is the **matched control**: the current architecture, one shared trunk, Linear read-out,
+everything taken from the 500-update `nse-batch` baseline `2026-09-10T21-21-48Z-conus-train-and-test` except
+that it learns `n` + `p_spatial` + `q_spatial` where the baseline learned `n` + `q_spatial` and pinned
+`p_spatial` at 21.
+
+| | NSE | KGE |
+|---|---|---|
+| baseline, `p` fixed at 21 | 0.7376 | 0.7600 |
+| **`head_shared_linear`, `p` learnable** | **0.7458** | **0.7619** |
+| difference | **+0.0082** | +0.0019 |
+
+Same 2,365 gauges, same eval window, same optimizer budget, same seed, same everything else — the arm config is
+that run's own `config.yaml` with only the `kan_head` block changed.
+
+**The predicted mechanism is REFUTED — see §33.1.** §32.5 argued that with `p` constant the downstream width
+exponent is capped at `q·f`, and that `p` is the only parameter able to supply the rest through how it scales
+with river size. The skill gain is real, but it did not come from that: `p` scales *negatively* with discharge
+and the downstream geometry got worse, not better.
+
+### What this is not, yet
+
+- **One seed.** NdArray is deterministic, so re-running reproduces the number exactly and tells us nothing.
+  There is no spread estimate for this configuration. +0.008 is seven times smaller than the +0.059 the
+  optimizer-budget fix delivered (§27), and that one moved 70.7 % of gauges.
+- ~~**Not run on a plain-master binary.**~~ **RESOLVED 2026-09-12.** A binary built from `3412a78` (plain
+  master) and one built from this branch — carrying both the `kan_head` restructure and the stage-roughness
+  code — produce **identical per-micro-batch losses** on this exact config, to all six printed decimals:
+
+  ```
+    micro 1/4  loss=0.141474  n=4980  median_n=0.13343      master 3412a78
+    micro 1/4  loss=0.141474  n=4980  median_n=0.13343      this branch
+    micro 2/4  loss=0.153518  n=5312  median_n=0.13331      both
+    micro 3/4  loss=0.092350  n=5312  median_n=0.13324      both
+  ```
+
+  The full comparison runs **100 mini-batches over 50 epochs and the two logs are identical line for
+  line, all 500 lines**, so the equivalence is not just at initialisation: it survives fifty epochs of
+  accumulated drift, where any real numerical difference would have amplified. Both sets of changes are
+  inert at their defaults, and the +0.008 is attributable to `p_spatial` becoming learnable rather than
+  to any code change. Reproduce with
+  `experiments/head_arch/` — the check is a `run --workflow train --max-mini-batches 2` on each binary with
+  the same config (note `--max-mini-batches` caps mini-batches PER EPOCH, not in total).
+- **The mechanism was measured and is refuted.** See §33.1.
+
+### Also measured: the celerity convention is approximate
+
+Building the stage-roughness gates surfaced a property of the existing solver worth recording, since it is
+pre-existing and easy to rediscover as a bug. `beta = 5/3 − (4/3)·A·√(1+z²)/(T·P)` is derived for a trapezoid
+of FIXED shape being filled, i.e. `dA/dd = T` and `dP/dd = 2√(1+z²)`. This geometry reshapes as it fills:
+`bw = tw·(1−q)` and `z = (p·q/2)·d^(q−1)` both move with depth, so the true `dA/dd` is `T·(2−q)(q+1)/2`.
+
+Measured gap between `v·beta` and the true `dQ/dA`:
+
+| q | 0.084 | 0.30 | 0.65 | 1.00 |
+|---|---|---|---|---|
+| relative error | 0.0–0.8 % | 0.8–1.0 % | **2.1 %** | 0.0 % |
+
+It vanishes at `q = 0` and `q = 1` (where `(2−q)(q+1)/2 = 1`) and peaks in between. At the trained
+`q ≈ 0.084` it is under 1 %, so it is not a live problem for current results, but it scales with `q` and would
+matter if `q` were moved toward the Leopold & Maddock band. Inherited from DDR; changing it would move
+invariant 1, so it is documented rather than fixed. Test:
+`tests/stage_roughness.rs::documents_the_preexisting_beta_approximation`.
+
+### 33.1 Skill went up and the channel geometry went down
+
+`experiments/head_arch/downstream_geometry.py` fits the downstream exponents the way
+`channel_geometry.md` defines them, at a common baseflow specific discharge across all 346,321 reaches. The
+model reaches Leopold & Maddock's `b ≈ 0.50` through
+
+```
+  b = beta + q · f          beta = dlog(p) / dlog(Q)
+```
+
+so with `p` pinned, `beta = 0` and `b` cannot exceed `q·f`. That cap was the whole argument for freeing `p`.
+
+| model | median q | median p | beta | q·f | **b** | f |
+|---|---|---|---|---|---|---|
+| `p` fixed at 21 (`2026-09-10T21-21-48Z`) | 0.0843 | 21.00 | 0.000 | 0.046 | **0.099** | 0.550 |
+| `p` learnable (`2026-09-11T23-24-04Z`) | 0.2951 | 5.85 | **−0.144** | 0.163 | **0.004** | 0.551 |
+| Leopold & Maddock | — | — | — | — | **0.50** | 0.40 |
+
+`q` more than tripled, which lifted `q·f` from 0.046 to 0.163 exactly as intended. But **`p` shrinks as rivers
+grow** (`beta = −0.144`), which cancels that and more. The net downstream width exponent fell from 0.099 to
+**0.004**: channel width is now essentially constant from headwater to main stem, where reality grows it as
+`Q^0.5`.
+
+**So freeing `p` bought +0.008 NSE and made the channel geometry worse.** The two moved in opposite directions.
+
+### 33.2 What the gain actually came from
+
+Measuring the trained trunk for this model (`--checkpoint` mode, same method as §32.2):
+
+| | trunk eff. rank | PC1 share | rho(n, q) | affine R² |
+|---|---|---|---|---|
+| two parameters (`n`, `q`) | **1.38** | 0.846 | 0.997 | **0.9924** |
+| three parameters (`n`, `p`, `q`) | **1.64** | 0.768 | 0.681 | **0.4580** |
+
+Adding a third output **partly breaks the rank-1 collapse**. The trunk carries a little more (1.38 → 1.64) and,
+far more visibly, the outputs stop being the same field: the share of `q`'s pre-activation explained by `n`'s
+falls from 99.2 % to 45.8 %. The residual is not noise either — it correlates +0.601 with `meanslope`.
+
+The fields also separate onto different attributes for the first time. `q` is now slope-driven (rho = +0.665
+with `meanslope`, against +0.325 with elevation), while `n` stays soil- and size-driven (+0.624 sand, −0.494
+`log10_uparea`). In the two-parameter model every field had the same correlation profile to within a few
+hundredths (§32's table).
+
+So the honest account of the +0.008 is: **not the geometry mechanism, but the head escaping some of its own
+collapse**, which is a different and more interesting reason than the one predicted.
+
+### 33.3 Why this matters more than the skill number
+
+This is selective equifinality caught in the act. Given freedom, the model used `p` for whatever helped the
+daily hydrograph and spent none of it on making channels physically sensible, because the objective cannot see
+channel width at all (§30: the width exponent lives in the scale channel, where flashiness is null at −0.045).
+A model that fits better and describes the river worse is exactly what the paper claims a distributed
+differentiable model does when its parameters are unidentifiable.
+
+It also means **`b` should be reported alongside NSE for every future arm**. Skill alone would have recorded
+this run as a straightforward improvement.
+
+## 34. The matched control: the +0.000 displacement was the budget, not the loss
+
+PR #42 reported that the derivative-loss model's 400-gauge stratified census gave a **median signed roughness
+displacement of +0.000**, gauges sitting exactly at their own optimum, and said plainly that without a matched
+control the number could not be attributed to the loss rather than to the optimizer budget. Both models had 500
+updates; only one had the time-derivative term. The control has now finished: the same 400 gauges stratified by
+basin size, the same objective, window and Newton search, run against the `nse-batch` model.
+
+Well-fit gauges (`nse0 > 0.3`, finite optimum), 400 per arm:
+
+| arm | n | median a* | median \|a*\| | \|a*\| < 0.10 | \|a*\| < 0.25 |
+|---|---|---|---|---|---|
+| `nse-batch` (control) | 358 | **−0.001** | 0.383 | 17.0 % | 33.5 % |
+| `nse-deriv` | 359 | **+0.000** | 0.376 | **24.8 %** | 37.0 % |
+
+**The headline number is not the loss.** The control lands at −0.001, indistinguishable from the derivative
+model's +0.000. Sitting at the median optimum is a property of running 500 optimizer updates, which is §27's
+result, not of the derivative term. Any reading of PR #42 that credits the loss for it should be corrected.
+
+**But the derivative term does help, modestly and significantly.** Paired on the 357 gauges both arms resolved:
+
+| | median a* | median \|a*\| |
+|---|---|---|
+| `nse-batch` | −0.001 | 0.385 |
+| `nse-deriv` | +0.000 | **0.366** |
+
+- median change in \|a*\|: **−0.058**
+- the derivative model is closer to its own optimum at **57.7 %** of gauges
+- Wilcoxon on the paired \|a*\|: **p = 0.0038**
+
+So the term tightens identifiability rather than relocating the optimum, which is exactly what §28's curvature
+probe predicted: it sharpens the valley (3.04x deeper, 92.8 % of gauges) without moving where the valley sits
+(sign agreement 88.7 %). The census now shows that sharpening translating into gauges actually sitting nearer
+their optima, with the share within 0.10 log units rising from 17.0 % to 24.8 %.
+
+### What this settles and what it does not
+
+Settled: the derivative term is a real if modest improvement in how well a gauge determines its own roughness,
+it is statistically significant on a paired test, and it is not responsible for the +0.000 median that PR #42
+led with.
+
+Not settled: whether that improvement is worth its cost. §20 bounds the entire roughness channel at about 0.09
+NSE, the derivative model scored a null on skill (+0.0007 NSE, +0.0012 KGE, journal entry for
+`2026-09-11T06-38-49Z`), and §29 showed it drove `q` to its bounds at 64 % of reaches. A better-identified
+roughness that buys no skill and wrecks the width exponent is not obviously a good trade. The recommendation in
+PR #42 stands: do not make `nse-batch-deriv` the default.
+
+## 35. Stage-dependent roughness on CONUS: the single-basin screen did not generalise
+
+`n(d) = n_0·(d/d_ref)^(−gamma)` (design doc `2026-09-12-stage-dependent-roughness-design.md`, Phase 1:
+`gamma` is a fixed global value, not a KAN output). Juniata screened it at 20 s per arm and gave a smooth
+single-peaked response, +0.091 NSE at `gamma = 0.35` against a control that reproduced the documented
+0.7903 / 0.8810 exactly. The matched CONUS pair, identical in every other respect and both on the same binary:
+
+| | `gamma = 0` | `gamma = 0.35` | change |
+|---|---|---|---|
+| **median NSE** | **0.7458** | **0.7362** | **−0.0096** |
+| median KGE | 0.7619 | 0.7588 | −0.0031 |
+| downstream `b` (L&M 0.50) | 0.004 | **0.098** | **+0.094** |
+| downstream `f` (L&M 0.40) | 0.551 | **0.484** | −0.067, toward L&M |
+| median `q` | 0.295 | 0.408 | +0.113 |
+| `beta` = dlog p / dlog Q | −0.144 | −0.082 | +0.062, less wrong |
+| trunk effective rank | 1.64 | **1.36** | −0.28 |
+| affine R² (`n`, `q`) | 0.458 | **0.976** | +0.518 |
+| `n(d)` breathing, per reach (median) | 1.000x | **1.910x** | — |
+
+**Juniata was misleading, by a lot and with the wrong sign.** +0.091 on one gauge became −0.0096 on 2,365.
+The Juniata sample is the documented fast end-to-end check and it is genuinely useful for mechanics, but it
+does not predict CONUS for this parameter. `gamma = 0.35` was chosen from a smooth interior optimum on a
+single basin, which looked like exactly the kind of evidence that should generalise, and did not.
+
+This was foreseeable and was partly foreseen. §2 of the design doc and the commit that recorded the Juniata
+sweep both flagged that the optimum sat at 0.35 against a literature-motivated 0.183, and that at the trained
+`q ≈ 0.084` the model already had an at-a-station velocity exponent of 0.381 against an observed 0.34 — so
+raising `gamma` was moving the static exponents *away* from observation while improving single-basin skill.
+The CONUS result is what that warning looks like when it comes true.
+
+The roughness really does breathe: over water year 1996 the typical live CONUS reach swings its Manning's
+`n` by **1.91x** between its driest and wettest day (p90 3.26x), against a network-median swing of only 1.29x
+— the spatial average is small because reaches peak on different days, so the per-reach number is the one to
+quote. That measurement requires excluding **188,646 reaches (54.5 %)** that carry no Q' prediction or sit at
+physically meaningless flows; they plot as flat lines and bias the statistic toward 1. See
+`.claude/skills/ddrs-eval-plots/references/stage_roughness.md`.
+
+### 35.1 Skill and physical plausibility are anti-correlated, in both directions
+
+Put §33.1 and this section side by side. Both are matched single-variable changes off the same baseline:
+
+| change | Δ median NSE | Δ downstream `b` |
+|---|---|---|
+| free `p_spatial` (§33.1) | **+0.0082** | **−0.095** |
+| add `gamma = 0.35` (§35) | **−0.0096** | **+0.094** |
+
+The two are near-perfect mirror images: roughly **0.01 NSE traded against 0.095 in the width exponent**, in
+whichever direction the change happens to push. One change bought skill by making the channel less physical;
+the other bought physics by giving up skill; neither bought both.
+
+That is a stronger statement than §30's "the objective cannot see channel width". It is not indifference. The
+daily-discharge objective **actively prefers** the physically wrong channel, and the preference is measurable
+and roughly symmetric. Any arm tuned on skill alone will drift away from defensible geometry, which is exactly
+why §33.3 now requires `b` next to every NSE.
+
+### 35.2 `gamma` deepened the output collapse
+
+Unexpected, and it cuts against the §32 story. Adding `gamma` moved the trained trunk from rank 1.64 back down
+to 1.36, and the share of `q`'s pre-activation explained by `n`'s from 45.8 % up to 97.6 % — almost all the way
+back to the two-parameter model's 99.2 %.
+
+A plausible reading, untested: stage-dependent roughness gives the *router* a flow-dependent travel time for
+free, so the network no longer needs spread in its parameter fields to produce the same routing behaviour, and
+collapses further. If that is right, it is a general caution: adding physical capacity to the solver can
+reduce what the learned parameters have to carry, and therefore make the parameters less identifiable rather
+than more. Worth testing directly before it is believed.
+
+### 35.3 Verdict
+
+**Do not adopt `gamma` at 0.35.** It costs about 0.01 NSE, and while it improves the downstream exponents
+substantially it also deepens the head collapse.
+
+What is not settled is whether some *smaller* `gamma` sits on the good side of the trade — `b` improved by
+0.094 for a skill cost of 0.0096, and a value near the literature-motivated 0.183 was never run on CONUS. The
+right next experiment is a CONUS sweep of `gamma ∈ {0.1, 0.183}`, scored on **both** NSE and `b`, not a
+re-tune on Juniata. Two arms, about 4.5 h.
+
+The implementation stands and is verified: `gamma = 0` is bit-identical to the historical solver
+(`tests/stage_roughness.rs`), the backward is gradient-exact at `gamma = 0.35` across all five parents
+(`tests/sp8_gradcheck.rs`), and the control arm here reproduced `head_shared_linear` to four decimals on a
+different binary.
+
+## 36. Learned stage-dependent roughness: code audit, prior art, and the CONUS read-out
+
+Reads the learned-`gamma` arm (`config/experiments/sr_gamma_learned.yaml`) against its matched control
+`head_shared_linear` (`2026-09-12T03-53-34Z`, 0.7458 / 0.7619) and the global-constant arm `gamma = 0.35`
+(`2026-09-12T06-06-19Z`, 0.7362 / 0.7588, §35). Before the read-out, the implementation was audited end to end,
+which is where the section starts, because the audit changed what got run.
+
+### 36.1 The equations, checked by hand
+
+The model family is `n(d) = n_0 · (d/d_ref)^(−gamma)` substituted into Manning for a section whose top width
+follows `w = p·d^q`. Three consequences, all verified against `src/geometry.rs`, `src/routing/mmc_op.rs` S2–S17
+and `src/experiment/adjoint/hydraulics.rs`:
+
+1. **Depth inversion stays closed form.** `Q = (1/n_0)·d^gamma·R^(2/3)·√S·A` with the power-law section gives
+   `d = (Q·n_0·(q+1)·d_ref^gamma / (p·√S))^(3/(5+3q+3·gamma))`. The code applies exactly this: the exponent
+   denominator gains `3·gamma` and the numerator gains `d_ref^gamma` (which is `1.0` for the learned field, since
+   config load requires no `stage_roughness` block there and `stage_roughness_params()` then returns
+   `d_ref = 1`).
+2. **Velocity carries the factor too.** `v = (1/n_0)·(d/d_ref)^gamma·R^(2/3)·√S`. Applying the stage law to
+   the depth inversion but not to the velocity would move the depth exponent while leaving the velocity exponent
+   at Manning's `2f/3`; `tests/stage_roughness.rs::exponents_match_theory_and_gamma_moves_velocity` pins the
+   realised exponents `f = 3/(5+3q+3·gamma)`, `b = q·f`, `m = 1 − b − f` at `gamma ∈ {0, 0.183, 0.4}`.
+3. **Celerity gains one term.** With `dA/dd = T` for any section, `c = dQ/dA = v·[beta_trap + gamma·A/(T·d)]`,
+   where `beta_trap = 5/3 − (4/3)·A·√(1+z²)/(T·P)` is the pre-existing fixed-shape trapezoid convention. The
+   increment is exact under that convention
+   (`tests/stage_roughness.rs::stage_roughness_celerity_increment_is_exact`, rel. error < 1e-4); the convention
+   itself is approximate by up to 2.25 % because the section reshapes as it fills, which is inherited from DDR,
+   measured, and deliberately unfixed (`documents_the_preexisting_beta_approximation`).
+
+`gamma = 0` takes the historical code path bit for bit (`compare_ddr_sandbox` still reports ABSOLUTE MATCH at
+1.5e-5 m³/s; `gamma_zero_is_bit_identical`).
+
+### 36.2 The gradient, checked by hand and by finite differences
+
+A learned `gamma` enters the forward in three places and the hand-written backward (invariant 4) has one term
+for each, all read from the same saved primitives:
+
+| forward site | term | backward |
+|---|---|---|
+| S5 exponent `3/(5+3q+3·gamma)` | `∂exp/∂gamma = −9/(5+3q+3·gamma)²`, the same expression as `∂exp/∂q` | B5 |
+| S15 velocity `(d/d_ref)^gamma` | `∂v/∂gamma = v·ln(d/d_ref)`; also a new explicit `∂v/∂d = gamma·v/d` | B15 |
+| S17 celerity `+gamma·A/(T·d)` | `∂c/∂gamma = v·A/(T·d)`; also `∂/∂A, ∂/∂T, ∂/∂d` of the new term | B17 |
+
+The `d_ref^gamma` numerator factor contributes nothing because `d_ref = 1` whenever `gamma` is learned. The two
+new depth paths (B15, B17) join the depth accumulator before the `depth_lb` clamp mask, which is right because
+the clamped depth is a constant there. `tests/sp8_gradcheck.rs` compares all six parents against central finite
+differences with `gamma = 0.35` both as a global constant and as a learned per-reach tensor (19 tests, all pass).
+`gamma` is a real autograd parent through `TimestepGammaOp`, the six-parent sibling of `TimestepOp`; a tensor
+that is not a parent never receives a gradient, which is the trap the sibling exists to avoid.
+
+### 36.3 What the audit found: the eval path never saw the learned gamma
+
+`src/training/forward.rs` has three hand-written readers of the head's output map — `forward` (training),
+`forward_eval_core` (eval, behind `forward_eval`), and `probe_forward` — and only the first had been taught about
+`gamma`. The other two built `SpatialParameters { gamma: None }`, so the solver fell back to the config scalar,
+which is 0 for a learned-gamma run. **The first learned-gamma CONUS arm (`2026-09-12T13-38-27Z`) therefore
+trained the right model and was about to score a different one**, at `gamma = 0`, with no error and plausible
+numbers. It was stopped at eval chunk 80/366.
+
+The fix threads `gamma` through all three readers, makes the landscape objective refuse a learned-gamma arm
+instead of routing it at 0, exports the per-reach `gamma` field to `plot/kan_parameters.nc`, and adds
+`tests/gamma_eval_parity.rs`: one head routed through `forward`, `forward_eval` and `probe_forward` must give the
+same hydrograph. Before the fix it diverged by 2.1e-2 relative; after, they agree to f32 round-off, and a table
+over every optional head output (`p_spatial`, `x_storage`, `gamma`, the three leakance fields) now runs on every
+`cargo test`. The three readers stay separate on purpose (WET); the table is the price. Trap T14 in
+`ddrs-dev/references/traps.md`.
+
+The relaunch (`2026-09-12T16-30-14Z`, binary `0844cf8`) reproduces the killed arm's training bit for bit — its
+third accumulated batch loss, 0.294693, is identical — so nothing about the training result is in question;
+only the eval numbers below are new.
+
+The same pass found five test crates (`celerity_beta`, `cunge_x`, `negative_discharge_counter`,
+`positivity_clamp`, `cuda_backward_parity`) that no longer compiled against the 13-argument
+`timestep_forward`. "All 7 gate suites green" in the previous handoff was true of the suites it named and false
+of `cargo test`.
+
+### 36.4 Prior art and physical realism, for the reviewer
+
+Roughness that falls with stage is standard river hydraulics, not a modelling convenience:
+
+- **Semi-logarithmic resistance laws.** Keulegan-type relations give `1/√f ∝ log(R/k_s)`, so Manning's `n`
+  (which absorbs `R^(1/6)/√f`) falls as relative submergence `R/k_s` rises. Limerinos (1970) fitted exactly this
+  to natural channels: `n = 0.0926·R^(1/6) / (1.16 + 2.0·log10(R/d_84))`.
+- **Power laws in depth.** Jarrett (1984), for high-gradient streams, `n = 0.39·S^0.38·R^(−0.16)`: a stage
+  exponent of −0.16 on hydraulic radius, which is the same form as this model with `gamma ≈ 0.16` and sits next
+  to the 0.183 the at-a-station exponents imply (§2 of the design doc). Ferguson's (2007) variable-power equation
+  reproduces the same decline across the shallow-to-deep transition; Bjerklie et al. (2005) compare these forms
+  on natural rivers and find the depth dependence necessary.
+- **Hydraulic geometry.** Leopold & Maddock's at-a-station velocity exponent (`m ≈ 0.34`) exceeds the `2f/3`
+  that constant-`n` Manning allows; the gap is precisely a stage-dependent roughness, which is the argument the
+  design doc made from the exponents alone.
+
+So the functional form has a literature and a physical mechanism (drowning of the bed material). What a reviewer
+will push on, and what the numbers below have to answer:
+
+1. **Monotone only in-bank.** Every relation above is for in-channel flow. Overbank flow raises composite
+   roughness sharply (which is why operational routing such as the National Water Model carries a separate,
+   larger compound-channel `n`). A single decreasing power law is wrong above bankfull; on daily CONUS routing
+   the exposure is the largest floods at the largest rivers, exactly where §35's improvement in the width
+   exponent came from. This is a modelling limitation to state, not hide.
+2. **`n_0` is not Manning's `n`.** It is roughness at `d_ref = 1 m`. Published `n` maps from `gamma = 0` runs
+   are not comparable; the parameter dump names the variable `gamma` and this document names the change.
+3. **Identifiability.** A gauge observes a network sum (fact 5 in the `ddrs-dev` skill), and a per-reach
+   `gamma` adds one more field with only that supervision. The registered prediction in the config banner —
+   `rho(n, gamma) > 0.9`, `gamma` as another relabelled copy of `n` — is the thing §36.5 measures, and a
+   "yes" would argue for `gamma` as a physical constant, not a learned field.
+4. **The celerity convention** is approximate at the 1–2 % level (36.1). `K = L/c` and `c ∝ 1/n`, so the
+   learned roughness absorbs the smooth part; it does not affect the comparison between arms, which share it.
+5. **It deviates from DDR**, so the KAN-head parity fixtures do not cover it; the manifest's config snapshot
+   records the deviation.
+
+### 36.5 Read-out: the registered prediction failed, and gamma bought nothing
+
+Run `2026-09-12T16-30-14Z-train-and-test`, binary `0844cf8`, 50 epochs / 500 updates, 2,365 gauges, CPU.
+
+| | control `gamma = 0` | constant `gamma = 0.35` | **learned `gamma`** |
+|---|---|---|---|
+| median NSE | 0.7458 | 0.7362 | **0.7420** (−0.0038) |
+| median KGE | 0.7619 | 0.7588 | **0.7624** (+0.0005) |
+| downstream `b` (L&M 0.50) | 0.004 | 0.098 | **−0.017** |
+| downstream `f` (L&M 0.40) | 0.551 | 0.484 | 0.550 |
+| `beta` = dlog p / dlog Q | −0.144 | −0.082 | −0.157 |
+| median `q` / `p` | 0.295 / 5.85 | 0.408 / 9.99 | 0.261 / 8.22 |
+| trunk effective rank (dims for 90 %) | 1.64 | 1.36 | **1.96** (3) |
+| affine R² (`n`, `q`) | 0.458 | 0.976 | 0.704 |
+| rho(`n`, `gamma`) | — | — | **+0.30** |
+
+**The learned field.** `gamma` is median 0.221, p10 0.159, p90 0.312, min 0.064, max 0.427, with 0.0 % of
+reaches at either bound of the [0, 0.5] box; the sigmoid initialises at 0.25, so the head moved it down and
+spread it. It is ordered by river size: median 0.236 below 100 km², 0.217 at 100–1,000, 0.179 at
+1,000–10,000, 0.149 above 10,000 km². That is the direction the resistance literature gives (relative
+submergence grows with size, so the stage dependence weakens), and the large-river value sits at Jarrett's
+0.16. Figure: `plots/gamma_readout.png`.
+
+**The registered prediction — rho(n, gamma) > 0.9, gamma as a relabelled `n` — did not hold.** rho(n, gamma)
+is +0.30. What `gamma` correlates with is the *width* channel: rho(p, gamma) = +0.89, rho(q, gamma) = +0.76
+(and rho(q, p) = +0.97). The trunk did not collapse further either; its effective rank rose from 1.64 to
+1.96 and it takes three directions to explain 90 % of the latent, against two for every earlier arm. §35.2's
+reading ("more physics in the solver ⇒ less for the parameters to carry ⇒ deeper collapse") was drawn from
+the constant arm and does not transfer to the learned one; treat it as refuted in that general form.
+
+**But it bought nothing.** Skill is inside noise of the control (−0.004 NSE, +0.0005 KGE) and better than the
+constant arm; the width exponent `b` is back at the control's value (−0.017 vs 0.004), so the geometric
+improvement that made the constant arm interesting (§35, `b` → 0.098) is gone once `gamma` is free to move.
+Compare the two `gamma` arms: the constant forced every reach to 0.35 and the head answered by raising `q`
+(0.295 → 0.408) and `p`; the learned arm settled `gamma` lower (0.22) and `q` *fell* (0.261), and the
+downstream exponent went with it. The daily objective, given a free `gamma`, uses it as a third direction
+that is correlated with the width parameters and orthogonal to skill.
+
+**Verdict on the handoff's question** (learned field or fixed constant): on skill grounds undecided (both
+within 0.01 of the control); on geometry grounds the constant is the only arm that moved `b`, and only at a
+skill cost. Neither arm is promotable as-is. What is now settled: (i) `gamma` is not `n` relabelled, so the
+§31/§32 "one latent direction" story does not automatically extend to a fourth output; (ii) the learned
+field is physically ordered, which is worth one figure in the paper as a positive example next to the
+`q`/`p` negative ones; (iii) the open experiment remains the small-constant sweep, `gamma ∈ {0.1, 0.183}`,
+scored on both NSE and `b`, which the learned arm's median (0.22) now brackets from above.
+
+**Breathing.** Over water year 2000, with 192,152 dead reaches (55.5 %) excluded and accumulated Q′
+as the discharge, the typical live reach swings its Manning's `n` by a median **1.46x** between its driest and
+wettest day (p90 2.24x), against 1.91x (p90 3.26x) on the constant `gamma = 0.35` arm over water year 1996;
+the learned field's lower median (0.22) and its fall with river size both damp the swing where the flow
+range is largest. Figures: `plots/n_of_d_wy2000_area.gif` (log drainage area vs n(d), one frame per day),
+`n_of_d_wy2000_3d.png` / `_3d_heatmap.png`, `n_of_d_wy2000_traces.png`.
+
+**Routing lag** (§36.6 method) on this arm: identical to the control below 10,000 km²; above it the router
+adds a median 2 days at 10,000–30,000 km² and 3 above (control 1 and 2; the gauges ask for 1 and 2), on 138
+gauges — a hint that the learned stage law slows the largest rivers slightly too much, consistent with
+`gamma` being lowest but not zero there. Correlation with observations is 0.886 routed vs 0.880 summed.
+
+### 36.6 Routing lag against the summed Q', on the two finished arms
+
+Asked directly: does routing add a delay, and is it the delay the gauges ask for?
+`experiments/stage_roughness/routing_lag.py` cross-correlates daily anomalies over the full 15-year eval window
+and takes the lag (whole days) that maximises the correlation, per gauge, for three pairs.
+
+| drainage area (km²) | n | summed Q' → routed | summed Q' → observed | routed → observed | r(summed, obs) | r(routed, obs) |
+|---|---|---|---|---|---|---|
+| < 300 | 491 | 0 [0, 0] | 0 [0, 1] | 0 [0, 1] | 0.865 | 0.856 |
+| 300–1,000 | 776 | 0 [0, 0] | 0 [0, 1] | 0 [0, 1] | 0.888 | 0.887 |
+| 1,000–3,000 | 617 | 0 [0, 1] | 0 [0, 2] | 0 [0, 1] | 0.882 | 0.896 |
+| 3,000–10,000 | 343 | 1 [0, 2] | 1 [0, 3] | 0 [0, 1] | 0.885 | 0.911 |
+| 10,000–30,000 | 126 | 1 [1, 3] | 1 [0, 4] | 0 [−1, 2] | 0.883 | 0.922 |
+| > 30,000 | 12 | 2 [1, 4] | 2 [1, 8] | 0 [0, 4] | 0.850 | 0.891 |
+
+(control arm `gamma = 0`; median [p10, p90]. The `gamma = 0.35` arm is the same to within one gauge class.)
+
+The router adds the lag the observations ask for — 0 days below ~1,500 km², one day through 30,000 km², two
+above — at 69.9 % of gauges, and the residual routed-to-observed lag is 0 at 75.1 %. The gain in correlation
+from routing grows with basin size (+0.03 to +0.04 above 3,000 km²) and is nil below 1,000 km², where the
+summed Q' already has the right timing at daily resolution. Two cautions: daily output cannot resolve a
+sub-day lag, so most of CONUS reads as 0 by construction; and the examples
+(`plots/routing_lag_examples_wy2000.png`) show that for basins under a few thousand km² the routed and summed
+series are nearly on top of each other — routing's visible work there is peak attenuation, not delay.
+
+### 36.7 The small-constant sweep: a monotone trade, no interior optimum
+
+Two more constant arms, `gamma = 0.1` (`2026-09-12T20-38-08Z`) and `gamma = 0.183`
+(`2026-09-12T20-36-00Z`), each a one-line change from the `0.35` config, run in parallel on CPU from binary
+`7d3bd49`. With the control and the learned arm that is five points on one axis:
+
+| gamma | run | NSE | KGE | `b` (L&M 0.50) | `f` (0.40) | median `q` | negative solves | per-gauge dNSE, % up |
+|---|---|---|---|---|---|---|---|---|
+| 0 (control) | `03-53-34Z` | 0.7458 | 0.7619 | 0.004 | 0.551 | 0.295 | 0.0137 % | — |
+| 0.1 | `20-38-08Z` | 0.7456 | 0.7620 | −0.017 | 0.543 | 0.289 | 0.0211 % | −0.0001, 48 % |
+| 0.183 | `20-36-00Z` | 0.7416 | 0.7611 | 0.065 | 0.532 | 0.351 | 0.0295 % | −0.0005, 43 % |
+| 0.35 | `06-06-19Z` | 0.7362 | 0.7588 | 0.098 | 0.484 | 0.408 | 0.0381 % | −0.0015, 38 % |
+| learned (median 0.22) | `16-30-14Z` | 0.7420 | 0.7624 | −0.017 | 0.550 | 0.261 | 0.0309 % | −0.0006, 43 % |
+
+Three readings.
+
+1. **The trade is monotone and roughly linear.** Skill falls and the width exponent rises together as the
+   constant grows: about 0.03 of `b` per 0.01 of NSE across 0.183 and 0.35. There is no interior value that
+   keeps the geometry and the skill, which answers §35.3's open question in the negative. At 0.1 the term is
+   inert on every axis, including geometry.
+2. **The head compensates the same way at every constant.** Median `q` rises with gamma (0.29, 0.35, 0.41)
+   and the peak bias grows slightly more negative; the roughness law makes floods faster and sharper in
+   isolation, and the head answers by widening the channel and damping them back. `b` improves as a side
+   effect of that compensation, not because the objective asked for geometry.
+3. **The learned field is the 0.183 arm's skill with the control's geometry.** Same NSE to within 0.001,
+   `b` back at zero, `q` at its lowest. Given gamma as a free direction the head lowers `q` and lets gamma
+   carry the stage dependence, which is the degeneracy argued in §36.5.
+
+Negative pre-clamp solves rise with gamma, from 0.014 % to 0.038 % of reach-timesteps: still one solve in
+several thousand, floored to 1e-4 m³/s, and every micro-batch has a few. It is the Muskingum coefficient
+window (`.claude/REACH-SUBDIVISION.md`), not an instability, but it is a real cost of the term and the
+stage law roughly doubles it.
+
+**Verdict on the constant-versus-learned question.** Neither is promotable on skill. If the paper wants
+the geometry argument, the constant is the only form that delivers it, at a known price; if it wants a
+learned physical field as a positive example next to the `q`/`p` negatives, the learned gamma is that,
+ordered by river size and uncorrelated with `n`, and it costs nothing. The experiment that would separate
+"gamma is degenerate with q" from "gamma is unidentifiable" is to learn gamma with `q` held fixed; it has
+not been run.
+
+## 37. The head that learns only n_0 and gamma: with the channel fixed, gamma is n_0 relabelled
+
+The decision after §36.7 was to make n_0 and gamma the only KAN outputs, with the channel shape prescribed
+(p = 21, the DDR default coefficient; q = 0.65, the Leopold & Maddock at-a-station b/f). Two reasons: it removes
+the width channel that a free gamma had been riding, so identifiability can be read without the degeneracy; and
+a two-output head is what the landscape and adjoint instruments can probe directly. Config
+`config/experiments/sr_n0_gamma.yaml`, matched control `sr_n0_only.yaml` (n_0 alone, same fixed channel).
+Both 500 updates, seed 42, 2,365 gauges, CPU, binary `becc4b4`.
+
+### 37.1 Skill
+
+| arm | run | NSE / KGE | per-gauge dNSE vs its control | b (by construction) | negative solves |
+|---|---|---|---|---|---|
+| free channel control (§33) | `03-53-34Z` | 0.7458 / 0.7619 | | 0.004 | 0.014 % |
+| n_0 only, channel fixed | `23-39-06Z` | 0.7408 / 0.7612 | −0.0002, 46 % up (vs free) | 0.284 | 0.020 % |
+| **n_0 + gamma, channel fixed** | `23-39-03Z` | 0.7391 / 0.7592 | −0.0004, 42 % up (vs n_0 only) | 0.285 | 0.031 % |
+
+Prescribing the channel costs about 0.004 NSE, which the head mostly absorbs through n_0 (median 0.064
+against 0.10 with the channel free: the prescribed channel is wider and shallower, so the head smooths it).
+Adding gamma on top costs nothing and buys nothing: 48 gauges move by more than 0.05 NSE, 19 of them up.
+The downstream width exponent is 0.284 in both by construction (q·f with p constant), incidentally the
+closest any arm has come to Leopold & Maddock's 0.50, and it came from prescribing, not learning.
+
+### 37.2 The learned gamma collapsed onto n_0
+
+| | free channel (§36.5) | **channel fixed** |
+|---|---|---|
+| gamma median (p10, p90) | 0.221 (0.159, 0.312) | **0.067 (0.028, 0.189)** |
+| rho(n_0, gamma) | +0.30 | **+0.90** |
+| gamma by size, <100 km² to >10,000 km² | 0.236 to 0.149 | 0.084 to 0.053 |
+| per-reach breathing, water year 2000 | 1.46x | **1.09x** (n_low/n_high median 1.05) |
+
+The registered prediction of §36 (rho above 0.9) that the free-channel arm refuted holds here. The gamma
+against n_0 panel of `plots/gamma_readout.png` is a single tight monotone curve: gamma is a function of n_0.
+The size ordering and the physically plausible median of the free-channel arm are therefore not properties
+of the stage law the gauges learned; they were gamma tracking p and q (rho 0.89 and 0.76 there). Take the
+width parameters away and the head has one roughness direction, which it emits twice.
+
+What the gauges do constrain is the composite: roughness at the depths the reach actually runs. n_0 is
+roughness at 1 m and most reaches run shallower, so n_0 and gamma trade along the curve that keeps
+n(d) fixed at the typical depth. That is the same non-identifiability as §5 fact 5 in the skill (a gauge
+sees a network sum) one level down: even at one reach, daily discharge sees n at one effective depth,
+not the slope of n against depth.
+
+### 37.3 What this settles and what the landscape adds
+
+- The learned stage exponent is not identifiable from daily gauges in this model: unchanged skill, and a
+  field that is a relabelling of n_0 once the channel cannot absorb it. The constant-gamma sweep (§36.7)
+  remains the only way the term moved anything, and it traded geometry for skill linearly.
+- The "physically ordered gamma" of §36.5 is withdrawn as evidence of identifiability. It is on the
+  do-not-use list with that note.
+- Open: the per-gauge (n_0, gamma) landscape (`experiments/landscape-n0-gamma`, §37.4 when it finishes)
+  gives the curvature along gamma at fixed n_0 and the orientation of the sloppy valley. The prediction
+  from the collapse is a valley along the n(d)-preserving curve, i.e. H_gamma,gamma small against H_nn
+  and the stiff eigenvector nearly along n_0.
+
+### 37.5 Do dams explain where roughness is high? A small, real, Midwest-concentrated signal
+
+User hypothesis (2026-09-13, from the low/high-flow roughness maps of the n_0 + gamma arm): the slow, rough
+stretches of the Mississippi basin in the Midwest coincide with dams, since an impounded reach runs deep and slow
+at every discharge and a model with a prescribed channel can only say so through n_0.
+
+Test (`experiments/stage_roughness/dam_roughness.py`): the 2,178 MERIT reaches hosting a HydroLAKES/GRanD
+reservoir outlet (DDR's `merit_reservoir_params.csv`; 2,144 reservoirs, 34 dam-controlled natural lakes), plus
+their neighbours one to three hops upstream (impounded) and downstream (regulated), against every other live
+reach in the same 0.25-dex drainage-area bin. Residual = n_0 minus the bin median of unaffected reaches.
+
+| n_0 residual, median | CONUS, n_0 + gamma arm | Midwest box (98–84 W, 36–47 N) |
+|---|---|---|
+| dam reach | +0.0025 (n = 2,178, p = 6e-6) | −0.005 (n = 338) |
+| 1–3 hops upstream | +0.0013 to +0.0006 | −0.009 to −0.010 |
+| 1–3 hops downstream | +0.0002 to +0.0013 (n.s.) | −0.002 to +0.004 |
+| all other reaches | 0 by construction | **−0.014** (n = 27,905) |
+
+Reading. CONUS-wide the dam effect is a few per cent of n_0 (0.057 against 0.058 at the median; the p-value is
+small because n is large). Inside the Midwest box the picture the user saw is real but inverted from the naive
+reading: Midwest reaches as a population are *smoother* than same-size reaches elsewhere (residual −0.014 on a
+base of 0.044), and it is the dam reaches and their regulated downstream neighbours that stand *out* of that
+background by +0.009 to +0.018, i.e. 20–40 % rougher than the surrounding unaffected reaches. The same ordering
+appears in the free-channel arm (`16-30-14Z`: Midwest dam reaches −0.010 against other −0.015). So dams do mark
+the rougher reaches within the Midwest, but they do not explain the region's roughness level, which is low, and the
+CONUS-wide association is weak.
+
+Caveats. The reservoir set is 0.6 % of reaches, and a reservoir's attenuation has to be absorbed over many reaches
+in a model with no storage term, so three hops is a short reach of the effect; the residual is against a size bin,
+not a regional baseline, which is why the Midwest column is negative for everyone; and n_0 in this arm is
+roughness at 1 m with a prescribed channel, so a deep impounded reach is rough by construction only if the model
+routes it at the wrong depth. Figure `plots/dam_roughness.png` in both run directories (n_0 against size by group,
+residual box plots, a map of dam reaches coloured by residual with the Midwest box drawn).
+
+### 37.4 The (n_0, gamma) landscape: a valley that runs straight along gamma
+
+`experiments/landscape-n0-gamma` on the finished checkpoint (`epoch_50_mb_9` of `23-39-03Z`), first use of
+`landscape.axes: [n, gamma, q_spatial]` (q fixed, so slot 2 is inert). 15 gauges spanning 5 to 213 reaches,
+one 5-year testing window (1995-10-01 to 2000-09-29), central-difference Hessian at h = 0.05, damped Newton
+(8 iterations, alpha capped at ±1.1 = a factor 3), 11×11 grids on the n-gamma and stiff-sloppy planes. Five
+shards, about 20 min per gauge (64 min for the 802-reach basin). One listed staid is not in the eval population,
+so 14 gauges. Pre-registered bars, as for q in §29: median
+|H_gg| / |H_nn| ≥ 0.25 and H_gg > 0 at ≥ 70 % of well-fit gauges.
+
+| gauge | reaches | NSE trained → optimum | alpha* (n_0, gamma) | H_nn at trained | H_gg at trained | ratio |
+|---|---|---|---|---|---|---|
+| 01047000 | 17 | 0.815 → 0.843 | −0.41, **−1.10** (bound) | 7.4e-1 | −4.1e-3 | 0.006 |
+| 02177000 | 8 | 0.846 → 0.857 | −0.64, **−1.10** | 9.0e-2 | −2.4e-3 | 0.026 |
+| 01055000 | 5 | 0.680 → 0.688 | −0.45, **−1.10** | 2.3e-1 | −5.5e-3 | 0.024 |
+| 03155000 | 77 | 0.861 → 0.902 | −0.43, +0.72 | 9.6e-1 | −8.3e-3 | 0.009 |
+| 11274500 | 7 | 0.849 → 0.866 | +0.61, −0.19 | 5.3e-2 | 4.7e-2 | 0.882 |
+| 01449000 | 31 | 0.694 → 0.745 | +0.74, −0.25 | −4.6e-2 | 2.4e-3 | 0.052 |
+| 05451500 | 89 | 0.824 → 0.836 | −0.66, **−1.10** | 2.8e-2 | −7.9e-4 | 0.029 |
+| 12451000 | 23 | 0.732 → 0.732 | +0.14, −0.02 | −2.5e-3 | 8.6e-4 | 0.340 |
+| 01563500 | 127 | 0.824 → 0.825 | −0.04, **−1.10** | 1.4e-1 | 7.7e-4 | 0.005 |
+| 06934000 | 163 | 0.876 → 0.894 | +0.15, −0.68 | 4.3e-1 | 2.7e-3 | 0.006 |
+| 01567000 | 213 | 0.867 → 0.867 | +0.00, +0.01 | 4.0e-1 | 2.3e-3 | 0.006 |
+| 07068000 | 113 | 0.772 → 0.772 | −0.00, −0.00 | 1.1e-1 | 2.6e-3 | 0.023 |
+| 14166000 | 181 | 0.864 → 0.866 | +0.10, −0.04 | 4.5e-2 | 6.0e-3 | 0.134 |
+| 13317000 | 802 | 0.953 → 0.955 | −0.62, **−1.10** | 3.3e-2 | −8.0e-4 | 0.024 |
+
+Summary over the 14: median |H_gg| / |H_nn| **0.024** at the trained point (0.028 at the optimum); H_gg > 0
+at 8 of 14 trained points and 13 of 14 optima; gamma driven to the alpha bound (a factor 3 smaller) at 6 of 14
+optima with essentially no change in loss at four of them; median NSE gain to the per-gauge optimum 0.010.
+Figure `n_gamma_planes.png` in the study directory: at every gauge but the two smallest basins the NSE contours
+on the n-gamma plane are vertical stripes, i.e. the loss is a function of n_0 alone across a factor of three in
+gamma either way.
+
+**Both bars fail.** The magnitude bar by a factor of ten (0.024 against 0.25; q managed 0.062), the sign bar at
+the trained point (57 %, against 70 %). The two exceptions to the stripe pattern, 11274500 (ratio 0.88) and
+12451000 (0.34), are the two basins where n_0's own curvature is smallest (5e-2 and −2.5e-3), so the ratio is
+large because the denominator is tiny, not because gamma is constrained; 12451000's whole plane spans 0.006 NSE.
+
+**What it means.** With the channel prescribed, the per-gauge loss has one stiff direction and it is n_0. gamma
+is flatter than q was in §29 by a factor of two to three, and the training result of §37.2 (gamma collapsed
+onto n_0 at rho 0.90) is the optimizer walking that valley: any gamma is as good as any other once n_0 has been
+set for the depth the reach usually runs at, so the head emits whatever the trunk's one direction gives it. This
+is the cleanest statement of the paper's thesis produced so far: the daily hydrograph identifies Manning's
+roughness at one effective depth per gauge and nothing about its dependence on stage, even when that
+dependence is the only physical degree of freedom left in the channel.
+
+Caveats: 14 gauges, one seed, one window; the trained point is not at the optimum in n_0 at most gauges (the
+500-update convergence issue of §21, visible as the black dot sitting off the stripe's centre), and gamma's
+multiplicative perturbation of a field whose median is 0.067 spans 0.02–0.2, inside the box but on the low
+side. A stratified-400 census with the same axes is the natural next run (about 6 h sharded).

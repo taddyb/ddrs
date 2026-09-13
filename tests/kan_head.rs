@@ -181,6 +181,7 @@ fn kan_head_to_muskingum_cunge_gradient_flow() {
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     };
 
     let mut mc = MuskingumCunge::<InnerBackend>::new(common::mock_config(), device.clone());

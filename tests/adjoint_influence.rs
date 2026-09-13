@@ -25,6 +25,7 @@ fn route(q: Tensor<TestBackend, 2>, device: &TestDevice) -> Tensor<TestBackend, 
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     };
     mc.setup_inputs(mock_routing_inputs(N, device), q, params, false, None);
     mc.forward() // (N, T)

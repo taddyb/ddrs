@@ -1,7 +1,10 @@
 //! Per-gauge objective in basin-uniform log-multiplier space.
 //!
-//! `α = (α_n, α_p, α_q)` scales the trained physical fields `n₀·e^{α_n}` etc.,
-//! clamped to the arm's parameter ranges and re-normalized for the engine.
+//! `α = (α_0, α_1, α_2)` scales the trained physical fields of the three AXIS
+//! parameters (`LandscapeSpec::axes`, default `(n, p_spatial, q_spatial)`;
+//! `gamma` may take a slot on an arm that learns it), `x₀·e^{α}`, clamped to
+//! the arm's parameter ranges and re-normalized for the engine. Parameters
+//! that are not axes are carried at their trained (or default) field.
 //! `L_g(α)` is the NSE-batch loss (training objective) over the configured
 //! windows; its gradient comes from autograd with `α` lifted as leaves.
 //! Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md §1–§2.
@@ -27,10 +30,13 @@ pub struct WindowData<I: Backend> {
     pub tensors: RoutingTensors<AD<I>>,
     /// Observed daily series over the window (rho_days), NaN = missing.
     pub obs: Vec<f32>,
-    /// Trained physical fields (inner backend, constant).
-    pub n0: Tensor<I, 1>,
-    pub p0: Tensor<I, 1>,
-    pub q0: Tensor<I, 1>,
+    /// Trained physical field of each axis SLOT, in `Objective::axes` order
+    /// (inner backend, constant).
+    pub x0: [Tensor<I, 1>; 3],
+    /// Trained physical fields of the parameters that are NOT axes, by name
+    /// (`n`, `p_spatial`, `q_spatial`, and `gamma` when the arm learns it).
+    /// `forward_loss` holds these constant.
+    pub carried: Vec<(String, Tensor<I, 1>)>,
     pub x_storage: Tensor<I, 1>,
     pub q_prime: Tensor<I, 2>,
     pub slope: Tensor<I, 1>,
@@ -44,13 +50,17 @@ pub struct Objective<'a, I: Backend> {
     pub windows: Vec<WindowData<I>>,
     pub sigma: f32,
     pub eps: f32,
+    /// Parameter name in each alpha slot (`LandscapeSpec::axes`).
+    pub axes: [String; 3],
     pub ranges: [[f32; 2]; 3],
     pub log_space: [bool; 3],
-    /// `active[k]` is true when component `k` of `(n, p_spatial, q_spatial)`
-    /// is in the head's `learnable_parameters` (a real model parameter);
-    /// false when it is fixed at `params.defaults` for this arm. See
-    /// `Objective::active`.
+    /// `active[k]` is true when the slot-`k` axis parameter is in the head's
+    /// `learnable_parameters` (a real model parameter); false when it is
+    /// fixed at `params.defaults` for this arm. See `Objective::active`.
     active: [bool; 3],
+    /// The arm learns `gamma` (it is a head output), so the engine must be
+    /// handed the field whether or not `gamma` is an axis.
+    learns_gamma: bool,
     /// Which per-window loss `forward_loss` builds: "nse-batch", "kge" or
     /// "nse-deriv". Validated against `landscape::VALID_OBJECTIVES` before
     /// this is built.
@@ -77,12 +87,38 @@ pub struct Eval {
     pub grad: Option<[f32; 3]>,
 }
 
-/// Per-reach `dL/d ln x` for `x` in `(n, p_spatial, q_spatial)`, length `n_reach` each.
+/// Per-reach `dL/d ln x` for each axis slot (`Objective::axes` order), length `n_reach` each.
 #[derive(Debug, Clone)]
 pub struct ReachGrad {
-    pub n: Vec<f32>,
-    pub p: Vec<f32>,
-    pub q: Vec<f32>,
+    pub slots: [Vec<f32>; 3],
+}
+
+/// Physical fields at some `alpha`, by name, for hydraulic checks.
+pub struct PhysFields<I: Backend> {
+    pub n: Tensor<I, 1>,
+    pub p: Tensor<I, 1>,
+    pub q: Tensor<I, 1>,
+    /// `Some` only when the arm learns `gamma`.
+    pub gamma: Option<Tensor<I, 1>>,
+}
+
+/// Every parameter the landscape can hold or perturb.
+pub const AXIS_PARAMS: [&str; 4] = ["n", "p_spatial", "q_spatial", "gamma"];
+
+/// `parameter_ranges` entry for an axis parameter.
+pub fn param_range(cfg: &crate::config::Config, name: &str) -> [f32; 2] {
+    let r = &cfg.params.parameter_ranges;
+    match name {
+        "n" => r.n,
+        "p_spatial" => r.p_spatial,
+        "q_spatial" => r.q_spatial,
+        "gamma" => r.gamma,
+        other => panic!("`{other}` is not a landscape axis parameter; valid: {AXIS_PARAMS:?}"),
+    }
+}
+
+fn param_log(cfg: &crate::config::Config, name: &str) -> bool {
+    cfg.params.log_space_parameters.iter().any(|s| s == name)
 }
 
 /// Returned by `Objective::build` when a gauge has zero valid (finite,
@@ -122,19 +158,20 @@ where
         window_days: usize,
         objective: &str,
         deriv_weight: f32,
+        axes: &[String; 3],
     ) -> Result<Self, BoxError> {
         let device = &ctx.device;
-        let ranges = [
-            ctx.cfg.params.parameter_ranges.n,
-            ctx.cfg.params.parameter_ranges.p_spatial,
-            ctx.cfg.params.parameter_ranges.q_spatial,
-        ];
+        for a in axes {
+            if !AXIS_PARAMS.contains(&a.as_str()) {
+                return Err(format!("unknown landscape axis `{a}`; valid axes are {AXIS_PARAMS:?}").into());
+            }
+        }
+        if axes[0] == axes[1] || axes[0] == axes[2] || axes[1] == axes[2] {
+            return Err(format!("landscape axes must be distinct, got {axes:?}").into());
+        }
+        let ranges: [[f32; 2]; 3] = std::array::from_fn(|k| param_range(&ctx.cfg, &axes[k]));
+        let log_space: [bool; 3] = std::array::from_fn(|k| param_log(&ctx.cfg, &axes[k]));
         let log = &ctx.cfg.params.log_space_parameters;
-        let log_space = [
-            log.iter().any(|s| s == "n"),
-            log.iter().any(|s| s == "p_spatial"),
-            log.iter().any(|s| s == "q_spatial"),
-        ];
         let sigma = ctx
             .dataset
             .gauge_obs_std(&[staid.clone()])
@@ -148,11 +185,15 @@ where
         // `InfluenceContext::open`'s learnable/fixed log line, so the two
         // never disagree.
         let section = ctx.cfg.kan_head.as_ref().ok_or("arm config has no kan_head section")?;
-        let active = [
-            section.learnable_parameters.iter().any(|s| s == "n"),
-            section.learnable_parameters.iter().any(|s| s == "p_spatial"),
-            section.learnable_parameters.iter().any(|s| s == "q_spatial"),
-        ];
+        let learns = |name: &str| section.learnable_parameters.iter().any(|s| s == name);
+        let learns_gamma = learns("gamma");
+        if axes.iter().any(|a| a == "gamma") && !learns_gamma {
+            return Err("landscape axis `gamma` needs an arm whose head learns gamma \
+                        (`gamma` in kan_head.learnable_parameters); a global \
+                        `params.stage_roughness.gamma` is a constant, not a field to perturb."
+                .into());
+        }
+        let active: [bool; 3] = std::array::from_fn(|k| learns(&axes[k]));
         // The routed daily series `forward_loss` compares `obs` against has
         // length `window_days - 2` regardless of `tau`: `n_hourly =
         // (window_days - 1) * 24` (`RhoWindow::n_hourly`,
@@ -190,9 +231,25 @@ where
                 let default = if head_out.is_some() { 0.0 } else { resolve_default(&ctx.cfg.params.defaults, name)? };
                 Ok(trained_field(head_out, range, log, default, n_active, device))
             };
-            let n0 = field("n", ranges[0], log_space[0])?;
-            let p0 = field("p_spatial", ranges[1], log_space[1])?;
-            let q0 = field("q_spatial", ranges[2], log_space[2])?;
+            let x0: [Tensor<I, 1>; 3] = [
+                field(&axes[0], ranges[0], log_space[0])?,
+                field(&axes[1], ranges[1], log_space[1])?,
+                field(&axes[2], ranges[2], log_space[2])?,
+            ];
+            // Everything that is not an axis rides along at its trained (or
+            // default) field: the three channel parameters always, gamma
+            // only when the arm learns it (otherwise the engine's scalar
+            // fallback is the right model, and `gamma` is not a head output).
+            let mut carried = Vec::new();
+            for name in AXIS_PARAMS {
+                if axes.iter().any(|a| a == name) {
+                    continue;
+                }
+                if name == "gamma" && !learns_gamma {
+                    continue;
+                }
+                carried.push((name.to_string(), field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?));
+            }
             let x_storage = match params_map.get("x_storage") {
                 Some(x) => denormalize(
                     x.clone().inner(),
@@ -209,33 +266,55 @@ where
             let slope = Tensor::<I, 1>::from_floats(tensors.adjacency.slope.as_slice(), device)
                 .clamp_min(ctx.cfg.params.attribute_minimums.slope);
             let length = Tensor::<I, 1>::from_floats(tensors.adjacency.length_m.as_slice(), device);
-            windows.push(WindowData { start_day: start, tensors, obs, n0, p0, q0, x_storage, q_prime, slope, length, gauge_row, comids });
+            windows.push(WindowData { start_day: start, tensors, obs, x0, carried, x_storage, q_prime, slope, length, gauge_row, comids });
         }
         if !any_valid_window {
             let start = ctx.axis.start + Duration::days(window_starts[0] as i64);
             let end = start + Duration::days(window_days.saturating_sub(1) as i64);
             return Err(Box::new(NoValidObservations { start, end }));
         }
-        Ok(Self { ctx, windows, sigma, eps, ranges, log_space, active, objective: objective.to_string(), deriv_weight })
+        Ok(Self { ctx, windows, sigma, eps, axes: axes.clone(), ranges, log_space, active, learns_gamma, objective: objective.to_string(), deriv_weight })
+    }
+
+    /// Trained physical field of parameter `name` (axis slot or carried);
+    /// `None` when the arm has no such field (`gamma` on an arm that does not
+    /// learn it).
+    pub fn trained_field(&self, w: &WindowData<I>, name: &str) -> Option<Tensor<I, 1>> {
+        if let Some(k) = self.axes.iter().position(|a| a == name) {
+            return Some(w.x0[k].clone());
+        }
+        w.carried.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
     }
 
     pub fn n_reach(&self) -> usize {
         self.windows[0].tensors.adjacency.n
     }
 
-    /// `active[k]` for `k` in `(n, p_spatial, q_spatial)`: true when the
-    /// parameter is in the head's `learnable_parameters` and so is a real
-    /// model parameter; false when it's fixed at `params.defaults` and must
-    /// not be treated as an optimization axis.
+    /// `active[k]` for slot `k` of `axes`: true when the parameter is in the
+    /// head's `learnable_parameters` and so is a real model parameter; false
+    /// when it's fixed at `params.defaults` and must not be treated as an
+    /// optimization axis.
     pub fn active(&self) -> [bool; 3] {
         self.active
     }
 
-    /// Physical fields at `α` (inner backend), for hydraulic checks.
-    pub fn fields_at(&self, w: &WindowData<I>, alpha: [f32; 3]) -> (Tensor<I, 1>, Tensor<I, 1>, Tensor<I, 1>) {
+    /// Physical fields at `α` (inner backend), by name, for hydraulic checks.
+    /// Axis parameters are scaled and clamped; carried ones are constant.
+    pub fn fields_at(&self, w: &WindowData<I>, alpha: [f32; 3]) -> PhysFields<I> {
         // NB: clamp the FIELD, not the scalar multiplier (precedence).
-        let f = |x0: &Tensor<I, 1>, a: f32, r: [f32; 2]| (x0.clone() * a.exp()).clamp(r[0], r[1]);
-        (f(&w.n0, alpha[0], self.ranges[0]), f(&w.p0, alpha[1], self.ranges[1]), f(&w.q0, alpha[2], self.ranges[2]))
+        let at = |name: &str| -> Option<Tensor<I, 1>> {
+            if let Some(k) = self.axes.iter().position(|a| a == name) {
+                let r = self.ranges[k];
+                return Some((w.x0[k].clone() * alpha[k].exp()).clamp(r[0], r[1]));
+            }
+            w.carried.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
+        };
+        PhysFields {
+            n: at("n").expect("n is always an axis or carried"),
+            p: at("p_spatial").expect("p_spatial is always an axis or carried"),
+            q: at("q_spatial").expect("q_spatial is always an axis or carried"),
+            gamma: at("gamma"),
+        }
     }
 
     /// Normalized (engine-space) field from a physical field with autograd.
@@ -270,8 +349,11 @@ where
         let mut dailies: Vec<Vec<f32>> = Vec::new();
         let mut clamped_max = 0.0f32;
         for w in &self.windows {
-            let mut norm = Vec::new();
-            for (k, x0) in [&w.n0, &w.p0, &w.q0].into_iter().enumerate() {
+            // Normalized (engine-space) field for every parameter: the alpha
+            // slots are scaled, clamped and re-normalized; carried ones are
+            // constant.
+            let mut norm: Vec<(String, Tensor<AD<I>, 1>)> = Vec::new();
+            for (k, x0) in w.x0.iter().enumerate() {
                 let scale = leaves[k].clone().exp() * ones.clone(); // [n]
                 let phys = Tensor::<AD<I>, 1>::from_inner(x0.clone()) * scale;
                 let [lo, hi] = self.ranges[k];
@@ -280,20 +362,26 @@ where
                 let cf = v.iter().filter(|x| **x <= lo || **x >= hi).count() as f32 / n as f32;
                 clamped_max = clamped_max.max(cf);
                 let phys = phys.clamp(lo, hi);
-                norm.push(Self::normalize_ad(phys, self.ranges[k], self.log_space[k]));
+                norm.push((self.axes[k].clone(), Self::normalize_ad(phys, self.ranges[k], self.log_space[k])));
             }
+            for (name, x0) in &w.carried {
+                let phys = Tensor::<AD<I>, 1>::from_inner(x0.clone());
+                norm.push((name.clone(), Self::normalize_ad(phys, param_range(&self.ctx.cfg, name), param_log(&self.ctx.cfg, name))));
+            }
+            let get = |name: &str| norm.iter().find(|(nm, _)| nm == name).map(|(_, t)| t.clone());
             let mut engine = MuskingumCunge::<I>::new(self.ctx.cfg.clone(), device.clone());
             engine.setup_inputs(
                 RoutingInputs { adjacency: w.tensors.adjacency.clone(), x_storage: Tensor::from_inner(w.x_storage.clone()) },
                 Tensor::<AD<I>, 2>::from_inner(w.q_prime.clone()),
                 SpatialParameters {
-                    n: norm[0].clone(),
-                    q_spatial: norm[2].clone(),
-                    p_spatial: Some(norm[1].clone()),
+                    n: get("n").expect("n field"),
+                    q_spatial: get("q_spatial").expect("q_spatial field"),
+                    p_spatial: Some(get("p_spatial").expect("p_spatial field")),
                     k_d: None,
                     d_gw: None,
                     leakance_factor: None,
                     impervious_mask: None,
+                    gamma: if self.learns_gamma { Some(get("gamma").expect("gamma field")) } else { None },
                 },
                 false,
                 None,
@@ -430,7 +518,7 @@ where
         dailies.into_iter().next().expect("at least one window")
     }
 
-    /// Per-reach `g_i = dL/d ln x_i` for `x` in `(n, p_spatial, q_spatial)` at
+    /// Per-reach `g_i = dL/d ln x_i` for each axis slot at
     /// `α`: same forward as `eval`, but each reach gets its own log-scale
     /// leaf (initialized to `α`, broadcast) instead of one shared scalar.
     /// Where the field is clamped at a range edge the local gradient is
@@ -446,7 +534,7 @@ where
         let extract = |l: &Tensor<AD<I>, 1>| -> Vec<f32> {
             l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()).unwrap_or_else(|| vec![0.0; n])
         };
-        ReachGrad { n: extract(&leaves[0]), p: extract(&leaves[1]), q: extract(&leaves[2]) }
+        ReachGrad { slots: [extract(&leaves[0]), extract(&leaves[1]), extract(&leaves[2])] }
     }
 
     /// Central-difference Hessian of `L_g` at `α` (symmetrized), step `h`.

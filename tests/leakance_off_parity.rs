@@ -68,6 +68,7 @@ fn losing_config_params(
         d_gw: Some(Tensor::<Autodiff<InnerBackend>, 1>::zeros([n], device)),
         leakance_factor: Some(Tensor::<Autodiff<InnerBackend>, 1>::ones([n], device) * 1.0),
         impervious_mask: None,
+        gamma: None,
     }
 }
 

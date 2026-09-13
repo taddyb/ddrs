@@ -559,6 +559,7 @@ fn run_forward_loss(
         slope_t,
         xst_t,
         false,
+        None, // gamma: no stage roughness in this fixture
     );
 
     // Conditioned scalar loss (see hazard 2 in the section header).

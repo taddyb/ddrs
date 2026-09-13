@@ -40,6 +40,14 @@ hydraulic-geometry exponents vs Leopold & Maddock** — the only internal test o
 whether `p_spatial`/`q_spatial` are physically sensible, since the attributes
 carry no width or depth to validate against · plausibility bands
 
+**`references/stage_roughness.md`**
+`n(d) = n_0·(d/d_ref)^(−gamma)` animated over a water year, as a GIF or as line
+traces · where the per-reach daily depth comes from (recomputed from the closed
+form; `--discharge accumulated` vs `local`, and why neither is the routed Q) ·
+the Juniata verification numbers and **the shape check that says the discharge
+join is right** (n(d) is the hydrograph upside down) · `n_0` is roughness at
+`d_ref`, NOT Manning's n, so it is not comparable to a `gamma = 0` run's `n`
+
 **`references/parity.md`** (235 lines)
 Init-time parity (when to use, inputs, load → histograms → pass/fail, KS criterion) ·
 Trained parity (inputs, load → per-distribution stats → histograms → per-reach
@@ -127,6 +135,7 @@ boundary.
 | Manning's n, p_spatial, q_spatial, slope, map, basin, spatial pattern | **parameter_map** | `references/parameter_map.md` |
 | "have the parameters converged", epoch drift, movement across epochs | **parameter convergence** | `references/parameter_map.md` §Convergence |
 | width, depth, channel geometry, w:d ratio, "are the geometry parameters right", hydraulic geometry, Leopold & Maddock | **channel_geometry** | `references/channel_geometry.md` |
+| stage-dependent roughness, `n(d)`, how roughness changes with flow, animation, GIF over a water year | **stage_roughness** | `references/stage_roughness.md` |
 | DDR-vs-ddrs parameter distributions, at init or trained | **parity** | `references/parity.md` |
 
 Vague request ("plot my trained model")? Offer the default bundle:
@@ -263,6 +272,8 @@ was still ruled NO-GO — passing it is necessary, not sufficient.
   epoch-to-epoch convergence drift
 - `references/channel_geometry.md` — baseflow width/depth over MERIT, plus the
   Leopold & Maddock exponent check on `p_spatial`/`q_spatial`
+- `references/stage_roughness.md` — `n(d)` over a water year (GIF or traces),
+  for runs with `params.stage_roughness`
 - `references/parity.md` — DDR-vs-ddrs parameter distributions at init and trained
 - `scripts/load_ddrs_predictions.py` — **always use this** to open the predictions
   zarr and the f32 baseline. It handles two pitfalls every notebook otherwise hits:

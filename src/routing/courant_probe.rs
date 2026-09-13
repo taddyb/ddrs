@@ -169,6 +169,7 @@ where
             &mut leak_out,
             &mut x_eff_out,
             /* track_neg */ true,
+            /* gamma_in */ None,
         );
 
         if t % sample_every == 0 {

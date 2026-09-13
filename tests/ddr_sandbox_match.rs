@@ -76,6 +76,7 @@ fn sandbox_routes_to_absolute_match_against_ddr() {
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     };
     let mut mc = MuskingumCunge::<Inner>::new(inputs.config.clone(), device.clone());
     mc.setup_inputs(routing_inputs, qprime, params, false, None);

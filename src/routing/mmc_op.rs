@@ -160,6 +160,23 @@ pub(crate) struct TimestepState<B: Backend> {
     /// Tells the backward whether S18' (K floor) and S19' (three-way X min) ran,
     /// so B18'/B19' apply their masks. `false` ⇒ the pre-clamp math, unchanged.
     pub enforce_pos: bool,
+    /// Stage-roughness exponent, `n(d) = n_0·(d/d_ref)^(−gamma)`. `0.0` means
+    /// the block is absent and the backward takes the historical path verbatim
+    /// (B5's `5 + 3q` and B17's four-term beta), so a zero here is not merely
+    /// a value that happens to cancel.
+    pub gamma: f32,
+    /// Reference depth for `gamma`, metres. Only `d_ref^gamma` enters, so this
+    /// is inert at `gamma == 0` and at `d_ref == 1`.
+    pub d_ref: f32,
+    /// Per-reach `gamma` when it is a LEARNED KAN output rather than a global
+    /// constant. `Some` makes it the op's sixth parent, so it receives a
+    /// gradient; `None` falls back to the scalar `gamma` above.
+    ///
+    /// Both paths exist on purpose. The scalar path is what
+    /// `2026-09-12T06-06-19Z-train-and-test` ran, and keeping it byte-exact
+    /// means that recorded result stays reproducible; the tensor path is what
+    /// makes gamma learnable.
+    pub gamma_t: Option<B::FloatTensorPrimitive>,
 }
 
 #[derive(Debug)]
@@ -195,14 +212,78 @@ struct BetaGrads<I: Backend> {
     g_side_slope: Tensor<I, 1>,
 }
 
-/// The five accumulated parent gradients produced by [`timestep_backward_core`],
-/// in parent order `[n, q_spatial, p_spatial, q_t, q_prime_t]`.
-pub(crate) struct FiveGrads<I: Backend> {
-    pub gn_total: Tensor<I, 1>,
-    pub gq_spatial: Tensor<I, 1>,
-    pub gp_total: Tensor<I, 1>,
-    pub gq_t_total: Tensor<I, 1>,
-    pub gq_prime_t: Tensor<I, 1>,
+/// Which of the op's parents are tracked by autograd, i.e. will actually
+/// receive a gradient. Built from `ops.parents` by each `Backward` impl.
+///
+/// A parent that is not tracked — `p_spatial` when it is a fixed constant,
+/// `q_t` at the first timestep (the hotstart state), `q_prime_t` in ordinary
+/// training (the lateral inflow is data; only the adjoint study lifts it) —
+/// used to have its gradient computed and then thrown away. The shared chain
+/// through the solve and the geometry is needed by every parent and is never
+/// skipped; the mask only gates each parent's FINAL assembly, plus the one
+/// O(nnz) piece that belongs to a single parent (B24's `N^T·gi_t` for `q_t`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ParentMask {
+    pub n: bool,
+    pub q_spatial: bool,
+    pub p_spatial: bool,
+    pub q_t: bool,
+    pub q_prime_t: bool,
+    pub gamma: bool,
+}
+
+impl ParentMask {
+    pub const ALL: ParentMask = ParentMask {
+        n: true,
+        q_spatial: true,
+        p_spatial: true,
+        q_t: true,
+        q_prime_t: true,
+        gamma: true,
+    };
+}
+
+/// The parent gradients produced by [`timestep_backward_core`], in parent
+/// order `[n, q_spatial, p_spatial, q_t, q_prime_t]`, plus `gamma` when
+/// stage-dependent roughness is a learned per-reach field.
+///
+/// Each is `Some` exactly when the corresponding [`ParentMask`] flag was set
+/// (and, for `gamma`, when `state.gamma_t` is `Some`). The ops register
+/// whatever is `Some` on whatever parent is tracked, and `register_parent`
+/// panics if a tracked parent arrives without a gradient.
+pub(crate) struct ParentGrads<I: Backend> {
+    pub n: Option<Tensor<I, 1>>,
+    pub q_spatial: Option<Tensor<I, 1>>,
+    pub p_spatial: Option<Tensor<I, 1>>,
+    pub q_t: Option<Tensor<I, 1>>,
+    pub q_prime_t: Option<Tensor<I, 1>>,
+    /// Accumulated from the three places gamma enters the forward: the depth
+    /// exponent (B5), the velocity's `(d/d_ref)^gamma` (B15), and the
+    /// celerity's `gamma·A/(T·d)` (B17).
+    pub gamma: Option<Tensor<I, 1>>,
+}
+
+/// Register `grad` on `parent` when the parent is tracked. A tracked parent
+/// with no gradient means the mask handed to the core disagreed with
+/// `ops.parents`, which is a plumbing bug, so it panics rather than skipping.
+fn register_parent<I: Backend + 'static>(
+    grads: &mut Gradients,
+    parent: Option<burn::backend::autodiff::NodeId>,
+    grad: Option<Tensor<I, 1>>,
+    name: &str,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if let Some(id) = parent {
+        let g = grad.unwrap_or_else(|| {
+            panic!("parent `{name}` is tracked but the backward produced no gradient for it")
+        });
+        let prim = match g.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        };
+        grads.register::<I>(id, prim);
+    }
 }
 
 /// Shared analytical backward body for both [`TimestepOp`] (5 parents) and
@@ -219,8 +300,9 @@ pub(crate) struct FiveGrads<I: Backend> {
 pub(crate) fn timestep_backward_core<I: Backend + 'static>(
     state: &TimestepState<I>,
     grad_out: I::FloatTensorPrimitive,
+    mask: ParentMask,
     zeta_hook: impl FnOnce(&Tensor<I, 1>) -> Option<ZetaGeomGrads<I>>,
-) -> FiveGrads<I>
+) -> ParentGrads<I>
 where
     I::FloatTensorPrimitive: 'static,
 {
@@ -242,7 +324,8 @@ where
         let gy = wrap(grad_out);
 
         let n_t = wrap(state.n.clone());
-        let _q_spatial = wrap(state.q_spatial.clone());
+        // `state.q_spatial` is not read: every q path goes through the saved
+        // `q_eps` (S1), and B1 is the identity.
         let p_spatial = wrap(state.p_spatial.clone());
         let q_t = wrap(state.q_t.clone());
         let q_prime_t = wrap(state.q_prime_t.clone());
@@ -256,16 +339,17 @@ where
         let depth = wrap(state.depth.clone());
         let top_width = wrap(state.top_width.clone());
         let side_slope = wrap(state.side_slope.clone());
-        let _bottom_width = wrap(state.bottom_width.clone());
+        let bottom_width = wrap(state.bottom_width.clone());
         let hyd_radius = wrap(state.hydraulic_radius.clone());
         let velocity_un = wrap(state.velocity_unclamped.clone());
-        let _velocity_cl = wrap(state.velocity_clamped.clone());
+        let velocity_cl = wrap(state.velocity_clamped.clone());
         let celerity = wrap(state.celerity.clone());
         let k_muskingum = wrap(state.k_muskingum.clone());
         let denom = wrap(state.denom.clone());
-        let _c1 = wrap(state.c1.clone());
-        let _c2 = wrap(state.c2.clone());
-        let _c3 = wrap(state.c3.clone());
+        // `state.c1` is not read: gc1 comes from the assembled A-values (B26),
+        // and the c1..c4 VALUES are recovered from k, X and dt at B23-B20.
+        let c2_t = wrap(state.c2.clone());
+        let c3_t = wrap(state.c3.clone());
         let c4 = wrap(state.c4.clone());
         let i_t = wrap(state.i_t.clone());
         let x_sol = wrap(state.x_sol.clone());
@@ -344,22 +428,29 @@ where
         //   gq_t_from_S25 = c3 · gb_rhs                (partial)
         //   gq_prime_t = c4 · gb_rhs                   (final)
         // ===========================================================
-        let c2_t = wrap(state.c2.clone());
-        let c3_t = wrap(state.c3.clone());
         let gc2 = gb_rhs.clone() * i_t.clone();
         let gc3 = gb_rhs.clone() * q_t.clone();
         let gc4 = gb_rhs.clone() * q_prime_t.clone();
         let gi_t = c2_t.clone() * gb_rhs.clone();
         let gq_t_from_s25 = c3_t.clone() * gb_rhs.clone();
-        let gq_prime_t = c4.clone() * gb_rhs.clone();
+        // `q_prime_t` is a parent only in the adjoint study (it lifts the
+        // lateral inflow as a leaf); in training it is data.
+        let gq_prime_t = mask.q_prime_t.then(|| c4.clone() * gb_rhs.clone());
 
         // ===========================================================
         // B24. i_t = N · q_t  →  gq_t_from_S24 = N^T · gi_t
+        // The one O(nnz) piece that belongs to a single parent; skipped when
+        // `q_t` is untracked (the hotstart state at the first timestep).
         // ===========================================================
-        let gi_t_prim = unwrap(gi_t);
-        let gq_t_from_s24_prim =
-            sparse::spmv_backward_primitive::<I>(&state.pattern, gi_t_prim, &device, state.use_cuda);
-        let gq_t_from_s24 = wrap(gq_t_from_s24_prim);
+        let gq_t_from_s24 = mask.q_t.then(|| {
+            let gi_t_prim = unwrap(gi_t);
+            wrap(sparse::spmv_backward_primitive::<I>(
+                &state.pattern,
+                gi_t_prim,
+                &device,
+                state.use_cuda,
+            ))
+        });
 
         // ===========================================================
         // B23-B20. Chain rule through c1..c4 → k_muskingum.
@@ -553,7 +644,7 @@ where
         // ===========================================================
         let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
         let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
-        let wp = _bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
+        let wp = bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
         let area = hyd_radius.clone() * wp.clone();
 
         // ===========================================================
@@ -603,21 +694,60 @@ where
         //   accumulators — A, T, P and z all already carry gradient through
         //   the hyd_radius chain.
         // ===========================================================
-        let (gvelocity_cl, beta_grads) = if state.ddr_match {
-            (gcelerity * (5.0 / 3.0), None)
+        //   Stage-dependent roughness (`gamma != 0`) adds  H ≡ gamma·A/(T·d)
+        //   to beta, contributing three more terms:
+        //     ∂H/∂A = H/A     ∂H/∂T = −H/T     ∂H/∂depth = −H/depth
+        //   The first two fold into the same gA/gT accumulators as G's; the
+        //   third is a NEW path into depth, returned separately because depth
+        //   is not one of BetaGrads' existing four.
+        let (gvelocity_cl, beta_grads, gdepth_from_s17, ggamma_from_s17) = if state.ddr_match {
+            (gcelerity * (5.0 / 3.0), None, None, None)
         } else {
             let g_term = area.clone() * sqrt_1_plus_ss_sq.clone()
                 / (top_width.clone() * wp.clone())
                 * (4.0 / 3.0);
             let beta = -g_term.clone() + (5.0 / 3.0);
-            let gbeta = gcelerity.clone() * _velocity_cl.clone();
-            let grads = BetaGrads {
+            let gbeta = gcelerity.clone() * velocity_cl.clone();
+            let mut grads = BetaGrads {
                 g_area: -gbeta.clone() * g_term.clone() / area.clone(),
                 g_top_width: gbeta.clone() * g_term.clone() / top_width.clone(),
                 g_wp: gbeta.clone() * g_term.clone() / wp.clone(),
-                g_side_slope: -gbeta * g_term * side_slope.clone() / one_plus_ss_sq.clone(),
+                g_side_slope: -gbeta.clone() * g_term.clone() * side_slope.clone()
+                    / one_plus_ss_sq.clone(),
             };
-            (gcelerity * beta, Some(grads))
+            let gamma_t = state
+                .gamma_t
+                .clone()
+                .map(|g| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)));
+            // H = gamma·A/(T·d).  ∂H/∂A = H/A, ∂H/∂T = −H/T, ∂H/∂d = −H/d,
+            // and ∂c/∂gamma = v·A/(T·d) — the last only when gamma is learned.
+            let h_term = match (&gamma_t, state.gamma) {
+                (Some(g), _) => {
+                    Some(area.clone() * g.clone() / (top_width.clone() * depth.clone()))
+                }
+                (None, gm) if gm != 0.0 => {
+                    Some(area.clone() * gm / (top_width.clone() * depth.clone()))
+                }
+                _ => None,
+            };
+            if let Some(h_term) = h_term {
+                grads.g_area = grads.g_area + gbeta.clone() * h_term.clone() / area.clone();
+                grads.g_top_width =
+                    grads.g_top_width - gbeta.clone() * h_term.clone() / top_width.clone();
+                let gd = -gbeta.clone() * h_term.clone() / depth.clone();
+                // ∂c/∂gamma = v·A/(T·d) = v · (H/gamma); computed directly from
+                // A, T and d so it is well defined at gamma = 0.
+                let ggamma_s17 = gamma_t.as_ref().map(|_| {
+                    gcelerity.clone()
+                        * velocity_cl.clone()
+                        * area.clone()
+                        / (top_width.clone() * depth.clone())
+                });
+                let beta = beta + h_term;
+                (gcelerity * beta, Some(grads), Some(gd), ggamma_s17)
+            } else {
+                (gcelerity * beta, Some(grads), None, None)
+            }
         };
 
         // ===========================================================
@@ -636,6 +766,30 @@ where
         //   ∂v/∂R = (2/3) · v / R
         //   (slope is constant — dropped)
         // ===========================================================
+        //   With stage roughness, v also depends on depth EXPLICITLY through
+        //   (d/d_ref)^gamma, on top of its dependence through R:
+        //     ∂v/∂depth |_explicit = gamma · v / depth
+        //   That is a path into depth which does not exist at gamma == 0.
+        //   ∂v/∂depth |_explicit = gamma·v/depth, and when gamma is LEARNED
+        //   also ∂v/∂gamma = v·ln(depth/d_ref).
+        let gamma_t_b15 = state
+            .gamma_t
+            .clone()
+            .map(|g| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)));
+        let gdepth_from_s15 = match (&gamma_t_b15, state.gamma) {
+            (Some(g), _) => Some(
+                gvelocity_un.clone() * velocity_un.clone() * g.clone() / depth.clone(),
+            ),
+            (None, gm) if gm != 0.0 => {
+                Some(gvelocity_un.clone() * velocity_un.clone() * gm / depth.clone())
+            }
+            _ => None,
+        };
+        let ggamma_from_s15 = gamma_t_b15.as_ref().map(|_| {
+            gvelocity_un.clone()
+                * velocity_un.clone()
+                * (depth.clone() / state.d_ref).log()
+        });
         let gn_from_s15 = gvelocity_un.clone() * (-velocity_un.clone() / n_t.clone());
         let gr_from_s15 =
             gvelocity_un.clone() * (velocity_un.clone() * (2.0f32 / 3.0f32)) / hyd_radius.clone();
@@ -681,7 +835,7 @@ where
         let half_d = depth.clone() * 0.5;
         let gtw_from_s12 = garea.clone() * half_d.clone();
         let gbw_from_s12 = garea.clone() * half_d.clone();
-        let gd_from_s12 = garea * (top_width.clone() + _bottom_width.clone()) * 0.5;
+        let gd_from_s12 = garea * (top_width.clone() + bottom_width.clone()) * 0.5;
 
         // ===========================================================
         // B11. bottom_width = max(bw_raw, bottom_width_lb)
@@ -759,6 +913,15 @@ where
         //   ∂d/∂exponent = d · ln(ratio)
         // ===========================================================
         let mut gd_total = gd_from_s13 + gd_from_s12 + gd_from_s10 + gd_from_s8 + gdepth_from_s7;
+        // Stage-dependent roughness opens two extra paths into depth that do
+        // not exist at gamma == 0: the celerity's `beta += gamma·A/(T·d)`
+        // (B17) and the velocity's explicit `(d/d_ref)^gamma` (B15).
+        if let Some(gd) = gdepth_from_s17 {
+            gd_total = gd_total + gd;
+        }
+        if let Some(gd) = gdepth_from_s15 {
+            gd_total = gd_total + gd;
+        }
         if let Some(zg) = zeta_geom.as_ref() {
             gd_total = gd_total + zg.g_depth.clone();
         }
@@ -771,7 +934,13 @@ where
         // d = ratio^exponent  (NOTE: depth saved is post-clamp; the un-clamped
         // value at differentiation point equals depth when mask is true, so we can
         // use depth in derivative expressions where mask is true.)
-        let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+        let five_plus_three_gamma: Tensor<I, 1> = match state.gamma_t.clone() {
+            Some(g) => {
+                Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)) * 3.0 + 5.0
+            }
+            None => q_eps.clone().zeros_like() + (5.0_f32 + 3.0_f32 * state.gamma),
+        };
+        let exponent = (q_eps.clone() * 3.0 + five_plus_three_gamma.clone()).recip() * 3.0;
         let gratio_from_s6 =
             gd_pre_clamp.clone() * exponent.clone() * depth.clone() / ratio.clone();
         let gexp_from_s6 = gd_pre_clamp * depth.clone() * ratio.clone().log();
@@ -781,8 +950,18 @@ where
         //   ∂exp/∂q_eps = -9 / (5 + 3·q_eps)² = -3 · exp² / 3 = ... use direct:
         //   d/dq[3/(5+3q)] = -9/(5+3q)²
         // ===========================================================
-        let five_plus_three_qeps = q_eps.clone() * 3.0 + 5.0;
-        let gqeps_from_s5 = -gexp_from_s6 * 9.0 / (five_plus_three_qeps.clone() * five_plus_three_qeps);
+        //   With stage roughness the denominator is `5 + 3·q_eps + 3·gamma`;
+        //   gamma is a constant here (Phase 1 does not learn it), so only the
+        //   denominator changes, not the form.
+        let five_plus_three_qeps = q_eps.clone() * 3.0 + five_plus_three_gamma;
+        let denom_sq = five_plus_three_qeps.clone() * five_plus_three_qeps;
+        //   exponent = 3/(5 + 3·q_eps + 3·gamma), so gamma and q_eps enter the
+        //   denominator identically and their partials are the same expression.
+        let ggamma_from_s5 = state
+            .gamma_t
+            .as_ref()
+            .map(|_| -gexp_from_s6.clone() * 9.0 / denom_sq.clone());
+        let gqeps_from_s5 = -gexp_from_s6 * 9.0 / denom_sq;
 
         // ===========================================================
         // B4. ratio = numerator / denominator
@@ -799,50 +978,78 @@ where
         let gp_from_s3 = gden * slope.clone().sqrt();
 
         // ===========================================================
-        // B2. numerator = q_t · n · (q_eps + 1)
-        //   ∂num/∂q_t   = n · (q_eps + 1)
-        //   ∂num/∂n     = q_t · (q_eps + 1)
-        //   ∂num/∂q_eps = q_t · n
+        // B2. numerator = q_t · n · (q_eps + 1) · d_ref^gamma
+        //   ∂num/∂q_t   = n · (q_eps + 1) · d_ref^gamma
+        //   ∂num/∂n     = q_t · (q_eps + 1) · d_ref^gamma
+        //   ∂num/∂q_eps = q_t · n · d_ref^gamma
+        //   `d_ref^gamma` is a constant (gamma is not learned in Phase 1), so
+        //   it scales all three identically. It is exactly 1.0 whenever the
+        //   stage-roughness block is absent OR d_ref is 1, which config load
+        //   currently requires — see `validate_stage_roughness`.
         // ===========================================================
         let q_eps_plus_one = q_eps.clone() + 1.0;
-        let gq_t_from_s2 = gnum.clone() * n_t.clone() * q_eps_plus_one.clone();
-        let gn_from_s2 = gnum.clone() * q_t.clone() * q_eps_plus_one.clone();
-        let gqeps_from_s2 = gnum * q_t.clone() * n_t.clone();
+        let dref_pow_gamma = if state.gamma != 0.0 && state.d_ref != 1.0 {
+            state.d_ref.powf(state.gamma)
+        } else {
+            1.0
+        };
+        let gq_t_from_s2 = gnum.clone() * n_t.clone() * q_eps_plus_one.clone() * dref_pow_gamma;
+        let gn_from_s2 = gnum.clone() * q_t.clone() * q_eps_plus_one.clone() * dref_pow_gamma;
+        let gqeps_from_s2 = gnum * q_t.clone() * n_t.clone() * dref_pow_gamma;
 
         // ===========================================================
         // B1. q_eps = q_spatial + 1e-6  →  ∂q_eps/∂q_spatial = 1
         // ===========================================================
-        let mut gq_spatial = gqeps_from_s8 + gqeps_from_s7 + gqeps_from_s5 + gqeps_from_s2;
-        if let Some(zg) = zeta_geom.as_ref() {
-            gq_spatial = gq_spatial + zg.g_q_eps.clone();
-        }
+        let gq_spatial = mask.q_spatial.then(|| {
+            let g = gqeps_from_s8 + gqeps_from_s7 + gqeps_from_s5 + gqeps_from_s2;
+            match zeta_geom.as_ref() {
+                Some(zg) => g + zg.g_q_eps.clone(),
+                None => g,
+            }
+        });
 
         // ===========================================================
-        // Final accumulations on the 5 parents:
+        // Final assembly, one parent at a time, each gated on the mask.
+        // Everything above this point is shared and was computed regardless.
         // ===========================================================
-        let gn_total = gn_from_s15 + gn_from_s2;
-        let mut gp_total = gp_from_s7 + gp_from_s3;
-        if let Some(zg) = zeta_geom.as_ref() {
-            gp_total = gp_total + zg.g_p_spatial.clone();
-        }
+        let gn = mask.n.then(|| gn_from_s15 + gn_from_s2);
+        let gp = mask.p_spatial.then(|| {
+            let g = gp_from_s7 + gp_from_s3;
+            match zeta_geom.as_ref() {
+                Some(zg) => g + zg.g_p_spatial.clone(),
+                None => g,
+            }
+        });
         // q_t reaches the loss through the S25 RHS (c3·q_t), the S24 SpMV
         // (N·q_t), the S2 depth chain — and, under `ddr_match: false`, a
         // FOURTH path: the Cunge X at S19 (B19).
-        let gq_t_total = gq_t_from_s25 + gq_t_from_s24 + gq_t_from_s2;
-        let gq_t_total = match x_grads.as_ref() {
-            Some(xg) => gq_t_total + xg.g_q_t.clone(),
-            None => gq_t_total,
+        let gq_t = gq_t_from_s24.map(|from_s24| {
+            let g = gq_t_from_s25 + from_s24 + gq_t_from_s2;
+            match x_grads.as_ref() {
+                Some(xg) => g + xg.g_q_t.clone(),
+                None => g,
+            }
+        });
+
+        // Sum gamma's three contributions. All three are Some together or None
+        // together, gated on `state.gamma_t`, so a partial sum cannot happen.
+        let ggamma = match (ggamma_from_s5, ggamma_from_s15, ggamma_from_s17) {
+            (Some(a), Some(b), Some(c)) => Some(a + b + c),
+            (None, None, None) => None,
+            _ => unreachable!(
+                "gamma gradient paths disagree on whether gamma is learned; all \
+                 three are gated on state.gamma_t"
+            ),
         };
+        let ggamma = if mask.gamma { ggamma } else { None };
 
-        // Touch unused intermediate bindings to silence dead-code warnings.
-        let _ = (_q_spatial, _velocity_cl);
-
-        FiveGrads {
-            gn_total,
-            gq_spatial,
-            gp_total,
-            gq_t_total,
-            gq_prime_t,
+        ParentGrads {
+            n: gn,
+            q_spatial: gq_spatial,
+            p_spatial: gp,
+            q_t: gq_t,
+            q_prime_t: gq_prime_t,
+            gamma: ggamma,
         }
     }
 }
@@ -860,35 +1067,83 @@ where
         _checkpointer: &mut Checkpointer,
     ) {
         let state = ops.state;
+        debug_assert!(
+            state.gamma_t.is_none(),
+            "a learned gamma must route through TimestepGammaOp, which has the \
+             sixth parent needed to give it a gradient"
+        );
         let [p_n, p_qsp, p_psp, p_qt, p_qpt] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: false,
+        };
 
         let grad_out = grads.consume::<I>(&ops.node);
 
-        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-            match t.into_primitive() {
-                TensorPrimitive::Float(p) => p,
-                _ => unreachable!(),
-            }
+        // No leakance ⇒ hook returns None ⇒ pre-leakance math, byte-identical.
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
+
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+    }
+}
+
+/// Six-parent variant of [`TimestepOp`] for a LEARNED stage-roughness exponent.
+///
+/// A tensor that is not a parent receives no gradient, so `gamma` can only be
+/// trained if it is registered as one. Rather than widen `TimestepOp` and give
+/// every existing run a sixth parent it does not use, this is a sibling op —
+/// the same pattern `TimestepLeakanceOp` already follows for leakance. The
+/// backward body is shared via [`timestep_backward_core`]; only the parent
+/// bookkeeping differs.
+#[derive(Debug)]
+pub(crate) struct TimestepGammaOp;
+
+impl<I: Backend + 'static> Backward<I, 6> for TimestepGammaOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 6>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
+            state.gamma_t.is_some(),
+            "TimestepGammaOp requires a per-reach gamma in the saved state"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_gamma] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt, &p_gamma].map(|p| p.as_ref().map(|n| n.id));
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: ids[5].is_some(),
         };
 
-        // No leakance ⇒ hook returns None ⇒ pre-leakance math, byte-identical.
-        let g = timestep_backward_core::<I>(&state, grad_out, |_gb_rhs| None);
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
 
-        if let Some(node) = p_n {
-            grads.register::<I>(node.id, unwrap(g.gn_total));
-        }
-        if let Some(node) = p_qsp {
-            grads.register::<I>(node.id, unwrap(g.gq_spatial));
-        }
-        if let Some(node) = p_psp {
-            grads.register::<I>(node.id, unwrap(g.gp_total));
-        }
-        if let Some(node) = p_qt {
-            grads.register::<I>(node.id, unwrap(g.gq_t_total));
-        }
-        if let Some(node) = p_qpt {
-            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
-        }
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, ids[5], g.gamma, "gamma");
     }
 }
 
@@ -918,6 +1173,16 @@ where
     ) {
         let state = ops.state;
         let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        // `mask` below is the impervious mask; this one is the parent mask.
+        let parent_mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: false,
+        };
 
         let grad_out = grads.consume::<I>(&ops.node);
 
@@ -953,7 +1218,7 @@ where
             I::FloatTensorPrimitive,
             I::FloatTensorPrimitive,
         )> = None;
-        let g = timestep_backward_core::<I>(&state.base, grad_out, |gb_rhs| {
+        let g = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, |gb_rhs| {
             let zg = crate::routing::leakance::zeta_backward::<I>(
                 gb_rhs.clone(),
                 depth.clone(),
@@ -979,21 +1244,11 @@ where
         });
 
         // Register the 5 base parents (zeta geom already folded in by `core`).
-        if let Some(node) = p_n {
-            grads.register::<I>(node.id, unwrap(g.gn_total));
-        }
-        if let Some(node) = p_qsp {
-            grads.register::<I>(node.id, unwrap(g.gq_spatial));
-        }
-        if let Some(node) = p_psp {
-            grads.register::<I>(node.id, unwrap(g.gp_total));
-        }
-        if let Some(node) = p_qt {
-            grads.register::<I>(node.id, unwrap(g.gq_t_total));
-        }
-        if let Some(node) = p_qpt {
-            grads.register::<I>(node.id, unwrap(g.gq_prime_t));
-        }
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
 
         // Register the 3 leakance parents.
         let (g_k_d, g_d_gw, g_fac) =
@@ -1075,6 +1330,9 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     // `TimestepState::x_effective`). Always written.
     x_eff_out: &mut Option<I::FloatTensorPrimitive>,
     track_neg: bool,
+    // Per-reach stage-roughness exponent when it is a learned KAN output.
+    // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`.
+    gamma_in: Option<Tensor<I, 1>>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -1092,6 +1350,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
     // S18'/S19' positivity clamp. `ddr_match: true` must stay byte-identical to
     // DDR (invariant 1), so the clamp is gated on BOTH flags even though
     // `validate_enforce_positivity` already rejects the combination at load.
@@ -1112,14 +1371,36 @@ where
 
     // S1
     let q_eps = qsp_in.clone() + 1e-6_f32;
-    // S2
+    // S2. With stage-dependent roughness the Manning inversion picks up a
+    // constant `d_ref^gamma` on the numerator; see S5 for where gamma really
+    // bites. At gamma == 0 (or d_ref == 1) the factor is exactly 1.0.
     let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
+    let numerator = if gamma != 0.0 && d_ref != 1.0 {
+        numerator * d_ref.powf(gamma)
+    } else {
+        numerator
+    };
     // S3
     let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
     // S4
     let ratio = numerator.clone() / denominator.clone();
-    // S5
-    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+    // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma).
+    //
+    // Substituting n = n_0·(d/d_ref)^(−gamma) into the Manning relation moves
+    // one power of depth from the left side to the right, so gamma simply
+    // shifts the denominator. `gamma == 0` restores `5 + 3·q_eps` exactly —
+    // the literal is written as a separate binding so the f32 rounding of the
+    // historical expression cannot change.
+    // When gamma is learned it is a per-reach tensor and the denominator has to
+    // be built elementwise; the scalar spelling is kept verbatim for the
+    // constant case so `gamma_t: None` reproduces it bit for bit.
+    let exponent = match &gamma_in {
+        Some(g) => (q_eps.clone() * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
+        None => {
+            let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
+            (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0
+        }
+    };
     // S6
     let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
     // S7
@@ -1139,8 +1420,20 @@ where
         + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
     // S14
     let hyd_radius = _area.clone() / wp.clone();
-    // S15
-    let velocity_un = n_in.clone().recip() * hyd_radius.clone().powf_scalar(2.0 / 3.0)
+    // S15. v = (1/n(d))·R^(2/3)·√slope. With stage-dependent roughness
+    // 1/n(d) = (1/n_0)·(d/d_ref)^gamma, so the factor rides on the velocity as
+    // well as on the depth inversion. Applying it to only one of the two leaves
+    // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
+    // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
+    // caught on the first run.
+    let n_recip = match &gamma_in {
+        Some(g) => n_in.clone().recip() * (depth.clone() / d_ref).powf(g.clone()),
+        None if gamma != 0.0 => {
+            n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
+        }
+        None => n_in.clone().recip(),
+    };
+    let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
         * slope_in.clone().sqrt();
     // S16
     let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
@@ -1152,12 +1445,27 @@ where
     //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
     //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
     //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
+    //   With stage-dependent roughness, Q = (d/d_ref)^gamma · Q_Manning(d), so
+    //   c = dQ/dA picks up one extra term. Using dA/dd = T (true for ANY cross
+    //   section, not just the power law):
+    //       c = v · [ beta_trapezoid + gamma · A/(T·d) ]
+    //   Sanity: for the pure power-law section A/(T·d) = 1/(q+1), recovering
+    //   beta = (5 + 3q + 3·gamma)/(3(q+1)), which is 5/3 at q = gamma = 0.
     let celerity = if ddr_match {
         velocity_cl.clone() * (5.0_f32 / 3.0_f32)
     } else {
         let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
         let beta =
             -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
+        let beta = match &gamma_in {
+            Some(g) => {
+                beta + _area.clone() * g.clone() / (top_width.clone() * depth.clone())
+            }
+            None if gamma != 0.0 => {
+                beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
+            }
+            None => beta,
+        };
         velocity_cl.clone() * beta
     };
 
@@ -1714,6 +2022,10 @@ pub fn timestep_forward<I: Backend + 'static>(
     slope_at: Tensor<Autodiff<I>, 1>,
     x_storage_at: Tensor<Autodiff<I>, 1>,
     track_neg: bool,
+    // Learned per-reach stage-roughness exponent. `Some` makes it the op's
+    // SIXTH parent, so it receives a gradient and the KAN can train it.
+    // `None` falls back to the global `params.stage_roughness.gamma`.
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -1728,6 +2040,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
     // Must mirror `forward_chain_inner`'s gate EXACTLY (S18'/S19' vs B18'/B19').
     let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
@@ -1744,6 +2057,8 @@ where
     let length_aut = unwrap_at(length_at);
     let slope_aut = unwrap_at(slope_at);
     let xst_aut = unwrap_at(x_storage_at);
+    let gamma_aut = gamma_at.map(unwrap_at);
+    let gamma_p = gamma_aut.as_ref().map(|g| g.primitive.clone());
 
     let n_p = n_aut.primitive.clone();
     let qsp_p = qsp_aut.primitive.clone();
@@ -1760,6 +2075,7 @@ where
     };
 
     let mut x_eff_out: Option<I::FloatTensorPrimitive> = None;
+    let gamma_chain = gamma_p.clone().map(wrap);
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg,
         pattern,
@@ -1775,6 +2091,7 @@ where
         &mut None,
         &mut x_eff_out,
         track_neg,
+        gamma_chain.clone(),
     );
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
@@ -1835,22 +2152,44 @@ where
         use_cuda,
         ddr_match,
         enforce_pos,
+        gamma,
+        d_ref,
+        gamma_t: gamma_p.clone(),
     };
 
-    // Register the op on the autograd tape.
-    let result_prim = match TimestepOp
-        .prepare::<NoCheckpointing>([
-            n_aut.node.clone(),
-            qsp_aut.node.clone(),
-            psp_aut.node.clone(),
-            qt_aut.node.clone(),
-            qpt_aut.node.clone(),
-        ])
-        .compute_bound()
-        .stateful()
-    {
-        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
-        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    // Register the op on the autograd tape. A learned gamma needs a sixth
+    // parent to receive a gradient at all, so it routes through the sibling
+    // `TimestepGammaOp`; everything else keeps the historical five-parent node.
+    let result_prim = match &gamma_aut {
+        Some(g) => match TimestepGammaOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+                g.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
+        None => match TimestepOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
     };
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
@@ -1904,6 +2243,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
     // Must mirror `forward_chain_inner`'s gate EXACTLY (S18'/S19' vs B18'/B19').
     let enforce_pos = !ddr_match && cfg.params.enforce_positivity;
 
@@ -1963,6 +2303,7 @@ where
         &mut leak_out,
         &mut x_eff_out,
         track_neg,
+        None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
@@ -2042,6 +2383,9 @@ where
         use_cuda,
         ddr_match,
         enforce_pos,
+        gamma,
+        d_ref,
+        gamma_t: None,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -2127,6 +2471,9 @@ where
             n_at, q_spatial_at, p_spatial_at,
             q_t_at, q_prime_t_at, length_at, slope_at, x_storage_at,
             false,
+            // CUDA graphs and a learned gamma are mutually exclusive at config
+            // load, so this fallback never needs one.
+            None,
         );
     }
 
@@ -2146,6 +2493,7 @@ where
     let discharge_lb = cfg.params.attribute_minimums.discharge;
     let use_cuda = cfg.params.sparse_solver == SparseSolver::Cuda;
     let ddr_match = cfg.params.ddr_match;
+    let (gamma, d_ref) = cfg.params.stage_roughness_params();
 
     // Unwrap autograd primitives.
     let unwrap_at = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
@@ -2349,6 +2697,12 @@ where
         // and `enforce_positivity` requires `ddr_match: false` at config load,
         // so S18'/S19' can never have run on this path.
         enforce_pos: false,
+        // Stage-dependent roughness needs the trapezoidal celerity, which this
+        // path does not have; config load rejects `gamma > 0` together with
+        // `use_cuda_graphs: true`, so it is off here by construction.
+        gamma: 0.0,
+        d_ref: 1.0,
+        gamma_t: None,
     };
 
     let result_prim = match TimestepOp
@@ -2396,7 +2750,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false,
+        &mut None, &mut None, false, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -2459,7 +2813,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false,
+        &mut None, &mut None, false, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

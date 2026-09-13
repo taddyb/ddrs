@@ -159,6 +159,7 @@ fn leakance_params_with_leaves(
         d_gw: Some(Tensor::<AB, 1>::zeros([n], device)),
         leakance_factor: Some(factor_leaf.clone()),
         impervious_mask: None,
+        gamma: None,
     };
     (params, [k_d_leaf, factor_leaf])
 }
