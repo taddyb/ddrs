@@ -2363,3 +2363,59 @@ learned physical field as a positive example next to the `q`/`p` negatives, the 
 ordered by river size and uncorrelated with `n`, and it costs nothing. The experiment that would separate
 "gamma is degenerate with q" from "gamma is unidentifiable" is to learn gamma with `q` held fixed; it has
 not been run.
+
+## 37. The head that learns only n_0 and gamma: with the channel fixed, gamma is n_0 relabelled
+
+The decision after §36.7 was to make n_0 and gamma the only KAN outputs, with the channel shape prescribed
+(p = 21, the DDR default coefficient; q = 0.65, the Leopold & Maddock at-a-station b/f). Two reasons: it removes
+the width channel that a free gamma had been riding, so identifiability can be read without the degeneracy; and
+a two-output head is what the landscape and adjoint instruments can probe directly. Config
+`config/experiments/sr_n0_gamma.yaml`, matched control `sr_n0_only.yaml` (n_0 alone, same fixed channel).
+Both 500 updates, seed 42, 2,365 gauges, CPU, binary `becc4b4`.
+
+### 37.1 Skill
+
+| arm | run | NSE / KGE | per-gauge dNSE vs its control | b (by construction) | negative solves |
+|---|---|---|---|---|---|
+| free channel control (§33) | `03-53-34Z` | 0.7458 / 0.7619 | | 0.004 | 0.014 % |
+| n_0 only, channel fixed | `23-39-06Z` | 0.7408 / 0.7612 | −0.0002, 46 % up (vs free) | 0.284 | 0.020 % |
+| **n_0 + gamma, channel fixed** | `23-39-03Z` | 0.7391 / 0.7592 | −0.0004, 42 % up (vs n_0 only) | 0.285 | 0.031 % |
+
+Prescribing the channel costs about 0.004 NSE, which the head mostly absorbs through n_0 (median 0.064
+against 0.10 with the channel free: the prescribed channel is wider and shallower, so the head smooths it).
+Adding gamma on top costs nothing and buys nothing: 48 gauges move by more than 0.05 NSE, 19 of them up.
+The downstream width exponent is 0.284 in both by construction (q·f with p constant), incidentally the
+closest any arm has come to Leopold & Maddock's 0.50, and it came from prescribing, not learning.
+
+### 37.2 The learned gamma collapsed onto n_0
+
+| | free channel (§36.5) | **channel fixed** |
+|---|---|---|
+| gamma median (p10, p90) | 0.221 (0.159, 0.312) | **0.067 (0.028, 0.189)** |
+| rho(n_0, gamma) | +0.30 | **+0.90** |
+| gamma by size, <100 km² to >10,000 km² | 0.236 to 0.149 | 0.084 to 0.053 |
+| per-reach breathing, water year 2000 | 1.46x | **1.09x** (n_low/n_high median 1.05) |
+
+The registered prediction of §36 (rho above 0.9) that the free-channel arm refuted holds here. The gamma
+against n_0 panel of `plots/gamma_readout.png` is a single tight monotone curve: gamma is a function of n_0.
+The size ordering and the physically plausible median of the free-channel arm are therefore not properties
+of the stage law the gauges learned; they were gamma tracking p and q (rho 0.89 and 0.76 there). Take the
+width parameters away and the head has one roughness direction, which it emits twice.
+
+What the gauges do constrain is the composite: roughness at the depths the reach actually runs. n_0 is
+roughness at 1 m and most reaches run shallower, so n_0 and gamma trade along the curve that keeps
+n(d) fixed at the typical depth. That is the same non-identifiability as §5 fact 5 in the skill (a gauge
+sees a network sum) one level down: even at one reach, daily discharge sees n at one effective depth,
+not the slope of n against depth.
+
+### 37.3 What this settles and what the landscape adds
+
+- The learned stage exponent is not identifiable from daily gauges in this model: unchanged skill, and a
+  field that is a relabelling of n_0 once the channel cannot absorb it. The constant-gamma sweep (§36.7)
+  remains the only way the term moved anything, and it traded geometry for skill linearly.
+- The "physically ordered gamma" of §36.5 is withdrawn as evidence of identifiability. It is on the
+  do-not-use list with that note.
+- Open: the per-gauge (n_0, gamma) landscape (`experiments/landscape-n0-gamma`, §37.4 when it finishes)
+  gives the curvature along gamma at fixed n_0 and the orientation of the sloppy valley. The prediction
+  from the collapse is a valley along the n(d)-preserving curve, i.e. H_gamma,gamma small against H_nn
+  and the stiff eigenvector nearly along n_0.

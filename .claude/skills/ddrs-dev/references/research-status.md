@@ -212,9 +212,12 @@ Three matched CONUS arms off the 500-update `nse-batch` baseline, all on 2,365 g
 | **learned `gamma` per reach** | `2026-09-12T16-30-14Z` | 0.7420 / 0.7624 | −0.017 | **1.96** | rho(n, gamma) = **0.30**, not > 0.9 |
 | constant `gamma = 0.1` | `2026-09-12T20-38-08Z` | 0.7456 / 0.7620 | −0.017 | — | inert on every axis |
 | constant `gamma = 0.183` | `2026-09-12T20-36-00Z` | 0.7416 / 0.7611 | 0.065 | — | two thirds of 0.35's geometry, half its cost |
+| n_0 only, p = 21, q = 0.65 fixed | `2026-09-12T23-39-06Z` | 0.7408 / 0.7612 | 0.284 (by construction) | — | fixing the channel costs ~0.004 |
+| **n_0 + gamma, channel fixed** (the working model, 2026-09-13) | `2026-09-12T23-39-03Z` | 0.7391 / 0.7592 | 0.285 | — | **rho(n_0, gamma) = 0.90**: gamma collapsed onto n_0 (median 0.067) |
 
 - **Do not cite Juniata as a predictor for this parameter** (§35): +0.091 there became −0.0096 on CONUS.
-- **The registered prediction "learned gamma is `n` relabelled" was refuted.** `gamma` tracks the width
+- **The registered prediction "learned gamma is `n` relabelled" was refuted with p and q free, and CONFIRMED with them fixed** (§37: rho 0.90, gamma a monotone function of n_0). The free-channel gamma was riding p/q; do not cite its size ordering as identifiability evidence.
+- Superseded detail of the free-channel arm: `gamma` tracks the width
   channel instead (rho(p, gamma) 0.89, rho(q, gamma) 0.76), is physically ordered (median 0.236 below
   100 km² falling to 0.149 above 10,000 km²), and raised the trunk rank. §35.2's "more solver physics ⇒
   deeper collapse" was drawn from the constant arm and does not generalise — do not quote it as a rule.

@@ -82,6 +82,7 @@ def main():
         print(f"  gauges with |dNSE| > 0.05: {big.sum()} ({100 * big.mean():.1f}%), of which improved {int((d.nse[big] > 0).sum())}")
         print(f"  control medians: NSE {c.nse.median():.4f} KGE {c.kge.median():.4f} FHV {c.fhv.median():+.2f}% alpha {c.alpha.median():.3f} lag {c.lag.median():+.2f}")
         print(f"  arm medians:     NSE {a.nse.median():.4f} KGE {a.kge.median():.4f} FHV {a.fhv.median():+.2f}% alpha {a.alpha.median():.3f} lag {a.lag.median():+.2f}")
+        (RUNS / arm / "plots").mkdir(exist_ok=True)
         d.to_csv(RUNS / arm / "plots" / f"delta_vs_{ctrl[:19]}.csv")
 
 
