@@ -2510,9 +2510,8 @@ side. A stratified-400 census with the same axes is the natural next run (about 
 
 The Beven-challenges study (`experiments/beven-inflow-arms`): the n_0 + gamma head with the channel fixed
 (p = 21, q = 0.65), the same 2,365 gauges, observations, network and 500-update recipe, trained on five
-AORC-forced unit-catchment products. The retrospective arm `23-39-03Z` (§37) is the reference. Three of five
-arms are in as this is written; the distributed dHBV2 and hydroDL LSTM arms are in eval, the hourly MTS-LSTM
-arm trains overnight (its hourly-native store costs ~2 min per mini-batch against 13 s for the daily ones).
+AORC-forced unit-catchment products. The retrospective arm `23-39-03Z` (§37) is the reference. Four of five
+arms are in as this is written; the hourly MTS-LSTM arm trains overnight (its hourly-native store costs ~2 min per mini-batch against 13 s for the daily ones).
 
 Two stores had to be rechunked first: the dHBV2 and hydroDL AORC products were stored as 100–200 divides by the
 full 41-year time axis, so every 90-day batch decompressed whole rows and training ran 6x slow;
@@ -2526,8 +2525,8 @@ verified bit-identical). Trap T15 in the ddrs-dev skill.
 | retrospective (reference) | `2026-09-12T23-39-03Z` | 0.678 / 0.717 | 0.7391 / 0.7592 | +0.061 |
 | NH daily LSTM | `2026-09-13T13-55-03Z` | 0.531 / 0.616 | 0.6359 / 0.6580 | +0.105 |
 | dHBV2 lumped, AORC | `2026-09-13T13-56-50Z` | **0.007** / 0.432 | 0.5826 / 0.5951 | **+0.576** |
-| dHBV2 distributed, AORC | `2026-09-13T17-22-30Z` | pending | pending | |
-| hydroDL LSTM, AORC | `2026-09-13T17-21-58Z` | pending | pending | |
+| dHBV2 distributed, AORC | `2026-09-13T17-22-30Z` | 0.654 / 0.695 | 0.7301 / 0.7559 | +0.076 |
+| hydroDL LSTM, AORC | `2026-09-13T17-21-58Z` | 0.405 / 0.531 | 0.5689 / 0.5320 | +0.164 |
 | NH hourly MTS-LSTM | `2026-09-13T14-14-46Z` | pending | pending | |
 
 The lumped dHBV2 product has essentially no daily skill unrouted and is routed to 0.58 by a two-parameter
@@ -2537,24 +2536,38 @@ roughness law: the routing is doing most of the work, and the next subsection sa
 
 `experiments/stage_roughness/cross_arm_fields.py` (figure `beven-inflow-arms/cross_arm_fields.png`):
 
-| product | n_0 median | reaches at the n_0 ceiling | gamma median | reaches with gamma = 0 | rho(n_0, gamma) | n_0 by size, 10–100 km² → >10,000 km² |
-|---|---|---|---|---|---|---|
-| retrospective | 0.058 | 0 % | 0.067 | 0 % | +0.90 | 0.066 → 0.063 |
-| NH daily LSTM | 0.096 | 0 % | 0.247 | 0 % | −0.50 | 0.076 → 0.193 |
-| dHBV2 lumped | 0.246 | **27 %** | 0.003 | **38 %** | −1.00 | 0.249 → 0.226 |
+| product | n_0 median | at the n_0 ceiling | gamma median | gamma = 0 | rho(n_0, gamma) | n_0 by size, 10–100 km² → >10,000 km² | summed Q' lags obs by (median, 3,000–30,000 km²) |
+|---|---|---|---|---|---|---|---|
+| retrospective | 0.058 | 0 % | 0.067 | 0 % | +0.90 | 0.066 → 0.063 | 1 d early, router adds 1 |
+| dHBV2 distributed | 0.082 | 0 % | 0.232 | 0 % | +0.91 | 0.086 → 0.072 | 1 d early, router adds 1 |
+| NH daily LSTM | 0.096 | 0 % | 0.247 | 0 % | −0.50 | 0.076 → 0.193 | 1 d early, router adds 1–2 |
+| hydroDL LSTM | 0.168 | 0 % | 0.064 | 1 % | −0.87 | 0.175 → 0.151 | 1–2 d early, router adds 1–2 |
+| dHBV2 lumped | 0.246 | **27 %** | 0.003 | **38 %** | −1.00 | 0.249 → 0.226 | 1–2 d early even at < 300 km², router adds 1–3 |
 
-Per-reach rank agreement of n_0 between products is 0.15 to 0.44; the range-normalised cross-arm spread of
-n_0 per reach is 0.79 of the box (gamma 0.49) over all 346,321 reaches. Three products, three different laws
-of roughness against river size from the same gauges: flat and low on the retrospective, rising with size on
-the LSTM (large rivers rough, headwaters smooth), pinned at the ceiling everywhere on the lumped dHBV2 with
-the stage law switched off. The learned field is a fingerprint of the inflow product, not a property of the
+Per-reach rank agreement of n_0 between products (Spearman): 0.69 between the two dHBV2-family distributed
+products (retrospective vs distributed AORC), 0.13 to 0.44 for every other pair; gamma agrees at 0.72 for that
+same pair and −0.31 to +0.50 otherwise. The range-normalised cross-arm spread per reach over all 346,321
+reaches is 0.79 of the box for n_0 and 0.50 for gamma (five arms). Five products, five different laws of
+roughness against river size from the same gauges: low and flat on the two distributed dHBV2 products, rising
+with size on the NH LSTM (large rivers rough, headwaters smooth), high and flat on hydroDL, pinned at the
+ceiling everywhere on the lumped dHBV2 with the stage law switched off.
+
+**What the roughness is buying is timing.** The routing-lag analysis per arm (`routing_lag.py`) orders the
+products the same way the roughness does: each product's summed unrouted inflow reaches the gauge earlier
+than the observed flow by a product-specific amount, and the router delays it with roughness. The two
+distributed dHBV2 products are on time below 1,000 km² and one day early above (router adds one day); the
+lumped dHBV2 product is one to two days early already at basins under 300 km², where it has no in-catchment
+routing at all, and the router adds one to three days by pinning the channel at the roughness ceiling. Across
+the five arms the median n_0 tracks the median lead of the product's inflow, which is why the products that
+under-predict peaks most (FHV −27 % and −35 %) get the *roughest* channels: the daily objective pays for the
+timing first and accepts the extra attenuation. The learned field is a fingerprint of the inflow product, not a property of the
 channel; the paper's H1 (geometry converges across arms) is refuted for roughness by construction, and this
 is the sharpest form of the "bias absorber" claim (H2).
 
 **The absorption is product-wide, not gauge-wise.** Within any one product, the basin-median n_0 barely
-tracks that product's own per-gauge inflow error (Spearman |rho| ≤ 0.15 against volume ratio, peak bias or
-summed-Q' NSE, n = 2,361). Across products, the whole field shifts with the product's median peak bias
-(summed Q' FHV −10 %, −18 %, −27 % against n_0 0.065, 0.085, 0.248). The routing learns a global correction
+tracks that product's own per-gauge inflow error (Spearman |rho| ≤ 0.25 against volume ratio, peak bias or
+summed-Q' NSE, n = 2,361, five arms). Across products, the whole field shifts with the product (median peak
+bias −9, −10, −18, −27, −35 % against basin-median n_0 0.080, 0.065, 0.085, 0.248, 0.164; pooled rho −0.23). The routing learns a global correction
 for what the product does to all basins at once, and spatial detail second.
 
 ### 38.3 The (n_0, gamma) landscapes per product
