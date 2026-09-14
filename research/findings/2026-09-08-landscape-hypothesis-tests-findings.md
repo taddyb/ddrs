@@ -2597,6 +2597,10 @@ for what the product does to all basins at once, and spatial detail second.
 ### 38.3 The (n_0, gamma) landscapes per product
 
 Same 14-gauge population as §37.4, same protocol, three shards per arm (~3 h each).
+The hourly arm ran as five shards (2026-09-14, 37–90 min each on the hourly-native store). Inclusion rule for
+every row: a gauge whose Newton step fell back to the gradient direction has no optimum to report and is
+dropped (one gauge on the daily LSTM, the lumped dHBV2 and the hourly LSTM); "at bound" means the optimum's
+gamma multiplier sits within 1 % of the ±1.1 log box.
 
 | arm | gauges in | median \|H_gg\|/\|H_nn\| trained (optimum) | H_gg > 0 trained | gamma at bound | median NSE gain |
 |---|---|---|---|---|---|
@@ -2605,13 +2609,25 @@ Same 14-gauge population as §37.4, same protocol, three shards per arm (~3 h ea
 | dHBV2 lumped | 13 | 0.008 (0.009) | 7/13 | 3/13 | 0.005 |
 | hydroDL LSTM | 14 | 0.113 (0.045) | **11/14** | 6/14 | 0.005 |
 | dHBV2 distributed | 14 | **0.229** | **13/14** | 3/14 | 0.004 |
+| NH hourly MTS-LSTM | 13 | 0.018 (0.006) | 8/13 | **8/13** | 0.008 |
 
 Even the curvature along gamma is a property of the product, and it is ordered by how well-timed the product's
 inflow is: 0.008 on the lumped dHBV2 (one to two days early, roughness at the ceiling), 0.02 on the
 retrospective, 0.10–0.11 on the two LSTMs, **0.23 on the distributed dHBV2**, which also has positive gamma
 curvature at 13 of 14 gauges. That arm sits at the magnitude bar (0.25) and passes the sign bar (70 %); it is
 the only arm on which the daily gauges come close to constraining the stage exponent, and it is the arm whose
-inflow needed the least timing correction. Read together with §37: gamma becomes visible to a gauge only once
+inflow needed the least timing correction.
+
+The hourly MTS-LSTM arm (added 2026-09-14) lands at the bottom of the ordering with the lumped dHBV2: median
+|H_gg| / |H_nn| 0.018 at the trained point and 0.006 at the optimum, the sign bar at 8 of 13. Its distinguishing
+feature is where the optima go: gamma is driven to the *lower* bound (multiplier 0.33) at 8 of 13 gauges, more
+than on any daily arm (3–6), and n_0 to a bound at 4. The gauges are asking this arm for a channel with almost no
+stage dependence and a very different roughness level, and the loss barely responds along either axis (median
+NSE gain to the per-gauge optimum 0.008). Two gauges, 01047000 and 13317000, have H_nn < 0 at the trained
+point: along n_0 the trained field sits on a ridge, not in a valley, which the daily arms never showed. Read with
+§38.2: on a product whose error is peak volume rather than timing, neither n_0 nor gamma is the parameter the
+gauge wants to move, and the landscape says so at every gauge. Figures:
+`.ddrs/experiments/landscape-inflow-nh-hourly-lstm/n_gamma_planes.png` and `n_gamma_surfaces_3d.png`. Read together with §37: gamma becomes visible to a gauge only once
 the channel is not being used to repair the inflow's timing.
 
 ### 38.4 Do the per-gauge optima move with the product? Partly
