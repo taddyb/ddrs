@@ -2552,6 +2552,11 @@ roughness against river size from the same gauges: low and flat on the two distr
 with size on the NH LSTM (large rivers rough, headwaters smooth), high and flat on hydroDL, pinned at the
 ceiling everywhere on the lumped dHBV2 with the stage law switched off.
 
+One detail of the distributed dHBV2 field: its gamma sits at 0.232 with p10–p90 of 0.218–0.251, i.e. the
+whole network within ±0.02 of the sigmoid's initial 0.25. The head never moved it, which is what a flat
+direction looks like from the optimizer's side; the retrospective arm moved gamma down to 0.067 and the lumped
+arm to 0.003 because those products needed the roughness *level* changed, and gamma went along with n_0.
+
 **What the roughness is buying is timing.** The routing-lag analysis per arm (`routing_lag.py`) orders the
 products the same way the roughness does: each product's summed unrouted inflow reaches the gauge earlier
 than the observed flow by a product-specific amount, and the router delays it with roughness. The two
@@ -2579,9 +2584,12 @@ Same 14-gauge population as §37.4, same protocol, three shards per arm (~3 h ea
 | retrospective (§37.4) | 14 | 0.024 (0.028) | 8/14 | 6/14 | 0.010 |
 | NH daily LSTM | 12 | **0.125** (0.031) | 5/12 | 6/12 | 0.014 |
 | dHBV2 lumped | 13 | 0.008 (0.009) | 7/13 | 3/13 | 0.005 |
+| hydroDL LSTM | 14 | 0.113 (0.045) | **11/14** | 6/14 | 0.005 |
+| dHBV2 distributed | pending (last shard) | | | | |
 
-Even the curvature along gamma is a property of the product: an order of magnitude larger on the LSTM
-inflow than on the lumped dHBV2 at the trained point, and no arm passes either pre-registered bar. The
+Even the curvature along gamma is a property of the product: an order of magnitude larger on the two LSTM
+inflows than on the lumped dHBV2 at the trained point. The hydroDL arm is the first to pass the sign bar
+(H_gg > 0 at 79 % of gauges) while still failing the magnitude bar by a factor of two; no arm passes both. The
 per-gauge optima and their cross-arm angles (the "detached routing" test) will be tabulated when all five
 arms are in; the pairwise comparison uses `experiments/landscape/census.py` on two arms at a time.
 
