@@ -2585,11 +2585,41 @@ Same 14-gauge population as §37.4, same protocol, three shards per arm (~3 h ea
 | NH daily LSTM | 12 | **0.125** (0.031) | 5/12 | 6/12 | 0.014 |
 | dHBV2 lumped | 13 | 0.008 (0.009) | 7/13 | 3/13 | 0.005 |
 | hydroDL LSTM | 14 | 0.113 (0.045) | **11/14** | 6/14 | 0.005 |
-| dHBV2 distributed | pending (last shard) | | | | |
+| dHBV2 distributed | 14 | **0.229** | **13/14** | 3/14 | 0.004 |
 
-Even the curvature along gamma is a property of the product: an order of magnitude larger on the two LSTM
-inflows than on the lumped dHBV2 at the trained point. The hydroDL arm is the first to pass the sign bar
-(H_gg > 0 at 79 % of gauges) while still failing the magnitude bar by a factor of two; no arm passes both. The
+Even the curvature along gamma is a property of the product, and it is ordered by how well-timed the product's
+inflow is: 0.008 on the lumped dHBV2 (one to two days early, roughness at the ceiling), 0.02 on the
+retrospective, 0.10–0.11 on the two LSTMs, **0.23 on the distributed dHBV2**, which also has positive gamma
+curvature at 13 of 14 gauges. That arm sits at the magnitude bar (0.25) and passes the sign bar (70 %); it is
+the only arm on which the daily gauges come close to constraining the stage exponent, and it is the arm whose
+inflow needed the least timing correction. Read together with §37: gamma becomes visible to a gauge only once
+the channel is not being used to repair the inflow's timing.
+
+### 38.4 Do the per-gauge optima move with the product? Partly
+
+The same 14 gauges, five arms, the Newton optimum in (n_0, gamma) from each arm's trained point. Two things
+are true at once.
+
+**The product-wide shift is a global correction the gauges do not ask for.** The median per-gauge optimum in
+n_0 is at the trained value on the two distributed dHBV2 products (alpha*_n −0.02 and −0.01) and *below* it
+on the three products the routing had made rough: −0.20 (lumped), −0.18 (hydroDL), −0.44 (NH daily LSTM),
+i.e. gauge by gauge those channels want to be 20–35 % smoother than training left them. Training absorbed
+the product's lead with a roughness level that the individual gauges, given their own optimum, would partly
+give back; the gain from doing so is small (median 0.004–0.012 NSE), which is §20's near-free displacement
+again, now with its cause in view.
+
+**Underneath it, the gauges have their own opinion, and it survives the product.** The sign of the n_0 move
+agrees between arms at 64–86 % of gauges, and the alpha* directions of the two distributed dHBV2 products are
+16° apart (median over gauges with a non-trivial move); the two LSTM products are 13° apart. Gauges that want
+a rougher channel want it on every product (01449000: ×1.9 to ×2.6 on four of five), and gauges that want a
+smoother one likewise (01055000: ×0.4–0.65 on all five). The pairs that disagree most are across model
+families (retrospective vs NH LSTM, 84°). So the per-gauge constraint has two parts: a product-specific level,
+which is the bias absorber, and a gauge-specific direction, which is the channel; the landscape separates them
+where the trained fields cannot.
+
+Table of per-gauge optima (n_0 and gamma multipliers) across the five arms is in this section's source log
+(`cross-arm optima`, 2026-09-14) and will be typeset for the paper; figures per arm in
+`landscape-inflow-<arm>/n_gamma_surfaces_3d.png`. The
 per-gauge optima and their cross-arm angles (the "detached routing" test) will be tabulated when all five
 arms are in; the pairwise comparison uses `experiments/landscape/census.py` on two arms at a time.
 
