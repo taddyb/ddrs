@@ -2510,8 +2510,8 @@ side. A stratified-400 census with the same axes is the natural next run (about 
 
 The Beven-challenges study (`experiments/beven-inflow-arms`): the n_0 + gamma head with the channel fixed
 (p = 21, q = 0.65), the same 2,365 gauges, observations, network and 500-update recipe, trained on five
-AORC-forced unit-catchment products. The retrospective arm `23-39-03Z` (§37) is the reference. Four of five
-arms are in as this is written; the hourly MTS-LSTM arm trains overnight (its hourly-native store costs ~2 min per mini-batch against 13 s for the daily ones).
+AORC-forced unit-catchment products. The retrospective arm `23-39-03Z` (§37) is the reference. All five arms are in (the hourly MTS-LSTM arm finished 2026-09-14 06:07 UTC after 16 h of training on
+its hourly-native store) (its hourly-native store costs ~2 min per mini-batch against 13 s for the daily ones).
 
 Two stores had to be rechunked first: the dHBV2 and hydroDL AORC products were stored as 100–200 divides by the
 full 41-year time axis, so every 90-day batch decompressed whole rows and training ran 6x slow;
@@ -2527,7 +2527,7 @@ verified bit-identical). Trap T15 in the ddrs-dev skill.
 | dHBV2 lumped, AORC | `2026-09-13T13-56-50Z` | **0.007** / 0.432 | 0.5826 / 0.5951 | **+0.576** |
 | dHBV2 distributed, AORC | `2026-09-13T17-22-30Z` | 0.654 / 0.695 | 0.7301 / 0.7559 | +0.076 |
 | hydroDL LSTM, AORC | `2026-09-13T17-21-58Z` | 0.405 / 0.531 | 0.5689 / 0.5320 | +0.164 |
-| NH hourly MTS-LSTM | `2026-09-13T14-14-46Z` | pending | pending | |
+| NH hourly MTS-LSTM | `2026-09-13T14-14-46Z` | 0.592 / 0.547 | 0.5989 / 0.5151 | **+0.007** (KGE −0.03) |
 
 The lumped dHBV2 product has essentially no daily skill unrouted and is routed to 0.58 by a two-parameter
 roughness law: the routing is doing most of the work, and the next subsection says with what.
@@ -2543,11 +2543,16 @@ roughness law: the routing is doing most of the work, and the next subsection sa
 | NH daily LSTM | 0.096 | 0 % | 0.247 | 0 % | −0.50 | 0.076 → 0.193 | 1 d early, router adds 1–2 |
 | hydroDL LSTM | 0.168 | 0 % | 0.064 | 1 % | −0.87 | 0.175 → 0.151 | 1–2 d early, router adds 1–2 |
 | dHBV2 lumped | 0.246 | **27 %** | 0.003 | **38 %** | −1.00 | 0.249 → 0.226 | 1–2 d early even at < 300 km², router adds 1–3 |
+| NH hourly MTS-LSTM | 0.117 | 0 % | 0.042 | 3 % | +0.85 | 0.117 → 0.143 | (read-out pending) |
 
-Per-reach rank agreement of n_0 between products (Spearman): 0.69 between the two dHBV2-family distributed
-products (retrospective vs distributed AORC), 0.13 to 0.44 for every other pair; gamma agrees at 0.72 for that
-same pair and −0.31 to +0.50 otherwise. The range-normalised cross-arm spread per reach over all 346,321
-reaches is 0.79 of the box for n_0 and 0.50 for gamma (five arms). Five products, five different laws of
+Per-reach rank agreement of n_0 between products (Spearman): the three well-timed products cluster —
+retrospective vs distributed dHBV2 0.69, distributed dHBV2 vs hourly LSTM **0.72** (gamma 0.81), retrospective
+vs hourly LSTM 0.56 — across model families, while every pair involving the lumped dHBV2, the hydroDL LSTM
+or the daily NH LSTM sits at 0.10 to 0.52. The range-normalised cross-arm spread per reach over all 346,321
+reaches is 0.80 of the box for n_0 and 0.56 for gamma (six arms). The hourly arm also settles the magnitude
+question: its inflow has the worst peak bias of all (FHV −39 %) and a moderate n_0 (0.117), so pooled over
+six products the correlation of roughness with peak bias is −0.12; roughness follows the products' timing
+lead, not their volume or peak error. Five products, five different laws of
 roughness against river size from the same gauges: low and flat on the two distributed dHBV2 products, rising
 with size on the NH LSTM (large rivers rough, headwaters smooth), high and flat on hydroDL, pinned at the
 ceiling everywhere on the lumped dHBV2 with the stage law switched off.
