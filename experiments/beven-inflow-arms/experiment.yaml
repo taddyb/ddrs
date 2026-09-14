@@ -25,7 +25,7 @@ arms:
   - { name: dhbv2-dist,     config: config/experiments/sr_n0_gamma_dhbv2_dist.yaml,     product: "dHBV2 distributed, AORC2f, daily",    run: 2026-09-13T17-22-30Z-train-and-test }
   - { name: hydrodl-lstm,   config: config/experiments/sr_n0_gamma_hydrodl_lstm.yaml,   product: "hydroDL LSTM, AORC2f, daily",         run: 2026-09-13T17-21-58Z-train-and-test }
   - { name: nh-daily-lstm,  config: config/experiments/sr_n0_gamma_nh_daily_lstm.yaml,  product: "NeuralHydrology daily LSTM",           run: 2026-09-13T13-55-03Z-train-and-test }
-  - { name: nh-hourly-lstm, config: config/experiments/sr_n0_gamma_nh_hourly_lstm.yaml, product: "NeuralHydrology hourly MTS-LSTM",      run: PENDING }
+  - { name: nh-hourly-lstm, config: config/experiments/sr_n0_gamma_nh_hourly_lstm.yaml, product: "NeuralHydrology hourly MTS-LSTM",      run: 2026-09-13T14-14-46Z-train-and-test }
 reference_arms:
   # Same head and recipe on the dHBV2 UH retrospective, for comparison only.
   - { name: uh-retro-n0-gamma, run: 2026-09-12T23-39-03Z-train-and-test }
