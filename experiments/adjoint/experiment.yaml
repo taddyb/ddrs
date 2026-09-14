@@ -1,6 +1,6 @@
 # Adjoint influence-map study (proof of concept: one nested gauge pair in the
 # Juniata River basin). Spec:
-# docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md
+# research/specs/2026-09-03-ddrs-experiment-adjoint-design.md
 #
 # Run from the repo root:
 #   target/release/ddrs --workspace .ddrs experiment adjoint --backend cpu

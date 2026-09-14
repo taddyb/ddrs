@@ -188,5 +188,5 @@ constrain. But note the verdict in §35 — on CONUS `gamma = 0.35` cost about
 0.01 median NSE while improving the downstream width exponent from 0.004 to
 0.098, so a pretty animation is not evidence the term should be adopted. Design
 and gates:
-`docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`,
+`research/specs/2026-09-12-stage-dependent-roughness-design.md`,
 `tests/stage_roughness.rs`.

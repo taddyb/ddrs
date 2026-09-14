@@ -1,7 +1,7 @@
 //! The adjoint influence-map study: gradient of routed gauge discharge with
 //! respect to lateral inflow at every upstream reach and hour, per trained arm.
 //!
-//! Spec: `docs/superpowers/specs/2026-09-03-ddrs-experiment-adjoint-design.md` §2.
+//! Spec: `research/specs/2026-09-03-ddrs-experiment-adjoint-design.md` §2.
 
 pub mod gauges;
 pub mod hydraulics;

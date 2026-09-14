@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """How much of the per-gauge displacement gain is actually recoverable.
 
-Write-up: docs/2026-09-08-landscape-hypothesis-tests-findings.md, §20.
+Write-up: research/findings/2026-09-08-landscape-hypothesis-tests-findings.md, §20.
 
 Both sections below use the per-gauge quadratic surrogate in the
 log-multiplier `c` on Manning's n,

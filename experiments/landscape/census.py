@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Displacement census for the alpha-landscape study (spec section 7.1,
-docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md).
+research/specs/2026-09-07-adjoint-landscape-design.md).
 
 Per gauge per arm: the gain available from the gauge's own optimum, the
 optimum direction alpha_star and its physical multipliers, the stiff-

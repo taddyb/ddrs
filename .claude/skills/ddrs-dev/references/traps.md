@@ -23,6 +23,7 @@ is what a future session needs, not the narrative.
 | Training crawls; GPU is resident but idle at single-digit utilisation | T13 |
 | Eval metrics belong to a different model than the one trained (a new head output changes training loss but not eval) | T14 |
 | Training runs 6x slower than the 3.5 s/micro-batch pace on a new Q′ store, CPU pegged in decompression | T15 |
+| A forward-only sweep (grid search, sensitivity scan) grows RSS without bound | T16 |
 
 ---
 
@@ -279,7 +280,7 @@ faster. Check `head -1 <run>/run.log` to see which backend any historical run
 actually used before quoting its wall clock.
 
 ---
-## T11 Forward-only Autodiff evaluations retain the tape
+## T16 — Forward-only Autodiff evaluations retain the tape
 
 **Symptom.** A process that runs many routing forwards without training (grid sweeps, sensitivity scans) grows
 without bound: about 18 MB per forward on the 5-reach sandbox at 2,142 steps, 20 MB per eval at Newport (213

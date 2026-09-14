@@ -46,7 +46,7 @@ banner = (
     "# head_shared_linear.yaml in every other respect, so the pair is matched.\n"
     "# n(d) = n_0*(d/d_ref)^(-gamma); gamma = 0 is byte-identical to the\n"
     "# historical solver (tests/stage_roughness.rs::gamma_zero_is_bit_identical).\n"
-    "# Design: docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md\n#\n"
+    "# Design: research/specs/2026-09-12-stage-dependent-roughness-design.md\n#\n"
 )
 if float(g) != 0.0:
     t = t.replace("params:\n  parameter_ranges:",

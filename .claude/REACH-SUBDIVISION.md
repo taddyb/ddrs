@@ -14,9 +14,9 @@
 > Do not re-open the "Cr ≈ 1 ⇒ non-negative coefficients" argument without
 > reading §Why it fails.
 
-Config: `params.subdivision` (`src/config.rs:491-576`), default `enabled: false`.
+Config: `params.subdivision` (`src/config.rs::Subdivision`), default `enabled: false`.
 Implementation: `src/adjacency/subdivide.rs`, wired in `src/adjacency/cache.rs`.
-Plan of record: `docs/superpowers/plans/2026-08-05-reach-subdivision.md`
+Plan of record: `research/plans/2026-08-05-reach-subdivision.md`
 (Tasks 1-8, commits `741e475` … `6cb66bf`).
 
 ---
@@ -139,7 +139,7 @@ still **41.7 % off at t = 120** — the *configured* `warmup` (5 days) — reach
 <10 % only at t = 221 and <5 % at t = 282.
 
 So **`MuskingumCunge::divide_hotstart_by_pieces` defaults `true`**
-(`src/routing/mmc.rs:144,214`). It is an exact no-op without subdivision (no
+(`src/routing/mmc.rs::MuskingumCunge`). It is an exact no-op without subdivision (no
 divisor exists), so `compare_ddr_sandbox` stays an ABSOLUTE MATCH (1.53e-5 m³/s)
 and `adjacency_parity` still matches element-for-element.
 `probe_courant --divide-hotstart` A/B's it.
@@ -199,7 +199,7 @@ parent space (N = 346,321)          sub-reach space (N' = Σ min(m, M))
 ```
 
 `IdIndex` is built from **`parent_order`**, never from `order`
-(`src/data/store/zarr.rs:121-122`). A store without the map synthesizes the
+(`src/data/store/zarr.rs::ConusAdjacencyStore`). A store without the map synthesizes the
 identity (`parent_order == order`, `parent_offset == 0..=n`), so every un-split
 store keeps working unchanged.
 
@@ -207,11 +207,11 @@ store keeps working unchanged.
 
 | Concern | Site |
 |---|---|
-| Config + validation | `src/config.rs:491-576`, `validate_subdivision` `:1034` |
+| Config + validation | `src/config.rs::Subdivision`, `validate_subdivision` `:1034` |
 | Reference celerity, reach plan, expansion, `plan_stats` | `src/adjacency/subdivide.rs` |
 | Upstream-area accumulation, sequencing, cache key | `src/adjacency/cache.rs` (`upstream_area_km2`, `reach_plan`, `resolve_or_build`) |
 | Zarr persist/load of `parent_order` + `parent_offset` | `src/data/store/zarr.rs` |
-| `q'/m` after the clamp; hot-start divisor | `src/routing/mmc.rs:267-273,340,539` |
+| `q'/m` after the clamp; hot-start divisor | `src/routing/mmc.rs::forward`, `src/routing/mmc.rs::setup_inputs` |
 | KAN parent→sub-reach gather | `src/training/forward.rs::gather_params_to_subreaches` |
 | Gauge read at the parent's outlet piece; compressed-space `parent_offset` | `src/data/collate.rs` |
 | Tests | `tests/subdivide.rs`, `tests/subdivision_integration.rs` (12) |

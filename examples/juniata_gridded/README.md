@@ -63,7 +63,7 @@ zarr, and everything downstream is the existing subdivided-network path:
 | `juniata_gage.csv` — one row with the snapped `cell` and `da_ratio` | the gauge table; `cell` is read as the outlet id, routed at that cell's last sub-reach. `da_ratio` is informational (no output correction, as in DDR's `train_gridded.py`) |
 
 Design and the full list of deviations:
-`docs/superpowers/specs/2026-09-08-ddrs-gridded-routing-design.md`.
+`research/specs/2026-09-08-ddrs-gridded-routing-design.md`.
 
 ## Tests
 

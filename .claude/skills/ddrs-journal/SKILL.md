@@ -1,11 +1,11 @@
 ---
 name: ddrs-journal
-description: Use when a ddrs run or experiment has finished, when a journal entry in docs/journal/ has unfilled TODO fields, or when recording what a training run or experiment concluded.
+description: Use when a ddrs run or experiment has finished, when a journal entry in research/journal/ has unfilled TODO fields, or when recording what a training run or experiment concluded.
 ---
 
 # ddrs research journal
 
-`docs/journal/YYYY-MM.md` is the running record of what we tried and what came of
+`research/journal/YYYY-MM.md` is the running record of what we tried and what came of <!-- verify-doc-paths: ignore -->
 it. Facts are written for you by `scripts/journal.py` (hooked on `ddrs run` and
 `ddrs experiment`). Judgement is yours.
 
@@ -28,7 +28,8 @@ Manual: `python3 scripts/journal.py --mode status` (what is pending),
 ## Filling an entry
 
 Four fields. Keep the whole entry under ~15 lines; if the conclusion needs more,
-it has earned a `docs/YYYY-MM-DD-<topic>-findings.md` and the entry links to it.
+it has earned a `research/findings/YYYY-MM-DD-<topic>-findings.md` and the entry
+links to it.
 
 **Question** — what we wanted to find out, phrased so "no" is a possible answer.
 
@@ -55,7 +56,7 @@ The stop hook runs `$CLAUDE_PROJECT_DIR/scripts/journal.py`, and
 `CLAUDE_PROJECT_DIR` is the **main checkout**, not the worktree the session is
 editing. So:
 
-- the hook opens its stub in `<main tree>/docs/journal/`
+- the hook opens its stub in `<main tree>/research/journal/`
 - a stub you fill in the worktree is invisible to it
 - `journal.py --mode status` run from the worktree reports 0 open TODOs while
   `--mode stop` keeps blocking on the same run, which looks like a bug in the
@@ -63,7 +64,7 @@ editing. So:
 
 Fill the **main tree's** copy to clear the block, with the same judgement text,
 then let the two converge when the branch merges. Expect a conflict in
-`docs/journal/<month>.md` at merge: the main tree has hook-written stubs the
+`research/journal/<month>.md` at merge: the main tree has hook-written stubs the
 branch does not, and the branch has filled entries the main tree does not. Both
 sides are wanted; resolve by keeping the filled version of each entry.
 

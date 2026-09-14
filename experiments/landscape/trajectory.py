@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Training-trajectory figures for the alpha-landscape study (spec section 7.2,
-docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md).
+research/specs/2026-09-07-adjoint-landscape-design.md).
 
 Arms are checkpoints of ONE run, named ep-init, ep-01, ep-05, ep-10, ep-20,
 ep-30 (the epoch is parsed from the arm name; ep-init = 0). The checkpoint

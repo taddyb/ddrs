@@ -1264,7 +1264,7 @@ fn load_merged_stats(
 /// no gradient signal on dry samples — well-documented to slow convergence
 /// (LeCun et al., *Efficient BackProp*). A mean-centered feature trains every
 /// weight every step. Verified via the synthetic discriminator
-/// `examples/disagg_precip_normalization_discriminator.rs`: at a matched
+/// `research/archive/examples/disagg_precip_normalization_discriminator.rs`: at a matched
 /// short training budget the z-scored feature reached 88% precip-timing
 /// accuracy vs 77% for the fixed-divisor feature (both reach 100% given 20x
 /// more steps — a convergence-speed gap, not missing information). This is

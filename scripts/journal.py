@@ -78,7 +78,7 @@ def workspaces(root: Path) -> list[Path]:
 
 
 def journal_dir(root: Path) -> Path:
-    return root / "docs" / "journal"
+    return root / "research" / "journal"
 
 
 def state_path(root: Path) -> Path:
@@ -419,7 +419,7 @@ def mode_post_tool(root: Path, payload: dict) -> int:
     save_state(root, st)
 
     stubs = [r.id for r, got in written if got]
-    lines = [f"Research journal: recorded {len(written)} completed run(s) in docs/journal/."]
+    lines = [f"Research journal: recorded {len(written)} completed run(s) in research/journal/."]
     if stubs:
         lines.append("These need the judgement fields written before this turn ends "
                      "(Question / What we did / Result / Conclusion):")
@@ -466,7 +466,7 @@ def mode_stop(root: Path, payload: dict) -> int:
     json.dump({"decision": "block", "reason":
                "These journal entries were opened by runs in this session and still have "
                "TODO judgement fields: " + ", ".join(unfilled) +
-               ". Fill Question / What we did / Result / Conclusion in docs/journal/ now. "
+               ". Fill Question / What we did / Result / Conclusion in research/journal/ now. "
                "Write what you actually know; if the run's purpose is unclear to you, "
                "record that plainly instead of inventing one."}, sys.stdout)
     sys.stdout.write("\n")

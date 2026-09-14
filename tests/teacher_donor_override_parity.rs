@@ -1,5 +1,5 @@
 //! Parity gate for teacher mode's new n/q_spatial/p_spatial donor override
-//! (docs/superpowers/specs/2026-07-22-synthetic-n-recoverability-design.md).
+//! (research/specs/2026-07-22-synthetic-n-recoverability-design.md).
 //!
 //! Injecting a checkpoint's OWN dump_parameters output as the teacher's
 //! donor field must reproduce (within tolerance) the SAME synthetic gauge

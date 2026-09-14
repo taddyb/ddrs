@@ -6,7 +6,7 @@
 //!
 //! Three physics corrections landed with hand-written BURN-0.21
 //! `Backward<I, N>` implementations rather than autograd-tape unrolling
-//! (invariant 4, `docs/reference/burn-autograd.md`):
+//! (invariant 4, `docs/book/reference/burn-autograd.md`):
 //!
 //!   1. trapezoidal celerity `c = v·β`, `β = 5/3 − (4/3)·A·√(1+z²)/(T·P)`  (S17)
 //!   2. Cunge `X = clamp(0.5(1 − Q/(B·S·c·L)), 0, 0.5)`                    (S19)

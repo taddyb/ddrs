@@ -4,7 +4,7 @@
 # head_shared_linear.yaml in every other respect, so the pair is matched.
 # n(d) = n_0*(d/d_ref)^(-gamma); gamma = 0 is byte-identical to the
 # historical solver (tests/stage_roughness.rs::gamma_zero_is_bit_identical).
-# Design: docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md
+# Design: research/specs/2026-09-12-stage-dependent-roughness-design.md
 #
 # head_shared_linear
 #

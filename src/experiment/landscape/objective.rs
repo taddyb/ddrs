@@ -7,7 +7,7 @@
 //! that are not axes are carried at their trained (or default) field.
 //! `L_g(α)` is the NSE-batch loss (training objective) over the configured
 //! windows; its gradient comes from autograd with `α` lifted as leaves.
-//! Spec: docs/superpowers/specs/2026-09-07-adjoint-landscape-design.md §1–§2.
+//! Spec: research/specs/2026-09-07-adjoint-landscape-design.md §1–§2.
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;

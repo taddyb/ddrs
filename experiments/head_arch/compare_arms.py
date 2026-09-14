@@ -33,7 +33,7 @@ Reported per arm, over all 346,321 CONUS reaches:
              this script scored q itself against a "0.1-0.6 band", which is a
              conflation of the two: in b terms that band is [0.057, 0.257]. See
              .claude/skills/ddrs-eval-plots/references/channel_geometry.md and
-             docs/superpowers/specs/2026-09-12-leopold-maddock-q-prior-design.md.
+             research/specs/2026-09-12-leopold-maddock-q-prior-design.md.
   skill      median NSE and KGE from each run's own manifest, plus its own
              baseline. Read arms against EACH OTHER: they all learn three
              parameters where the 0.7376/0.7600 reference learned two, so the

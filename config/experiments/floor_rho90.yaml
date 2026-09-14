@@ -1,9 +1,9 @@
 # floor_rho90.yaml — Phase B objective-floor measurement.
 # GENERATED from recoverability_student_a.yaml — rho 90 (training default); teacher head via checkpoint warm start
-# Spec: docs/superpowers/specs/2026-07-04-leakance-gate-program-design.md §4
+# Spec: research/specs/2026-07-04-leakance-gate-program-design.md §4
 # recoverability_student_a.yaml — synthetic losing-reach recoverability (positive control).
 # GENERATED from leakance_hourly_on.yaml — student A: warm-start (weights only), leakance ON, synthetic obs
-# Spec: docs/superpowers/specs/2026-07-03-synthetic-recoverability-design.md
+# Spec: research/specs/2026-07-03-synthetic-recoverability-design.md
 
 mode: training
 workflow: train-and-test

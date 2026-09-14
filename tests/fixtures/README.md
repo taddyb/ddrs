@@ -35,7 +35,7 @@ cargo test --features fixtures --test kan_head_init_parity \
 
 Tiny icechunk Qr stores used by the hourly-streamflow and import-command
 integration tests.  Regenerate only if the DDR Q' store contract changes
-(see `docs/nh-qprime-store-contract.md`):
+(see `docs/book/nh-qprime-store-contract.md`):
 
 ```bash
 cd ~/projects/ddr

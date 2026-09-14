@@ -8,8 +8,8 @@
 # term identifiable. Paired against leakance_hourly_off (=the 2026-06-23T02-49-12Z run)
 # for the subset NSE/KGE delta.
 #
-# Spec: docs/superpowers/specs/2026-06-29-leakance-hourly-feasibility-design.md
-# Plan task 12: docs/superpowers/plans/2026-06-29-leakance-hourly-feasibility.md
+# Spec: research/specs/2026-06-29-leakance-hourly-feasibility-design.md
+# Plan task 12: research/plans/2026-06-29-leakance-hourly-feasibility.md
 #
 # Derived verbatim from:
 #   .ddrs/runs/2026-06-23T02-49-12Z-conus-hourly-train-and-test/config.yaml

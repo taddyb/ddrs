@@ -60,7 +60,7 @@ def write_experiment(root: Path, study: str, ts: str, *, finished: str, shard=No
 
 
 def journal_text(root: Path) -> str:
-    jd = root / "docs" / "journal"
+    jd = root / "research" / "journal"
     return "".join(f.read_text() for f in sorted(jd.glob("*.md"))) if jd.is_dir() else ""
 
 
@@ -86,8 +86,8 @@ def main() -> int:
         text = journal_text(root)
         check("ledger rows written", text.count("| 2026-") == 5, str(text.count("| 2026-")))
         check("no invented judgement", "_TODO_" not in text)
-        check("months split", (root / "docs/journal/2026-09.md").exists()
-              and (root / "docs/journal/2026-08.md").exists())
+        check("months split", (root / "research/journal/2026-09.md").exists()
+              and (root / "research/journal/2026-08.md").exists())
 
         print("idempotency")
         run(root, "backfill")
@@ -124,7 +124,7 @@ def main() -> int:
         check("never loops", p.stdout.strip() == "", p.stdout)
 
         print("stop: goes quiet once judgement is written")
-        f = root / "docs/journal/2026-09.md"
+        f = root / "research/journal/2026-09.md"
         f.write_text(f.read_text().replace("_TODO_", "answered"))
         p = run(root, "stop", {"session_id": "S1"})
         check("quiet after fields filled", p.stdout.strip() == "", p.stdout)
