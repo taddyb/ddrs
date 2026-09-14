@@ -102,7 +102,7 @@ pub struct KanHeadConfig {
     /// `logit(param_j) = w_j · h + b_j`. When the informative part of `h` is
     /// effectively one direction, any two outputs are then *exactly* affinely
     /// related — the mechanism measured in
-    /// `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §31
+    /// `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` §31
     /// (`logit(q) = 3.979 · logit(n) + 2.752`, R² = 0.987).
     ///
     /// `true` gives every output its own spline coefficients on every edge

@@ -378,7 +378,7 @@ pub struct KanHeadConfigSection {
 /// sits at `m ≈ 0.34` against `f ≈ 0.40`, i.e. off that curve. Roughness falling
 /// as the channel fills is the one physical term that can move `m` without
 /// breaking width and depth. See
-/// `docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`.
+/// `research/specs/2026-09-12-stage-dependent-roughness-design.md`.
 ///
 /// Two things change in the solver, both reducing exactly at `gamma = 0`:
 /// the depth exponent becomes `3/(5 + 3q + 3·gamma)`, and the celerity gains

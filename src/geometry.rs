@@ -61,7 +61,7 @@ pub fn compute_trapezoidal_geometry<B: Backend>(
 ///
 /// **This does not compute celerity**, which also gains a `gamma · A/(T·d)` term
 /// — see `src/routing/mmc_op.rs` S17 and
-/// `docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`.
+/// `research/specs/2026-09-12-stage-dependent-roughness-design.md`.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_trapezoidal_geometry_gamma<B: Backend>(
     n: Tensor<B, 1>,

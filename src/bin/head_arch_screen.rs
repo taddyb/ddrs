@@ -2,7 +2,7 @@
 //!
 //! # Why this exists
 //!
-//! §31 of `docs/2026-09-08-landscape-hypothesis-tests-findings.md` found that
+//! §31 of `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` found that
 //! the trained head's two learnable outputs are the same latent direction
 //! relabelled: over all 346,321 CONUS reaches,
 //! `logit(q) = 3.979 · logit(n) + 2.752` with R² = 0.987. That gain of ~4 is

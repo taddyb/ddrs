@@ -1,7 +1,7 @@
 # Giving the width exponent a Leopold & Maddock prior
 
 **Status:** design, not implemented. Written 2026-09-12.
-**Motivated by:** `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §30 (what daily
+**Motivated by:** `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` §30 (what daily
 discharge can identify), §32 (the head is capable; the trunk collapses to rank 1.38),
 and `.claude/skills/ddrs-eval-plots/references/channel_geometry.md` (the width law
 cannot reach L&M's exponent inside the declared range).

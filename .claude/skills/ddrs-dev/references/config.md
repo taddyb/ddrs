@@ -128,7 +128,7 @@ Ten production `input_var_names`: `SoilGrids1km_clay`, `aridity`, `meanelevation
 
 ### Head topology knobs (added 2026-09-11) — all default to the current head
 
-These exist to test §31 of `docs/2026-09-08-landscape-hypothesis-tests-findings.md`:
+These exist to test §31 of `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`:
 the head's learnable outputs came out as one latent direction relabelled
 (`logit(q) = 3.979 · logit(n) + 2.752`, R² = 0.987 over 346,321 reaches), which
 is also why `q_spatial` saturated both bounds while `n` never touched its own.

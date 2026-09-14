@@ -2,7 +2,7 @@
 //! `input_layer_kan`, `output_layer_kan`).
 //!
 //! These knobs exist to test the §31 finding in
-//! `docs/2026-09-08-landscape-hypothesis-tests-findings.md`: with a
+//! `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`: with a
 //! `Linear(H, P)` read-out every output is an affine functional of one shared
 //! latent, so when that latent's informative part is effectively one direction
 //! any two parameters are forced into an exact affine relationship

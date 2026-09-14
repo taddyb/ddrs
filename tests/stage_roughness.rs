@@ -1,6 +1,6 @@
 //! Gates for stage-dependent Manning roughness, `n(d) = n_0·(d/d_ref)^(−gamma)`.
 //!
-//! Design: `docs/superpowers/specs/2026-09-12-stage-dependent-roughness-design.md`.
+//! Design: `research/specs/2026-09-12-stage-dependent-roughness-design.md`.
 //!
 //! Three things must hold, and the third is the one the existing suite has no
 //! analogue for:

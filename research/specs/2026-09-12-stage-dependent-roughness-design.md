@@ -5,7 +5,7 @@
 identifiable. See §5, which amends the "probe before any code" framing because a
 probe needs the axis to exist in the forward model first.
 
-**Background:** `docs/2026-09-08-landscape-hypothesis-tests-findings.md` §29
+**Background:** `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md` §29
 (the width exponent is concave at half of gauges), §30 (roughness is a *timing*
 channel, width a *scale* channel), §32 (the trunk collapses to rank 1.38 under a
 near one-dimensional gradient), and
