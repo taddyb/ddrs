@@ -73,7 +73,7 @@ pub fn parameter_bounds<'py>(
         ("p_spatial", ranges.p_spatial),
     ];
 
-    let out = PyDict::new_bound(py);
+    let out = PyDict::new(py);
     for (name, [lo, hi]) in entries {
         let bounds_tup = (lo as f64, hi as f64);
         let log = log_set.contains(name);
