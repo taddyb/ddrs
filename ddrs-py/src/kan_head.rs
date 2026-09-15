@@ -77,7 +77,7 @@ impl PyKanHead {
 
         let raw = self.inner.forward(input);
 
-        let out = PyDict::new_bound(py);
+        let out = PyDict::new(py);
         for key in self.inner.learnable_parameters() {
             let tensor = raw
                 .get(key)
@@ -87,7 +87,7 @@ impl PyKanHead {
                     "BURN tensor → Vec<f32> failed for `{key}`: {e:?}"
                 ))
             })?;
-            out.set_item(key, PyArray1::from_vec_bound(py, vec))?;
+            out.set_item(key, PyArray1::from_vec(py, vec))?;
         }
         Ok(out)
     }

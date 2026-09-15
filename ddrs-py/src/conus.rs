@@ -101,8 +101,8 @@ pub fn run_inference_over_conus<'py>(
         .map(String::as_str)
         .collect();
 
-    let out = PyDict::new_bound(py);
-    out.set_item("comid", PyArray1::from_vec_bound(py, resolved_comids))?;
+    let out = PyDict::new(py);
+    out.set_item("comid", PyArray1::from_vec(py, resolved_comids))?;
 
     for name in model.param_order() {
         let bounds = match name.as_str() {
@@ -125,7 +125,7 @@ pub fn run_inference_over_conus<'py>(
         })?;
         let log_space = log_set.contains(name.as_str());
         let denorm = denormalize_vec(&raw_vec, bounds, log_space);
-        out.set_item(name, PyArray1::from_vec_bound(py, denorm))?;
+        out.set_item(name, PyArray1::from_vec(py, denorm))?;
     }
 
     Ok(out)

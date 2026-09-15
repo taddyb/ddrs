@@ -40,5 +40,5 @@ pub fn denormalize<'py>(
         let scale = hi - lo;
         input.iter().map(|&v| v * scale + lo).collect()
     };
-    Ok(PyArray1::from_vec_bound(py, out))
+    Ok(PyArray1::from_vec(py, out))
 }
