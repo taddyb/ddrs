@@ -138,8 +138,15 @@ pub fn probe_forward<I: Backend>(
         .iter()
         .find(|(n, _)| n.as_str() == "q_spatial")
         .map(|(_, t)| t.clone())
-        .unwrap_or_else(|| {
-            params_map.get("q_spatial").expect("head missing q_spatial").clone()
+        .unwrap_or_else(|| match params_map.get("q_spatial") {
+            Some(q) => q.clone(),
+            None => crate::training::forward::fixed_output_normalized::<Autodiff<I>>(
+                cfg,
+                "q_spatial",
+                cfg.params.parameter_ranges.q_spatial,
+                n_active,
+                device,
+            ),
         });
     let p_param: Option<Tensor<Autodiff<I>, 1>> = leaves
         .leaves
@@ -147,6 +154,13 @@ pub fn probe_forward<I: Backend>(
         .find(|(n, _)| n.as_str() == "p_spatial")
         .map(|(_, t)| t.clone())
         .or_else(|| params_map.get("p_spatial").cloned());
+    // Stage-roughness exponent, same treatment as p_spatial (mirrors `forward`).
+    let gamma_param: Option<Tensor<Autodiff<I>, 1>> = leaves
+        .leaves
+        .iter()
+        .find(|(n, _)| n.as_str() == "gamma")
+        .map(|(_, t)| t.clone())
+        .or_else(|| params_map.get("gamma").cloned());
 
     // Mirrors forward.rs:214-230: leakance fields only when use_leakance is true.
     let (k_d, d_gw, leakance_factor) = if cfg.params.use_leakance {
@@ -188,6 +202,7 @@ pub fn probe_forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
+            gamma: gamma_param,
             k_d,
             d_gw,
             leakance_factor,

@@ -77,6 +77,14 @@ pub struct LandscapeSpec {
     /// `VALID_PLANES` at the top of `run_landscape`.
     #[serde(default = "d_planes")]
     pub planes: Vec<String>,
+    /// Which parameter occupies each alpha slot. Default `[n, p_spatial,
+    /// q_spatial]` (every earlier study). `gamma` may take a slot on an arm
+    /// whose head learns it (e.g. `[n, gamma, q_spatial]` for the n_0 + gamma
+    /// head); parameters not listed are carried at their trained field.
+    /// Plane names follow the slot labels (`n`, `p`, `q`, `gamma`), e.g.
+    /// `n-gamma`. Validated by `validate_axes`.
+    #[serde(default = "d_axes")]
+    pub axes: [String; 3],
     /// Also compute per-reach `g_i = dL/d ln x_i` (x in n, p, q) at α = 0 and
     /// α*, plus `dist_to_gauge_m`, for the "perturbations in a watershed"
     /// study: where in the network the gauge still constrains parameters,
@@ -155,6 +163,26 @@ fn effective_max_clamped(spec_value: f32, min_reaches: usize, n_reach: usize, n_
 fn d_planes() -> Vec<String> {
     VALID_PLANES.iter().map(|s| s.to_string()).collect()
 }
+fn d_axes() -> [String; 3] {
+    ["n".to_string(), "p_spatial".to_string(), "q_spatial".to_string()]
+}
+
+/// Short label of an axis parameter, used in plane names and output
+/// variable names: `n`, `p`, `q`, `gamma`.
+pub fn axis_label(name: &str) -> &str {
+    match name {
+        "p_spatial" => "p",
+        "q_spatial" => "q",
+        other => other,
+    }
+}
+
+/// The three parameter-plane names for a set of axes, slot pairs
+/// (0,1), (0,2), (1,2): `n-p`, `n-q`, `p-q` for the default axes.
+pub fn axis_plane_names(axes: &[String; 3]) -> [String; 3] {
+    let l: Vec<&str> = axes.iter().map(|a| axis_label(a)).collect();
+    [format!("{}-{}", l[0], l[1]), format!("{}-{}", l[0], l[2]), format!("{}-{}", l[1], l[2])]
+}
 fn d_slice_center() -> String {
     "optimum".to_string()
 }
@@ -181,17 +209,57 @@ pub const OBJECTIVE_NSE_DERIV: &str = "nse-deriv";
 pub const VALID_PERIODS: [&str; 2] = [PERIOD_TESTING, PERIOD_TRAINING];
 
 impl LandscapeSpec {
-    /// Reject any `planes` entry that isn't one of `VALID_PLANES`.
+    /// Reject any `planes` entry that isn't a parameter plane of the chosen
+    /// axes or `stiff-sloppy`. With the default axes that is exactly
+    /// `VALID_PLANES`.
     pub fn validate_planes(&self) -> Result<(), BoxError> {
-        for p in &self.planes {
-            if !VALID_PLANES.contains(&p.as_str()) {
+        let valid: Vec<String> = self.resolved_planes_valid();
+        for p in &self.resolved_planes() {
+            if !valid.contains(p) {
                 return Err(format!(
-                    "unknown landscape plane `{p}`; valid planes are {VALID_PLANES:?}"
+                    "unknown landscape plane `{p}` for axes {:?}; valid planes are {valid:?}",
+                    self.axes
                 )
                 .into());
             }
         }
         Ok(())
+    }
+
+    /// Reject unknown or repeated axis names. Whether `gamma` is usable on
+    /// the arm is checked when the objective is built (it needs the head).
+    pub fn validate_axes(&self) -> Result<(), BoxError> {
+        for a in &self.axes {
+            if !crate::experiment::landscape::objective::AXIS_PARAMS.contains(&a.as_str()) {
+                return Err(format!(
+                    "unknown landscape axis `{a}`; valid axes are {:?}",
+                    crate::experiment::landscape::objective::AXIS_PARAMS
+                )
+                .into());
+            }
+        }
+        if self.axes[0] == self.axes[1] || self.axes[0] == self.axes[2] || self.axes[1] == self.axes[2] {
+            return Err(format!("landscape axes must be distinct, got {:?}", self.axes).into());
+        }
+        Ok(())
+    }
+
+    fn resolved_planes_valid(&self) -> Vec<String> {
+        let mut v: Vec<String> = axis_plane_names(&self.axes).to_vec();
+        v.push("stiff-sloppy".to_string());
+        v
+    }
+
+    /// The planes to compute. The default `planes` list is spelled for the
+    /// default axes; when the axes differ and `planes` was left at its
+    /// default, the same three slot pairs are renamed for the chosen axes
+    /// so a bundle need not restate them.
+    pub fn resolved_planes(&self) -> Vec<String> {
+        if self.planes == d_planes() && self.axes != d_axes() {
+            self.resolved_planes_valid()
+        } else {
+            self.planes.clone()
+        }
     }
 
     /// Reject a `slice_center` that isn't one of `VALID_SLICE_CENTERS`.
@@ -289,6 +357,7 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static + Send + Sync,
 {
+    spec.validate_axes()?;
     spec.validate_planes()?;
     spec.validate_slice_center()?;
     spec.validate_window_days()?;
@@ -453,7 +522,7 @@ where
     I::Device: 'static,
 {
     let staid = Staid::new(&g.staid);
-    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight)?;
+    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight, &spec.axes)?;
     let h = spec.fd_step;
     let active = obj.active();
     let n_active_params = active.iter().filter(|&&a| a).count();
@@ -590,7 +659,8 @@ where
     if spec.grid > 0 {
         let gsz = spec.grid.max(3);
         let axis: Vec<f32> = (0..gsz).map(|i| -spec.alpha_max + 2.0 * spec.alpha_max * i as f32 / (gsz - 1) as f32).collect();
-        let axis_planes: [(&str, [usize; 2]); 3] = [("n-p", [0, 1]), ("n-q", [0, 2]), ("p-q", [1, 2])];
+        let names = axis_plane_names(&spec.axes);
+        let axis_planes: [(&str, [usize; 2]); 3] = [(&names[0], [0, 1]), (&names[1], [0, 2]), (&names[2], [1, 2])];
         // "optimum" (default): axis planes pin the third component at
         // alpha_star, the eigen plane is centred at alpha_star. "trained":
         // axis planes pin the third component at 0, the eigen plane is
@@ -598,8 +668,8 @@ where
         let trained_center = spec.slice_center == "trained";
         let axis_third = if trained_center { [0.0f32; 3] } else { alpha_star };
         let eigen_center = if trained_center { [0.0f32; 3] } else { alpha_star };
-        for name in &spec.planes {
-            if let Some(fixed) = plane_skip_reason(name, active) {
+        for name in &spec.resolved_planes() {
+            if let Some(fixed) = plane_skip_reason(name, active, &spec.axes) {
                 println!("  [{}] {} plane {name} skipped: {fixed} fixed", arm.name, g.staid);
                 continue;
             }
@@ -665,8 +735,8 @@ where
         let rgs = obj.reach_grad(alpha_star);
         let sum = |v: &[f32]| v.iter().sum::<f32>();
         for (label, rg, uniform) in [("alpha=0", &rg0, &grad0), ("alpha*", &rgs, &grad_star)] {
-            for (k, name) in ["n", "p", "q"].into_iter().enumerate() {
-                let per_reach = [&rg.n, &rg.p, &rg.q][k];
+            for (k, name) in spec.axes.iter().map(|a| axis_label(a)).enumerate() {
+                let per_reach = &rg.slots[k];
                 let s = sum(per_reach);
                 let u = uniform[k];
                 let rel = (s - u).abs() / u.abs().max(1e-8);
@@ -677,7 +747,7 @@ where
             }
         }
         let dist = dist_to_gauge(&obj.windows[0].tensors.adjacency, obj.windows[0].gauge_row);
-        (Some([rg0.n, rg0.p, rg0.q]), Some([rgs.n, rgs.p, rgs.q]), dist)
+        (Some(rg0.slots), Some(rgs.slots), dist)
     } else {
         (None, None, Vec::new())
     };
@@ -768,9 +838,11 @@ where
         max_clamped_effective: max_clamped,
         hit_range_bound,
         used_gradient_fallback,
-        n0: obj.windows[0].n0.clone().into_data().to_vec::<f32>().unwrap(),
-        p0: obj.windows[0].p0.clone().into_data().to_vec::<f32>().unwrap(),
-        q0: obj.windows[0].q0.clone().into_data().to_vec::<f32>().unwrap(),
+        n0: obj.trained_field(&obj.windows[0], "n").expect("n").into_data().to_vec::<f32>().unwrap(),
+        p0: obj.trained_field(&obj.windows[0], "p_spatial").expect("p").into_data().to_vec::<f32>().unwrap(),
+        q0: obj.trained_field(&obj.windows[0], "q_spatial").expect("q").into_data().to_vec::<f32>().unwrap(),
+        gamma0: obj.trained_field(&obj.windows[0], "gamma").map(|t| t.into_data().to_vec::<f32>().unwrap()),
+        param_names: spec.axes.clone(),
         comid: obj.windows[0].comids.clone(),
         reach_grad0,
         reach_grad_star,
@@ -801,17 +873,19 @@ fn unit(i: usize) -> [f32; 3] {
     u
 }
 
-const PARAM_NAMES: [&str; 3] = ["n", "p_spatial", "q_spatial"];
-
-/// Which two alpha indices an axis plane's grid spans; `None` for
-/// `"stiff-sloppy"` (it is never skipped for naming a fixed parameter --
-/// it re-slices onto the active eigenvectors instead).
-fn axis_plane_indices(name: &str) -> Option<[usize; 2]> {
-    match name {
-        "n-p" => Some([0, 1]),
-        "n-q" => Some([0, 2]),
-        "p-q" => Some([1, 2]),
-        _ => None,
+/// Which two alpha indices an axis plane's grid spans, for the given axes;
+/// `None` for `"stiff-sloppy"` (it is never skipped for naming a fixed
+/// parameter -- it re-slices onto the active eigenvectors instead).
+fn axis_plane_indices(name: &str, axes: &[String; 3]) -> Option<[usize; 2]> {
+    let names = axis_plane_names(axes);
+    if name == names[0] {
+        Some([0, 1])
+    } else if name == names[1] {
+        Some([0, 2])
+    } else if name == names[2] {
+        Some([1, 2])
+    } else {
+        None
     }
 }
 
@@ -819,12 +893,12 @@ fn axis_plane_indices(name: &str) -> Option<[usize; 2]> {
 /// `None` when both its axes are active (or `name` isn't an axis plane at
 /// all, e.g. `"stiff-sloppy"`). Pure, so it's unit-tested without a trained
 /// run.
-fn plane_skip_reason(name: &str, active: [bool; 3]) -> Option<&'static str> {
-    let [i, j] = axis_plane_indices(name)?;
+fn plane_skip_reason(name: &str, active: [bool; 3], axes: &[String; 3]) -> Option<String> {
+    let [i, j] = axis_plane_indices(name, axes)?;
     if !active[i] {
-        Some(PARAM_NAMES[i])
+        Some(axes[i].clone())
     } else if !active[j] {
-        Some(PARAM_NAMES[j])
+        Some(axes[j].clone())
     } else {
         None
     }
@@ -874,8 +948,8 @@ where
     }
     let q_t = burn::tensor::Tensor::<I, 1>::from_floats(q_acc.as_slice(), &obj.ctx.device);
     let mean_tt = |alpha: [f32; 3]| -> f32 {
-        let (nn, pp, qq) = obj.fields_at(w, alpha);
-        let k = reach_k_hours::<I>(&obj.ctx.cfg, &nn, &pp, &qq, q_t.clone(), &w.slope, &w.length);
+        let f = obj.fields_at(w, alpha);
+        let k = reach_k_hours::<I>(&obj.ctx.cfg, &f.n, &f.p, &f.q, q_t.clone(), &w.slope, &w.length, f.gamma.as_ref());
         let tt = path_travel_time_hours(adj, w.gauge_row, &k);
         let f: Vec<f32> = tt.into_iter().filter(|v| v.is_finite()).collect();
         f.iter().sum::<f32>() / f.len().max(1) as f32
@@ -946,20 +1020,56 @@ mod tests {
     }
 
     #[test]
+    fn axes_default_planes_are_the_legacy_names() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert_eq!(spec.axes, d_axes());
+        assert_eq!(axis_plane_names(&spec.axes).to_vec(), vec!["n-p", "n-q", "p-q"]);
+        assert_eq!(spec.resolved_planes(), d_planes());
+        assert!(spec.validate_axes().is_ok());
+    }
+
+    #[test]
+    fn gamma_axis_renames_default_planes_and_validates() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\naxes: [n, gamma, q_spatial]\n").unwrap();
+        assert!(spec.validate_axes().is_ok());
+        assert_eq!(spec.resolved_planes(), vec!["n-gamma", "n-q", "gamma-q", "stiff-sloppy"]);
+        assert!(spec.validate_planes().is_ok());
+        let axes = spec.axes.clone();
+        assert_eq!(axis_plane_indices("n-gamma", &axes), Some([0, 1]));
+        assert_eq!(axis_plane_indices("gamma-q", &axes), Some([1, 2]));
+        assert_eq!(axis_plane_indices("n-p", &axes), None);
+        // q fixed (the n_0 + gamma head): only the n-gamma plane survives.
+        let active = [true, true, false];
+        assert_eq!(plane_skip_reason("n-gamma", active, &axes), None);
+        assert_eq!(plane_skip_reason("gamma-q", active, &axes).as_deref(), Some("q_spatial"));
+        // An explicit legacy plane name on gamma axes is an error, not silently skipped.
+        let bad: LandscapeSpec = serde_yaml::from_str("gauges: {}\naxes: [n, gamma, q_spatial]\nplanes: [n-p]\n").unwrap();
+        assert!(bad.validate_planes().is_err());
+    }
+
+    #[test]
+    fn axes_reject_unknown_and_repeated_names() {
+        let a: LandscapeSpec = serde_yaml::from_str("gauges: {}\naxes: [n, beta, q_spatial]\n").unwrap();
+        assert!(a.validate_axes().is_err());
+        let b: LandscapeSpec = serde_yaml::from_str("gauges: {}\naxes: [n, n, q_spatial]\n").unwrap();
+        assert!(b.validate_axes().is_err());
+    }
+
+    #[test]
     fn plane_skip_reason_names_the_fixed_parameter() {
         // p_spatial (index 1) fixed.
         let active = [true, false, true];
-        assert_eq!(plane_skip_reason("n-p", active), Some("p_spatial"));
-        assert_eq!(plane_skip_reason("p-q", active), Some("p_spatial"));
-        assert_eq!(plane_skip_reason("n-q", active), None);
-        assert_eq!(plane_skip_reason("stiff-sloppy", active), None);
+        assert_eq!(plane_skip_reason("n-p", active, &d_axes()).as_deref(), Some("p_spatial"));
+        assert_eq!(plane_skip_reason("p-q", active, &d_axes()).as_deref(), Some("p_spatial"));
+        assert_eq!(plane_skip_reason("n-q", active, &d_axes()).as_deref(), None);
+        assert_eq!(plane_skip_reason("stiff-sloppy", active, &d_axes()).as_deref(), None);
     }
 
     #[test]
     fn plane_skip_reason_all_active_never_skips() {
         let active = [true, true, true];
         for name in VALID_PLANES {
-            assert_eq!(plane_skip_reason(name, active), None);
+            assert_eq!(plane_skip_reason(name, active, &d_axes()), None);
         }
     }
 

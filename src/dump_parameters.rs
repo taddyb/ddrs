@@ -98,6 +98,63 @@ fn dump_load_merged_stats(
 /// into physical units, and write `(COMID, n, q_spatial, p_spatial, slope)`
 /// NetCDF4 to `output_path`. Returns the number of reaches written.
 ///
+/// Load the z-scored CONUS attribute matrix the KAN head consumes, in
+/// `parent_order` (per-COMID) order.
+///
+/// Factored out of [`dump`]/[`dump_init`] so head-architecture diagnostics can
+/// evaluate candidate heads over the real attribute distribution without
+/// running a routing forward pass. Returns `((N, F) attributes, COMID order)`.
+pub fn load_conus_attributes(
+    cfg: &Config,
+    input_var_names: &[String],
+) -> Result<(Array2<f32>, Vec<i64>), CliError> {
+    let ds = cfg
+        .data_sources
+        .as_ref()
+        .expect("data_sources section required");
+
+    let conus_path = ds.conus_adjacency.as_ref().ok_or_else(|| CliError::ConfigInvalid {
+        path: "<config>".into(),
+        source: "conus_adjacency not resolved — invoke via `ddrs run --plot` \
+                 (which resolves adjacency), or set conus_adjacency/gages_adjacency \
+                 explicitly"
+            .into(),
+    })?;
+    eprintln!("opening CONUS adjacency: {}", conus_path.display());
+    let conus = ConusAdjacencyStore::open(conus_path).map_err(|e| CliError::Other(Box::new(e)))?;
+    let n_reaches = conus.n_parent();
+    eprintln!("CONUS reaches: {n_reaches}");
+
+    eprintln!("opening attributes: {} file(s)", ds.attributes.len());
+    let (attrs, means, stds) = open_attrs_and_stats(ds, input_var_names, &conus.parent_order)
+        .map_err(|e| CliError::Other(Box::new(e)))?;
+
+    let f = input_var_names.len();
+    let mut a: Array2<f32> = Array2::zeros((f, n_reaches));
+    for (out_col, comid) in conus.parent_order.iter().enumerate() {
+        if let Some(src_col) = attrs.index.position(comid) {
+            for fi in 0..f {
+                a[(fi, out_col)] = attrs.attrs[(fi, src_col)];
+            }
+        } else {
+            for fi in 0..f {
+                a[(fi, out_col)] = f32::NAN;
+            }
+        }
+    }
+    fill_nans(a.view_mut(), &attrs.row_means);
+    for fi in 0..f {
+        let (m, sd) = (means[fi], stds[fi]);
+        for col in 0..n_reaches {
+            a[(fi, col)] = (a[(fi, col)] - m) / sd;
+        }
+    }
+    Ok((
+        a.reversed_axes().into_owned(),
+        conus.parent_order.iter().map(|c| c.0).collect(),
+    ))
+}
+
 /// `checkpoint` is the base path (no `.mpk` suffix).
 pub fn dump<I>(
     cfg: &Config,
@@ -193,6 +250,11 @@ where
     let mut kd_phys: Vec<f32> = Vec::new();
     let mut dgw_phys: Vec<f32> = Vec::new();
     let mut lfac_phys: Vec<f32> = Vec::new();
+    // Stage-roughness exponent, only when it is a learned KAN output. A global
+    // `params.stage_roughness.gamma` is a config scalar, not a field, and is
+    // read from the run's config snapshot by the plotting scripts.
+    let dump_gamma = learn_has("gamma");
+    let mut gamma_phys: Vec<f32> = Vec::new();
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -205,13 +267,18 @@ where
         let raw = head.forward(input);
 
         let n_d = denormalize(raw["n"].clone(), cfg.params.parameter_ranges.n, is_log("n"));
-        let q_d = denormalize(
-            raw["q_spatial"].clone(),
-            cfg.params.parameter_ranges.q_spatial,
-            is_log("q_spatial"),
-        );
         n_phys.extend(n_d.into_data().to_vec::<f32>().unwrap());
-        q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        if learn_has("q_spatial") {
+            let q_d = denormalize(
+                raw["q_spatial"].clone(),
+                cfg.params.parameter_ranges.q_spatial,
+                is_log("q_spatial"),
+            );
+            q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        } else {
+            let q_default = *cfg.params.defaults.get("q_spatial").expect("q_spatial fixed but no default");
+            q_phys.extend(std::iter::repeat(q_default).take(rows));
+        }
 
         if learn_has("p_spatial") {
             let p_d = denormalize(
@@ -222,6 +289,15 @@ where
             p_phys.extend(p_d.into_data().to_vec::<f32>().unwrap());
         } else {
             p_phys.extend(std::iter::repeat(p_default).take(rows));
+        }
+
+        if dump_gamma {
+            let g_d = denormalize(
+                raw["gamma"].clone(),
+                cfg.params.parameter_ranges.gamma,
+                is_log("gamma"),
+            );
+            gamma_phys.extend(g_d.into_data().to_vec::<f32>().unwrap());
         }
 
         // Muskingum X: denormalize when learnable, else the routing constant 0.3.
@@ -297,6 +373,21 @@ where
         );
     }
 
+    if dump_gamma {
+        let mut gs = gamma_phys.clone();
+        gs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| gs[((p * (gs.len() - 1) as f64).round() as usize).min(gs.len() - 1)];
+        let [lo, hi] = cfg.params.parameter_ranges.gamma;
+        let at_floor = gs.iter().filter(|&&x| x <= lo + 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        let at_ceil = gs.iter().filter(|&&x| x >= hi - 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        eprintln!(
+            "learned gamma over {} reaches: min={:.4} p10={:.4} median={:.4} p90={:.4} max={:.4}  \
+             frac@floor={:.1}%  frac@ceil={:.1}%  (range [{lo}, {hi}])",
+            gs.len(), gs[0], pct(0.10), pct(0.50), pct(0.90), gs[gs.len() - 1],
+            at_floor * 100.0, at_ceil * 100.0
+        );
+    }
+
     // ---------- 6. Write NetCDF4 ----------
     let slope_lb = cfg.params.attribute_minimums.slope;
     let comids_i64: Vec<i64> = conus.parent_order.iter().map(|c| c.0).collect();
@@ -320,6 +411,7 @@ where
         } else {
             None
         },
+        if dump_gamma { Some(gamma_phys.as_slice()) } else { None },
     )
     .map_err(CliError::Other)?;
 
@@ -430,6 +522,11 @@ where
     let mut kd_phys: Vec<f32> = Vec::new();
     let mut dgw_phys: Vec<f32> = Vec::new();
     let mut lfac_phys: Vec<f32> = Vec::new();
+    // Stage-roughness exponent, only when it is a learned KAN output. A global
+    // `params.stage_roughness.gamma` is a config scalar, not a field, and is
+    // read from the run's config snapshot by the plotting scripts.
+    let dump_gamma = learn_has("gamma");
+    let mut gamma_phys: Vec<f32> = Vec::new();
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -442,13 +539,18 @@ where
         let raw = head.forward(input);
 
         let n_d = denormalize(raw["n"].clone(), cfg.params.parameter_ranges.n, is_log("n"));
-        let q_d = denormalize(
-            raw["q_spatial"].clone(),
-            cfg.params.parameter_ranges.q_spatial,
-            is_log("q_spatial"),
-        );
         n_phys.extend(n_d.into_data().to_vec::<f32>().unwrap());
-        q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        if learn_has("q_spatial") {
+            let q_d = denormalize(
+                raw["q_spatial"].clone(),
+                cfg.params.parameter_ranges.q_spatial,
+                is_log("q_spatial"),
+            );
+            q_phys.extend(q_d.into_data().to_vec::<f32>().unwrap());
+        } else {
+            let q_default = *cfg.params.defaults.get("q_spatial").expect("q_spatial fixed but no default");
+            q_phys.extend(std::iter::repeat(q_default).take(rows));
+        }
 
         if learn_has("p_spatial") {
             let p_d = denormalize(
@@ -459,6 +561,15 @@ where
             p_phys.extend(p_d.into_data().to_vec::<f32>().unwrap());
         } else {
             p_phys.extend(std::iter::repeat(p_default).take(rows));
+        }
+
+        if dump_gamma {
+            let g_d = denormalize(
+                raw["gamma"].clone(),
+                cfg.params.parameter_ranges.gamma,
+                is_log("gamma"),
+            );
+            gamma_phys.extend(g_d.into_data().to_vec::<f32>().unwrap());
         }
 
         // Muskingum X: denormalize when learnable, else the routing constant 0.3.
@@ -534,6 +645,21 @@ where
         );
     }
 
+    if dump_gamma {
+        let mut gs = gamma_phys.clone();
+        gs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pct = |p: f64| gs[((p * (gs.len() - 1) as f64).round() as usize).min(gs.len() - 1)];
+        let [lo, hi] = cfg.params.parameter_ranges.gamma;
+        let at_floor = gs.iter().filter(|&&x| x <= lo + 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        let at_ceil = gs.iter().filter(|&&x| x >= hi - 0.001 * (hi - lo)).count() as f64 / gs.len() as f64;
+        eprintln!(
+            "learned gamma over {} reaches: min={:.4} p10={:.4} median={:.4} p90={:.4} max={:.4}  \
+             frac@floor={:.1}%  frac@ceil={:.1}%  (range [{lo}, {hi}])",
+            gs.len(), gs[0], pct(0.10), pct(0.50), pct(0.90), gs[gs.len() - 1],
+            at_floor * 100.0, at_ceil * 100.0
+        );
+    }
+
     // ---------- 6. Write NetCDF4 ----------
     let slope_lb = cfg.params.attribute_minimums.slope;
     let comids_i64: Vec<i64> = conus.parent_order.iter().map(|c| c.0).collect();
@@ -557,6 +683,7 @@ where
         } else {
             None
         },
+        if dump_gamma { Some(gamma_phys.as_slice()) } else { None },
     )
     .map_err(CliError::Other)?;
 
@@ -883,6 +1010,7 @@ fn write_netcdf(
     slope: &[f32],
     checkpoint: &str,
     leakance: Option<(&[f32], &[f32], &[f32])>,
+    gamma: Option<&[f32]>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut file = netcdf::create(path)?;
 
@@ -941,6 +1069,16 @@ fn write_netcdf(
         v.put_values(leakance_factor, ..)?;
         v.put_attribute("long_name", "leakance gating/scaling factor")?;
         v.put_attribute("units", "dimensionless")?;
+    }
+
+    // Stage-dependent roughness exponent, n(d) = n_0·(d/d_ref)^(−gamma) — only
+    // when learned per reach. `n` above is then n_0, the roughness at d_ref.
+    if let Some(gamma) = gamma {
+        let mut v = file.add_variable::<f32>("gamma", &["COMID"])?;
+        v.put_values(gamma, ..)?;
+        v.put_attribute("long_name", "stage-roughness exponent, n(d) = n_0 (d/d_ref)^(-gamma)")?;
+        v.put_attribute("units", "dimensionless")?;
+        v.put_attribute("d_ref", "1.0 m")?;
     }
 
     Ok(())

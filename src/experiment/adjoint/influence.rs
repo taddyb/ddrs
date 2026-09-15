@@ -89,7 +89,12 @@ where
         // landscape study (`Objective::build`) broadcasts a constant for any
         // parameter not in `learnable_parameters`.
         let (mut learnable, mut fixed) = (Vec::new(), Vec::new());
-        for name in ["n", "p_spatial", "q_spatial"] {
+        // `gamma` is listed only when learned: a global constant is not a
+        // field, and "fixed at default" would misdescribe it.
+        for name in ["n", "p_spatial", "q_spatial", "gamma"] {
+            if name == "gamma" && !section.learnable_parameters.iter().any(|s| s == "gamma") {
+                continue;
+            }
             if section.learnable_parameters.iter().any(|s| s == name) {
                 learnable.push(name);
             } else {
@@ -184,9 +189,22 @@ where
         // Detach every head output: the study differentiates w.r.t. inflow only.
         let detach = |t: Tensor<AD<I>, 1>| Tensor::<AD<I>, 1>::from_inner(t.inner());
         let n_param = detach(params_map.get("n").expect("KAN head missing n").clone());
-        let q_param = detach(params_map.get("q_spatial").expect("KAN head missing q_spatial").clone());
+        // Fixed q (mirrors `forward`): the default, normalized into the box.
+        let q_param = match params_map.get("q_spatial") {
+            Some(q) => detach(q.clone()),
+            None => crate::training::forward::fixed_output_normalized::<AD<I>>(
+                &self.cfg,
+                "q_spatial",
+                self.cfg.params.parameter_ranges.q_spatial,
+                n_active,
+                device,
+            ),
+        };
         let p_param = params_map.get("p_spatial").cloned().map(detach);
-        let (n_param_keep, q_param_keep, p_param_keep) = (n_param.clone(), q_param.clone(), p_param.clone());
+        // Learned stage-roughness exponent, carried as a constant field.
+        let gamma_param = params_map.get("gamma").cloned().map(detach);
+        let (n_param_keep, q_param_keep, p_param_keep, gamma_param_keep) =
+            (n_param.clone(), q_param.clone(), p_param.clone(), gamma_param.clone());
         let x_storage: Tensor<AD<I>, 1> = match params_map.get("x_storage") {
             Some(x) => denormalize(
                 detach(x.clone()),
@@ -220,6 +238,7 @@ where
                 d_gw: None,
                 leakance_factor: None,
                 impervious_mask: None,
+                gamma: gamma_param,
             },
             false,
             None,
@@ -245,10 +264,12 @@ where
                 Tensor::<I, 1>::full([n_active], d, device)
             }
         };
+        let gamma_phys = gamma_param_keep
+            .map(|g| denormalize(g, ranges.gamma, log.iter().any(|s| s == "gamma")).inner());
         let slope = Tensor::<I, 1>::from_floats(tensors.adjacency.slope.as_slice(), device)
             .clamp_min(self.cfg.params.attribute_minimums.slope);
         let length = Tensor::<I, 1>::from_floats(tensors.adjacency.length_m.as_slice(), device);
-        LeafForward { q_leaf, gauge_series, q_hourly_inner, runoff_inner, n_phys, p_phys, q_phys, slope, length }
+        LeafForward { q_leaf, gauge_series, q_hourly_inner, runoff_inner, n_phys, p_phys, q_phys, gamma_phys, slope, length }
     }
 
     /// Daily gauge series under the training convention (`tau` trim + pool).
@@ -270,6 +291,9 @@ pub struct LeafForward<I: Backend> {
     pub n_phys: Tensor<I, 1>,
     pub p_phys: Tensor<I, 1>,
     pub q_phys: Tensor<I, 1>,
+    /// Learned per-reach stage-roughness exponent (physical); `None` when
+    /// the arm does not learn gamma.
+    pub gamma_phys: Option<Tensor<I, 1>>,
     pub slope: Tensor<I, 1>,
     pub length: Tensor<I, 1>,
 }

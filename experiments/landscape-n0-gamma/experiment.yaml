@@ -1,0 +1,31 @@
+# Loss landscape over (n_0, gamma) for the head that learns ONLY those two
+# (config/experiments/sr_n0_gamma.yaml; p = 21 and q = 0.65 fixed). First use
+# of `landscape.axes`: slot 1 is gamma, and q_spatial (fixed) occupies slot 2
+# so it is carried and never perturbed. Planes: the n-gamma parameter plane
+# and the stiff-sloppy eigenplane. Question: with the channel shape prescribed,
+# is gamma identifiable at a gauge (H_gamma,gamma > 0, magnitude not tiny
+# against H_nn), or is the valley flat along a (n, gamma) combination?
+# Pre-registered bars, as for q in findings §29: median |H_gg|/|H_nn| >= 0.25
+# and H_gg > 0 at >= 70 % of well-fit gauges (nse0 > 0.3).
+study: landscape
+arms:
+  - { name: n0-gamma, run: 2026-09-12T23-39-03Z-train-and-test, checkpoint: epoch_50_mb_9 }
+landscape:
+  axes: [n, gamma, q_spatial]
+  gauges:
+    source: list
+    # The Juniata pair plus a spread of sizes; extend to the stratified 400
+    # (experiments/landscape-p21c-strat400) once this runs clean.
+    staids: ["01563500", "01567000", "01047000", "01055000", "01449000", "02177000", "03155000", "05451500", "06934000", "07068000", "09163500", "11274500", "12451000", "13317000", "14166000"]
+  period: testing
+  window_days: 1826
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 1.0986123
+  fd_step: 0.05
+  newton_iters: 8
+  grid: 11
+  planes: [n-gamma, stiff-sloppy]
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  series: false

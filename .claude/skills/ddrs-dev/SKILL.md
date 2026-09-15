@@ -196,6 +196,19 @@ Findings: `research/findings/2026-09-07-landscape-uh-juniata-findings.md`,
 `research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`. Gate: `cargo test
 --lib experiment`.
 
+**`landscape` axes by name (2026-09-13).** `landscape.axes: [a, b, c]` names the
+parameter in each alpha slot; default `[n, p_spatial, q_spatial]` (every earlier
+bundle unchanged, byte for byte). `gamma` may take a slot on an arm whose head
+learns it (`experiments/landscape-n0-gamma`: `[n, gamma, q_spatial]` with q fixed,
+so only the `n-gamma` plane is live). Parameters not listed are carried at their
+trained (or `params.defaults`) field; a learned gamma is always handed to the
+engine, axis or not (before this the objective refused such arms). Plane names
+follow the slot labels (`n-gamma`, `gamma-q`); a default `planes` list is renamed
+automatically. Output: `param_names` attribute, `gamma0` variable, reach-grad
+variables named by label; `census.py` reads the labels. The adjoint study and the
+hydraulic-K check carry the learned gamma too, and both handle a fixed `q_spatial`
+(`params.defaults.q_spatial`, the n_0 + gamma head).
+
 ## Juniata single-catchment sample (`examples/juniata/`)
 
 The fastest full end-to-end exercise of the CLI, and the mirror of DDR's

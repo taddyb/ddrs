@@ -36,6 +36,14 @@ import xarray as xr  # noqa: E402
 
 ALPHA_INDEX = {"n": 0, "p": 1, "q": 2}
 COMPONENTS = ["n", "p", "q"]
+_LABEL = {"n": "n", "p_spatial": "p", "q_spatial": "q", "gamma": "gamma"}
+
+
+def slot_labels(ds) -> list[str]:
+    """Short label of each alpha slot: from the `param_names` attribute when the
+    study chose its axes, else the legacy n, p, q."""
+    names = str(ds.attrs.get("param_names", "n,p_spatial,q_spatial")).split(",")
+    return [_LABEL.get(x.strip(), x.strip()) for x in names]
 
 
 # ----------------------------------------------------------------------------- io
@@ -106,9 +114,9 @@ def per_gauge_row(arm: str, staid: str, ds: xr.Dataset, tol_target: float) -> di
         "gain": float(ds["nse_star"].values) - float(ds["nse0"].values),
         "nse0": float(ds["nse0"].values),
         "nse_star": float(ds["nse_star"].values),
-        "alpha_star_n": float(alpha_star[0]),
-        "alpha_star_p": float(alpha_star[1]),
-        "alpha_star_q": float(alpha_star[2]),
+        # Slot labels follow the study's axes (`param_names` attr; the legacy
+        # n,p,q when absent), so a gamma study yields alpha_star_gamma etc.
+        **{f"alpha_star_{lab}": float(alpha_star[k]) for k, lab in enumerate(slot_labels(ds))},
         "alpha_star_norm": norm,
         "unit_n": float(unit[0]),
         "unit_p": float(unit[1]),

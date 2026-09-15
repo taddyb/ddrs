@@ -52,7 +52,21 @@ from matplotlib import cm  # noqa: E402
 from matplotlib.colors import LightSource  # noqa: E402
 from scipy.ndimage import zoom  # noqa: E402
 
-ALPHA_INDEX = {"n": 0, "p": 1, "q": 2}
+# Slot labels follow the study's axes (`param_names` attribute, written by
+# src/experiment/landscape/output.rs; the legacy n, p, q when absent), so a
+# study with `landscape.axes: [n, gamma, q_spatial]` has plane "n-gamma".
+_LABEL = {"n": "n", "p_spatial": "p", "q_spatial": "q", "gamma": "gamma"}
+
+
+def slot_labels(ds) -> list[str]:
+    names = str(ds.attrs.get("param_names", "n,p_spatial,q_spatial")).split(",")
+    return [_LABEL.get(x.strip(), x.strip()) for x in names]
+
+
+def alpha_index(ds) -> dict[str, int]:
+    return {lab: k for k, lab in enumerate(slot_labels(ds))}
+
+
 CLAMP_THRESHOLD = 0.05
 UPSAMPLE_MAX_SIDE = 15
 UPSAMPLE_FACTOR = 4
@@ -68,13 +82,17 @@ PHYSICAL_TICK_SUBS = {
     "n": (1.0, 2.0, 5.0),
     "p": (1.0, 2.0, 5.0),
     "q": (1.0, 2.0, 3.0, 5.0, 7.0),
+    "gamma": (1.0, 2.0, 3.0, 5.0, 7.0),
 }
 PHYSICAL_AXIS_LABEL = {
     "n": "Manning n (basin median x multiplier)",
     "p": "width coefficient p",
     "q": "width exponent q",
+    "gamma": "stage-roughness exponent gamma",
 }
-PARAM_DISPLAY_NAME = {"n": "Manning n", "p": "width coefficient p", "q": "width exponent q"}
+PARAM_DISPLAY_NAME = {"n": "Manning n", "p": "width coefficient p", "q": "width exponent q", "gamma": "stage exponent gamma"}
+# NetCDF variable holding each slot's trained field.
+FIELD_VAR = {"n": "n0", "p": "p0", "q": "q0", "gamma": "gamma0"}
 
 # --depth-axis (n-q plane only): draw the loss surface over the gauge reach's
 # own depth under mean flow instead of a raw q multiplier axis. Uses the
@@ -94,8 +112,8 @@ def axis_labels(plane_name: str) -> tuple[str, str]:
 
 
 def field_medians(ds) -> dict[str, float]:
-    """Per-reach trained-field medians (n0, p0, q0) -> physical alpha=0 value."""
-    return {k: float(np.median(ds[f"{k}0"].values)) for k in ("n", "p", "q")}
+    """Per-reach trained-field medians per slot label -> physical alpha=0 value."""
+    return {k: float(np.median(ds[FIELD_VAR[k]].values)) for k in slot_labels(ds) if FIELD_VAR[k] in ds.variables}
 
 
 def active_mask(ds) -> np.ndarray:
@@ -274,7 +292,7 @@ def title_param_suffix(ds, plane_name: str, alpha_axes: bool) -> str:
     if alpha_axes or plane_name == "stiff-sloppy":
         return ""
     a_name, b_name = plane_name.split("-")
-    i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
+    i, j = alpha_index(ds)[a_name], alpha_index(ds)[b_name]
     medians = field_medians(ds)
     alpha_star = ds["alpha_star"].values
     ta, oa = medians[a_name], medians[a_name] * float(np.exp(alpha_star[i]))
@@ -288,9 +306,9 @@ def pinned_third_note(ds, plane_name: str, alpha_axes: bool) -> str:
     if alpha_axes or plane_name == "stiff-sloppy":
         return ""
     a_name, b_name = plane_name.split("-")
-    pinned = ({"n", "p", "q"} - {a_name, b_name}).pop()
+    pinned = (set(slot_labels(ds)) - {a_name, b_name}).pop()
     median = field_medians(ds)[pinned]
-    if not active_mask(ds)[ALPHA_INDEX[pinned]]:
+    if not active_mask(ds)[alpha_index(ds)[pinned]]:
         # Fixed parameter: alpha_star is exactly 0 (Newton never moves it),
         # so it's pinned at the trained/default value regardless of
         # slice_center -- label it as such instead of "(optimum)", which
@@ -300,7 +318,7 @@ def pinned_third_note(ds, plane_name: str, alpha_axes: bool) -> str:
     if slice_center == "trained":
         val = median
     else:
-        val = median * float(np.exp(ds["alpha_star"].values[ALPHA_INDEX[pinned]]))
+        val = median * float(np.exp(ds["alpha_star"].values[alpha_index(ds)[pinned]]))
     return f"; third parameter pinned at {PARAM_DISPLAY_NAME[pinned]} = {val:.3g} ({slice_center})"
 
 
@@ -318,7 +336,7 @@ def marker_points(ds, plane_name: str) -> tuple[tuple[float, float], tuple[float
             return (0.0, 0.0), (-float(coord_trained[0]), -float(coord_trained[last_k]))
         return (float(coord_trained[0]), float(coord_trained[last_k])), (0.0, 0.0)
     a_name, b_name = plane_name.split("-")
-    i, j = ALPHA_INDEX[a_name], ALPHA_INDEX[b_name]
+    i, j = alpha_index(ds)[a_name], alpha_index(ds)[b_name]
     alpha_star = ds["alpha_star"].values
     return (0.0, 0.0), (float(alpha_star[i]), float(alpha_star[j]))
 

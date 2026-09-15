@@ -155,6 +155,28 @@ pub fn physical_to_normalized(values: &[f32], range: [f32; 2], log_space: bool) 
     }
 }
 
+/// The NORMALIZED constant the engine should see for a head output that is
+/// not learned: `params.defaults[name]` (physical) mapped into the parameter's
+/// box exactly as `denormalize` will map it back. Config load guarantees the
+/// default exists and lies inside the range when the output is absent from
+/// `kan_head.learnable_parameters` (`validate_fixed_q_spatial`).
+pub fn fixed_output_normalized<B: Backend>(
+    cfg: &Config,
+    name: &str,
+    range: [f32; 2],
+    n: usize,
+    device: &B::Device,
+) -> Tensor<B, 1> {
+    let phys = *cfg
+        .params
+        .defaults
+        .get(name)
+        .unwrap_or_else(|| panic!("head has no `{name}` output and params.defaults has no `{name}`"));
+    let log = cfg.params.log_space_parameters.iter().any(|s| s == name);
+    let v = physical_to_normalized(&[phys], range, log)[0];
+    Tensor::full([n], v, device)
+}
+
 /// Direct-param forward pass for V1/V2 verification. No MLP, no autograd
 /// retention. Takes frozen physical parameters, runs the MC engine over the
 /// full window, and returns per-gauge hourly predictions `(num_gauges, T_hours)`.
@@ -212,6 +234,7 @@ pub fn forward_with_frozen_params<I: Backend>(
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            gamma: None,
         },
         carry_state,
         initial_state_ad,
@@ -316,13 +339,24 @@ pub fn forward<I: Backend>(
     );
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
-    let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
+    // `q_spatial` is fixed at `params.defaults.q_spatial` when the head does
+    // not emit it (the n_0 + gamma design, 2026-09-12).
+    let q_param = match params_map.get("q_spatial") {
+        Some(q) => q.clone(),
+        None => fixed_output_normalized::<Autodiff<I>>(cfg, "q_spatial", cfg.params.parameter_ranges.q_spatial, n_active, device),
+    };
     let p_param = params_map.get("p_spatial").cloned();
 
     // Learnable Muskingum X: when the KAN emits `x_storage`, denormalize its
     // [0,1] output to the configured range so the routing learns its own
     // attenuation-vs-translation per reach (gradient already flows via the
     // custom sparse backward in mmc_op.rs). Otherwise hold the constant 0.3.
+    // Stage-roughness exponent: learned per reach when the KAN emits `gamma`,
+    // otherwise absent and the solver falls back to the global
+    // `params.stage_roughness.gamma` (or to no stage roughness at all).
+    // Denormalisation happens in `setup_inputs`, like every other output.
+    let gamma_param: Option<Tensor<Autodiff<I>, 1>> = params_map.get("gamma").cloned();
+
     let x_storage: Tensor<Autodiff<I>, 1> = match params_map.get("x_storage") {
         Some(x_norm) => denormalize(
             x_norm.clone(),
@@ -372,6 +406,7 @@ pub fn forward<I: Backend>(
             n: n_param,
             q_spatial: q_param,
             p_spatial: p_param,
+            gamma: gamma_param,
             k_d,
             d_gw,
             leakance_factor,
@@ -619,7 +654,11 @@ fn forward_eval_core<I: Backend>(
     );
 
     let n_param = params_map.get("n").expect("MLP missing n").clone();
-    let q_param = params_map.get("q_spatial").expect("MLP missing q_spatial").clone();
+    // Fixed q (mirrors `forward`): the default, normalized into the box.
+    let q_param = match params_map.get("q_spatial") {
+        Some(q) => q.clone(),
+        None => fixed_output_normalized::<I>(cfg, "q_spatial", cfg.params.parameter_ranges.q_spatial, n_active, device),
+    };
     let p_param = params_map.get("p_spatial").cloned();
 
     // H5/H6 parameter-swap override: whole-batch replace of n/q_spatial/
@@ -698,6 +737,11 @@ fn forward_eval_core<I: Backend>(
     let n_ad = Tensor::<Autodiff<I>, 1>::from_inner(n_param);
     let q_ad = Tensor::<Autodiff<I>, 1>::from_inner(q_param);
     let p_ad = p_param.map(Tensor::<Autodiff<I>, 1>::from_inner);
+    // Stage-roughness exponent, when the head emits it. Mirrors `forward`:
+    // the eval path once passed `gamma: None` here, so a head trained with a
+    // learned gamma was scored at gamma = 0 — a different model, with no
+    // error. Pinned by `tests/gamma_eval_parity.rs`.
+    let gamma_ad = params_map.get("gamma").cloned().map(Tensor::<Autodiff<I>, 1>::from_inner);
     let x_ad = Tensor::<Autodiff<I>, 1>::from_inner(x_storage);
     let k_d_ad = k_d_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
     let d_gw_ad = d_gw_inner.map(Tensor::<Autodiff<I>, 1>::from_inner);
@@ -712,6 +756,7 @@ fn forward_eval_core<I: Backend>(
         SpatialParameters {
             n: n_ad,
             q_spatial: q_ad,
+            gamma: gamma_ad,
             p_spatial: p_ad,
             k_d: k_d_ad,
             d_gw: d_gw_ad,

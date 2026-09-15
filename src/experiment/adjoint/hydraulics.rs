@@ -24,6 +24,9 @@ pub fn reach_k_hours<I: Backend>(
     q_t: Tensor<I, 1>,
     slope: &Tensor<I, 1>,
     length: &Tensor<I, 1>,
+    // Per-reach learned stage-roughness exponent (physical, `d_ref = 1`);
+    // `None` falls back to the config scalar, exactly as the solver does.
+    gamma_field: Option<&Tensor<I, 1>>,
 ) -> Vec<f32> {
     assert!(!cfg.params.ddr_match, "hydraulic K mirrors the ddr_match=false celerity");
     let depth_lb = cfg.params.attribute_minimums.depth;
@@ -31,22 +34,51 @@ pub fn reach_k_hours<I: Backend>(
     let velocity_lb = cfg.params.attribute_minimums.velocity;
     let discharge_lb = cfg.params.attribute_minimums.discharge;
 
+    // Stage-dependent roughness, if configured. This file MUST track
+    // `mmc_op.rs` S5/S17 exactly: it is what the landscape instrument measures
+    // K on, so a divergence here would silently probe a different surface than
+    // the one the solver routes.
+    let (gamma, d_ref) = match gamma_field {
+        Some(_) => (0.0, 1.0), // learned: the field carries it, d_ref is 1
+        None => cfg.params.stage_roughness_params(),
+    };
+
     let q_t = q_t.clamp_min(discharge_lb);
     let q_eps = q.clone() + 1e-6_f32;
     let numerator = q_t * n.clone() * (q_eps.clone() + 1.0);
+    let numerator = if gamma != 0.0 && d_ref != 1.0 {
+        numerator * d_ref.powf(gamma)
+    } else {
+        numerator
+    };
     let denominator = p.clone() * slope.clone().sqrt() + 1e-8_f32;
     let ratio = numerator / denominator;
-    let exponent = (q_eps.clone() * 3.0 + 5.0).recip() * 3.0;
+    let exponent = match gamma_field {
+        Some(g) => (q_eps.clone() * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
+        None => (q_eps.clone() * 3.0 + (5.0 + 3.0 * gamma)).recip() * 3.0,
+    };
     let depth = ratio.powf(exponent).clamp_min(depth_lb);
     let top_width = p.clone() * depth.clone().powf(q_eps.clone());
     let side_slope = (top_width.clone() * q_eps / (depth.clone() * 2.0)).clamp(0.5, 50.0);
     let bottom_width = (top_width.clone() - side_slope.clone() * depth.clone() * 2.0).clamp_min(bottom_width_lb);
     let area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
     let root = (side_slope.powf_scalar(2.0) + 1.0).sqrt();
-    let wp = bottom_width + depth * root.clone() * 2.0;
+    let wp = bottom_width + depth.clone() * root.clone() * 2.0;
     let hyd_radius = area.clone() / wp.clone();
-    let velocity = (n.clone().recip() * hyd_radius.powf_scalar(2.0 / 3.0) * slope.clone().sqrt()).clamp(velocity_lb, 15.0);
-    let beta = -(area * root) / (top_width * wp) * (4.0 / 3.0) + (5.0 / 3.0);
+    // Stage-dependent roughness rides on the velocity too, not only on the
+    // depth inversion — must match mmc_op.rs S15 exactly.
+    let n_recip = match gamma_field {
+        Some(g) => n.clone().recip() * depth.clone().powf(g.clone()),
+        None if gamma != 0.0 => n.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma),
+        None => n.clone().recip(),
+    };
+    let velocity = (n_recip * hyd_radius.powf_scalar(2.0 / 3.0) * slope.clone().sqrt()).clamp(velocity_lb, 15.0);
+    let beta = -(area.clone() * root) / (top_width.clone() * wp) * (4.0 / 3.0) + (5.0 / 3.0);
+    let beta = match gamma_field {
+        Some(g) => beta + area * g.clone() / (top_width * depth),
+        None if gamma != 0.0 => beta + area * gamma / (top_width * depth),
+        None => beta,
+    };
     let celerity = velocity * beta;
     let k_seconds = length.clone() / celerity;
     let k: Vec<f32> = k_seconds.into_data().to_vec::<f32>().expect("f32");
@@ -66,13 +98,14 @@ pub fn mean_reach_k_hours<I: Backend>(
     length: &Tensor<I, 1>,
     from: usize,
     to: usize,
+    gamma_field: Option<&Tensor<I, 1>>,
 ) -> Vec<f32> {
     let [n_reach, _t] = runoff.dims();
     let mut acc = vec![0.0f64; n_reach];
     let mut count = 0usize;
     for h in from..to {
         let q_t = runoff.clone().slice([0..n_reach, h..h + 1]).reshape([n_reach]);
-        let k = reach_k_hours::<I>(cfg, n, p, q, q_t, slope, length);
+        let k = reach_k_hours::<I>(cfg, n, p, q, q_t, slope, length, gamma_field);
         for (a, v) in acc.iter_mut().zip(k) {
             *a += v as f64;
         }

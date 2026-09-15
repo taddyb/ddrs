@@ -159,6 +159,7 @@ fn route_and_extract(ddr_match: bool, pieces: usize) -> (Vec<f32>, Vec<f32>) {
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            gamma: None,
         },
         false,
         None,

@@ -105,6 +105,7 @@ fn counter_starts_at_zero_and_positive_control() {
         Tensor::from_floats(adj.slope.as_slice(), &device),
         x_t,
         true, // track_neg = ON
+        None, // gamma: no stage roughness in this fixture
     );
 
     let (neg_b, total_b) = negative_solve_stats();
@@ -155,6 +156,7 @@ fn counter_starts_at_zero_and_positive_control() {
         Tensor::from_floats(adj2.slope.as_slice(), &device),
         x_t2,
         true, // track_neg = ON
+        None, // gamma: no stage roughness in this fixture
     );
 
     let (neg_c, total_c) = negative_solve_stats();

@@ -88,6 +88,11 @@ pub struct SpatialParameters<I: Backend> {
     /// `cfg.params.leakance_impervious_threshold`. Constant, not autograd-tracked
     /// (inner backend `I`, no gradient). `None` ⇒ all-ones (no-op, back-compat).
     pub impervious_mask: Option<Tensor<I, 1>>,
+    /// Learned per-reach stage-roughness exponent for
+    /// `n(d) = n_0·(d/d_ref)^(−gamma)`. Present ⇒ gamma is the timestep op's
+    /// sixth parent and receives a gradient. Absent ⇒ the global
+    /// `params.stage_roughness.gamma` (or no stage roughness at all).
+    pub gamma: Option<Tensor<Autodiff<I>, 1>>,
 }
 
 /// Differentiable Muskingum-Cunge routing engine.
@@ -97,6 +102,8 @@ pub struct MuskingumCunge<I: Backend> {
     n: Option<Tensor<Autodiff<I>, 1>>,
     q_spatial: Option<Tensor<Autodiff<I>, 1>>,
     p_spatial: Tensor<Autodiff<I>, 1>,
+    /// Learned per-reach stage-roughness exponent, when the KAN emits it.
+    gamma: Option<Tensor<Autodiff<I>, 1>>,
     length: Option<Tensor<Autodiff<I>, 1>>,
     slope: Option<Tensor<Autodiff<I>, 1>>,
     x_storage: Option<Tensor<Autodiff<I>, 1>>,
@@ -198,6 +205,7 @@ impl<I: Backend> MuskingumCunge<I> {
             cfg,
             n: None,
             q_spatial: None,
+            gamma: None,
             p_spatial,
             length: None,
             slope: None,
@@ -296,6 +304,15 @@ impl<I: Backend> MuskingumCunge<I> {
             ranges.q_spatial,
             log_space.iter().any(|s| s == "q_spatial"),
         ));
+        // Stage-roughness exponent, when learned. Denormalised the same way as
+        // every other KAN output; `parameter_ranges.gamma` sets the box.
+        if let Some(g) = params.gamma {
+            self.gamma = Some(denormalize(
+                g,
+                ranges.gamma,
+                log_space.iter().any(|s| s == "gamma"),
+            ));
+        }
         if let Some(p) = params.p_spatial {
             self.p_spatial = denormalize(
                 p,
@@ -511,6 +528,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
                 self.track_negative_discharge,
+                self.gamma.as_ref().cloned(),
             )
         }
     }

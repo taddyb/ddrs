@@ -281,6 +281,7 @@ where
         d_gw: None,
         leakance_factor: None,
         impervious_mask: None,
+        gamma: None,
     };
 
     let mut mc = MuskingumCunge::<I>::new(inputs.config.clone(), device.clone());

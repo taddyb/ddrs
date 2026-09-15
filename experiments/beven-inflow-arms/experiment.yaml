@@ -1,0 +1,41 @@
+# Beven-challenges study (AGU 2026, "How far can we go in distributed hydrological
+# modelling?" 25 years on): the same routing model, the same 346,321-reach MERIT
+# network, the same 2,365 gauges and observations, with ONLY the unit-catchment
+# inflow product swapped. The KAN head learns n_0 and gamma of the stage law
+# n(d) = n_0 (d/d_ref)^(-gamma); channel shape is prescribed (p = 21, q = 0.65),
+# because p and q are not learnable from daily discharge (findings §29-§33, §35,
+# §37: flat/saddle landscapes in q, n/p degeneracy, fields that are copies of n).
+#
+# Questions:
+#   1. How much of the learned roughness is the routing absorbing inflow bias?
+#      (per-reach n_0 and gamma across arms; per-gauge inflow bias vs roughness
+#      shift; realized depth/celerity at a common flow)
+#   2. Do the per-gauge loss-landscape optima move with the inflow source?
+#      If yes, the routing is compensating for a runoff model it is detached
+#      from, and "parameter certainty" is conditional on that model.
+#
+# All arms: config/experiments/sr_n0_gamma_<tag>.yaml, one line apart
+# (data_sources.streamflow). Recipe: 500 Adam updates (50 epochs, micro-batch
+# 64, accumulation 4), seed 42, nse-batch loss, CPU backend, binary c56920e.
+# Launcher: .ddrs/experiments/n0_gamma_arms.sh (three at a time, MemoryMax 48G).
+# NOT included by design: the dHBV2 UH retrospective (not AORC-forced).
+study: inflow-arms
+arms:
+  - { name: dhbv2-lumped,   config: config/experiments/sr_n0_gamma_dhbv2_lumped.yaml,   product: "dHBV2 lumped, AORC2f, daily",         run: 2026-09-13T13-56-50Z-train-and-test }
+  - { name: dhbv2-dist,     config: config/experiments/sr_n0_gamma_dhbv2_dist.yaml,     product: "dHBV2 distributed, AORC2f, daily",    run: 2026-09-13T17-22-30Z-train-and-test }
+  - { name: hydrodl-lstm,   config: config/experiments/sr_n0_gamma_hydrodl_lstm.yaml,   product: "hydroDL LSTM, AORC2f, daily",         run: 2026-09-13T17-21-58Z-train-and-test }
+  - { name: nh-daily-lstm,  config: config/experiments/sr_n0_gamma_nh_daily_lstm.yaml,  product: "NeuralHydrology daily LSTM",           run: 2026-09-13T13-55-03Z-train-and-test }
+  - { name: nh-hourly-lstm, config: config/experiments/sr_n0_gamma_nh_hourly_lstm.yaml, product: "NeuralHydrology hourly MTS-LSTM",      run: 2026-09-13T14-14-46Z-train-and-test }
+reference_arms:
+  # Same head and recipe on the dHBV2 UH retrospective, for comparison only.
+  - { name: uh-retro-n0-gamma, run: 2026-09-12T23-39-03Z-train-and-test }
+  - { name: uh-retro-n0-only,  run: 2026-09-12T23-39-06Z-train-and-test }
+analysis:
+  # per-arm read-out
+  - experiments/stage_roughness/gamma_readout.py <run>
+  - experiments/stage_roughness/arm_delta_by_gauge.py <control> <arm>
+  - experiments/stage_roughness/animate_n_of_d.py <run-dir> --water-year 2000 --view maps
+  - experiments/head_arch/downstream_geometry.py <runs...>
+  # cross-arm (to write): per-reach n_0/gamma ratio maps and rank agreement;
+  # per-gauge inflow bias (summed Q' vs obs) against the roughness shift
+  # landscape per arm: experiments/landscape-inflow-arms/experiment.yaml

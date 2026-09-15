@@ -1,0 +1,28 @@
+# (n_0, gamma) loss landscape per inflow arm, same gauges for every arm, so the
+# per-gauge optima can be compared ACROSS arms (census.py reports the angle
+# between arms' alpha* when two arms are present; run pairs or all five).
+# Fill `arms:` with the run ids from experiments/beven-inflow-arms/experiment.yaml
+# once the arms finish; checkpoint epoch_50_mb_9 is the 500-update end point.
+# Shard it: ddrs --workspace .ddrs experiment landscape-inflow-arms --backend cpu --shard I/K
+study: landscape
+arms:
+  - { name: nh-hourly-lstm, run: 2026-09-13T14-14-46Z-train-and-test, checkpoint: epoch_50_mb_9 }
+landscape:
+  axes: [n, gamma, q_spatial]
+  gauges:
+    source: list
+    # the 15 of landscape-n0-gamma (14 in the eval population); widen to the
+    # stratified 400 of landscape-p21c-strat400 for the census
+    staids: ["01563500", "01567000", "01047000", "01055000", "01449000", "02177000", "03155000", "05451500", "06934000", "07068000", "09163500", "11274500", "12451000", "13317000", "14166000"]
+  period: testing
+  window_days: 1826
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 1.0986123
+  fd_step: 0.05
+  newton_iters: 8
+  grid: 11
+  planes: [n-gamma, stiff-sloppy]
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  series: false

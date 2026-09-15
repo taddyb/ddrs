@@ -532,6 +532,7 @@ where
         slope_t,
         xst_t,
         false,
+        None, // gamma: no stage roughness in this fixture
     );
 
     let loss = q_next * mk(weights, false);

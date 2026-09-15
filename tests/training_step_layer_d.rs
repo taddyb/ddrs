@@ -270,6 +270,7 @@ fn full_forward(
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            gamma: None,
         },
         false,
         None,

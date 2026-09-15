@@ -608,10 +608,10 @@ where
             // the lag horizon, in days.
             {
                 let lag_from = t0.saturating_sub(24 * adjoint.lag_days);
-                let k_mean = mean_reach_k_hours::<I>(&ctx.cfg, &lf.n_phys, &lf.p_phys, &lf.q_phys, &lf.runoff_inner, &lf.slope, &lf.length, lag_from, t0 + 1);
+                let k_mean = mean_reach_k_hours::<I>(&ctx.cfg, &lf.n_phys, &lf.p_phys, &lf.q_phys, &lf.runoff_inner, &lf.slope, &lf.length, lag_from, t0 + 1, lf.gamma_phys.as_ref());
                 let n_reach = grad.n;
                 let q_t0 = lf.runoff_inner.clone().slice([0..n_reach, t0..t0 + 1]).reshape([n_reach]);
-                let k_t0 = reach_k_hours::<I>(&ctx.cfg, &lf.n_phys, &lf.p_phys, &lf.q_phys, q_t0, &lf.slope, &lf.length);
+                let k_t0 = reach_k_hours::<I>(&ctx.cfg, &lf.n_phys, &lf.p_phys, &lf.q_phys, q_t0, &lf.slope, &lf.length, lf.gamma_phys.as_ref());
                 let path_mean = path_travel_time_hours(&adjacency, gauge_row, &k_mean);
                 let path_t0 = path_travel_time_hours(&adjacency, gauge_row, &k_t0);
                 r.hydraulic_lag_days.push(path_mean.iter().map(|h| h / 24.0).collect());

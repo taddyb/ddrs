@@ -117,11 +117,15 @@ pub struct LandscapeResult {
     /// Per-reach along-channel distance to the gauge outlet, meters; empty
     /// unless `landscape.reach_grad: true`.
     pub dist_to_gauge_m: Vec<f32>,
-    /// `active[k]` for `k` in `(n, p_spatial, q_spatial)`: true when the
-    /// parameter is a real model parameter (in the head's
-    /// `learnable_parameters`), false when it's fixed at `params.defaults`.
-    /// See `Objective::active`.
+    /// `active[k]` for slot `k` of `param_names`: true when the parameter is
+    /// a real model parameter (in the head's `learnable_parameters`), false
+    /// when it's fixed at `params.defaults`. See `Objective::active`.
     pub active: [bool; 3],
+    /// Parameter in each alpha slot (`LandscapeSpec::axes`).
+    pub param_names: [String; 3],
+    /// Trained per-reach learned stage-roughness exponent; `Some` only on an
+    /// arm whose head learns `gamma`.
+    pub gamma0: Option<Vec<f32>>,
     /// `LandscapeSpec::objective` used to drive the Newton search for this
     /// gauge: "nse-batch" or "kge".
     pub objective: String,
@@ -154,7 +158,11 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("n_reach", r.n_reach as i64)?;
     f.add_attribute("window_days", r.window_days as i64)?;
     f.add_attribute("sigma_obs_training", r.sigma as f64)?;
-    f.add_attribute("alpha_components", "log-multipliers on (n, p_spatial, q_spatial) applied to the trained physical fields; alpha = 0 is the trained point")?;
+    f.add_attribute(
+        "alpha_components",
+        format!("log-multipliers on ({}) applied to the trained physical fields; alpha = 0 is the trained point", r.param_names.join(", ")).as_str(),
+    )?;
+    f.add_attribute("param_names", r.param_names.join(",").as_str())?;
     f.add_attribute("objective", r.objective.as_str())?;
     f.add_attribute("eigvec_layout", "eigvec[component, k]: column k is the k-th eigenvector (descending eigenvalue) of the Hessian at alpha_star")?;
     f.add_attribute("coord_trained_definition", "c_k = v_k^T (0 - alpha_star): trained point in the eigenbasis of H(alpha_star)")?;
@@ -170,8 +178,7 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     f.add_attribute("obs_n_valid_days", r.obs_n_valid_days as i64)?;
     f.add_attribute("period", r.period.as_str())?;
     f.add_attribute("axis_start_date", r.axis_start_date.as_str())?;
-    const PARAM_NAMES: [&str; 3] = ["n", "p_spatial", "q_spatial"];
-    let active_params: Vec<&str> = PARAM_NAMES.iter().zip(r.active.iter()).filter(|(_, &a)| a).map(|(&n, _)| n).collect();
+    let active_params: Vec<&str> = r.param_names.iter().zip(r.active.iter()).filter(|(_, &a)| a).map(|(n, _)| n.as_str()).collect();
     f.add_attribute("active_params", active_params.join(","))?;
 
     f.add_dimension("alpha", 3)?;
@@ -242,17 +249,21 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     put("n0", &["reach"], &r.n0, "trained (alpha = 0) per-reach Manning's n")?;
     put("p0", &["reach"], &r.p0, "trained (alpha = 0) per-reach Leopold-Maddock p")?;
     put("q0", &["reach"], &r.q0, "trained (alpha = 0) per-reach Leopold-Maddock q")?;
+    if let Some(g) = &r.gamma0 {
+        put("gamma0", &["reach"], g, "trained (alpha = 0) per-reach stage-roughness exponent gamma")?;
+    }
+    let lab: Vec<String> = r.param_names.iter().map(|n| super::axis_label(n).to_string()).collect();
     put("slope", &["reach"], &r.slope, "per-reach channel slope (dimensionless, m/m), clamped to params.attribute_minimums.slope")?;
     put("length", &["reach"], &r.length, "per-reach channel length (m)")?;
     if let Some(rg) = &r.reach_grad0 {
-        put("reach_grad0_n", &["reach"], &rg[0], "dL/d ln(n) at alpha = 0, per reach (loss per unit ln parameter)")?;
-        put("reach_grad0_p", &["reach"], &rg[1], "dL/d ln(p_spatial) at alpha = 0, per reach (loss per unit ln parameter)")?;
-        put("reach_grad0_q", &["reach"], &rg[2], "dL/d ln(q_spatial) at alpha = 0, per reach (loss per unit ln parameter)")?;
+        for k in 0..3 {
+            put(&format!("reach_grad0_{}", lab[k]), &["reach"], &rg[k], &format!("dL/d ln({}) at alpha = 0, per reach (loss per unit ln parameter)", r.param_names[k]))?;
+        }
     }
     if let Some(rg) = &r.reach_grad_star {
-        put("reach_grad_star_n", &["reach"], &rg[0], "dL/d ln(n) at alpha*, per reach (loss per unit ln parameter)")?;
-        put("reach_grad_star_p", &["reach"], &rg[1], "dL/d ln(p_spatial) at alpha*, per reach (loss per unit ln parameter)")?;
-        put("reach_grad_star_q", &["reach"], &rg[2], "dL/d ln(q_spatial) at alpha*, per reach (loss per unit ln parameter)")?;
+        for k in 0..3 {
+            put(&format!("reach_grad_star_{}", lab[k]), &["reach"], &rg[k], &format!("dL/d ln({}) at alpha*, per reach (loss per unit ln parameter)", r.param_names[k]))?;
+        }
     }
     if !r.dist_to_gauge_m.is_empty() {
         put("dist_to_gauge_m", &["reach"], &r.dist_to_gauge_m, "along-channel distance from reach outlet to gauge outlet, meters")?;
@@ -322,6 +333,8 @@ mod tests {
             reach_grad_star: None,
             dist_to_gauge_m: Vec::new(),
             active: [true, true, true],
+            param_names: ["n".into(), "p_spatial".into(), "q_spatial".into()],
+            gamma0: None,
             slope: vec![1e-3, 2e-3],
             length: vec![500.0, 750.0],
             gauge_reach_row: 1,
@@ -489,7 +502,12 @@ pub fn append_summary(path: &Path, r: &LandscapeResult) -> Result<(), BoxError> 
     let new = !path.exists();
     let mut w = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     if new {
-        writeln!(w, "arm,staid,n_reach,sigma,loss0,nse0,loss_star,nse_star,alpha_n_star,alpha_p_star,alpha_q_star,mult_n,mult_p,mult_q,lambda1,lambda2,lambda3,v1_n,v1_p,v1_q,v3_n,v3_p,v3_q,c1,c2,c3,hw1_tol0,hw2_tol0,hw3_tol0,cel_n,cel_p,cel_q,cos_v1_cel,grad0_norm,grad_star_norm,newton_iters,clamped_frac_star,hit_range_bound,used_gradient_fallback")?;
+        let l: Vec<&str> = r.param_names.iter().map(|n| super::axis_label(n)).collect();
+        writeln!(
+            w,
+            "arm,staid,n_reach,sigma,loss0,nse0,loss_star,nse_star,alpha_{0}_star,alpha_{1}_star,alpha_{2}_star,mult_{0},mult_{1},mult_{2},lambda1,lambda2,lambda3,v1_{0},v1_{1},v1_{2},v3_{0},v3_{1},v3_{2},c1,c2,c3,hw1_tol0,hw2_tol0,hw3_tol0,cel_{0},cel_{1},cel_{2},cos_v1_cel,grad0_norm,grad_star_norm,newton_iters,clamped_frac_star,hit_range_bound,used_gradient_fallback",
+            l[0], l[1], l[2]
+        )?;
     }
     let v = &r.eigvec_star;
     let cos = (0..3).map(|i| v[i][0] * r.celerity_dir[i]).sum::<f32>();

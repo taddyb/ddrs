@@ -21,7 +21,7 @@ kan_head:
   hidden_size: 21
   num_hidden_layers: 2
   input_var_names: [aridity]
-  learnable_parameters: [n]
+  learnable_parameters: [n, q_spatial]
   disaggregation:
     hidden_size: 16
 "#;

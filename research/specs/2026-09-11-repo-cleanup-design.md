@@ -202,7 +202,7 @@ anywhere. It is false.
 
 An earlier revision of this design split the work across two pull requests, because
 `origin/landscape-deriv-objective` was in flight with ten commits editing
-`docs/2026-09-08-landscape-hypothesis-tests-findings.md`, `docs/journal/2026-09.md`
+`research/findings/2026-09-08-landscape-hypothesis-tests-findings.md`, `docs/journal/2026-09.md`
 and `.claude/skills/ddrs-dev/references/config.md`, all of which the restructure
 renames. A rename of about 100 files plus 414 link rewrites would have collided
 with it.
