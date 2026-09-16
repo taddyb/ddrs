@@ -90,10 +90,50 @@ CONUS arms use. This is a sanity check, not the test.
 
 ## 5. CONUS, against the retrospective benchmark
 
-`config/experiments/sr_n0_leakance.yaml`, a single-variable change against the trained `sr_n0_only`
-arm: same gauges, windows, loss and 500 optimizer updates, on the UH retrospective store. Running.
+`config/experiments/sr_n0_leakance.yaml`, a single-variable change against `sr_n0_only.yaml`: same
+gauges, windows, loss and seed, on the UH retrospective store.
 
-\tbd{result}
+**The 500-update arm diverged.** Loss and the head's own outputs went NaN at epoch 15, mini-batch 8,
+and the remaining 36 epochs trained on NaN weights. The failure is in the backward, not the forward:
+mini-batch 7 reported a finite loss (0.188355) and the checkpoint written after its optimizer step is
+already NaN, so a non-finite gradient was produced from a finite forward and applied. Cutting the peak
+learning rate 5x removed it, so this is a step-size problem rather than a structural defect. The July
+campaign never met it because a frozen K_D was acting as a stabiliser.
+
+Both arms below were then rerun at the lowered rate (peak 0.001, 20 epochs), matched to each other.
+They are NOT comparable to the 0.7376 / 0.7600 reference, which uses the full 500-update recipe.
+
+| arm | median NSE | median KGE |
+|---|---|---|
+| leakance off, matched control | 0.7345 | 0.7596 |
+| leakance on | 0.7382 | 0.7627 |
+| difference | +0.0037 | +0.0031 |
+
+**The volume-absorption hypothesis is refuted.** The retrospective product over-delivers volume by
+about 12 % at the median. The learned loss removes this:
+
+| quantity | value |
+|---|---|
+| median zeta | 4.268e-4 m3/s |
+| zeta / mean discharge, median | 0.0441 % |
+| zeta / mean discharge, p90 | 0.1743 % |
+| reaches clearing the 0.01 m3/s bar | 11.6 % of 64,892 |
+| gaining reaches (`zeta_net` < 0) | 0 |
+
+Two orders of magnitude short of the bias it would have to absorb, with parameters chosen freely from
+boxes they now span. The +0.004 skill difference is small enough that it is at least as likely to come
+from three extra head outputs as from the water removed, and no seed replicate exists at this recipe
+to separate them. Do not quote it as a leakance benefit.
+
+Two mechanisms are visible in the learned fields. Zero gaining reaches, because the losing-only clamp
+defaults on. And the learned groundwater offset (median +0.43 m) sits **above** the median channel
+depth (0.26 m), so under that clamp the model is using the offset as an off switch at most reaches
+rather than as a water-table elevation. Whether an unclamped, sign-symmetric term behaves differently
+is untested and is the one variant worth a further run.
+
+This completes the paper's sentence in the other direction. Roughness absorbs the inflow product's
+timing. Leakance does not absorb its volume, because at physically admissible conductances the term is
+far too small to matter.
 
 ## Open items
 
