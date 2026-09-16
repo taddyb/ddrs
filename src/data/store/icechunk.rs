@@ -23,6 +23,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
 use icechunk::{Repository, Store, new_local_filesystem_storage};
+use icechunk::format::SnapshotId;
 use icechunk::repository::VersionInfo;
 use zarrs::array::Array as ZarrArray;
 use zarrs::storage::{
@@ -40,12 +41,24 @@ use crate::data::ids::{Comid, IdIndex, Staid};
 pub(crate) struct IcSession {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) store: Arc<Store>,
+    /// The snapshot the session actually reads — the pinned id when `snapshot`
+    /// was `Some`, otherwise the resolved `main` branch tip.
+    pub(crate) snapshot: String,
 }
 
-/// Open an icechunk repo at `path` and start a read-only session on the
-/// `main` branch.
+/// Open an icechunk repo at `path` read-only.
+///
+/// `snapshot` is `data_sources.pins`' value for this source: `None` opens the
+/// `main` branch tip (the historical behavior), `Some(id)` opens exactly that
+/// snapshot via `VersionInfo::SnapshotId`. Either way the resolved id is
+/// returned on [`IcSession::snapshot`], so the run manifest can record the data
+/// version that was actually read.
+///
+/// A malformed id (not Crockford base32 of 12 bytes) and an id no snapshot in
+/// this repo carries are both `DataError::Malformed`, naming the store path and
+/// the id — icechunk's own errors name neither reliably.
 #[allow(dead_code)] // Tasks 2-4 will call this.
-pub(crate) fn open_session(path: &Path) -> Result<IcSession> {
+pub(crate) fn open_session(path: &Path, snapshot: Option<&str>) -> Result<IcSession> {
     let runtime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -57,7 +70,7 @@ pub(crate) fn open_session(path: &Path) -> Result<IcSession> {
             })?,
     );
 
-    let store = runtime.block_on(async {
+    let (store, resolved) = runtime.block_on(async {
         let storage = new_local_filesystem_storage(path)
             .await
             .map_err(|e| ic_err(path, e))?;
@@ -66,16 +79,35 @@ pub(crate) fn open_session(path: &Path) -> Result<IcSession> {
             .await
             .map_err(|e| ic_err(path, e))?;
 
-        let session = repo
-            .readonly_session(&VersionInfo::BranchTipRef("main".into()))
-            .await
-            .map_err(|e| ic_err(path, e))?;
+        let version = match snapshot {
+            None => VersionInfo::BranchTipRef("main".into()),
+            Some(id) => VersionInfo::SnapshotId(parse_snapshot_id(path, id)?),
+        };
+
+        let session = repo.readonly_session(&version).await.map_err(|e| match snapshot {
+            // A pinned open that fails is almost always "no such snapshot";
+            // re-wrap so the message names the id the user wrote.
+            Some(id) => DataError::Malformed {
+                path: path.to_path_buf(),
+                message: format!("cannot open pinned icechunk snapshot `{id}`: {e}"),
+            },
+            None => ic_err(path, e),
+        })?;
+        let resolved = session.snapshot_id().to_string();
 
         let store = Store::from_session(Arc::new(RwLock::new(session))).await;
-        Ok::<Arc<Store>, DataError>(Arc::new(store))
+        Ok::<(Arc<Store>, String), DataError>((Arc::new(store), resolved))
     })?;
 
-    Ok(IcSession { runtime, store })
+    Ok(IcSession { runtime, store, snapshot: resolved })
+}
+
+/// Parse a configured pin into an icechunk `SnapshotId`.
+fn parse_snapshot_id(path: &Path, id: &str) -> Result<SnapshotId> {
+    SnapshotId::try_from(id).map_err(|e| DataError::Malformed {
+        path: path.to_path_buf(),
+        message: format!("`{id}` is not a valid icechunk snapshot id: {e}"),
+    })
 }
 
 /// Resolve the `main` branch tip of the icechunk repository at `path` to its
@@ -222,6 +254,9 @@ pub struct StreamflowStore {
     pub n_time: usize,
     /// Native axis resolution, sniffed from the CF `units` attribute.
     pub resolution: Frequency,
+    /// The icechunk snapshot this store reads: the configured pin, or the
+    /// `main` branch tip resolved at open. Recorded in the run manifest.
+    pub snapshot: String,
     // SP-3 may consolidate to a shared runtime; keep the Arc alive so the
     // icechunk Store is not dropped while `qr` is in use.
     #[allow(dead_code)]
@@ -278,8 +313,15 @@ fn detect_time_major(
 
 impl StreamflowStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_at(path, None)
+    }
+
+    /// Open at a specific icechunk snapshot. `snapshot: None` is [`Self::open`]
+    /// — the `main` branch tip. See `data_sources.pins` in `src/config.rs`.
+    pub fn open_at(path: impl Into<PathBuf>, snapshot: Option<&str>) -> Result<Self> {
         let path = path.into();
-        let session = open_session(&path)?;
+        let session = open_session(&path, snapshot)?;
+        let snapshot = session.snapshot.clone();
         let storage: Arc<IcZarrStorage> = IcZarrStorage::shared(&session);
         // zarrs Array::open takes Arc<dyn ReadableStorageTraits> — cast via type alias
         let readable: ReadableStorage = storage.clone();
@@ -325,7 +367,17 @@ impl StreamflowStore {
             .map_err(|e| ic_err(&path, e))?;
         let time_major = detect_time_major(&qr, index.len(), n_time, &path)?;
 
-        Ok(Self { path, index, time_start, n_time, resolution, storage, qr, time_major })
+        Ok(Self {
+            path,
+            index,
+            time_start,
+            n_time,
+            resolution,
+            snapshot,
+            storage,
+            qr,
+            time_major,
+        })
     }
 }
 
@@ -783,6 +835,9 @@ pub struct UsgsObservationsStore {
     pub index: IdIndex<Staid>,
     pub time_start: NaiveDate,
     pub n_time: usize,
+    /// The icechunk snapshot this store reads (pin, or the resolved `main`
+    /// tip). Recorded in the run manifest.
+    pub snapshot: String,
     #[allow(dead_code)]
     storage: Arc<IcZarrStorage>,
     streamflow: ZarrArray<dyn ReadableStorageTraits>,
@@ -790,8 +845,15 @@ pub struct UsgsObservationsStore {
 
 impl UsgsObservationsStore {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_at(path, None)
+    }
+
+    /// Open at a specific icechunk snapshot. `snapshot: None` is [`Self::open`]
+    /// — the `main` branch tip. See `data_sources.pins` in `src/config.rs`.
+    pub fn open_at(path: impl Into<PathBuf>, snapshot: Option<&str>) -> Result<Self> {
         let path = path.into();
-        let session = open_session(&path)?;
+        let session = open_session(&path, snapshot)?;
+        let snapshot = session.snapshot.clone();
         let storage: Arc<IcZarrStorage> = IcZarrStorage::shared(&session);
         let readable: ReadableStorage = storage.clone();
 
@@ -825,6 +887,7 @@ impl UsgsObservationsStore {
             index,
             time_start,
             n_time,
+            snapshot,
             storage,
             streamflow,
         })
@@ -1095,7 +1158,7 @@ mod tests {
         if !p.exists() {
             return;
         }
-        assert!(open_session(p).is_ok());
+        assert!(open_session(p, None).is_ok());
     }
 
     #[test]

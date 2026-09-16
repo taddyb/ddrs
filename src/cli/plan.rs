@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::cli::fingerprint::{Fingerprint, fingerprint_path, reuse_if_unchanged};
+use crate::cli::fingerprint::{Fingerprint, fingerprint_path_at, reuse_if_unchanged_at};
 use crate::cli::lockfile::{Lockfile, diff_against_live};
 use crate::cli::types::Workflow;
 use crate::cli::workspace::Workspace;
@@ -210,9 +210,12 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
     }
     let mut sources = BTreeMap::new();
     for (key, path) in pairs {
+        // `data_sources.pins` (icechunk sources only) decides which snapshot
+        // the run will read, so the lock records the pin rather than the tip.
+        let pin = data_sources.pin_for(&key);
         let live = match prior_lock.as_ref().and_then(|l| l.sources.get(&key)) {
             Some(locked) => {
-                let r = reuse_if_unchanged(&path, locked)?;
+                let r = reuse_if_unchanged_at(&path, locked, pin)?;
                 Fingerprint {
                     path: path.clone(),
                     mtime: r.mtime,
@@ -221,7 +224,7 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
                     snapshot: r.snapshot,
                 }
             }
-            None => fingerprint_path(&path)?,
+            None => fingerprint_path_at(&path, pin)?,
         };
         sources.insert(key, live);
     }
@@ -234,10 +237,23 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
     // Drift policy + auto-relock. Strict callers (run --strict) abort
     // BEFORE the lock is refreshed so the drift evidence survives.
     if !drift.is_empty() {
+        // One line per drifted source, naming both fingerprints. For an
+        // icechunk source the fp IS the snapshot id, so this reads as
+        // "the store was appended to since the lock" without further digging.
+        eprintln!("data source drift since last plan:");
+        for field in &drift {
+            let locked = prior_lock
+                .as_ref()
+                .and_then(|l| l.sources.get(field))
+                .map(|f| f.fp.as_str())
+                .unwrap_or("<absent>");
+            let current = sources.get(field).map(|f| f.fp.as_str()).unwrap_or("<absent>");
+            eprintln!("  {field}: locked {locked} -> current {current}");
+        }
         if input.strict {
             return Err(CliError::LockDrift { fields: drift });
         }
-        eprintln!("warning: data source drift since last plan: {drift:?} — relocking");
+        eprintln!("warning: relocking (pass --strict to abort instead)");
     }
     // Rewrite only when something actually changed, so an unchanged re-plan
     // leaves the lock byte-identical. Note: intentionally stat-sensitive

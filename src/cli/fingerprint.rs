@@ -33,10 +33,18 @@ pub struct ReuseResult {
 }
 
 pub fn fingerprint_path(path: &Path) -> Result<Fingerprint, CliError> {
+    fingerprint_path_at(path, None)
+}
+
+/// As [`fingerprint_path`], but for a source pinned to an icechunk snapshot
+/// (`data_sources.pins`): the fingerprint then records the PIN, because that is
+/// the data version the run will actually read. Unpinned icechunk sources still
+/// record the resolved `main` tip.
+pub fn fingerprint_path_at(path: &Path, pin: Option<&str>) -> Result<Fingerprint, CliError> {
     let md = fs::metadata(path).map_err(|_| CliError::DataSourceMissing { path: path.into() })?;
     let size = md.len();
     let mtime = systime_to_iso(md.modified()?);
-    let (fp, snapshot) = compute_fp(path, &md)?;
+    let (fp, snapshot) = compute_fp(path, &md, pin)?;
     Ok(Fingerprint { path: path.into(), mtime, size, fp, snapshot })
 }
 
@@ -51,6 +59,15 @@ pub fn fingerprint_path(path: &Path) -> Result<Fingerprint, CliError> {
 /// and Q' stores is on the order of the store's file count (icechunk repos
 /// escape this — their fingerprint is one ref read, no walk).
 pub fn reuse_if_unchanged(path: &Path, locked: &Fingerprint) -> Result<ReuseResult, CliError> {
+    reuse_if_unchanged_at(path, locked, None)
+}
+
+/// As [`reuse_if_unchanged`], with the source's `data_sources.pins` value.
+pub fn reuse_if_unchanged_at(
+    path: &Path,
+    locked: &Fingerprint,
+    pin: Option<&str>,
+) -> Result<ReuseResult, CliError> {
     let md = fs::metadata(path).map_err(|_| CliError::DataSourceMissing { path: path.into() })?;
     let size = md.len();
     let mtime = systime_to_iso(md.modified()?);
@@ -63,26 +80,41 @@ pub fn reuse_if_unchanged(path: &Path, locked: &Fingerprint) -> Result<ReuseResu
             reused: true,
         });
     }
-    let (fp, snapshot) = compute_fp(path, &md)?;
+    let (fp, snapshot) = compute_fp(path, &md, pin)?;
     Ok(ReuseResult { fp, mtime, size, snapshot, reused: false })
 }
 
 /// Returns `(fp, snapshot)`.
 ///
 /// * regular file (CSV, NetCDF, gpkg) — blake3 over the full content.
-/// * icechunk repository — `icechunk:<main branch snapshot id>`. The snapshot
-///   id is a content hash by construction, so no walk is needed.
+/// * icechunk repository — `icechunk:<snapshot id>`: the configured `pin` when
+///   there is one, else the `main` branch tip. Either way it is the version the
+///   run will read, and a snapshot id is a content hash by construction, so no
+///   walk is needed.
 /// * any other directory (zarr v2/v3 stores, unpacked fabrics) — blake3 over
 ///   the recursive `<relative path>\n<size>\n` listing plus the bytes of the
 ///   root metadata file, if any.
-fn compute_fp(path: &Path, md: &fs::Metadata) -> Result<(String, Option<String>), CliError> {
+fn compute_fp(
+    path: &Path,
+    md: &fs::Metadata,
+    pin: Option<&str>,
+) -> Result<(String, Option<String>), CliError> {
     if !md.is_dir() {
         return Ok((format!("blake3:{}", blake3::hash(&fs::read(path)?).to_hex()), None));
     }
     if is_icechunk_repo(path) {
-        let snapshot = main_branch_snapshot(path).map_err(|e| {
-            CliError::Runtime(format!("icechunk fingerprint failed for {}: {e}", path.display()))
-        })?;
+        // A pin is already an immutable snapshot id — no ref read needed, and
+        // recording the tip here would name a version the run never touches.
+        // An id that does not resolve is caught when the store is opened.
+        let snapshot = match pin {
+            Some(id) => id.to_string(),
+            None => main_branch_snapshot(path).map_err(|e| {
+                CliError::Runtime(format!(
+                    "icechunk fingerprint failed for {}: {e}",
+                    path.display()
+                ))
+            })?,
+        };
         return Ok((format!("icechunk:{snapshot}"), Some(snapshot)));
     }
     let (hex, files) = hash_dir(path)?;

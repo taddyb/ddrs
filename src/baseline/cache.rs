@@ -374,6 +374,7 @@ mod tests {
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),
             aorc_precip: None,
+            pins: None,
         });
         cfg.experiment = Some(Experiment {
             batch_size: 1,
@@ -502,6 +503,7 @@ mod tests {
             observations: PathBuf::from("/dev/null/obs.ic"),
             gages: PathBuf::from("/dev/null/gages.csv"),
             aorc_precip: None,
+            pins: None,
         });
         cfg.experiment = Some(Experiment {
             batch_size: 1,
