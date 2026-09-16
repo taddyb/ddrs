@@ -455,6 +455,25 @@ constrains aggregate loss while carrying zero information about per-reach flux.
 Every rival explanation (gradient starvation, objective noise, uninformative
 inputs, sign ambiguity) was individually refuted.
 
+**Anchored to the February reference since 2026-09-15.** DDR reverted leakance on
+master, so `_compute_zeta` survives only in DDR commit `c2bd0f9`
+(`~/projects/ddr/src/ddr/routing/mmc.py`, "feat: add leakance (GW-SW exchange) to routing (#130)",
+2026-02-13). `scripts/export_ddr_leakance_reference.py` pulls that function out of
+history, runs it on 29 hand-chosen reaches spanning six decades of discharge, both
+flow directions, and the `K_D` box floor/middle/ceiling, and writes
+`fixtures/leakance/ddr_reference_zeta.csv`.
+`tests/leakance_reference_match.rs` replays it through
+`src/routing/leakance.rs::zeta_forward` with the `losing_only` clamp off and no
+impervious mask (the reference's own form) and matches to a max relative
+difference of 6.17e-6, which is the `q_eps = q_spatial + 1e-6` width-exponent
+stabilisation and nothing else. The clamp, the impervious mask, and the
+`attribute_minimums.depth` floor are pinned separately as deliberate ddrs-only
+deviations. Regenerate the fixture with:
+
+```bash
+cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_leakance_reference.py
+```
+
 Verdict and refutations: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md` §3
 Enable steps, ranges, zeta diagnostic: `ddrs-dev/references/config.md`
 Gates: `ddrs-dev/references/testing.md`
