@@ -218,6 +218,7 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
                     mtime: r.mtime,
                     size: r.size,
                     fp: r.fp,
+                    snapshot: r.snapshot,
                 }
             }
             None => fingerprint_path(&path)?,

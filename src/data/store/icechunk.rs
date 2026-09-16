@@ -78,6 +78,43 @@ pub(crate) fn open_session(path: &Path) -> Result<IcSession> {
     Ok(IcSession { runtime, store })
 }
 
+/// Resolve the `main` branch tip of the icechunk repository at `path` to its
+/// snapshot id (Crockford base32, as icechunk prints it).
+///
+/// Opens the repository read-only exactly the way [`open_session`] does — a
+/// private 2-worker tokio runtime, `new_local_filesystem_storage` +
+/// `Repository::open` — but stops at `lookup_branch`, so no `Session` and no
+/// `Store` are built. Used by `src/cli/fingerprint.rs::compute_fp` to give an
+/// icechunk store a content fingerprint: the snapshot id is a content hash by
+/// construction, so no file walk is needed.
+pub fn main_branch_snapshot(path: &Path) -> Result<String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| DataError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+
+    runtime.block_on(async {
+        let storage = new_local_filesystem_storage(path)
+            .await
+            .map_err(|e| ic_err(path, e))?;
+
+        let repo = Repository::open(None, storage, std::collections::HashMap::new())
+            .await
+            .map_err(|e| ic_err(path, e))?;
+
+        let snapshot = repo
+            .lookup_branch("main")
+            .await
+            .map_err(|e| ic_err(path, e))?;
+
+        Ok(snapshot.to_string())
+    })
+}
+
 #[allow(dead_code)] // Used by the helpers in this module once filled in.
 pub(crate) fn ic_err<E: std::error::Error + Send + Sync + 'static>(
     path: &Path,

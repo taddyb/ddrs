@@ -6,7 +6,7 @@ use std::fs;
 fn fp(path: &str, fp: &str) -> Fingerprint {
     Fingerprint {
         path: path.into(), mtime: "2026-05-30T00:00:00Z".into(),
-        size: 1, fp: fp.into(),
+        size: 1, fp: fp.into(), snapshot: None,
     }
 }
 
