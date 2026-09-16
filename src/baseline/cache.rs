@@ -81,6 +81,29 @@ pub fn cache_key(test_cfg: &Config) -> Result<String, BaselineError> {
     h.update(b"\n");
     h.update(exp.end_time.as_bytes());
 
+    // `data_sources.pins` changes which snapshot `summed_q_prime` READS, so it
+    // changes the baseline's inputs and must change the key — otherwise
+    // re-pinning silently reuses the previous snapshot's cached predictions,
+    // and the trained model is judged against the wrong reference.
+    //
+    // Hashed only when there is at least one pin, so an unpinned config yields
+    // the byte-identical key it did before pins existed and no cached baseline
+    // is invalidated. `BASELINE_ALGO_VERSION` is deliberately NOT bumped: the
+    // baseline ALGORITHM is unchanged (that constant means "recompute stale
+    // caches from older binaries"), this is a new INPUT, and bumping it would
+    // throw away every existing cache to no purpose.
+    if let Some(pins) = ds.pins.as_ref().filter(|p| !p.is_empty()) {
+        h.update(b"\npins\n");
+        // BTreeMap iterates in sorted key order, so the digest is independent
+        // of the order the keys appear in the YAML.
+        for (source, snapshot) in pins {
+            h.update(source.as_bytes());
+            h.update(b"=");
+            h.update(snapshot.as_bytes());
+            h.update(b"\n");
+        }
+    }
+
     let hex = h.finalize().to_hex();
     Ok(hex.as_str()[..16].to_string())
 }
@@ -430,6 +453,51 @@ mod tests {
         h.update(exp.end_time.as_bytes());
         let legacy_key = h.finalize().to_hex().as_str()[..16].to_string();
         assert_ne!(cache_key(&cfg).unwrap(), legacy_key);
+    }
+
+    /// An UNPINNED config must keep producing the key it produced before
+    /// `data_sources.pins` existed, or every cached baseline on every
+    /// workstation is invalidated for nothing. The literal is the value
+    /// `fake_config()` hashed to before the pins block was added to
+    /// `cache_key`; it is machine-independent because the fixture's
+    /// `/dev/null/...` paths never canonicalize. If this assertion fails, a
+    /// change altered the key's inputs — decide deliberately whether that is
+    /// intended before updating the literal.
+    #[test]
+    fn unpinned_cache_key_is_unchanged_by_the_pins_support() {
+        assert_eq!(cache_key(&fake_config()).unwrap(), "43843300d30ff837");
+    }
+
+    #[test]
+    fn cache_key_invalidates_on_pin_change() {
+        // `summed_q_prime` reads the pinned snapshot, so two pins are two
+        // different sets of baseline inputs and must not share a cache entry.
+        let pinned = |id: &str| {
+            let mut c = fake_config();
+            c.data_sources.as_mut().unwrap().pins =
+                Some([("streamflow".to_string(), id.to_string())].into_iter().collect());
+            c
+        };
+        assert_ne!(
+            cache_key(&pinned("E0M3W6W1881H868V2KRG")).unwrap(),
+            cache_key(&pinned("BPY4SW34FJGXWC3T806G")).unwrap(),
+        );
+    }
+
+    #[test]
+    fn cache_key_invalidates_when_a_pin_is_added() {
+        let mut pinned = fake_config();
+        pinned.data_sources.as_mut().unwrap().pins = Some(
+            [("streamflow".to_string(), "E0M3W6W1881H868V2KRG".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert_ne!(cache_key(&fake_config()).unwrap(), cache_key(&pinned).unwrap());
+
+        // An EMPTY pins map is not a pin — it must hash as unpinned.
+        let mut empty = fake_config();
+        empty.data_sources.as_mut().unwrap().pins = Some(Default::default());
+        assert_eq!(cache_key(&fake_config()).unwrap(), cache_key(&empty).unwrap());
     }
 
     #[test]
