@@ -130,18 +130,19 @@ impl FrozenParams {
     }
 }
 
-/// Inverse of `denormalize` in `src/routing/utils.rs:32-43`.
+/// Inverse of `src/routing/utils.rs::denormalize`.
 ///
 /// Converts a physical parameter value back to normalized [0, 1] so it can
-/// be fed into `MuskingumCunge::setup_inputs`. Must exactly mirror the
-/// `+1e-6` epsilon used in `denormalize`'s log-space branch.
+/// be fed into `MuskingumCunge::setup_inputs`. The log-space lower bound comes
+/// from the same `src/routing/utils.rs::log_space_lower` helper `denormalize`
+/// uses, so the two directions cannot drift apart.
 ///
 /// `pub` (not `pub(crate)`): callers in `src/bin/*.rs` are separate crates
 /// that depend on `ddrs` externally, so crate-visibility isn't enough.
 pub fn physical_to_normalized(values: &[f32], range: [f32; 2], log_space: bool) -> Vec<f32> {
     let [lo, hi] = range;
     if log_space {
-        let log_lo = (lo + 1e-6).ln(); // matches denormalize's epsilon
+        let log_lo = crate::routing::utils::log_space_lower(lo);
         let log_hi = hi.ln();
         values
             .iter()
