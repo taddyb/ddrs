@@ -21,6 +21,7 @@ cargo test --test sparse_gradcheck
 cargo test --test leakance_gradcheck    # run even if you did not touch leakance —
 cargo test --test leakance_off_parity   # any routing change can disturb OFF-parity
 cargo test --test zeta_accum
+cargo test --test leakance_reference_match  # the only DDR anchor leakance has
 ```
 
 Since 2026-09-02 the sandbox gate is machine-enforced twice over:
@@ -74,6 +75,18 @@ cargo test --lib && cargo test && \
 ```
 If you touched `src/training/forward.rs` (disagg / leakance threading), also run
 `cargo test --test leakance_off_parity`.
+
+If you touched `src/routing/leakance.rs`, `src/geometry.rs`'s depth inversion, or
+the S6/S25 leakance call site in `src/routing/mmc_op.rs::forward_chain_inner`, run
+`cargo test --test leakance_reference_match --test zeta_accum` on top of the two
+above. `leakance_reference_match` is the ONLY anchor the leakance term has to the
+Python reference: DDR reverted the feature on master, so the reference lives in
+commit `c2bd0f9` and is extracted from history by
+`scripts/export_ddr_leakance_reference.py` into
+`fixtures/leakance/ddr_reference_zeta.csv`. Its `REL_TOL` of 2e-5 is derived from
+the `q_eps = q_spatial + 1e-6` width-exponent stabilisation (predicted 6.2e-6,
+measured 6.17e-6) - if a failure reports a larger difference, that is a real
+discrepancy against DDR, not a bar to widen.
 
 ### Tier D — config YAML only
 ```bash
@@ -135,7 +148,7 @@ line citation outright rather than trusting it to stay pinned.
 | Gridded (DDM30) ingestion | `gridded_bundle` (sub-reach store → subdivided layout, gauge at the cell's last piece, cache hit, dataset opens), `cargo test --lib adjacency::gridded` (synthetic-store validation), `hourly_streamflow::time_major_store_reads_identically_to_divide_major`, `cargo test --lib zarr::tests::upstream_comids_names_each_subdivided_parent_once` |
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
-| Leakance | `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` |
+| Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting) |
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |

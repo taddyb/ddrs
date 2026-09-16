@@ -28,13 +28,18 @@ output/
 # Exceptions that stay tracked: fixtures/sandbox/ (src/sandbox.rs embeds it
 # at compile time via include_str!; tests/ddr_sandbox_match.rs documents it
 # as committed: "a missing file means a broken checkout, not a skippable
-# test") and fixtures/gradcheck/ (32 KB from scripts/dump_solver_gradcheck.py;
+# test"), fixtures/gradcheck/ (32 KB from scripts/dump_solver_gradcheck.py;
 # without it tests/sparse_gradcheck.rs, the DDR-parity gate for the sparse
-# backward, self-skips and CI would never run it). fixtures/sp4 and
-# fixtures/sp5 predate this rule and are already tracked.
+# backward, self-skips and CI would never run it), and fixtures/leakance/
+# (4 KB from scripts/export_ddr_leakance_reference.py; it is the ONLY anchor
+# the leakance term has to DDR, and its reference commit c2bd0f9 is reverted
+# on DDR master, so an untracked copy could not be regenerated from a plain
+# checkout). fixtures/sp4 and fixtures/sp5 predate this rule and are already
+# tracked.
 /fixtures/*
 !/fixtures/sandbox/
 !/fixtures/gradcheck/
+!/fixtures/leakance/
 examples/fixtures/
 
 # Agent notes are tracked (ARCHITECTURE.md, skills/, specs/) — only ignore transient state
