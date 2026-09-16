@@ -24,15 +24,45 @@
 
 use burn::tensor::{backend::Backend, Tensor};
 
+/// Lower bound of the log-space map, as a natural log.
+///
+/// A log map needs a strictly positive lower bound, so a non-positive `lo` is
+/// nudged by `1e-6` before the `ln`. A `lo` that is already positive is used
+/// as-is: adding the nudge there silently collapses the box. For
+/// `k_d = [1e-8, 1e-6]` the nudged lower bound is `1.01e-6`, which sits
+/// *above* the upper bound, so the whole map inverts and spans 1 % instead of
+/// the intended two decades. See the `denormalize` docs.
+///
+/// Shared with `src/training/forward.rs::physical_to_normalized` so the two
+/// directions cannot drift apart.
+pub(crate) fn log_space_lower(lo: f32) -> f32 {
+    if lo > 0.0 {
+        lo.ln()
+    } else {
+        // Unchanged from the original guard, so `lo == 0` boxes keep their
+        // exact prior mapping.
+        (lo + 1e-6).ln()
+    }
+}
+
 /// Denormalize a `[0, 1]` neural-net output to physical units.
 ///
 /// Linear: `value · (max − min) + min`.
-/// Log-space: `exp(value · (log(max) − log(min + ε)) + log(min + ε))`.
-/// Matches `denormalize()` in `routing/utils.py`.
+/// Log-space: `exp(value · (log(max) − log(min)) + log(min))`, with `log(min)`
+/// supplied by [`log_space_lower`], which falls back to `log(min + 1e-6)`
+/// only when `min <= 0`.
+///
+/// Mirrors `denormalize()` in `~/projects/ddr/src/ddr/routing/utils.py`, except
+/// that DDR's Python still applies `bounds[0] + 1e-6` unconditionally. That
+/// guard collapses any box whose lower bound is small next to `1e-6`; DDR needs
+/// the same patch upstream. The two implementations therefore agree exactly
+/// wherever `min` is either zero or large next to `1e-6` (`p_spatial`, the only
+/// log-space parameter enabled by default, is `[1, 200]`) and disagree on
+/// log-space boxes with a small positive lower bound (`k_d = [1e-8, 1e-6]`).
 pub fn denormalize<B: Backend>(value: Tensor<B, 1>, bounds: [f32; 2], log_space: bool) -> Tensor<B, 1> {
     let [lo, hi] = bounds;
     if log_space {
-        let log_min = (lo + 1e-6).ln();
+        let log_min = log_space_lower(lo);
         let log_max = hi.ln();
         (value * (log_max - log_min) + log_min).exp()
     } else {
