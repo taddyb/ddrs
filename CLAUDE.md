@@ -366,6 +366,21 @@ no `da_ratio` output correction) are in
 DDR's gridded Q′ stores are `Qr(time, divide_id)`; the icechunk reader sniffs
 the axis order (`detect_time_major`) — see the ddrs-dev skill's trap T11.
 
+**Snapshot pinning and source fingerprints** (2026-09-16): `ddrs plan`
+fingerprints an icechunk repository by its `main` branch snapshot id
+(`fp = "icechunk:<id>"`) and any other directory store by a recursive walk of
+relative paths and sizes plus the root metadata bytes
+(`src/cli/fingerprint.rs::compute_fp`); the id actually read is recorded as
+`sources.<name>.snapshot` in `.ddrs/sources.lock` and in the run manifest,
+pinned or not, so every run names the exact data version it saw. The optional
+`data_sources.pins` map (source name to snapshot id) opens `streamflow` and
+`observations` at that snapshot instead of the branch tip; only those two names
+may be pinned (`src/config.rs::validate_pins`), and re-pinning recomputes the
+summed-Q' baseline rather than reusing the previous snapshot's, because
+`src/baseline/cache.rs::cache_key` hashes the pins. Because the directory
+fingerprint format changed, the first `ddrs plan` after this landed reports
+drift once and relocks.
+
 The `observations` and `streamflow` data sources auto-detect their format
 (`ObservationsStore::open` / `StreamflowSource::open`,
 `src/data/store/mod.rs`); the icechunk CONUS path is the fallback when the

@@ -67,6 +67,12 @@ and `ddrs plan` writes it to `sources.lock` and the run manifest as
 the snapshot id, appending to an unpinned store shows up as drift on the next
 `plan` (one `field: locked <fp> -> current <fp>` line per source); a pinned
 source never drifts.
+Changing a pin also invalidates the cached summed-Q' baseline:
+`baseline/cache.rs::cache_key` hashes the `pins` block after the window fields,
+so re-pinning recomputes the baseline instead of scoring the model against a
+reference built from a different snapshot. The block is hashed only when present
+and non-empty, so an unpinned config keeps the key it always had and no existing
+cache under `.ddrs/baselines/` is orphaned.
 
 ```yaml
 data_sources:
