@@ -154,3 +154,73 @@ House-style note for downstream drafts: write "leakance is active and
 non-collapsed under hourly forcing but not identifiable from gauged discharge
 (recovery ratio 0.008; field–WTD ρ −0.36)" — never "leakance is identifiable,"
 and never frame the NO-GO as "we chose not to promote it."
+
+---
+
+## Correction (2026-09-15): the `K_D` box was collapsed by a denormalization bug
+
+A defect in `src/routing/utils.rs::denormalize` invalidates three statements in
+the leakance record. **The NO-GO verdict itself is UNAFFECTED**; the reasoning is
+in "What this does not change" below.
+
+**The defect.** The log-space branch computed its lower bound as
+`(lo + 1e-6).ln()` unconditionally. The `1e-6` is a guard for `lo == 0`, but it
+swamps any lower bound that is small next to `1e-6`. The declared `K_D` box
+`[1e-8, 1e-6]` was therefore realized as `[1.01e-6, 1.00e-6]`: a band 1 % wide,
+sitting at the top of the nominal box, and **inverted**, because the guarded
+lower bound exceeds the upper bound. `K_D` was a frozen constant of about
+1e-6, not a learned parameter, in every leakance run ever executed. Fixed
+2026-09-15; see `.claude/skills/ddrs-dev/references/traps.md` T17.
+
+**What is wrong.**
+
+1. **§3 row A, and the "`K_D` is pinned at the ceiling on essentially every
+   reach" observation it rests on.** That was not a training outcome. The
+   reachable band *was* the ceiling, to within 1 %. Nothing was pinned, because
+   nothing could move. The associated box-utilization figure (median 3.4 %) is a
+   ratio against a nominal box that the map never reached, and should not be
+   read as evidence about what training preferred.
+
+2. **§3 row B, the `K_D`–aridity correlation ρ +0.61 as evidence of "strong
+   learned structure" in `K_D`.** The correlation is real as arithmetic but was
+   computed across a span of about 1 %, i.e. across numerical noise at the top of
+   the band. It does not demonstrate that the head learned physical structure in
+   `K_D`. The companion `d_gw`–meanP ρ +0.71 is untouched: `d_gw` is `[-2, 2]`
+   and linear, so it never entered the log-space branch.
+
+3. **§5, "`K_D` was widened to `[1e-8, 1e-5]` in Phase C", read as a 1000x
+   widening.** The reachable set went from `[1.01e-6, 1.00e-6]` to
+   `[1.01e-6, 1.00e-5]`, a span of about **10x**, not the nominal 1000x. Phase C
+   did widen the box, but by two orders of magnitude less than recorded, and only
+   upward: the lower bound never moved off 1.01e-6.
+
+**What this does not change: the NO-GO verdict stands.**
+
+- **The reachable water-loss flux set is unchanged.** `zeta` depends on `K_D`
+  only through the product `leakance_factor · area_z · K_D · (depth − d_gw)`, and
+  `leakance_factor` is linear on `[0, 1]`. A `K_D` frozen at 1e-6 with a free
+  factor covers the same set of products as a free `K_D` on `[1e-8, 1e-6]` with
+  the factor at 1. The bug redistributed a degree of freedom between two
+  multiplied parameters; it did not remove one, and it did not shrink the flux
+  the model could express.
+- **Every verdict-bearing measurement was made on the flux field, not the
+  parameter triple.** The recovery ratio (0.008), the field–WTD correlation
+  (ρ −0.36), the gauged/ungauged gradient ratio (1.5x), and the losing-subset
+  ΔKGE are all computed on `zeta` / `zeta_net`. Those quantities were free to
+  vary through `leakance_factor` and are unaffected.
+- **The detectability result does not depend on parameterization at all.** Row D
+  compares a 0.01 m³/s loss against the 5 % discharge-uncertainty band. That is a
+  statement about the observation, not about how the model spells `K_D`.
+- **The structural argument is untouched.** A gauge observes Σ(zeta) over its
+  upstream network, and a sum does not determine its addends. This holds for any
+  parameterization of the per-reach flux, collapsed box or not.
+
+**What would be worth redoing, and what it could show.** Rows A and B are the
+two rows whose *key numbers* came from the parameter field rather than the flux
+field. Both were REFUTED-as-rival-explanations, and a rerun on the fixed box can
+only sharpen or restate that: row A's question (is the box too small?) is now
+answerable for the first time with the box actually open, and row B's question
+(did the head collapse?) should be re-asked of a `K_D` that can move. Neither can
+overturn the verdict, which rests on rows C through G and on the structural
+argument. Anyone quoting the ρ +0.61 figure for `K_D` should drop it rather than
+requalify it.
