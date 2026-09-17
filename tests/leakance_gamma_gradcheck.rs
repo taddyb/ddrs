@@ -218,12 +218,16 @@ fn harness() -> Harness {
 }
 
 fn compute_analytical_grad(parent: Parent) -> Vec<f32> {
+    compute_analytical_grad_at(parent, &gamma_vec())
+}
+
+fn compute_analytical_grad_at(parent: Parent, gm: &[f32]) -> Vec<f32> {
     let h = harness();
     let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
-    let (kd, dgw, fac, gm) = (kd_vec(), dgw_vec(), fac_vec(), gamma_vec());
+    let (kd, dgw, fac) = (kd_vec(), dgw_vec(), fac_vec());
     let inp = Inputs {
         n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
-        kd: &kd, dgw: &dgw, fac: &fac, gamma: Some(&gm),
+        kd: &kd, dgw: &dgw, fac: &fac, gamma: Some(gm),
     };
     let (q_next, parents) = run_forward(
         &h.cfg, &h.pattern, &h.assembler, &h.device, &h.length, &h.slope, &inp, Some(parent),
@@ -250,9 +254,13 @@ fn compute_analytical_grad(parent: Parent) -> Vec<f32> {
 }
 
 fn compute_fd_grad(parent: Parent) -> Vec<f32> {
+    compute_fd_grad_at(parent, &gamma_vec())
+}
+
+fn compute_fd_grad_at(parent: Parent, gm_base: &[f32]) -> Vec<f32> {
     let h = harness();
     let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
-    let (base_kd, base_dgw, base_fac, base_gm) = (kd_vec(), dgw_vec(), fac_vec(), gamma_vec());
+    let (base_kd, base_dgw, base_fac, base_gm) = (kd_vec(), dgw_vec(), fac_vec(), gm_base.to_vec());
 
     let eval_loss = |n: &[f32], qsp: &[f32], psp: &[f32], qt: &[f32], qpt: &[f32],
                      kd: &[f32], dgw: &[f32], fac: &[f32], gm: &[f32]| -> f32 {
@@ -343,6 +351,48 @@ fn run(name: &str, parent: Parent) {
 /// The one that did not exist before the nine-parent op. A regression here
 /// means gamma is being trained against a wrong gradient while leakance is on.
 #[test] fn gradcheck_gamma() { run("gamma", Parent::Gamma); }
+
+/// NEGATIVE gamma: roughness RISES with stage, which is the composite /
+/// vegetated-floodplain case. `validate_learned_gamma` admits gamma down to
+/// -0.5, so the backward has to be right there too, not only on the
+/// historical `[0, 0.5]` box.
+///
+/// Two things could have gone wrong and neither shows up at positive gamma:
+/// the depth exponent `3/(5+3q+3·gamma)` grows rather than shrinks (its
+/// denominator only degenerates near gamma = -2.3, far outside the box), and
+/// `(d/d_ref)^(-gamma)` becomes a positive power of depth, flipping the sign
+/// of the B15 and B17 contributions into the depth accumulator.
+#[test]
+fn gradcheck_gamma_negative() {
+    let neg = vec![-0.2f32; N];
+    compare_grads(
+        "gamma (negative, composite-channel regime)",
+        &compute_analytical_grad_at(Parent::Gamma, &neg),
+        &compute_fd_grad_at(Parent::Gamma, &neg),
+    );
+}
+
+/// Every other parent must also keep a correct gradient when gamma is
+/// negative: gamma re-weights the whole geometry chain below depth, so a sign
+/// error there would corrupt `n` and the leakance parents too, not just gamma.
+#[test]
+fn gradcheck_all_parents_at_negative_gamma() {
+    let neg = vec![-0.2f32; N];
+    for (name, parent) in [
+        ("n", Parent::N),
+        ("q_spatial", Parent::QSpatial),
+        ("p_spatial", Parent::PSpatial),
+        ("K_D", Parent::KD),
+        ("d_gw", Parent::DGW),
+        ("leakance_factor", Parent::LeakFactor),
+    ] {
+        compare_grads(
+            &format!("{name} @ gamma=-0.2"),
+            &compute_analytical_grad_at(parent, &neg),
+            &compute_fd_grad_at(parent, &neg),
+        );
+    }
+}
 
 // --- identities: the new path must not disturb the old one -----------------
 

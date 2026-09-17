@@ -1379,12 +1379,25 @@ fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
         return Ok(());
     }
     let r = cfg.params.parameter_ranges.gamma;
-    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < 0.0 || r[1] <= r[0] || r[1] > 1.0 {
+    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < -0.5 || r[1] <= r[0] || r[1] > 1.0 {
         return Err(format!(
-            "params.parameter_ranges.gamma must be a valid range inside [0, 1] \
-             with lo < hi, got {r:?}. Channels get SMOOTHER as they fill so gamma \
-             is non-negative, and above 1 the depth exponent 3/(5+3q+3·gamma) \
-             collapses while roughness explodes as depth goes to zero."
+            "params.parameter_ranges.gamma must be a valid range inside [-0.5, 1] \
+             with lo < hi, got {r:?}. Above 1 the depth exponent 3/(5+3q+3·gamma) \
+             collapses while roughness explodes as depth goes to zero. Below \
+             -0.5 is refused as a guard, not as physics: the exponent's \
+             denominator only degenerates at gamma = -(5+3q)/3 (about -2.3 at \
+             q = 0.65), so -0.5 leaves a wide margin.
+
+             Negative gamma IS admitted, and deliberately. The usual argument \
+             that channels get smoother as they fill holds for an in-bank \
+             section, where the relative roughness of the bed falls as depth \
+             grows. It fails once flow reaches a vegetated floodplain or a \
+             composite section, where the effective roughness RISES with stage. \
+             A box floored at 0 cannot represent those reaches at all, and the \
+             2026-09-17 parameter-range audit measured learned gamma sitting \
+             hard against that floor on one product. The backward is exercised \
+             at negative gamma by `tests/sp8_gradcheck.rs` and, with leakance \
+             active, by `tests/leakance_gamma_gradcheck.rs`."
         ));
     }
     if cfg.params.ddr_match {
