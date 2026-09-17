@@ -1762,21 +1762,39 @@ where
                 //
                 // `relu` is the physics, not a patch: a reach with no water
                 // available can lose none, so the cap there is zero.
+                // SYMMETRIC. zeta > 0 is a losing reach (water leaves for the
+                // aquifer); zeta < 0 is a GAINING reach (the aquifer feeds the
+                // stream). Both directions need bounding, and for different
+                // reasons. Unbounded loss empties the channel, which is what
+                // produced the 2026-09-17 NaN. Unbounded GAIN is worse
+                // scientifically: a source term can manufacture water wherever
+                // the model runs short, so it will absorb any inflow deficit
+                // and improve skill while meaning nothing.
+                //
+                // `|zeta| <= alpha * relu(b_base)` says the exchange is a
+                // CORRECTION on the local flow, not a multiple of it, which is
+                // the right prior given dHBV's q' already carries baseflow.
                 let cap = b_rhs_base.clone().clamp_min(0.0) * alpha;
-                let bound = zeta.clone().min_pair(cap.clone());
+                let neg_cap = -cap.clone();
+                let bound = zeta
+                    .clone()
+                    .min_pair(cap.clone())
+                    .max_pair(neg_cap.clone());
 
                 // Two factors, because the forward splits b_rhs two ways:
-                //   d(b_rhs)/d(zeta)   = -(1 - s)
-                //   d(b_rhs)/d(b_base) = 1 - s * d(cap)/d(b_base)
-                //                      = 1 - s * alpha   where b_base > 0
-                //                      = 1               where b_base <= 0
-                // with s = 1 where the cap binds. Both are recorded here rather
-                // than recomputed in the backward, so the two cannot drift.
-                let binding = zeta.greater(cap).float();
-                let one_minus_binding = binding.clone().ones_like() - binding.clone();
+                //   d(b_rhs)/d(zeta)   = -(1 - s_up - s_dn)
+                //   d(b_rhs)/d(b_base) = 1 - (s_up - s_dn) * alpha  where b_base > 0
+                //                      = 1                          where b_base <= 0
+                // the sign difference being that an upper bind gives
+                // `b_rhs = (1-alpha)*b_base` and a lower bind `(1+alpha)*b_base`.
+                // Both are recorded here rather than recomputed in the backward,
+                // so the two cannot drift.
+                let s_up = zeta.clone().greater(cap).float();
+                let s_dn = zeta.lower(neg_cap).float();
+                let ones = s_up.clone().ones_like();
+                let one_minus_binding = ones.clone() - s_up.clone() - s_dn.clone();
                 let positive_base = b_rhs_base.clone().greater_elem(0.0).float();
-                let base_factor =
-                    binding.clone().ones_like() - binding * positive_base * alpha;
+                let base_factor = ones - (s_up - s_dn) * positive_base * alpha;
                 if let Some(ls) = leak_out.as_mut() {
                     ls.rhs_bound = Some((unwrap(base_factor), unwrap(one_minus_binding)));
                 }

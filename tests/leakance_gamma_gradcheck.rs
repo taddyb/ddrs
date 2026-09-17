@@ -655,3 +655,163 @@ fn a_tighter_bound_never_removes_more_water_and_somewhere_removes_less() {
         "alpha never changed the forward at any conductance — the bound is inert"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GAINING REACHES: zeta < 0, the aquifer feeds the stream.
+//
+// `leakance_losing_only: true` clamps these to exactly zero. Measured against
+// the independent water table on 63,365 CONUS reaches, 63.7% of them SHOULD be
+// gaining (the table sits above stream stage), so that clamp disables the
+// majority regime. These tests cover the `losing_only: false` path, including
+// the symmetric arm of the mass bound, which is the piece that stops a source
+// term from manufacturing water without limit.
+// ---------------------------------------------------------------------------
+
+fn cfg_two_way(alpha: Option<f32>) -> Config {
+    let mut cfg = match alpha {
+        Some(a) => mock_cfg_bounded(a),
+        None => mock_cfg(),
+    };
+    cfg.params.leakance_losing_only = false;
+    cfg
+}
+
+/// A reach whose water table sits ABOVE stream stage must GAIN water, i.e.
+/// end with more discharge than the same reach with leakance clamped off.
+#[test]
+fn a_reach_below_its_water_table_gains_water() {
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (kd, fac, gm) = (kd_vec(), fac_vec(), gamma_vec());
+    // d_gw far above any routed depth on this chain ⇒ head = depth - d_gw < 0.
+    let high_table = vec![50.0f32; N];
+    let go = |cfg: &Config| -> f32 {
+        let hh = Harness { cfg: cfg.clone(), ..harness() };
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &kd, dgw: &high_table, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, _) = run_forward(
+            &hh.cfg, &hh.pattern, &hh.assembler, &hh.device, &hh.length, &hh.slope, &inp, None,
+        );
+        q.sum().into_data().to_vec::<f32>().unwrap()[0]
+    };
+    let clamped = go(&mock_cfg());      // losing_only: true  ⇒ zeta ≡ 0 here
+    let two_way = go(&cfg_two_way(None));
+    println!("gaining reach: losing_only={clamped:.4}  two_way={two_way:.4}");
+    assert!(
+        two_way > clamped,
+        "with losing_only off, a reach under its water table must gain: {two_way} vs {clamped}"
+    );
+}
+
+/// And the clamp must still do its job when it is on: the SAME configuration
+/// with `losing_only: true` produces exactly zero exchange on a gaining reach.
+#[test]
+fn losing_only_still_zeroes_a_gaining_reach() {
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (fac, gm) = (fac_vec(), gamma_vec());
+    let high_table = vec![50.0f32; N];
+    let go = |kd: f32| -> Vec<f32> {
+        let hh = Harness { cfg: mock_cfg(), ..harness() };
+        let kdv = vec![kd; N];
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &kdv, dgw: &high_table, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, _) = run_forward(
+            &hh.cfg, &hh.pattern, &hh.assembler, &hh.device, &hh.length, &hh.slope, &inp, None,
+        );
+        q.into_data().to_vec::<f32>().unwrap()
+    };
+    assert_eq!(
+        go(K_D), go(1e-2),
+        "under losing_only, a gaining reach must be insensitive to K_D (zeta is clamped to 0)"
+    );
+}
+
+/// The symmetric arm of the mass bound. Without it, a gaining reach at a large
+/// conductance injects water without limit, which is a more dangerous lever
+/// than the sink: it can absorb any inflow deficit and flatter the skill.
+#[test]
+fn the_bound_limits_gain_as_well_as_loss() {
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (fac, gm) = (fac_vec(), gamma_vec());
+    let high_table = vec![50.0f32; N];
+    let big_kd = vec![5e-3f32; N];
+    let go = |cfg: &Config| -> f32 {
+        let hh = Harness { cfg: cfg.clone(), ..harness() };
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &big_kd, dgw: &high_table, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, _) = run_forward(
+            &hh.cfg, &hh.pattern, &hh.assembler, &hh.device, &hh.length, &hh.slope, &inp, None,
+        );
+        q.sum().into_data().to_vec::<f32>().unwrap()[0]
+    };
+    let unbounded = go(&cfg_two_way(None));
+    let bounded = go(&cfg_two_way(Some(0.1)));
+    println!("gaining @ K_D=5e-3: unbounded={unbounded:.3}  bounded={bounded:.3}");
+    assert!(
+        bounded < unbounded,
+        "the symmetric bound must limit injected water: {bounded} vs {unbounded}"
+    );
+}
+
+/// Gradcheck through the gaining branch. The `losing_only` gate is what
+/// previously zeroed every leakance gradient on these reaches, so this path has
+/// never been exercised in training.
+#[test]
+fn gradcheck_leakance_parents_on_a_gaining_reach() {
+    let h = Harness { cfg: cfg_two_way(None), ..harness() };
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (kd, fac, gm) = (kd_vec(), fac_vec(), gamma_vec());
+    let high_table = vec![50.0f32; N];
+
+    for (name, parent, eps) in [
+        ("K_D (gaining)", Parent::KD, 4e-7f32),
+        ("d_gw (gaining)", Parent::DGW, 1.0f32),
+        ("leakance_factor (gaining)", Parent::LeakFactor, 0.4f32),
+    ] {
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &kd, dgw: &high_table, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, parents) = run_forward(
+            &h.cfg, &h.pattern, &h.assembler, &h.device, &h.length, &h.slope, &inp, Some(parent),
+        );
+        let grads = q.sum().backward();
+        let a: Vec<f32> = match parent {
+            Parent::KD => parents.kd.grad(&grads).expect("grad on K_D"),
+            Parent::DGW => parents.dgw.grad(&grads).expect("grad on d_gw"),
+            Parent::LeakFactor => parents.fac.grad(&grads).expect("grad on factor"),
+            _ => unreachable!(),
+        }
+        .into_data().to_vec().unwrap();
+
+        let eval = |kd: &[f32], dgw: &[f32], fac: &[f32]| -> f32 {
+            let inp = Inputs {
+                n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+                kd, dgw, fac, gamma: Some(&gm),
+            };
+            let (q, _) = run_forward(
+                &h.cfg, &h.pattern, &h.assembler, &h.device, &h.length, &h.slope, &inp, None,
+            );
+            q.sum().into_data().to_vec::<f32>().unwrap()[0]
+        };
+        let mut fd = vec![0.0f32; N];
+        for i in 0..N {
+            let (mut pk, mut mk) = (kd.clone(), kd.clone());
+            let (mut pd, mut md) = (high_table.clone(), high_table.clone());
+            let (mut pf, mut mf) = (fac.clone(), fac.clone());
+            match parent {
+                Parent::KD => { pk[i] += eps; mk[i] -= eps; }
+                Parent::DGW => { pd[i] += eps; md[i] -= eps; }
+                Parent::LeakFactor => { pf[i] += eps; mf[i] -= eps; }
+                _ => unreachable!(),
+            }
+            fd[i] = (eval(&pk, &pd, &pf) - eval(&mk, &md, &mf)) / (2.0 * eps);
+        }
+        compare_grads(name, &a, &fd);
+    }
+}

@@ -281,27 +281,25 @@ params:
     # M = 1 m). Physical coverage without moving the starting point.
     K_D: [1.0e-9, 1.0e-5]
     # Water-table elevation relative to the streambed (m). Positive = table
-    # ABOVE the bed (gaining); negative = below (losing).
+    # ABOVE the bed.
     #
-    # THE BOX IS SHALLOW ON PURPOSE, and that is a consequence of the
-    # disconnection cap below, not an oversight. Without a cap you would want a
-    # deep box, because 9.3% of CONUS reaches have the table more than 5 m below
-    # the bed (p95 = 14 m, p99 = 71 m, max = 148 m in `channel_wtd_bed_rel`).
-    # With the cap, every one of those states is the SAME physics -- the stream
-    # is disconnected and the flux no longer depends on how far down the table
-    # sits -- so resolving -80 m from -150 m buys nothing.
+    # THE CEILING IS SET BY THE GAINING REGIME. Exchange direction is set by
+    # stream STAGE, not bed: a reach gains when `d_gw > depth`. Measured against
+    # the independent water table on 63,365 CONUS reaches, using this model's
+    # own routed depths (p50 = 0.29 m, p90 = 1.28 m):
     #
-    # What the box must do instead is put the INITIALISATION in the connected
-    # region. The head is a sigmoid with near-zero output bias, so at epoch 1
-    # every reach reports the box centre, here (-2 + 1)/2 = -0.5. Connection is
-    # exactly `d_gw > -M` (depth cancels out of both sides), so with M = 1.0 the
-    # centre is connected and `d_gw` receives gradient. A deep box would have
-    # centred below -M, where the cap sets the d_gw gradient to zero, and the
-    # parameter would never have moved at all.
+    #   should be GAINING (table above stage):  63.7%
+    #   should be losing:                       36.3%
     #
-    # Two thirds of this box is connected, so there is room to learn in both
-    # directions and room to express "disconnected" at the bottom.
-    d_gw: [-2.0, 1.0]
+    # The previous ceiling of +1.0 m sat below the true table on 45.3% of
+    # reaches. [-2, 3] covers 80.4% of the field distribution against 39.3% for
+    # [-2, 1]. The deep tail (field p1 = -71 m) needs no coverage because the
+    # disconnection cap makes every state below -M identical.
+    #
+    # Centre is +0.5: connected (`d_gw > -M`, so d_gw carries gradient at epoch
+    # 1) and, against a 0.29 m median depth, starts the model GAINING on most
+    # reaches, which is the regime the reference says dominates.
+    d_gw: [-2.0, 3.0]
     leakance_factor: [0.0, 1.0]
   attribute_minimums:
     discharge: 1.0e-4
@@ -336,6 +334,40 @@ params:
   # Losing-stream leakance: zeta = gate(leakance_factor) * area_z * K_D * (depth - d_gw)
   # subtracted from the routing RHS. Positive zeta = a losing reach.
   use_leakance: true
+  # TWO-WAY EXCHANGE. `true` (the default, and what every prior leakance run
+  # used) clamps gaining reaches to zeta = 0, which disables 63.7% of CONUS by
+  # the independent water table's own reckoning. It also quietly explains a
+  # result previously attributed to physics: the KGE decomposition showed
+  # leakance only helps gauges whose inflow over-delivers, because a sink can
+  # only remove a surplus. That is half physics and half this flag.
+  #
+  # The risk of turning it off is real and asymmetric. A source term can
+  # manufacture water wherever the model runs short, so it will absorb inflow
+  # deficits and improve skill while meaning nothing, and dHBV's q' already
+  # carries baseflow, which IS the gaining contribution. Two things guard it:
+  # `leakance_max_rhs_fraction` below bounds |zeta| so the exchange stays a
+  # correction rather than a source, and the READ-OUT is the partial
+  # correlation of learned d_gw against the withheld water table, not skill.
+  #
+  # What two-way buys scientifically: a SIGN constraint. The model must now
+  # place the table correctly relative to stream stage, not merely pick a
+  # plausible magnitude. That is a far sharper test of whether d_gw is a
+  # physical quantity than anything run so far.
+  leakance_losing_only: false
+  # |zeta| <= alpha * relu(b_rhs_base): the exchange may move at most this
+  # fraction of the locally available Muskingum RHS, in EITHER direction.
+  #
+  # Without it, nothing bounds the flux by the water present. Measured on the
+  # four-reach harness at K_D = 5e-3, an unbounded leakance drains the network
+  # to the discharge floor (total 0.004) while alpha = 0.1 holds it at 33.92.
+  # That unbounded drain is what produced the 2026-09-17 NaN: 30.8% of reaches
+  # negative pre-clamp against a 2-4% baseline, then a non-finite gradient
+  # through the saturated clamps on the first optimizer step.
+  #
+  # 0.25 lets the exchange be a substantial correction (a quarter of local
+  # flow) without letting it dominate. Watch `reaches with negative discharges
+  # pre clamp`: the no-leakance rate is 2-4%.
+  leakance_max_rhs_fraction: 0.25
   # Streambed thickness M (m) for the DISCONNECTION CAP:
   #   head = min(depth - d_gw, depth + M)
   # Once the water table falls more than M below the bed an unsaturated zone
