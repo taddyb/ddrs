@@ -154,8 +154,29 @@ def main():
     gdf["lw"] = np.clip(0.15 + 0.35*np.log10(np.maximum(gdf["uparea"].values, 1.0))/5.0, 0.15, 1.2)
     gdf = gdf.sort_values("uparea")
 
-    panels = [k for k in ["n", "conductance", "d_gw", "leakance_factor", "gamma", "q_spatial"] if k in gdf]
-    titles = {"n": "Manning's $n$", "conductance": "effective conductance $g\\cdot K_D$ (1/s)",
+    # Only map what the head actually learned. A parameter taken from
+    # params.defaults is a constant over the whole country, so mapping it shows
+    # nothing and invites the reader to think it was learned. dump_parameters
+    # writes every parameter it used, learned or not, so filter on variance.
+    candidates = ["n", "conductance", "d_gw", "leakance_factor", "gamma"]
+    panels, constants = [], []
+    for k in candidates:
+        if k not in gdf: continue
+        v = gdf[k].values
+        if np.nanstd(v) / max(abs(np.nanmedian(v)), 1e-12) < 1e-6:
+            constants.append((k, float(np.nanmedian(v))))
+        else:
+            panels.append(k)
+    for k in ["q_spatial", "p_spatial"]:
+        if k in gdf:
+            v = gdf[k].values
+            if np.nanstd(v) / max(abs(np.nanmedian(v)), 1e-12) < 1e-6:
+                constants.append((k, float(np.nanmedian(v))))
+    if constants:
+        print("prescribed constants, not mapped: " + ", ".join(f"{k}={v:g}" for k, v in constants))
+    n_is_n0 = "gamma" in F and np.nanstd(F["gamma"]) > 0
+    titles = {"n": ("$n_0$, roughness at the reference depth (stage law active)" if n_is_n0
+                    else "Manning's $n$ (no stage exponent learned in this arm)"), "conductance": "effective conductance $g\\cdot K_D$ (1/s)",
               "d_gw": "groundwater offset $d_{gw}$ (m)", "leakance_factor": "leakance gate $g$",
               "gamma": "stage exponent $\\gamma$", "q_spatial": "width exponent $q$"}
     ncol = 2; nrow = int(np.ceil(len(panels)/ncol))
@@ -165,9 +186,18 @@ def main():
         logc = col == "conductance"
         cmap = {"n": "plasma_r", "conductance": "viridis", "d_gw": "coolwarm",
                 "leakance_factor": "RdYlBu_r", "gamma": "magma", "q_spatial": "cividis"}.get(col, "viridis")
+        if col == "leakance_factor":
+            # A gate is a decision. Percentile limits would rescale a field that
+            # never leaves 0.96-1.0 into a full rainbow and hide that NOTHING is
+            # switched off. Fix the scale to the full [0, 1] the gate can take.
+            lo, hi = 0.0, 1.0
         norm = mcolors.LogNorm(vmin=max(lo,1e-12), vmax=hi) if logc else mcolors.Normalize(vmin=lo, vmax=hi)
         gdf.plot(ax=ax, column=col, cmap=cmap, norm=norm, linewidth=gdf["lw"].values, rasterized=True)
-        ax.set_title(titles.get(col, col), fontsize=12); ax.set_axis_off()
+        t = titles.get(col, col)
+        if col == "leakance_factor":
+            off = float((gdf[col].values < 0.5).mean())
+            t += f"\nfixed 0-1 scale; {off*100:.1f} % of reaches switched OFF (g < 0.5)"
+        ax.set_title(t, fontsize=11); ax.set_axis_off()
         fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.03, pad=0.01)
     for ax in axes.ravel()[len(panels):]: ax.set_axis_off()
     fig.suptitle(f"Learned parameter fields, CONUS ({cid.size:,} reaches)\n{a.params}", fontsize=12)
