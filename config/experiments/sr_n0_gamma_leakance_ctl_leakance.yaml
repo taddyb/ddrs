@@ -217,12 +217,36 @@ params:
     q_spatial: [0.0, 1.0]
     p_spatial: [1.0, 200.0]
     # Streambed leakance K_D = K/M (1/s), the MODFLOW river-package conductance
-    # per unit bed area. WIDENED from the [1e-8, 1e-6] "recoverability" box,
-    # which the parameter-range audit found both too narrow and misplaced: its
-    # centre 1e-7 sits below the field range. Measured streambed values span
-    # 8.8e-8 to 2.1e-5 1/s (Abimbola, M = 1 m) and K_v/M spans 1e-10 to 1e-1
-    # (Calver). Five decades covers clogged through gravel beds.
-    K_D: [1.0e-8, 1.0e-3]
+    # per unit bed area.
+    #
+    # THE CEILING IS NOT THE POINT, THE CENTRE IS. The head is a sigmoid with
+    # near-zero output bias, so every parameter STARTS at its box centre, and
+    # for a log-space parameter that centre is the GEOMETRIC mean. Widening a
+    # box therefore relocates where training begins:
+    #
+    #   [1e-8, 1e-6]  -> centre 1e-7      initial loss 0.149,  2.9% reaches negative
+    #   [1e-8, 1e-3]  -> centre 3.16e-6   initial loss 0.513, 30.8% reaches negative
+    #
+    # Measured 2026-09-17, same seed, that box the only difference. The wide
+    # box put 31.6x more conductance in at epoch zero; zeta is linear in K_D,
+    # so leakance drained a third of the network below zero, the S28 clamp
+    # rewrote all of them to 1e-4, and the gradient through that many saturated
+    # clamps went non-finite on the FIRST optimizer step. Loss was finite right
+    # up to the step, which is why this looks like an optimizer problem and is
+    # not one.
+    #
+    # THE UNDERLYING FLAW, which was invisible while the denormalize bug kept
+    # K_D frozen: nothing bounds zeta by the water actually in the reach. The
+    # `losing_only` clamp fixes the SIGN of the exchange, not its MAGNITUDE, so
+    # a large enough conductance removes more water than exists. Watch
+    # `reaches with negative discharges pre clamp` in the run log: the no-leakance
+    # rate is ~2-4%, and a climb well above that means this bound is being hit.
+    #
+    # [1e-9, 1e-5] is chosen so the geometric centre is EXACTLY 1e-7, the
+    # historically stable init, while spanning four decades instead of two and
+    # reaching the measured streambed range (8.8e-8 to 2.1e-5 1/s, Abimbola at
+    # M = 1 m). Physical coverage without moving the starting point.
+    K_D: [1.0e-9, 1.0e-5]
     # Water-table elevation relative to the streambed (m). Positive = table
     # ABOVE the bed (gaining); negative = below (losing).
     #
