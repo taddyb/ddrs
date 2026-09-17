@@ -229,6 +229,7 @@ and bounds every topology from above.
 | `use_leakance` | false | |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
+| `leakance_gate` | absent | Temperature-annealed 0/1 gate on the head's `leakance_factor` output; see §Leakance gate. Absent ⇒ byte-identical to the ungated readers. Requires `use_leakance: true` |
 | `tau` | 9 | **Not** a routing sub-step count. Since 2026-08-08: hours the routed output is ADVANCED before daily scoring (translation-only inverse routing, dMC-Juniata's sign). Slice `[tau : -(24-tau)]`, pooled day i ↔ obs day i, valid range [0, 24) (`src/training/loss.rs`). Nothing in `src/routing/` reads it. Default 9 = the measured CONUS optimum (findings §5g). **Legacy scale (pre-2026-08-08): old = new + 11**, slice `[13+tau : -11+tau]`, day i ↔ obs day i+1; DDR-Python still uses it, all older configs/checkpoints carry it (old shipped 3 ≡ new −8, wrong direction). Never copy a `tau:` value across the convention boundary. |
 | `log_space_parameters` | `["p_spatial"]` | |
 | `defaults` | `{p_spatial: 21.0}` | Value used when a parameter is not in `learnable_parameters` |
@@ -265,6 +266,9 @@ when subdivision is enabled), plus one at dataset open.
 | | nested `validate_subdivision_reaches_the_builder`: `enabled: true` + explicit `conus_adjacency`/`gages_adjacency` pointing at a non-subdivided store | `"params.subdivision"` + `"conflicts with the explicit"` |
 | `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
+| `validate_leakance_gate` | `leakance_gate` block without `use_leakance: true` | `"leakance_gate"` + `"use_leakance"` |
+| | empty `leakance_gate.temperature` | `"temperature"` |
+| | a temperature that is not positive and finite | `"epoch N"` + `"positive"` |
 | `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
 | `validate_enforce_positivity` | `enforce_positivity: true` + `ddr_match: true` | `"requires \`ddr_match: false\`"` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |
@@ -316,3 +320,58 @@ target/release/eval --config config/experiments/leakance_hourly_on.yaml \
 ```
 
 Takes about 10 minutes, no retrain.
+
+## Leakance gate (`params.leakance_gate`, added 2026-09-16)
+
+`zeta = leakance_factor · area_z · K_D · (depth − d_gw)` multiplies
+`leakance_factor` and `K_D`, so only their product reaches the physics: an
+exact scaling degeneracy (measured `rho(leakance_factor, K_D) = +0.9986` over
+346,321 CONUS reaches on a trained arm, with 97 % of the four outputs' variance
+in one direction). Physically a reach either sits above a losing aquifer or it
+does not, so `leakance_factor` is meant to be a SELECTOR of where leakance
+acts, not a continuous multiplier. The gate makes it one without a
+straight-through estimator: the head's normalized output `u ∈ (0, 1)` becomes
+
+```text
+g = sigmoid( logit(clamp(u, 1e-6, 1 − 1e-6)) / tau ),   logit(x) = ln(x / (1 − x))
+```
+
+`tau = 1` is the identity (`g = u`; the code returns `u` untouched, so it is
+BIT-exact, not round-tripped through `ln`/`exp`). Smaller `tau` sharpens toward
+a step at `u = 0.5`; `0.5` is a fixed point at every temperature. The clamp
+margin `1e-6` sits ~17 f32 ulps below 1.0 so `1 − u` keeps ~3 % relative
+accuracy at the edge, and it only alters values the head has already saturated
+past `|pre-activation| > 13.8`. Autograd through `clamp → log → div → sigmoid`
+gives the exact gradient; `TimestepLeakanceOp` and `src/routing/` are untouched
+because the gate is applied to the head OUTPUT before `setup_inputs`
+denormalizes it (`src/training/gate.rs::leakance_gate`).
+
+```yaml
+params:
+  use_leakance: true
+  leakance_gate:
+    temperature: {1: 1.0, 6: 0.5, 11: 0.2, 16: 0.05}   # keyed by 1-indexed epoch
+```
+
+| Key | Default | Notes |
+|---|---|---|
+| `temperature` | required | Epoch-keyed schedule resolved like `experiment.learning_rate` (`LeakanceGate::resolve`: largest key `<= epoch`, first value before it). Every value must be positive and finite; `1.0` = identity, `> 1` softens |
+
+Which temperature each reader applies:
+
+| Reader | Temperature | Log line |
+|---|---|---|
+| `src/training/forward.rs::forward` (training) | `resolve(epoch)`, threaded by the driver as `gate_tau` | `epoch E lr=… leakance_gate_tau=…` |
+| `src/training/forward.rs::forward_eval_core` (eval) | `final_temperature()` | `leakance gate: final temperature tau=…` |
+| `src/training/probe.rs::probe_forward` | `final_temperature()` (after lifting, so leaf grads carry the gate's Jacobian) | same, from `probe_zeta_gradient` |
+| `src/dump_parameters.rs::dump` / `dump_init` | `final_temperature()` (the dumped factor is the gated value) | same |
+
+`forward` asserts `gate_tau.is_some() == params.leakance_gate.is_some()`, so a
+caller cannot train an ungated model against a gated config or vice versa. In
+`forward_eval_core` the gate is applied BEFORE `LeakanceOverride`, so an
+override still replaces the value that reaches denormalization. Tests:
+`tests/leakance_gate.rs` (tau = 1 bit-exact identity through all three readers,
+central-difference gradcheck at five temperatures, monotonicity, limits,
+saturation without NaN/Inf) and the gated rows of `tests/gamma_eval_parity.rs`.
+This does not re-open the leakance verdict in `research-status.md`; it removes
+one degeneracy so a future arm can be judged on the gate, not on the product.
