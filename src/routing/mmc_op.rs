@@ -1156,6 +1156,97 @@ pub(crate) struct TimestepLeakanceState<I: Backend> {
     pub leak: LeakanceSaved<I>,
 }
 
+/// Gradients the leakance backward produces for the three leakance parents,
+/// alongside the base [`ParentGrads`] that [`timestep_backward_core`] returns.
+struct LeakanceParentGrads<I: Backend> {
+    base: ParentGrads<I>,
+    g_k_d: I::FloatTensorPrimitive,
+    g_d_gw: I::FloatTensorPrimitive,
+    g_leakance_factor: I::FloatTensorPrimitive,
+}
+
+/// Shared analytical backward for BOTH leakance ops — [`TimestepLeakanceOp`]
+/// (8 parents) and [`TimestepLeakanceGammaOp`] (9 parents, learned `gamma`).
+///
+/// The two differ only in parent bookkeeping: whether a ninth `gamma` node
+/// exists to receive `ParentGrads::gamma`. The math below is identical, so it
+/// lives here rather than being duplicated — the same reason
+/// [`timestep_backward_core`] is shared between the non-leakance ops.
+///
+/// `parent_mask.gamma` must be true exactly when `state.base.gamma_t` is
+/// `Some` AND a ninth parent is tracked; the core panics on the first half of
+/// that disagreement and [`register_parent`] on the second.
+fn leakance_backward_body<I: Backend + 'static>(
+    state: &TimestepLeakanceState<I>,
+    grad_out: I::FloatTensorPrimitive,
+    parent_mask: ParentMask,
+) -> LeakanceParentGrads<I>
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+        match t.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        }
+    };
+
+    // Geometry inputs zeta depends on, read from the SHARED base state.
+    let depth = wrap(state.base.depth.clone());
+    let p_spatial = wrap(state.base.p_spatial.clone());
+    let q_eps = wrap(state.base.q_eps.clone());
+    // Leakance-only saved intermediates.
+    let area_z = wrap(state.leak.area_z.clone());
+    let k_d = wrap(state.leak.k_d.clone());
+    let d_gw = wrap(state.leak.d_gw.clone());
+    let leakance_factor = wrap(state.leak.leakance_factor.clone());
+
+    // Impervious mask: same 0/1 constant from the forward, used to gate gzeta.
+    let mask = state.leak.mask.as_ref().map(|m| wrap(m.clone()));
+
+    // Capture zeta's 3 leakance-parent grads out of the hook so we can
+    // register them after `core` returns. The hook runs zeta_backward with
+    // `gb_rhs` (no pre-negation — zeta_backward negates internally) and
+    // returns the geometry grads for `core` to fold into the 5 base grads.
+    let mut zeta_param_grads: Option<(
+        I::FloatTensorPrimitive,
+        I::FloatTensorPrimitive,
+        I::FloatTensorPrimitive,
+    )> = None;
+    let base = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, |gb_rhs| {
+        let zg = crate::routing::leakance::zeta_backward::<I>(
+            gb_rhs.clone(),
+            depth.clone(),
+            p_spatial.clone(),
+            q_eps.clone(),
+            area_z.clone(),
+            k_d.clone(),
+            d_gw.clone(),
+            leakance_factor.clone(),
+            state.leak.losing_only,
+            mask.clone(),
+        );
+        zeta_param_grads = Some((
+            unwrap(zg.g_k_d),
+            unwrap(zg.g_d_gw),
+            unwrap(zg.g_leakance_factor),
+        ));
+        Some(ZetaGeomGrads {
+            g_depth: zg.g_depth,
+            g_q_eps: zg.g_q_eps,
+            g_p_spatial: zg.g_p_spatial,
+        })
+    });
+
+    let (g_k_d, g_d_gw, g_leakance_factor) =
+        zeta_param_grads.expect("zeta_hook always runs in the leakance backward");
+
+    LeakanceParentGrads { base, g_k_d, g_d_gw, g_leakance_factor }
+}
+
 #[derive(Debug)]
 pub(crate) struct TimestepLeakanceOp;
 
@@ -1172,9 +1263,14 @@ where
         _checkpointer: &mut Checkpointer,
     ) {
         let state = ops.state;
+        debug_assert!(
+            state.base.gamma_t.is_none(),
+            "a learned gamma must route through TimestepLeakanceGammaOp, which \
+             has the ninth parent needed to give it a gradient"
+        );
         let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac] = ops.parents;
         let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
-        // `mask` below is the impervious mask; this one is the parent mask.
+        // `mask` inside the body is the impervious mask; this one is the parent mask.
         let parent_mask = ParentMask {
             n: ids[0].is_some(),
             q_spatial: ids[1].is_some(),
@@ -1185,82 +1281,97 @@ where
         };
 
         let grad_out = grads.consume::<I>(&ops.node);
-
-        let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
-            Tensor::from_primitive(TensorPrimitive::Float(p))
-        };
-        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-            match t.into_primitive() {
-                TensorPrimitive::Float(p) => p,
-                _ => unreachable!(),
-            }
-        };
-
-        // Geometry inputs zeta depends on, read from the SHARED base state.
-        let depth = wrap(state.base.depth.clone());
-        let p_spatial = wrap(state.base.p_spatial.clone());
-        let q_eps = wrap(state.base.q_eps.clone());
-        // Leakance-only saved intermediates.
-        let area_z = wrap(state.leak.area_z.clone());
-        let k_d = wrap(state.leak.k_d.clone());
-        let d_gw = wrap(state.leak.d_gw.clone());
-        let leakance_factor = wrap(state.leak.leakance_factor.clone());
-
-        // Impervious mask: same 0/1 constant from the forward, used to gate gzeta.
-        let mask = state.leak.mask.as_ref().map(|m| wrap(m.clone()));
-
-        // Capture zeta's 3 leakance-parent grads out of the hook so we can
-        // register them after `core` returns. The hook runs zeta_backward with
-        // `gb_rhs` (no pre-negation — zeta_backward negates internally) and
-        // returns the geometry grads for `core` to fold into the 5 base grads.
-        let mut zeta_param_grads: Option<(
-            I::FloatTensorPrimitive,
-            I::FloatTensorPrimitive,
-            I::FloatTensorPrimitive,
-        )> = None;
-        let g = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, |gb_rhs| {
-            let zg = crate::routing::leakance::zeta_backward::<I>(
-                gb_rhs.clone(),
-                depth.clone(),
-                p_spatial.clone(),
-                q_eps.clone(),
-                area_z.clone(),
-                k_d.clone(),
-                d_gw.clone(),
-                leakance_factor.clone(),
-                state.leak.losing_only,
-                mask.clone(),
-            );
-            zeta_param_grads = Some((
-                unwrap(zg.g_k_d),
-                unwrap(zg.g_d_gw),
-                unwrap(zg.g_leakance_factor),
-            ));
-            Some(ZetaGeomGrads {
-                g_depth: zg.g_depth,
-                g_q_eps: zg.g_q_eps,
-                g_p_spatial: zg.g_p_spatial,
-            })
-        });
+        let g = leakance_backward_body::<I>(&state, grad_out, parent_mask);
 
         // Register the 5 base parents (zeta geom already folded in by `core`).
-        register_parent::<I>(grads, ids[0], g.n, "n");
-        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
-        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
-        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
-        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, ids[0], g.base.n, "n");
+        register_parent::<I>(grads, ids[1], g.base.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.base.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.base.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.base.q_prime_t, "q_prime_t");
 
         // Register the 3 leakance parents.
-        let (g_k_d, g_d_gw, g_fac) =
-            zeta_param_grads.expect("zeta_hook always runs in the leakance backward");
         if let Some(node) = p_kd {
-            grads.register::<I>(node.id, g_k_d);
+            grads.register::<I>(node.id, g.g_k_d);
         }
         if let Some(node) = p_dgw {
-            grads.register::<I>(node.id, g_d_gw);
+            grads.register::<I>(node.id, g.g_d_gw);
         }
         if let Some(node) = p_fac {
-            grads.register::<I>(node.id, g_fac);
+            grads.register::<I>(node.id, g.g_leakance_factor);
+        }
+    }
+}
+
+/// Nine-parent variant of [`TimestepLeakanceOp`] for a LEARNED stage-roughness
+/// exponent, i.e. losing-stream leakance and `n(d) = n_0·(d/d_ref)^(−gamma)`
+/// active at the same time.
+///
+/// This is the same sibling-op pattern [`TimestepGammaOp`] uses for gamma
+/// without leakance: a tensor that is not a parent receives no gradient, so
+/// adding gamma to the leakance path means adding a parent slot, not widening
+/// the existing op and giving every leakance run a ninth parent it does not
+/// use. The backward body is shared via [`leakance_backward_body`]; only the
+/// parent bookkeeping differs.
+///
+/// Gamma and leakance compose through the state rather than interacting
+/// directly: gamma changes `velocity`, `celerity`, and the depth exponent
+/// (B5/B15/B17), zeta reads `depth`, `p_spatial`, and `q_eps` and is folded
+/// into `b_rhs` (B27). The coupling both ways runs through the geometry
+/// accumulators that `timestep_backward_core` already shares, so no new
+/// cross-term is needed here — which is what the finite-difference gradcheck
+/// in `tests/leakance_gamma_gradcheck.rs` is there to confirm rather than
+/// assume.
+#[derive(Debug)]
+pub(crate) struct TimestepLeakanceGammaOp;
+
+impl<I: Backend + 'static> Backward<I, 9> for TimestepLeakanceGammaOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepLeakanceState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 9>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
+            state.base.gamma_t.is_some(),
+            "TimestepLeakanceGammaOp requires a per-reach gamma in the saved state"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac, p_gamma] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        let gamma_id = p_gamma.as_ref().map(|n| n.id);
+        let parent_mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: gamma_id.is_some(),
+        };
+
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = leakance_backward_body::<I>(&state, grad_out, parent_mask);
+
+        register_parent::<I>(grads, ids[0], g.base.n, "n");
+        register_parent::<I>(grads, ids[1], g.base.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.base.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.base.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.base.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, gamma_id, g.base.gamma, "gamma");
+
+        if let Some(node) = p_kd {
+            grads.register::<I>(node.id, g.g_k_d);
+        }
+        if let Some(node) = p_dgw {
+            grads.register::<I>(node.id, g.g_d_gw);
+        }
+        if let Some(node) = p_fac {
+            grads.register::<I>(node.id, g.g_leakance_factor);
         }
     }
 }
@@ -2198,7 +2309,9 @@ where
 /// Leakance variant of [`timestep_forward`]. Identical to it, plus three extra
 /// autograd-tracked parents (`K_D`, `d_gw`, `leakance_factor`) threaded into
 /// `forward_chain_inner`'s leakance gate so `zeta` is subtracted from `b_rhs`.
-/// Registers a [`TimestepLeakanceOp`] node (8 parents). Never uses CUDA graphs
+/// Registers a [`TimestepLeakanceOp`] node (8 parents), or a
+/// [`TimestepLeakanceGammaOp`] node (9 parents) when `gamma_at` carries a
+/// learned per-reach stage-roughness exponent. Never uses CUDA graphs
 /// (leakance forces `use_cuda_graphs: false`).
 ///
 /// `impervious_mask`: optional per-reach 0/1 constant (inner backend, not
@@ -2229,6 +2342,10 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     impervious_mask: Option<Tensor<I, 1>>,
     zeta_out: Option<&mut Option<ZetaStepDiag<I>>>,
     track_neg: bool,
+    // Per-reach stage-roughness exponent when it is a learned KAN output.
+    // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`, which is what
+    // every pre-2026-09-17 leakance run used.
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -2259,6 +2376,8 @@ where
     let length_aut = unwrap_at(length_at);
     let slope_aut = unwrap_at(slope_at);
     let xst_aut = unwrap_at(x_storage_at);
+    let gamma_aut = gamma_at.map(unwrap_at);
+    let gamma_p = gamma_aut.as_ref().map(|g| g.primitive.clone());
     let kd_aut = unwrap_at(k_d_at);
     let dgw_aut = unwrap_at(d_gw_at);
     let fac_aut = unwrap_at(leakance_factor_at);
@@ -2303,7 +2422,7 @@ where
         &mut leak_out,
         &mut x_eff_out,
         track_neg,
-        None,
+        gamma_p.clone().map(wrap),
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
@@ -2385,27 +2504,50 @@ where
         enforce_pos,
         gamma,
         d_ref,
-        gamma_t: None,
+        gamma_t: gamma_p.clone(),
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
 
-    let result_prim = match TimestepLeakanceOp
-        .prepare::<NoCheckpointing>([
-            n_aut.node.clone(),
-            qsp_aut.node.clone(),
-            psp_aut.node.clone(),
-            qt_aut.node.clone(),
-            qpt_aut.node.clone(),
-            kd_aut.node.clone(),
-            dgw_aut.node.clone(),
-            fac_aut.node.clone(),
-        ])
-        .compute_bound()
-        .stateful()
-    {
-        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
-        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    // A learned gamma needs a ninth parent to receive a gradient at all, so it
+    // routes through the sibling `TimestepLeakanceGammaOp`; a constant gamma
+    // (or none) keeps the historical eight-parent node, byte-identical.
+    let result_prim = match &gamma_aut {
+        Some(g) => match TimestepLeakanceGammaOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+                kd_aut.node.clone(),
+                dgw_aut.node.clone(),
+                fac_aut.node.clone(),
+                g.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
+        None => match TimestepLeakanceOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+                kd_aut.node.clone(),
+                dgw_aut.node.clone(),
+                fac_aut.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
     };
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))

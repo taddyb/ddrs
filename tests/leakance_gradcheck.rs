@@ -167,6 +167,9 @@ fn run_forward(
         mask,
         None,
         false,
+        // No learned gamma: this file pins the EIGHT-parent `TimestepLeakanceOp`.
+        // The nine-parent sibling is covered by `leakance_gamma_gradcheck.rs`.
+        None,
     );
 
     (

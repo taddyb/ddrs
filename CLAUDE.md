@@ -442,18 +442,24 @@ per-gauge masked (the driver already drops NaN gauges) then averaged, with
 Autograd is unchanged — it's a drop-in scalar on the routed predictions, so
 invariant 4 (the sparse backward) is untouched.
 
-## Leakance (CLOSED, NOT PROMOTABLE, 2026-07-06)
+## Leakance
 
 A losing-stream term subtracted from the routing RHS `b`:
 `zeta = leakance_factor · area_z · K_D · (depth − d_gw)`, positive zeta means a
 losing reach. Code-complete and gradient-exact (`src/routing/leakance.rs`,
-`TimestepLeakanceOp`); `params.use_leakance` defaults false. Do NOT remove it.
+`TimestepLeakanceOp`); `params.use_leakance` defaults false.
 
-Do NOT re-open the question. A gauge measures the SUM of zeta over its upstream
-network, and that sum does not determine the per-reach distribution, so training
-constrains aggregate loss while carrying zero information about per-reach flux.
-Every rival explanation (gradient starvation, objective noise, uninformative
-inputs, sign ambiguity) was individually refuted.
+A 2026-07-06 campaign concluded the term was not promotable, on the argument that
+a gauge measures the SUM of zeta over its upstream network and that sum does not
+determine the per-reach distribution. That argument still holds for recovering
+per-reach flux from discharge alone. Its supporting measurements do not: every run
+behind it had `K_D` pinned to a collapsed box by the `log_space_lower` bug fixed in
+`src/routing/utils.rs` on 2026-09-16, so `K_D` was a frozen constant throughout.
+It did test external agreement, correlating `|zeta|` against bed-relative water
+table depth (−0.355, recorded as a sign failure against a bar of > +0.3). The active
+question narrows that: whether the learned `d_gw` field itself, rather than the flux
+magnitude, agrees with independent water-table products, and whether any agreement
+survives controlling for the head's own input attributes.
 
 **Anchored to the February reference since 2026-09-15.** DDR reverted leakance on
 master, so `_compute_zeta` survives only in DDR commit `c2bd0f9`
@@ -474,7 +480,8 @@ deviations. Regenerate the fixture with:
 cd ~/projects/ddr && uv run python ~/projects/ddrs/scripts/export_ddr_leakance_reference.py
 ```
 
-Verdict and refutations: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md` §3
+2026-07 campaign, verdict and refutations (measurements superseded, see above):
+`research/findings/2026-07-06-leakance-nogo-scientific-summary.md` §3
 Enable steps, ranges, zeta diagnostic: `ddrs-dev/references/config.md`
 Gates: `ddrs-dev/references/testing.md`
 

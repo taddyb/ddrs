@@ -1313,15 +1313,6 @@ fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
                 .to_string(),
         );
     }
-    if cfg.params.use_leakance {
-        return Err(
-            "`gamma` in kan_head.learnable_parameters is not supported together \
-             with `use_leakance: true`. Leakance routes through its own \
-             eight-parent op, which has no gamma parent, so gamma would silently \
-             receive no gradient."
-                .to_string(),
-        );
-    }
     Ok(())
 }
 

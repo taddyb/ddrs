@@ -63,13 +63,19 @@ do not repeat the blanket claim undated, and do not upgrade it to a result eithe
 
 ## Closed campaigns — do not re-open
 
-### Leakance (GW–SW exchange): **CLOSED — NO-GO, 2026-07-06**
+### Leakance (GW–SW exchange): 2026-07-06 NO-GO, measurements superseded 2026-09-16
 
 Authority: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md`. Read §3 before
 proposing any retry.
 
-The term is code-complete and gradient-exact. **Do not remove it.** But it is not
-promotable, and identifiability is **REFUTED — not "pending"**.
+The term is code-complete and gradient-exact. **Do not remove it.**
+
+**Every number in the table below was measured with `K_D` frozen.** The
+`log_space_lower` bug (fixed in `src/routing/utils.rs`, 2026-09-16) collapsed
+`K_D`'s `[1e-8, 1e-6]` box to a span of ~1e-8 with the log range inverted, and
+`K_D` is in `log_space_parameters` for every leakance config. Treat the recovery
+ratio, the noise-floor refutation, and the Phase C legs as pending re-measurement,
+not as settled. The structural argument below is unaffected by the bug and stands.
 
 | Finding | Value |
 |---|---|
@@ -148,7 +154,7 @@ paper's R1–R5.
 | `+0.026` NSE improvement | Computed against the global baseline. The correct value is **+0.037** |
 | Any "own baseline" NSE from the 07-07 / 07-16 docs | 3,211-gauge population including 513 phantom zeros. KGE is unaffected (phantom gauges are NaN-KGE and were dropped) |
 | R1 = 0.009 / "130× noise floor" as the live blocker | Superseded by R1 = 0.008 on the fixed objective |
-| "leakance is identifiable" (any phrasing) | Explicitly forbidden by the NO-GO summary §7 |
+| Any leakance identifiability number from the 2026-07-06 campaign (R1 = 0.008, the 0.11 m³/s noise floor, the three Phase C legs) | Measured with `K_D` frozen by the `log_space_lower` bug fixed 2026-09-16. Pending re-measurement |
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
 | Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T13 |
