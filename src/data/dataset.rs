@@ -360,6 +360,20 @@ pub struct MeritGagesDataset {
     leakance_impervious_threshold: Option<f32>,
 }
 
+/// Log the data version a store opened at, as a sibling of the
+/// `streamflow resolution:` self-check line. `(pinned)` means
+/// `data_sources.pins.<source>` decided it; `(main tip)` means the branch tip
+/// was resolved at open. Non-icechunk sources carry no snapshot and say so.
+fn log_snapshot(source: &str, snapshot: Option<&str>, pin: Option<&str>) {
+    match snapshot {
+        Some(id) => {
+            let origin = if pin.is_some() { "pinned" } else { "main tip" };
+            eprintln!("{source} snapshot: {id} ({origin})");
+        }
+        None => eprintln!("{source} snapshot: n/a (not an icechunk store)"),
+    }
+}
+
 /// Reject the disaggregation head when the streamflow store is hourly-native:
 /// disaggregating an already-hourly signal is a config contradiction, and
 /// after the 2026-07-01 stale-binary incident nothing in the forcing path is
@@ -485,15 +499,24 @@ impl MeritGagesDataset {
         };
 
         // ---------- 3. Icechunk stores ----------
-        let streamflow = Arc::new(StreamflowSource::open(&ds.streamflow)?);
-        // The smoke-train self-check line: proves which read path executed.
+        let streamflow = Arc::new(StreamflowSource::open_at(
+            &ds.streamflow,
+            ds.pin_for("streamflow"),
+        )?);
+        // The smoke-train self-check lines: prove which read path executed,
+        // and which data version it read (see `data_sources.pins`).
         eprintln!("streamflow resolution: {:?}", streamflow.resolution());
+        log_snapshot("streamflow", streamflow.snapshot(), ds.pin_for("streamflow"));
         validate_disagg_vs_resolution(
             streamflow.resolution(),
             head_cfg.disaggregation.is_some(),
             &ds.streamflow,
         )?;
-        let observations = Arc::new(ObservationsStore::open(&ds.observations)?);
+        let observations = Arc::new(ObservationsStore::open_at(
+            &ds.observations,
+            ds.pin_for("observations"),
+        )?);
+        log_snapshot("observations", observations.snapshot(), ds.pin_for("observations"));
 
         // Optional hourly precip store for the disaggregation head. The head
         // always requires precip when enabled — no separate toggle. (`temp`

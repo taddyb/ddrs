@@ -34,7 +34,7 @@ pub use zarr_qprime::GlobalStreamflowStore;
 use ndarray::Array2;
 
 use crate::data::dates::{Frequency, RhoWindow};
-use crate::data::error::Result;
+use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 
 /// Format-dispatching observations reader. The `observations` data source is
@@ -53,11 +53,30 @@ impl ObservationsStore {
     /// Open `path`, sniffing the format: a `.zgroup` at the root means a
     /// plain zarr v2 group; anything else is treated as an icechunk repo.
     pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self> {
+        Self::open_at(path, None)
+    }
+
+    /// Open at a configured icechunk snapshot pin
+    /// (`data_sources.pins.observations`). `None` is [`Self::open`].
+    pub fn open_at(
+        path: impl Into<std::path::PathBuf>,
+        snapshot: Option<&str>,
+    ) -> Result<Self> {
         let path = path.into();
         if GlobalObservationsStore::sniff(&path) {
+            reject_pin_on_non_icechunk(&path, snapshot, "observations")?;
             Ok(Self::Global(GlobalObservationsStore::open(path)?))
         } else {
-            Ok(Self::Usgs(UsgsObservationsStore::open(path)?))
+            Ok(Self::Usgs(UsgsObservationsStore::open_at(path, snapshot)?))
+        }
+    }
+
+    /// The icechunk snapshot this store reads, when it is icechunk-backed.
+    /// The zarr-v2 global product has no versioning, hence `None`.
+    pub fn snapshot(&self) -> Option<&str> {
+        match self {
+            Self::Usgs(s) => Some(s.snapshot.as_str()),
+            Self::Global(_) => None,
         }
     }
 
@@ -108,11 +127,30 @@ impl StreamflowSource {
     /// `streamflow/.zarray`, at the root or one level down) mean the
     /// global zarr v2 layout; anything else is treated as an icechunk repo.
     pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self> {
+        Self::open_at(path, None)
+    }
+
+    /// Open at a configured icechunk snapshot pin
+    /// (`data_sources.pins.streamflow`). `None` is [`Self::open`].
+    pub fn open_at(
+        path: impl Into<std::path::PathBuf>,
+        snapshot: Option<&str>,
+    ) -> Result<Self> {
         let path = path.into();
         if GlobalStreamflowStore::sniff(&path) {
+            reject_pin_on_non_icechunk(&path, snapshot, "streamflow")?;
             Ok(Self::GlobalZarr(GlobalStreamflowStore::open(path)?))
         } else {
-            Ok(Self::Icechunk(StreamflowStore::open(path)?))
+            Ok(Self::Icechunk(StreamflowStore::open_at(path, snapshot)?))
+        }
+    }
+
+    /// The icechunk snapshot this store reads, when it is icechunk-backed.
+    /// The zarr-v2 global product has no versioning, hence `None`.
+    pub fn snapshot(&self) -> Option<&str> {
+        match self {
+            Self::Icechunk(s) => Some(s.snapshot.as_str()),
+            Self::GlobalZarr(_) => None,
         }
     }
 
@@ -163,5 +201,26 @@ impl std::fmt::Debug for StreamflowSource {
             Self::Icechunk(_) => write!(f, "StreamflowSource::Icechunk(..)"),
             Self::GlobalZarr(_) => write!(f, "StreamflowSource::GlobalZarr(..)"),
         }
+    }
+}
+
+/// `data_sources.pins` names a source, and config validation only knows names —
+/// it cannot tell that the configured `streamflow` path happens to be the
+/// zarr-v2 global product rather than an icechunk repo. Catch that here instead
+/// of opening the store and silently ignoring the pin.
+fn reject_pin_on_non_icechunk(
+    path: &std::path::Path,
+    snapshot: Option<&str>,
+    source: &str,
+) -> Result<()> {
+    match snapshot {
+        None => Ok(()),
+        Some(id) => Err(DataError::Malformed {
+            path: path.to_path_buf(),
+            message: format!(
+                "data_sources.pins.{source} is set to `{id}`, but this store is not an \
+                 icechunk repository — only icechunk sources carry snapshots"
+            ),
+        }),
     }
 }

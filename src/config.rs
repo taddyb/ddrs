@@ -138,6 +138,30 @@ pub struct DataSources {
     /// `research/specs/2026-09-08-ddrs-gridded-routing-design.md`.
     #[serde(default)]
     pub gridded_network: Option<std::path::PathBuf>,
+    /// Optional per-source icechunk snapshot pins: source name → snapshot id
+    /// (Crockford base32, as icechunk prints it). A pinned source is opened at
+    /// `VersionInfo::SnapshotId` instead of the `main` branch tip, so a run is
+    /// reproducible even after the store is appended to. Only the two
+    /// icechunk-backed sources can be pinned (`ICECHUNK_PINNABLE`); a pin on
+    /// any other name is rejected at load rather than silently ignored.
+    /// Absent (the default) ⇒ every source opens at the `main` tip, exactly as
+    /// before.
+    #[serde(default)]
+    pub pins: Option<BTreeMap<String, String>>,
+}
+
+/// The `data_sources` keys backed by an icechunk repository, and therefore the
+/// only ones `data_sources.pins` can name.
+pub const ICECHUNK_PINNABLE: [&str; 2] = ["streamflow", "observations"];
+
+impl DataSources {
+    /// The pinned icechunk snapshot id for `source`, if one is configured.
+    pub fn pin_for(&self, source: &str) -> Option<&str> {
+        self.pins
+            .as_ref()
+            .and_then(|p| p.get(source))
+            .map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1124,11 +1148,33 @@ impl Config {
 /// - Exactly one adjacency key → error: partial adjacency.
 /// - `geospatial_fabric_layer` set while the fabric is not a `.gpkg` → error
 ///   (the layer concept only exists for GeoPackage).
+/// `data_sources.pins` may only name an icechunk-backed source.
+///
+/// A pin is a snapshot id handed to `VersionInfo::SnapshotId` at open. Only
+/// `streamflow` and `observations` go through that path; a pin on `attributes`,
+/// an adjacency zarr or the gage CSV would be read by nothing, so it is a
+/// load-time error rather than a silently ignored key.
+fn validate_pins(ds: &DataSources) -> std::result::Result<(), String> {
+    let Some(pins) = ds.pins.as_ref() else { return Ok(()) };
+    for name in pins.keys() {
+        if !ICECHUNK_PINNABLE.contains(&name.as_str()) {
+            return Err(format!(
+                "data_sources: `pins` names `{name}`, which is not an icechunk-backed \
+                 source; only {} can be pinned to a snapshot id.",
+                ICECHUNK_PINNABLE.join(" and ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_data_sources(cfg: &Config) -> std::result::Result<(), String> {
     let ds = match cfg.data_sources.as_ref() {
         None => return Ok(()), // no data_sources section at all — allowed for default/test configs
         Some(ds) => ds,
     };
+    validate_pins(ds)?;
+
     let has_conus = ds.conus_adjacency.is_some();
     let has_gages = ds.gages_adjacency.is_some();
     let has_fabric = ds.geospatial_fabric.is_some();
@@ -2046,6 +2092,68 @@ data_sources:
             msg.contains("adjacency sources are missing"),
             "expected missing-adjacency error, got: {msg}"
         );
+    }
+
+    #[test]
+    fn pins_on_a_non_icechunk_source_are_rejected_by_name() {
+        // `attributes` is a NetCDF file, not an icechunk repo — a pin there
+        // would be silently ignored, so it is a load-time error.
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  conus_adjacency: /dev/null/conus.zarr
+  gages_adjacency: /dev/null/gages.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+  pins:
+    attributes: abc
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_pin_bad_source.yaml", ds_block);
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("pins"), "expected a pins error, got: {msg}");
+        assert!(msg.contains("attributes"), "error must name the source, got: {msg}");
+    }
+
+    #[test]
+    fn pins_on_the_icechunk_sources_parse() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  conus_adjacency: /dev/null/conus.zarr
+  gages_adjacency: /dev/null/gages.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+  pins:
+    streamflow: E0M3W6W1881H868V2KRG
+    observations: BPY4SW34FJGXWC3T806G
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_pin_ok.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("pins on icechunk sources are valid");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert_eq!(ds.pin_for("streamflow"), Some("E0M3W6W1881H868V2KRG"));
+        assert_eq!(ds.pin_for("observations"), Some("BPY4SW34FJGXWC3T806G"));
+        assert_eq!(ds.pin_for("attributes"), None);
+    }
+
+    #[test]
+    fn absent_pins_block_leaves_every_source_unpinned() {
+        let ds_block = r#"
+data_sources:
+  attributes: /dev/null/attrs.nc
+  conus_adjacency: /dev/null/conus.zarr
+  gages_adjacency: /dev/null/gages.zarr
+  streamflow: /dev/null/sf.ic
+  observations: /dev/null/obs.ic
+  gages: /dev/null/gages.csv
+"#;
+        let path = write_yaml_with_data_sources("ddrs_ds_pin_absent.yaml", ds_block);
+        let cfg = Config::from_yaml_file(&path).expect("no pins block is valid");
+        let ds = cfg.data_sources.as_ref().unwrap();
+        assert!(ds.pins.is_none());
+        assert_eq!(ds.pin_for("streamflow"), None);
     }
 
     #[test]

@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::cli::fingerprint::fingerprint_path;
+use crate::cli::fingerprint::fingerprint_path_at;
 use crate::cli::lockfile::Lockfile;
 use crate::cli::workspace::Workspace;
 use crate::config::{Config, ConfigMode, DataSources};
@@ -251,7 +251,9 @@ fn lock_sources_from_config(cfg_path: &Path, ws: &Workspace) -> Result<(), CliEr
             .map(|(k, p)| {
                 let p = p.clone();
                 let k = k.to_string();
-                s.spawn(move || (k, fingerprint_path(&p)))
+                // Same rule as `plan`: a pinned icechunk source locks its pin.
+                let pin = ds.pin_for(&k).map(str::to_owned);
+                s.spawn(move || (k, fingerprint_path_at(&p, pin.as_deref())))
             })
             .collect();
         handles

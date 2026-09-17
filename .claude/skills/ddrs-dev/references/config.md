@@ -52,6 +52,36 @@ is rejected alongside `gridded_network` (the store is already split by DDR).
 
 `aorc_precip` is required whenever `kan_head.disaggregation:` is present — see below.
 
+`pins:` (optional map, source name → icechunk snapshot id) opens a source at
+`VersionInfo::SnapshotId` instead of the `main` branch tip, so a run is
+reproducible after the store is appended to. Only the two icechunk-backed
+sources — `streamflow` and `observations` (`config.rs::ICECHUNK_PINNABLE`) —
+may be pinned; a pin on any other name is a load-time error
+(`config.rs::validate_pins`), and a pin on a path that turns out to be the
+zarr-v2 global product is refused at open (`store/mod.rs::reject_pin_on_non_icechunk`).
+Omitting the block changes nothing: every source opens at the tip, exactly as
+before. Either way the id actually read is recorded — dataset open logs
+`streamflow snapshot: <id> (pinned|main tip)` next to `streamflow resolution:`,
+and `ddrs plan` writes it to `sources.lock` and the run manifest as
+`sources.<name>.snapshot` with `fp = icechunk:<id>`. Because the fingerprint IS
+the snapshot id, appending to an unpinned store shows up as drift on the next
+`plan` (one `field: locked <fp> -> current <fp>` line per source); a pinned
+source never drifts.
+Changing a pin also invalidates the cached summed-Q' baseline:
+`baseline/cache.rs::cache_key` hashes the `pins` block after the window fields,
+so re-pinning recomputes the baseline instead of scoring the model against a
+reference built from a different snapshot. The block is hashed only when present
+and non-empty, so an unpinned config keeps the key it always had and no existing
+cache under `.ddrs/baselines/` is orphaned.
+
+```yaml
+data_sources:
+  streamflow: /mnt/ssd1/data/icechunk/merit_dhbv2_UH_retrospective.ic
+  observations: /mnt/ssd1/data/icechunk/usgs_daily_observations
+  pins:
+    streamflow: E0M3W6W1881H868V2KRG
+```
+
 ## `experiment:`
 
 | Key | Production value | Notes |
@@ -261,6 +291,7 @@ when subdivision is enabled), plus one at dataset open.
 | | `geospatial_fabric_layer` on a non-gpkg | `"geospatial_fabric_layer"` + `".gpkg"` |
 | | `gridded_network` + `geospatial_fabric` | `"gridded_network"` + `"geospatial_fabric"` |
 | | `gridded_network` + explicit adjacency pair | `"gridded_network"` + `"conus_adjacency"` |
+| `validate_pins` (called from `validate_data_sources`) | `pins:` naming anything but `streamflow`/`observations` | `"pins"` + the offending source name |
 | `validate_subdivision` | `subdivision.enabled: true` + `gridded_network` | `"params.subdivision"` + `"gridded_network"` |
 | | nested `validate_subdivision_reaches_the_builder`: `enabled: true` + explicit `conus_adjacency`/`gages_adjacency` pointing at a non-subdivided store | `"params.subdivision"` + `"conflicts with the explicit"` |
 | `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
