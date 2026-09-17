@@ -240,7 +240,8 @@ params:
     # `losing_only` clamp fixes the SIGN of the exchange, not its MAGNITUDE, so
     # a large enough conductance removes more water than exists. Watch
     # `reaches with negative discharges pre clamp` in the run log: the no-leakance
-    # rate is ~2-4%, and a climb well above that means this bound is being hit.
+    # rate is 0.013-0.114% (six prior CONUS runs), and a climb above ~0.1%
+    # means the exchange is taking more water than the reaches carry.
     #
     # [1e-9, 1e-5] is chosen so the geometric centre is EXACTLY 1e-7, the
     # historically stable init, while spanning four decades instead of two and

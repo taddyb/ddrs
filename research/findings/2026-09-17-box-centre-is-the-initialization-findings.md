@@ -77,8 +77,27 @@ available RHS (`c2·i_t + c3·q_t + c4·q'_t`), which is a forward and backward
 change in invariant-4 code.
 
 **Instrument:** `reaches with negative discharges pre clamp` in the run log.
-The no-leakance rate is 2 to 4%. A sustained climb well above that band means
-the missing bound is being hit.
+
+**CORRECTION (same day):** an earlier version of this document, and the config
+comments written with it, gave the no-leakance baseline as "2 to 4%". That was
+wrong — 2-4% was the rate of a leakance-ON run with a narrow `K_D` box. The
+true no-leakance rate, read from six prior CONUS runs, is **0.013% to 0.114%**,
+typically 0.04-0.06%. The error made leakance's excess look ~50x smaller than
+it was.
+
+Measured progression as the bound came in:
+
+| stage | negative pre-clamp |
+|---|---|
+| `K_D` ceiling 1e-3, no bound | 51.0% |
+| same, later batches | 30.8% |
+| narrow `K_D` box, no mass bound | 1.0 - 4.1% |
+| two-way + symmetric mass bound | **0.045%** |
+| no-leakance baseline | 0.043 - 0.056% |
+
+The bounded run is indistinguishable from no-leakance, i.e. the exchange now
+contributes no excess negative discharge at all. A sustained climb above ~0.1%
+means the bound is being hit.
 
 ## Consequences for reading any learned parameter
 

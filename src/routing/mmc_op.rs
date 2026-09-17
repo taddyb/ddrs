@@ -1736,14 +1736,14 @@ where
     // than the reach carries, the solve returns negative discharge, and the S28
     // clamp manufactures mass to hide it. Measured 2026-09-17: a K_D box whose
     // geometric centre was 31.6x too high drove 30.8% of CONUS reaches negative
-    // against a 2-4% no-leakance baseline, and the gradient through that many
+    // against a 0.04-0.06% no-leakance baseline, and the gradient through that many
     // saturated clamps went non-finite on the first optimizer step.
     //
     // `zeta <- min(zeta, alpha * b_base)` bounds the loss by the water locally
     // available. With every Muskingum coefficient non-negative and the inflows
     // non-negative, `b_base >= 0`, so for `alpha < 1` the bounded RHS stays
     // strictly positive and leakance can no longer produce a negative solve on
-    // its own. (Coefficient-induced negatives, the 2-4% baseline, are a
+    // its own. (Coefficient-induced negatives, the 0.04-0.06% baseline, are a
     // separate matter and unaffected.)
     //
     // `None` ⇒ unbounded, byte-identical to every run before 2026-09-17 and to

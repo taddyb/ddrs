@@ -273,7 +273,8 @@ params:
     # `losing_only` clamp fixes the SIGN of the exchange, not its MAGNITUDE, so
     # a large enough conductance removes more water than exists. Watch
     # `reaches with negative discharges pre clamp` in the run log: the no-leakance
-    # rate is ~2-4%, and a climb well above that means this bound is being hit.
+    # rate is 0.013-0.114% (six prior CONUS runs), and a climb above ~0.1%
+    # means the exchange is taking more water than the reaches carry.
     #
     # [1e-9, 1e-5] is chosen so the geometric centre is EXACTLY 1e-7, the
     # historically stable init, while spanning four decades instead of two and
@@ -361,12 +362,21 @@ params:
   # four-reach harness at K_D = 5e-3, an unbounded leakance drains the network
   # to the discharge floor (total 0.004) while alpha = 0.1 holds it at 33.92.
   # That unbounded drain is what produced the 2026-09-17 NaN: 30.8% of reaches
-  # negative pre-clamp against a 2-4% baseline, then a non-finite gradient
+  # negative pre-clamp against a 0.04-0.06% baseline, then a non-finite gradient
   # through the saturated clamps on the first optimizer step.
   #
   # 0.25 lets the exchange be a substantial correction (a quarter of local
-  # flow) without letting it dominate. Watch `reaches with negative discharges
-  # pre clamp`: the no-leakance rate is 2-4%.
+  # flow) without letting it dominate.
+  #
+  # INSTRUMENT: `reaches with negative discharges pre clamp` in the run log.
+  # The true NO-LEAKANCE baseline, from six prior CONUS runs, is 0.013% to
+  # 0.114% (typically 0.04-0.06%). Measured progression as this bound came in:
+  #   51.0%   K_D ceiling 1e-3, no bound
+  #   30.8%   same, later batches
+  #   1.0-4.1%  narrow K_D box, still no bound
+  #   0.045%  two-way + this bound  <- indistinguishable from no-leakance
+  # A sustained climb above ~0.1% means the exchange is again taking more water
+  # than the reaches carry.
   leakance_max_rhs_fraction: 0.25
   # Streambed thickness M (m) for the DISCONNECTION CAP:
   #   head = min(depth - d_gw, depth + M)

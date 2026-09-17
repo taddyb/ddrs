@@ -786,8 +786,8 @@ pub struct Params {
     /// manufactures mass to conceal it.
     ///
     /// Measured 2026-09-17: a `K_D` box whose geometric centre sat 31.6x too
-    /// high drove 30.8% of CONUS reaches negative pre-clamp, against a 2-4%
-    /// no-leakance baseline, and the gradient through that many saturated
+    /// high drove 30.8% of CONUS reaches negative pre-clamp, against a
+    /// no-leakance baseline of 0.013-0.114% (six prior CONUS runs), and the gradient through that many saturated
     /// clamps went non-finite on the first optimizer step. The flaw was
     /// unobservable for the whole prior history of the feature because the
     /// `log_space_lower` bug kept `K_D` frozen near 1e-7.
