@@ -26,6 +26,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use chrono::NaiveDate;
 use common::{mock_config, InnerBackend, TestDevice};
+use ddrs::config::LeakanceGate;
 use ddrs::data::dataset::RoutingTensors;
 use ddrs::data::{RhoWindow, Staid};
 use ddrs::nn::kan_head::{KanHead, KanHeadConfig};
@@ -33,6 +34,7 @@ use ddrs::sparse::SparseAdjacency;
 use ddrs::training::forward::{forward, forward_eval};
 use ddrs::training::probe::probe_forward;
 use ndarray::Array2;
+use std::collections::BTreeMap;
 
 type AB = Autodiff<InnerBackend>;
 
@@ -113,7 +115,11 @@ fn all_paths(outputs: &[&str], cfg: &ddrs::config::Config) -> (Vec<f32>, Vec<f32
     let head_inner: KanHead<InnerBackend> = head_ad.valid();
     let tensors_ad = minimal_routing_tensors::<AB>(n, t, f, &device);
 
-    let train = forward::<InnerBackend>(cfg, &tensors_ad, &head_ad, &device, false).inner();
+    // Training takes the epoch's gate temperature from the driver; the eval
+    // and probe readers apply the schedule's FINAL value, so hand training
+    // that same value here and the three must agree on one model.
+    let gate_tau = cfg.params.leakance_gate.as_ref().map(|g| g.final_temperature());
+    let train = forward::<InnerBackend>(cfg, &tensors_ad, &head_ad, &device, false, gate_tau).inner();
     let eval = forward_eval::<InnerBackend>(
         cfg,
         &minimal_routing_tensors::<InnerBackend>(n, t, f, &device),
@@ -190,7 +196,14 @@ fn every_optional_head_output_reaches_all_three_readers() {
     leak.params.use_cuda_graphs = false;
     let mut fixed_q = mock_config();
     fixed_q.params.defaults.insert("q_spatial".to_string(), 0.65);
-    let rows: [(&str, &[&str], &ddrs::config::Config); 8] = [
+    // Leakance gate at a sharp FINAL temperature: the schedule's last value
+    // (0.05) is what eval, the probe and `dump_parameters` must apply, not
+    // the initial 1.0. `tests/leakance_gate.rs` pins the tau = 1 identity.
+    let mut leak_gate = leak.clone();
+    leak_gate.params.leakance_gate = Some(LeakanceGate {
+        temperature: [(1usize, 1.0_f32), (2, 0.05)].into_iter().collect::<BTreeMap<_, _>>(),
+    });
+    let rows: [(&str, &[&str], &ddrs::config::Config); 10] = [
         ("n only (p, q fixed)", &["n"], &fixed_q),
         ("n + gamma (p, q fixed)", &["n", "gamma"], &fixed_q),
         ("n, q only (p fixed)", &["n", "q_spatial"], &base),
@@ -206,6 +219,16 @@ fn every_optional_head_output_reaches_all_three_readers() {
             "everything",
             &["n", "q_spatial", "p_spatial", "x_storage", "gamma", "K_D", "d_gw", "leakance_factor"],
             &leak,
+        ),
+        (
+            "leakance + gate (final tau 0.05)",
+            &["n", "q_spatial", "p_spatial", "K_D", "d_gw", "leakance_factor"],
+            &leak_gate,
+        ),
+        (
+            "everything + gate (final tau 0.05)",
+            &["n", "q_spatial", "p_spatial", "x_storage", "gamma", "K_D", "d_gw", "leakance_factor"],
+            &leak_gate,
         ),
     ];
     for (label, outputs, cfg) in rows {

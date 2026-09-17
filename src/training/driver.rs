@@ -106,6 +106,7 @@ fn run_micro_batch<I: Backend>(
     staids: &[Staid],
     window: &RhoWindow,
     mb_label: usize,
+    gate_tau: Option<f32>,
 ) -> Result<Option<MicroBatchOutcome<I>>> {
     let exp = cfg.experiment.as_ref().expect("experiment");
     let batch = dataset.collate(staids, window)?;
@@ -125,7 +126,7 @@ fn run_micro_batch<I: Backend>(
     let tensors = batch.to_tensors::<Autodiff<I>>(device);
     let (median_n, n_at_floor) =
         crate::training::forward::manning_n_stats::<I>(cfg, &tensors, head);
-    let pred_hourly = forward::<I>(cfg, &tensors, head, device, false);
+    let pred_hourly = forward::<I>(cfg, &tensors, head, device, false, gate_tau);
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
     let dims = daily.dims();
     let (g, t_days) = (dims[0], dims[1]);
@@ -295,7 +296,13 @@ pub fn train<I: Backend>(
             None => sampler.reshuffle(&mut state.rng),
         }
         let lr = resolve_lr(&exp.learning_rate, epoch);
-        eprintln!("epoch {epoch} lr={lr}");
+        // Leakance-gate temperature for this epoch, resolved like `lr` and
+        // stated in the run log so a reader can tell which model trained.
+        let gate_tau = cfg.params.leakance_gate.as_ref().map(|g| g.resolve(epoch));
+        match gate_tau {
+            Some(tau) => eprintln!("epoch {epoch} lr={lr} leakance_gate_tau={tau}"),
+            None => eprintln!("epoch {epoch} lr={lr}"),
+        }
 
         let mut mb_done = 0usize;
 
@@ -313,6 +320,7 @@ pub fn train<I: Backend>(
                     &staids,
                     &window,
                     state.mini_batch,
+                    gate_tau,
                 )?;
                 let Some(MicroBatchOutcome {
                     loss,
@@ -388,6 +396,7 @@ pub fn train<I: Backend>(
                         &staids,
                         &window,
                         state.mini_batch,
+                        gate_tau,
                     )?;
                     if let Some(MicroBatchOutcome {
                         loss,

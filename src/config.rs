@@ -400,6 +400,54 @@ pub struct StageRoughnessSection {
     pub d_ref: f32,
 }
 
+/// YAML `params.leakance_gate:` block. Absent by default, and absent means the
+/// gate is not applied at all (byte-identical to the historical path).
+///
+/// Turns the head's `leakance_factor` output from a continuous multiplier into
+/// a temperature-annealed 0/1 selector,
+/// `g = sigmoid(logit(clamp(u, eps, 1 − eps)) / tau)`, applied to the
+/// NORMALIZED head output in every reader (`src/training/gate.rs::leakance_gate`).
+/// `tau = 1` is the exact identity; smaller `tau` sharpens toward a step at
+/// `u = 0.5`. The motivation is the exact scaling degeneracy between
+/// `leakance_factor` and `K_D` (they multiply, so only their product reaches
+/// the physics); a gate and a conductance are not degenerate with each other.
+///
+/// Requires `params.use_leakance: true` (`validate_leakance_gate`): a gate on a
+/// disabled term is silently inert.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeakanceGate {
+    /// Temperature schedule keyed by 1-indexed epoch, resolved exactly like
+    /// `experiment.learning_rate` (`LeakanceGate::resolve` takes the largest
+    /// key `<= epoch`; an epoch before the first key takes the first value).
+    /// Training uses the epoch's value; eval, the probe and `dump_parameters`
+    /// use the FINAL value (`LeakanceGate::final_temperature`), so the scored
+    /// model is the one training ended on. Values must be positive and finite.
+    pub temperature: BTreeMap<usize, f32>,
+}
+
+impl LeakanceGate {
+    /// Temperature in force at `epoch` (1-indexed). Mirrors
+    /// `src/training/optimizer.rs::resolve_lr`: largest key `<= epoch`, else
+    /// the first value. Panics on an empty schedule, which
+    /// `validate_leakance_gate` rejects at load.
+    pub fn resolve(&self, epoch: usize) -> f32 {
+        self.temperature
+            .range(..=epoch)
+            .next_back()
+            .map(|(_, &t)| t)
+            .unwrap_or_else(|| {
+                *self.temperature.values().next().expect("leakance_gate.temperature is empty")
+            })
+    }
+
+    /// The last scheduled temperature: what eval, the probe and
+    /// `dump_parameters` apply.
+    pub fn final_temperature(&self) -> f32 {
+        *self.temperature.values().next_back().expect("leakance_gate.temperature is empty")
+    }
+}
+
 /// YAML `kan_head.disaggregation:` block (presence enables the head, unless
 /// `enabled: false`). The head always consumes `(daily Q', that day's 24h
 /// precip)` — requires `data_sources.aorc_precip` to be set. See
@@ -755,6 +803,10 @@ pub struct Params {
     /// Stage-dependent Manning roughness, `n(d) = n_0·(d/d_ref)^(−gamma)`.
     /// Absent ⇒ `gamma = 0`, byte-identical to the historical solver.
     pub stage_roughness: Option<StageRoughnessSection>,
+    /// Temperature-annealed 0/1 gate on the head's `leakance_factor` output.
+    /// Absent ⇒ the output is used as-is, byte-identical to the historical
+    /// readers. See `LeakanceGate`.
+    pub leakance_gate: Option<LeakanceGate>,
 }
 
 impl Params {
@@ -795,6 +847,7 @@ impl Default for Params {
             enforce_positivity: false,
             subdivision: Subdivision::default(),
             stage_roughness: None,
+            leakance_gate: None,
         }
     }
 }
@@ -823,6 +876,8 @@ struct ParamsRaw {
     subdivision: Subdivision,
     #[serde(default)]
     stage_roughness: Option<StageRoughnessSection>,
+    #[serde(default)]
+    leakance_gate: Option<LeakanceGate>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -920,6 +975,7 @@ impl From<ParamsRaw> for Params {
         // exactly what `Params::default()` carries.
         p.subdivision = r.subdivision;
         p.stage_roughness = r.stage_roughness;
+        p.leakance_gate = r.leakance_gate;
         p
     }
 }
@@ -1073,6 +1129,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_leakance_gate(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -1247,6 +1307,36 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// `params.leakance_gate` is only meaningful on a leakance run, and its
+/// schedule must hold usable temperatures.
+fn validate_leakance_gate(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(gate) = cfg.params.leakance_gate.as_ref() else {
+        return Ok(());
+    };
+    if !cfg.params.use_leakance {
+        return Err(
+            "params: `leakance_gate` requires `use_leakance: true` — the gate transforms \
+             the head's `leakance_factor` output, which nothing reads while leakance is \
+             off, so the block would be silently inert."
+                .to_string(),
+        );
+    }
+    if gate.temperature.is_empty() {
+        return Err(
+            "params.leakance_gate: `temperature` must map at least one epoch to a \
+             temperature (e.g. `{1: 1.0, 10: 0.2}`)."
+                .to_string(),
+        );
+    }
+    if let Some((epoch, t)) = gate.temperature.iter().find(|(_, t)| !(t.is_finite() && **t > 0.0)) {
+        return Err(format!(
+            "params.leakance_gate: temperature at epoch {epoch} is {t}; every temperature \
+             must be positive and finite (1.0 is the exact identity, smaller sharpens)."
+        ));
     }
     Ok(())
 }
@@ -2454,6 +2544,77 @@ params:
             (Params::default().leakance_impervious_threshold - 0.7).abs() < 1e-9,
             "leakance_impervious_threshold must default to 0.7"
         );
+    }
+
+    fn write_yaml(name: &str, yaml: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, yaml).unwrap();
+        path
+    }
+
+    const GATE_HEAD: &str = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+"#;
+
+    #[test]
+    fn leakance_gate_absent_is_none() {
+        let path = write_yaml("ddrs_leakance_gate_absent.yaml", &format!("{GATE_HEAD}params:\n  use_leakance: true\n"));
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        assert!(cfg.params.leakance_gate.is_none());
+        assert!(Params::default().leakance_gate.is_none());
+    }
+
+    #[test]
+    fn leakance_gate_rejected_without_use_leakance() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_no_leakance.yaml",
+            &format!("{GATE_HEAD}params:\n  leakance_gate:\n    temperature: {{1: 1.0, 5: 0.2}}\n"),
+        );
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("leakance_gate") && msg.contains("use_leakance"),
+            "error should name both keys: {msg}"
+        );
+    }
+
+    #[test]
+    fn leakance_gate_rejects_empty_and_nonpositive_temperatures() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_empty.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{}}\n"),
+        );
+        let msg = Config::from_yaml_file(&path).unwrap_err().to_string();
+        assert!(msg.contains("temperature"), "{msg}");
+
+        let path = write_yaml(
+            "ddrs_leakance_gate_zero.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{1: 1.0, 5: 0.0}}\n"),
+        );
+        let msg = Config::from_yaml_file(&path).unwrap_err().to_string();
+        assert!(msg.contains("epoch 5") && msg.contains("positive"), "{msg}");
+    }
+
+    #[test]
+    fn leakance_gate_schedule_resolves_at_epoch_boundaries() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_schedule.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{1: 1.0, 3: 0.5, 6: 0.1}}\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        let gate = cfg.params.leakance_gate.as_ref().expect("block parsed");
+        // Same rule as `resolve_lr`: largest key <= epoch, first value before it.
+        assert_eq!(gate.resolve(0), 1.0);
+        assert_eq!(gate.resolve(1), 1.0);
+        assert_eq!(gate.resolve(2), 1.0);
+        assert_eq!(gate.resolve(3), 0.5);
+        assert_eq!(gate.resolve(5), 0.5);
+        assert_eq!(gate.resolve(6), 0.1);
+        assert_eq!(gate.resolve(100), 0.1);
+        assert_eq!(gate.final_temperature(), 0.1);
     }
 
     #[test]

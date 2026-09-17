@@ -283,6 +283,8 @@ fn head_driven_leakance_changes_output() {
         &head,
         &device,
         false,
+        // no `params.leakance_gate` in these fixtures, so no gate temperature
+        None,
     );
     let sum_leak: f32 = out_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
 
@@ -293,6 +295,7 @@ fn head_driven_leakance_changes_output() {
         &head,
         &device,
         false,
+        None,
     );
     let sum_no_leak: f32 = out_no_leak.into_data().to_vec::<f32>().unwrap().iter().sum();
 
