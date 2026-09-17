@@ -89,6 +89,9 @@ pub(crate) struct LeakanceSaved<I: Backend> {
     /// Mirrors `cfg.params.leakance_losing_only` at the moment of the forward
     /// call, so the backward can apply the same gate without accessing the config.
     pub losing_only: bool,
+    /// Mirrors `cfg.params.leakance_bed_thickness` at the moment of the forward,
+    /// so the backward applies the SAME disconnection cap without the config.
+    pub bed_thickness: Option<f32>,
     /// Mirrors the impervious mask from the forward (same 0/1 constant). Used by
     /// the backward to gate `gzeta` identically to the forward's multiplication.
     /// `None` ⇒ no mask applied (all-ones behavior, byte-identical to pre-Task-2).
@@ -1227,6 +1230,7 @@ where
             d_gw.clone(),
             leakance_factor.clone(),
             state.leak.losing_only,
+            state.leak.bed_thickness,
             mask.clone(),
         );
         zeta_param_grads = Some((
@@ -1662,6 +1666,7 @@ where
     // subtracted from b_rhs below. `None` ⇒ this block is skipped entirely and
     // the kernel order is byte-identical to the pre-leakance path.
     let losing_only = cfg.params.leakance_losing_only;
+    let bed_thickness = cfg.params.leakance_bed_thickness;
     let zeta_opt = leakance.as_ref().map(|lk| {
         let (_w, area_z, zeta) = crate::routing::leakance::zeta_forward::<I>(
             depth.clone(),
@@ -1672,6 +1677,7 @@ where
             lk.d_gw.clone(),
             lk.leakance_factor.clone(),
             losing_only,
+            bed_thickness,
             lk.mask.clone(),
         );
         *leak_out = Some(LeakanceSaved {
@@ -1680,6 +1686,7 @@ where
             d_gw: unwrap(lk.d_gw.clone()),
             leakance_factor: unwrap(lk.leakance_factor.clone()),
             losing_only,
+            bed_thickness,
             mask: lk.mask.as_ref().map(|m| unwrap(m.clone())),
         });
         zeta
@@ -2438,17 +2445,24 @@ where
     let _ = (fsi::DEPTH, fsi::BW_RAW);
 
     // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · head, where
-    // head = max(0, depth − d_gw) when losing_only, else depth − d_gw.
-    // Recomputed from the saved primitives so the reported value is exactly
-    // what was subtracted from b_rhs (same losing_only flag as the forward).
+    // head = max(0, min(depth − d_gw, depth + M)) when losing_only, else the
+    // same without the outer clamp. Recomputed from the saved primitives so the
+    // reported value is exactly what was subtracted from b_rhs — it must mirror
+    // `zeta_forward` in EVERY branch (losing_only, the disconnection cap, and
+    // the impervious mask), or the eval diagnostic reports a flux the routing
+    // never applied.
     if let Some(out) = zeta_out {
         let depth = wrap(depth_p.clone());
         let area_z = wrap(leak.area_z.clone());
         let m_raw = depth.clone() - wrap(leak.d_gw.clone());
+        let m_capped = match leak.bed_thickness {
+            Some(bed_m) => m_raw.min_pair(depth.clone() + bed_m),
+            None => m_raw,
+        };
         let head = if leak.losing_only {
-            m_raw.clamp_min(0.0)
+            m_capped.clamp_min(0.0)
         } else {
-            m_raw
+            m_capped
         };
         let zeta_raw = wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * head;
         // Apply the impervious mask so the reported zeta equals exactly what was

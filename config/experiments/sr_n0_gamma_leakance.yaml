@@ -257,18 +257,27 @@ params:
     # (Calver). Five decades covers clogged through gravel beds.
     K_D: [1.0e-8, 1.0e-3]
     # Water-table elevation relative to the streambed (m). Positive = table
-    # ABOVE the bed (gaining); negative = below (losing). WIDENED from [-2, 2]:
-    # in the losing reaches this term exists to represent, the table sits
-    # metres below the bed, and the old floor cut that population off.
-    # The independent MERIT field `channel_wtd_bed_rel` has p90 = +4.4 m below
-    # bed, i.e. d_gw = -4.4, outside the old box entirely.
+    # ABOVE the bed (gaining); negative = below (losing).
     #
-    # KNOWN LIMITATION: the head is linear in (depth - d_gw), so flux keeps
-    # growing as the table drops. The physical form disconnects once the table
-    # falls below the bed by more than the bed thickness M, and flux becomes
-    # independent of it. Not implemented; a learned d_gw far below the bed
-    # should therefore be read as "disconnected", not as a depth estimate.
-    d_gw: [-5.0, 1.0]
+    # THE BOX IS SHALLOW ON PURPOSE, and that is a consequence of the
+    # disconnection cap below, not an oversight. Without a cap you would want a
+    # deep box, because 9.3% of CONUS reaches have the table more than 5 m below
+    # the bed (p95 = 14 m, p99 = 71 m, max = 148 m in `channel_wtd_bed_rel`).
+    # With the cap, every one of those states is the SAME physics -- the stream
+    # is disconnected and the flux no longer depends on how far down the table
+    # sits -- so resolving -80 m from -150 m buys nothing.
+    #
+    # What the box must do instead is put the INITIALISATION in the connected
+    # region. The head is a sigmoid with near-zero output bias, so at epoch 1
+    # every reach reports the box centre, here (-2 + 1)/2 = -0.5. Connection is
+    # exactly `d_gw > -M` (depth cancels out of both sides), so with M = 1.0 the
+    # centre is connected and `d_gw` receives gradient. A deep box would have
+    # centred below -M, where the cap sets the d_gw gradient to zero, and the
+    # parameter would never have moved at all.
+    #
+    # Two thirds of this box is connected, so there is room to learn in both
+    # directions and room to express "disconnected" at the bottom.
+    d_gw: [-2.0, 1.0]
     leakance_factor: [0.0, 1.0]
   attribute_minimums:
     discharge: 1.0e-4
@@ -303,6 +312,27 @@ params:
   # Losing-stream leakance: zeta = gate(leakance_factor) * area_z * K_D * (depth - d_gw)
   # subtracted from the routing RHS. Positive zeta = a losing reach.
   use_leakance: true
+  # Streambed thickness M (m) for the DISCONNECTION CAP:
+  #   head = min(depth - d_gw, depth + M)
+  # Once the water table falls more than M below the bed an unsaturated zone
+  # opens beneath the channel, stream and aquifer stop being hydraulically
+  # connected, and the flux is set by the head across the bed layer alone
+  # rather than by the distance down to the table. This is the MODFLOW river
+  # package's RBOT behaviour.
+  #
+  # Why it matters here and not just as a nicety: the uncapped linear head
+  # grows without bound, so at depth 1.5 m a d_gw of -80 m gives 12x the flux
+  # of -5 m for the same conductance. A large head with a small K_D is then
+  # indistinguishable from a small head with a large one, and K_D and d_gw
+  # become degenerate with each other by construction. The cap removes that
+  # direction, which is the point: this arm is trying to learn d_gw as a
+  # physical quantity, not as one half of a product.
+  #
+  # 1.0 m is the upper end of the typical alluvial range (0.1 to 1 m), chosen
+  # deliberately: a larger M keeps more reaches connected and therefore
+  # gradient-bearing. Absent ⇒ no cap, byte-identical to every run before
+  # 2026-09-17 and to the DDR c2bd0f9 reference.
+  leakance_bed_thickness: 1.0
   # Temperature-annealed 0/1 gate on the head's leakance_factor output.
   #
   # Replaces the continuous factor, which was doing the wrong job: a factor in

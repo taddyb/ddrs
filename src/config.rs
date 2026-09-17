@@ -757,6 +757,24 @@ pub struct Params {
     /// (Phase C on). Set to `false` to recover the prior unclamped behavior
     /// byte-identically (e.g. for the recovery control answer key).
     pub leakance_losing_only: bool,
+    /// Streambed thickness `M` (metres) for the leakance DISCONNECTION CAP.
+    ///
+    /// `Some(M)` caps the driving head at `depth + M`: once the water table
+    /// falls more than `M` below the bed, an unsaturated zone opens beneath the
+    /// channel, stream and aquifer are no longer hydraulically connected, and
+    /// the flux is set by the head across the bed layer alone rather than by
+    /// how far down the table sits. This is the MODFLOW river-package `RBOT`
+    /// behaviour, and it is what makes a DEEP `d_gw` box meaningful: without
+    /// it the linear head `depth - d_gw` grows without bound, so a large head
+    /// with a small `K_D` becomes indistinguishable from a small head with a
+    /// large one, and widening the box buys degeneracy rather than coverage.
+    ///
+    /// `None` (the default) leaves the head uncapped, byte-identical to every
+    /// run before 2026-09-17 and to the DDR `c2bd0f9` reference pinned by
+    /// `tests/leakance_reference_match.rs`.
+    ///
+    /// Typical alluvial streambeds are 0.1 to 1 m thick.
+    pub leakance_bed_thickness: Option<f32>,
     /// Phase C: impervious hard-zero threshold. Reaches with
     /// `corridor_impervious > threshold` get `zeta ≡ 0` and zero gradient to
     /// their leakance params. Only applied when an impervious mask tensor is
@@ -842,6 +860,7 @@ impl Default for Params {
             use_cuda_graphs: false,
             use_leakance: false,
             leakance_losing_only: true,
+            leakance_bed_thickness: None,
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
@@ -869,6 +888,7 @@ struct ParamsRaw {
     use_cuda_graphs: Option<bool>,
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
+    leakance_bed_thickness: Option<f32>,
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
     enforce_positivity: Option<bool>,
@@ -949,6 +969,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(b) = r.use_leakance {
             p.use_leakance = b;
+        }
+        if let Some(m) = r.leakance_bed_thickness {
+            p.leakance_bed_thickness = Some(m);
         }
         if let Some(b) = r.leakance_losing_only {
             p.leakance_losing_only = b;

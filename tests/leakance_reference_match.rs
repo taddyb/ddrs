@@ -179,6 +179,10 @@ fn ddrs_zeta(f: &Fixture, depth: &[f32], device: &D) -> Vec<f32> {
         t(&f.d_gw, device),
         t(&f.leakance_factor, device),
         false, // deviation 1: reference form, sign-symmetric
+        // deviation 3: no disconnection cap. The DDR c2bd0f9 reference has a
+        // purely linear head, so the cap MUST be off for this comparison; with
+        // it on the two would diverge wherever d_gw < -M, by design.
+        None,
         None,  // deviation 2: no impervious mask
     );
     zeta.into_data().to_vec().unwrap()
@@ -345,6 +349,7 @@ fn losing_only_clamp_is_a_ddrs_only_deviation() {
         t(&f.d_gw, &device),
         t(&f.leakance_factor, &device),
         true, // the ddrs default
+        None, // no disconnection cap: this test pins the losing-only clamp alone
         None,
     );
     let clamped: Vec<f32> = z.into_data().to_vec().unwrap();
