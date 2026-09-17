@@ -15,6 +15,7 @@ pub mod checkpoint;
 pub mod driver;
 pub mod eval;
 pub mod forward;
+pub mod gate;
 pub mod loss;
 pub mod metrics;
 pub mod optimizer;
@@ -37,6 +38,7 @@ pub use loss::{
     tau_trim_and_downsample, FilteredPair,
 };
 pub use driver::{train, TrainState};
+pub use gate::{leakance_gate, GATE_EPS};
 pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
 pub use adadelta::{AdaDelta, AdaDeltaConfig};

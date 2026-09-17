@@ -110,6 +110,16 @@ pub fn evaluate<I: Backend>(
     ensure_panic_hook_installed();
     take_worker_panicked(); // clear any stale flag from an unrelated prior call
 
+    // The gate is scored at its FINAL scheduled temperature
+    // (`forward_eval_core`); say so in the run log so a reader can tell which
+    // model these metrics belong to.
+    if let Some(gate) = cfg.params.leakance_gate.as_ref() {
+        eprintln!(
+            "leakance gate: final temperature tau={} (eval applies the last scheduled value)",
+            gate.final_temperature()
+        );
+    }
+
     let axis = dataset.time_axis().clone();
     let n_days_total = axis.num_days;
     assert!(batch_size_days > 0, "batch_size_days must be positive");

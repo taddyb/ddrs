@@ -472,6 +472,12 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
              use a leakance experiment config"
         );
     }
+    if let Some(gate) = cfg.params.leakance_gate.as_ref() {
+        eprintln!(
+            "leakance gate: final temperature tau={} (probe applies the last scheduled value)",
+            gate.final_temperature()
+        );
+    }
     let output = cli.output.ok_or("--output is required in grad mode")?;
 
     let dataset = MeritGagesDataset::open(&cfg)?;

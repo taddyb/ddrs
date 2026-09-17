@@ -22,6 +22,7 @@ use crate::nn::kan_head::KanHead;
 use crate::routing::utils::denormalize;
 use crate::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use crate::training::forward::{gather_params_to_subreaches, scatter_add_by_group};
+use crate::training::gate::leakance_gate;
 
 /// Detach `t` from its autograd graph and re-lift it as a `require_grad`
 /// leaf. Values are bit-identical; only the tape topology changes.
@@ -189,6 +190,13 @@ pub fn probe_forward<I: Backend>(
             .find(|(n, _)| n.as_str() == "leakance_factor")
             .map(|(_, t)| t.clone())
             .or_else(|| params_map.get("leakance_factor").cloned());
+        // Gate at the FINAL temperature, AFTER lifting: the leaf stays the raw
+        // head output `u`, so its gradient carries the gate's Jacobian exactly
+        // as the head's does in training (mirrors `forward`).
+        let leakance_factor = match cfg.params.leakance_gate.as_ref() {
+            Some(gate) => leakance_factor.map(|u| leakance_gate(u, gate.final_temperature())),
+            None => leakance_factor,
+        };
         (k_d, d_gw, leakance_factor)
     } else {
         (None, None, None)
