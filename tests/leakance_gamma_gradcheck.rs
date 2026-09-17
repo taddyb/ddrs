@@ -75,8 +75,15 @@ fn linear_chain_sparse() -> SparseAdjacency {
 /// both cases (only the exponent is per-reach), so a config with no
 /// `stage_roughness` block would supply `d_ref = 1.0` by default. Set it
 /// explicitly so the test does not depend on that default.
-fn mock_cfg() -> Config {
+fn mock_cfg() -> Config { mock_cfg_inner(None) }
+
+/// Same base config with the leakance MASS BOUND active. `alpha` is the
+/// fraction of the Muskingum RHS leakance may remove.
+fn mock_cfg_bounded(alpha: f32) -> Config { mock_cfg_inner(Some(alpha)) }
+
+fn mock_cfg_inner(max_rhs_fraction: Option<f32>) -> Config {
     let mut cfg = Config::default();
+    cfg.params.leakance_max_rhs_fraction = max_rhs_fraction;
     cfg.params.stage_roughness = Some(ddrs::config::StageRoughnessSection {
         gamma: 0.0,
         d_ref: 1.0,
@@ -454,5 +461,197 @@ fn learned_constant_gamma_matches_the_global_stage_roughness_path() {
     assert!(
         worst < 1e-5,
         "learned constant gamma disagrees with the global path (worst rel {worst:.3e})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MASS BOUND: zeta <- min(zeta, alpha * b_rhs_base)
+//
+// The forward splits b_rhs two ways, so the backward must split gb_rhs two
+// ways with DIFFERENT factors: d(b_rhs)/d(b_base) = 1 - alpha*s for the
+// c2/c3/c4/i_t/q_t/q' terms, and d(b_rhs)/d(zeta) = -(1 - s) for the zeta
+// parents. Getting one of those right and the other wrong is silent: the loss
+// stays finite and every parameter trains against a subtly wrong gradient.
+// Only finite differences catch it, which is what these tests are.
+// ---------------------------------------------------------------------------
+
+/// Drive the bound hard by making K_D enormous, so it binds on most reaches,
+/// then gradcheck every parameter through the binding branch.
+fn bound_harness(alpha: f32) -> (Config, Vec<f32>) {
+    // K_D four decades above the interior value used elsewhere in this file:
+    // zeta then greatly exceeds alpha * b_base and the cap is active.
+    (mock_cfg_bounded(alpha), vec![1e-2f32; N])
+}
+
+fn grads_with_bound(parent: Parent, alpha: f32, analytical: bool) -> Vec<f32> {
+    let (cfg, big_kd) = bound_harness(alpha);
+    let h = Harness { cfg, ..harness() };
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (dgw, fac, gm) = (dgw_vec(), fac_vec(), gamma_vec());
+
+    let eval = |kd: &[f32], dgw: &[f32], fac: &[f32], n: &[f32], qt: &[f32]| -> f32 {
+        let inp = Inputs {
+            n, qsp: &qsp_vec, psp: &psp_vec, qt, qpt: &qpt_vec,
+            kd, dgw, fac, gamma: Some(&gm),
+        };
+        let (q, _) = run_forward(
+            &h.cfg, &h.pattern, &h.assembler, &h.device, &h.length, &h.slope, &inp, None,
+        );
+        q.sum().into_data().to_vec::<f32>().unwrap()[0]
+    };
+
+    if analytical {
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &big_kd, dgw: &dgw, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, parents) = run_forward(
+            &h.cfg, &h.pattern, &h.assembler, &h.device, &h.length, &h.slope, &inp, Some(parent),
+        );
+        let grads = q.sum().backward();
+        let g = match parent {
+            Parent::KD => parents.kd.grad(&grads).expect("grad on K_D"),
+            Parent::DGW => parents.dgw.grad(&grads).expect("grad on d_gw"),
+            Parent::LeakFactor => parents.fac.grad(&grads).expect("grad on factor"),
+            Parent::N => parents.n.grad(&grads).expect("grad on n"),
+            Parent::QT => parents.qt.grad(&grads).expect("grad on q_t"),
+            _ => panic!("parent not covered by the mass-bound sweep"),
+        };
+        return g.into_data().to_vec::<f32>().unwrap();
+    }
+
+    let mut out = vec![0.0f32; N];
+    for i in 0..N {
+        let (mut pk, mut mk) = (big_kd.clone(), big_kd.clone());
+        let (mut pd, mut md) = (dgw.clone(), dgw.clone());
+        let (mut pf, mut mf) = (fac.clone(), fac.clone());
+        let (mut pn, mut mn) = (n_vec.clone(), n_vec.clone());
+        let (mut pq, mut mq) = (qt_vec.clone(), qt_vec.clone());
+        let eps = match parent {
+            Parent::KD => 1e-3,
+            Parent::DGW => 0.1,
+            Parent::LeakFactor => 0.05,
+            Parent::N => 1e-5,
+            Parent::QT => 0.5,
+            _ => panic!("parent not covered"),
+        };
+        match parent {
+            Parent::KD => { pk[i] += eps; mk[i] -= eps; }
+            Parent::DGW => { pd[i] += eps; md[i] -= eps; }
+            Parent::LeakFactor => { pf[i] += eps; mf[i] -= eps; }
+            Parent::N => { pn[i] += eps; mn[i] -= eps; }
+            Parent::QT => { pq[i] += eps; mq[i] -= eps; }
+            _ => unreachable!(),
+        }
+        let lp = eval(&pk, &pd, &pf, &pn, &pq);
+        let lm = eval(&mk, &md, &mf, &mn, &mq);
+        out[i] = (lp - lm) / (2.0 * eps);
+    }
+    out
+}
+
+fn run_bound(name: &str, parent: Parent, alpha: f32) {
+    compare_grads(
+        name,
+        &grads_with_bound(parent, alpha, true),
+        &grads_with_bound(parent, alpha, false),
+    );
+}
+
+/// Where the bound binds, zeta has dropped out of the graph, so its parents
+/// must receive ZERO. A nonzero gradient here means the forward capped the
+/// flux while the backward went on crediting zeta for it.
+#[test]
+fn leakance_parents_are_gradient_free_where_the_bound_binds() {
+    run_bound("K_D @ bound", Parent::KD, 0.9);
+    run_bound("d_gw @ bound", Parent::DGW, 0.9);
+    run_bound("leakance_factor @ bound", Parent::LeakFactor, 0.9);
+}
+
+/// The other half of the split, and the half that is easy to forget: where the
+/// bound binds, `b_rhs = (1-alpha)*b_base`, so EVERY parameter feeding the
+/// Muskingum RHS keeps a gradient, scaled by `(1-alpha)` rather than zeroed.
+#[test]
+fn rhs_parents_keep_a_scaled_gradient_where_the_bound_binds() {
+    run_bound("n @ bound", Parent::N, 0.9);
+    run_bound("q_t @ bound", Parent::QT, 0.9);
+}
+
+/// The bound must not perturb a run that never reaches it. At a negligible
+/// conductance zeta is far below `alpha*b_base` on every reach, so turning the
+/// bound on must change the forward not at all.
+///
+/// NOTE the conductance here is 1e-12, not the interior 5e-7 used elsewhere in
+/// this file. At 5e-7 on this deliberately small chain the bound genuinely does
+/// engage on some reaches (the routed discharges fall to O(1-40) while q_t is
+/// O(100), so `b_base` is small), and asserting bit-identity there tested a
+/// false premise rather than the implementation.
+#[test]
+fn an_unreached_bound_is_bit_identical() {
+    let h = harness();
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (dgw, fac, gm) = (dgw_vec(), fac_vec(), gamma_vec());
+    let negligible = vec![1e-12f32; N];
+    let go = |cfg: &Config| -> Vec<f32> {
+        let hh = Harness { cfg: cfg.clone(), ..harness() };
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &negligible, dgw: &dgw, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, _) = run_forward(
+            &hh.cfg, &hh.pattern, &hh.assembler, &hh.device, &hh.length, &hh.slope, &inp, None,
+        );
+        q.into_data().to_vec::<f32>().unwrap()
+    };
+    let _ = &h;
+    assert_eq!(
+        go(&mock_cfg()), go(&mock_cfg_bounded(0.9)),
+        "the mass bound changed a forward it should never have touched"
+    );
+}
+
+/// And it must actually bite, plus never bite the wrong way. Guards against
+/// the bound being silently inert, which would make every test above vacuous.
+///
+/// Two properties, swept over conductance because a single value cannot show
+/// both. Where `b_base <= 0` the cap is zero for EVERY alpha (no water, no
+/// loss), so alpha has no effect there and a test pinned to one conductance
+/// can compare equal for a reason that has nothing to do with the bound. Only
+/// reaches with positive `b_base` and `zeta` between the two caps distinguish
+/// them.
+#[test]
+fn a_tighter_bound_never_removes_more_water_and_somewhere_removes_less() {
+    let (n_vec, qsp_vec, psp_vec, qt_vec, qpt_vec) = default_inputs();
+    let (dgw, fac, gm) = (dgw_vec(), fac_vec(), gamma_vec());
+    let go = |alpha: f32, k: f32| -> Vec<f32> {
+        let hh = Harness { cfg: mock_cfg_bounded(alpha), ..harness() };
+        let kd = vec![k; N];
+        let inp = Inputs {
+            n: &n_vec, qsp: &qsp_vec, psp: &psp_vec, qt: &qt_vec, qpt: &qpt_vec,
+            kd: &kd, dgw: &dgw, fac: &fac, gamma: Some(&gm),
+        };
+        let (q, _) = run_forward(
+            &hh.cfg, &hh.pattern, &hh.assembler, &hh.device, &hh.length, &hh.slope, &inp, None,
+        );
+        q.into_data().to_vec::<f32>().unwrap()
+    };
+
+    let mut differed_somewhere = false;
+    for k in [1e-7f32, 1e-6, 1e-5, 1e-4, 5e-4, 1e-3, 5e-3] {
+        let loose = go(0.9, k);
+        let tight = go(0.1, k);
+        let (sl, st): (f32, f32) = (loose.iter().sum(), tight.iter().sum());
+        println!("K_D={k:.1e}  alpha=0.9 sum={sl:.6}  alpha=0.1 sum={st:.6}");
+        assert!(
+            st >= sl - 1e-6,
+            "a TIGHTER bound removed MORE water at K_D={k:.1e}: {st} vs {sl}"
+        );
+        if loose != tight {
+            differed_somewhere = true;
+        }
+    }
+    assert!(
+        differed_somewhere,
+        "alpha never changed the forward at any conductance — the bound is inert"
     );
 }

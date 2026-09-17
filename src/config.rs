@@ -775,6 +775,31 @@ pub struct Params {
     ///
     /// Typical alluvial streambeds are 0.1 to 1 m thick.
     pub leakance_bed_thickness: Option<f32>,
+    /// Mass bound on leakance: `zeta <- min(zeta, alpha * b_rhs_base)`, with
+    /// `alpha` this fraction and `b_rhs_base = c2*i_t + c3*q_t + c4*q'_t` the
+    /// locally available water in the Muskingum RHS.
+    ///
+    /// `leakance_losing_only` constrains the SIGN of the exchange (a gaining
+    /// reach contributes zero) but nothing constrains its MAGNITUDE, so a large
+    /// enough conductance removes more water than the reach carries. The solve
+    /// then returns negative discharge and the S28 `clamp_min(discharge_lb)`
+    /// manufactures mass to conceal it.
+    ///
+    /// Measured 2026-09-17: a `K_D` box whose geometric centre sat 31.6x too
+    /// high drove 30.8% of CONUS reaches negative pre-clamp, against a 2-4%
+    /// no-leakance baseline, and the gradient through that many saturated
+    /// clamps went non-finite on the first optimizer step. The flaw was
+    /// unobservable for the whole prior history of the feature because the
+    /// `log_space_lower` bug kept `K_D` frozen near 1e-7.
+    ///
+    /// With every Muskingum coefficient non-negative and inflows non-negative,
+    /// `b_rhs_base >= 0`, so `alpha < 1` keeps the bounded RHS strictly
+    /// positive and leakance can no longer drive a negative solve on its own.
+    /// Must lie in `(0, 1)`; `validate_leakance_mass_bound` rejects otherwise.
+    ///
+    /// `None` (the default) leaves zeta unbounded, byte-identical to every run
+    /// before 2026-09-17 and to the DDR `c2bd0f9` reference.
+    pub leakance_max_rhs_fraction: Option<f32>,
     /// Phase C: impervious hard-zero threshold. Reaches with
     /// `corridor_impervious > threshold` get `zeta ≡ 0` and zero gradient to
     /// their leakance params. Only applied when an impervious mask tensor is
@@ -861,6 +886,7 @@ impl Default for Params {
             use_leakance: false,
             leakance_losing_only: true,
             leakance_bed_thickness: None,
+            leakance_max_rhs_fraction: None,
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
@@ -889,6 +915,7 @@ struct ParamsRaw {
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
     leakance_bed_thickness: Option<f32>,
+    leakance_max_rhs_fraction: Option<f32>,
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
     enforce_positivity: Option<bool>,
@@ -972,6 +999,9 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(m) = r.leakance_bed_thickness {
             p.leakance_bed_thickness = Some(m);
+        }
+        if let Some(a) = r.leakance_max_rhs_fraction {
+            p.leakance_max_rhs_fraction = Some(a);
         }
         if let Some(b) = r.leakance_losing_only {
             p.leakance_losing_only = b;
@@ -1155,6 +1185,10 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_leakance_mass_bound(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         validate_leakance_gate(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
@@ -1330,6 +1364,34 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// `params.leakance_max_rhs_fraction` bounds zeta by the locally available
+/// water. It only makes sense on a leakance run, and only in `(0, 1)`: at or
+/// above 1 the bounded RHS can reach zero and the guarantee it exists to
+/// provide (leakance alone never drives a negative solve) is lost.
+fn validate_leakance_mass_bound(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(alpha) = cfg.params.leakance_max_rhs_fraction else {
+        return Ok(());
+    };
+    if !cfg.params.use_leakance {
+        return Err(
+            "params: `leakance_max_rhs_fraction` requires `use_leakance: true` — it bounds \
+             the leakance flux, and there is no flux to bound without leakance."
+                .to_string(),
+        );
+    }
+    if !(alpha.is_finite() && alpha > 0.0 && alpha < 1.0) {
+        return Err(format!(
+            "params.leakance_max_rhs_fraction must lie strictly inside (0, 1), got {alpha}. \
+             It is the fraction of the Muskingum RHS that leakance may remove. At 1.0 the \
+             bounded RHS can reach exactly zero, so the property this bound exists to \
+             guarantee — that leakance alone cannot drive a negative solve — no longer \
+             holds. At or below 0 leakance is disabled, which `use_leakance: false` \
+             already expresses."
+        ));
     }
     Ok(())
 }

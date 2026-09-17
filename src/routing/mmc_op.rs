@@ -92,6 +92,13 @@ pub(crate) struct LeakanceSaved<I: Backend> {
     /// Mirrors `cfg.params.leakance_bed_thickness` at the moment of the forward,
     /// so the backward applies the SAME disconnection cap without the config.
     pub bed_thickness: Option<f32>,
+    /// `(base_factor, one_minus_binding)` for the mass bound, when
+    /// `leakance_max_rhs_fraction` is set. The forward computed both, so the
+    /// backward splits `gb_rhs` exactly as the forward split `b_rhs` and the
+    /// two cannot drift apart:
+    ///   `gb_rhs` for the c2/c3/c4/i_t/q_t/q' terms  *= base_factor
+    ///   `gb_rhs` handed to the zeta hook            *= one_minus_binding
+    pub rhs_bound: Option<(I::FloatTensorPrimitive, I::FloatTensorPrimitive)>,
     /// Mirrors the impervious mask from the forward (same 0/1 constant). Used by
     /// the backward to gate `gzeta` identically to the forward's multiplication.
     /// `None` ⇒ no mask applied (all-ones behavior, byte-identical to pre-Task-2).
@@ -304,6 +311,13 @@ pub(crate) fn timestep_backward_core<I: Backend + 'static>(
     state: &TimestepState<I>,
     grad_out: I::FloatTensorPrimitive,
     mask: ParentMask,
+    // `(base_factor, one_minus_binding)` from the leakance MASS BOUND, both
+    // computed in the forward. The forward set
+    // `b_rhs = b_base - min(zeta, alpha*relu(b_base))`, so the two consumers of
+    // `gb_rhs` need DIFFERENT factors, and taking them from the forward rather
+    // than recomputing them is what keeps the split consistent.
+    // `None` ⇒ both factors are 1, recovering the unbounded math exactly.
+    rhs_bound: Option<(Tensor<I, 1>, Tensor<I, 1>)>,
     zeta_hook: impl FnOnce(&Tensor<I, 1>) -> Option<ZetaGeomGrads<I>>,
 ) -> ParentGrads<I>
 where
@@ -393,13 +407,27 @@ where
         );
 
         // gA_values via direct gather+multiply on primitives (mirrors dispatch::grada_primitive).
-        let gb_rhs = wrap(gb_rhs_prim.clone());
+        let gb_rhs_raw = wrap(gb_rhs_prim.clone());
+
+        // Split `gb_rhs` for the MASS BOUND. Where the bound binds, the forward
+        // used `b_rhs = (1-alpha)*b_base` and zeta dropped out of the graph
+        // entirely, so zeta's parents get zero there while the base terms get
+        // `(1-alpha)`. Where it does not bind, both factors are 1 and this is
+        // the historical math. Doing this ONCE, here, is what keeps the two
+        // consumers below consistent with each other.
+        let (gb_rhs, gb_rhs_for_zeta) = match &rhs_bound {
+            Some((base_factor, one_minus_binding)) => (
+                gb_rhs_raw.clone() * base_factor.clone(),
+                gb_rhs_raw * one_minus_binding.clone(),
+            ),
+            None => (gb_rhs_raw.clone(), gb_rhs_raw),
+        };
 
         // Leakance fold-in: zeta = ... was subtracted from b_rhs, so its
         // parent grads derive from `gb_rhs`. The hook computes zeta_backward
         // (with the 3 leakance parents registered by the caller) and returns
         // the geometry-side grads to inject below. `None` ⇒ pre-leakance math.
-        let zeta_geom = zeta_hook(&gb_rhs);
+        let zeta_geom = zeta_hook(&gb_rhs_for_zeta);
 
         let g_a_values_prim = {
             // -gb[row] * x[col]
@@ -1089,7 +1117,7 @@ where
         let grad_out = grads.consume::<I>(&ops.node);
 
         // No leakance ⇒ hook returns None ⇒ pre-leakance math, byte-identical.
-        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, None, |_gb_rhs| None);
 
         register_parent::<I>(grads, ids[0], g.n, "n");
         register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
@@ -1139,7 +1167,7 @@ where
         };
 
         let grad_out = grads.consume::<I>(&ops.node);
-        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, None, |_gb_rhs| None);
 
         register_parent::<I>(grads, ids[0], g.n, "n");
         register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
@@ -1219,7 +1247,12 @@ where
         I::FloatTensorPrimitive,
         I::FloatTensorPrimitive,
     )> = None;
-    let base = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, |gb_rhs| {
+    let rhs_bound = state
+        .leak
+        .rhs_bound
+        .as_ref()
+        .map(|(bf, omb)| (wrap(bf.clone()), wrap(omb.clone())));
+    let base = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, rhs_bound, |gb_rhs| {
         let zg = crate::routing::leakance::zeta_backward::<I>(
             gb_rhs.clone(),
             depth.clone(),
@@ -1687,6 +1720,9 @@ where
             leakance_factor: unwrap(lk.leakance_factor.clone()),
             losing_only,
             bed_thickness,
+            // Filled in below, at the point the bound is actually applied: the
+            // binding set is not known until b_rhs_base exists.
+            rhs_bound: None,
             mask: lk.mask.as_ref().map(|m| unwrap(m.clone())),
         });
         zeta
@@ -1695,8 +1731,59 @@ where
     // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t  (− zeta when leakance active)
     let b_rhs_base =
         c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
+    // MASS BOUND. `leakance_losing_only` fixes the SIGN of the exchange but
+    // never its MAGNITUDE, so a large enough conductance removes more water
+    // than the reach carries, the solve returns negative discharge, and the S28
+    // clamp manufactures mass to hide it. Measured 2026-09-17: a K_D box whose
+    // geometric centre was 31.6x too high drove 30.8% of CONUS reaches negative
+    // against a 2-4% no-leakance baseline, and the gradient through that many
+    // saturated clamps went non-finite on the first optimizer step.
+    //
+    // `zeta <- min(zeta, alpha * b_base)` bounds the loss by the water locally
+    // available. With every Muskingum coefficient non-negative and the inflows
+    // non-negative, `b_base >= 0`, so for `alpha < 1` the bounded RHS stays
+    // strictly positive and leakance can no longer produce a negative solve on
+    // its own. (Coefficient-induced negatives, the 2-4% baseline, are a
+    // separate matter and unaffected.)
+    //
+    // `None` ⇒ unbounded, byte-identical to every run before 2026-09-17 and to
+    // the DDR c2bd0f9 reference.
     let b_rhs = match zeta_opt {
-        Some(zeta) => b_rhs_base - zeta,
+        Some(zeta) => match cfg.params.leakance_max_rhs_fraction {
+            Some(alpha) => {
+                // `b_rhs_base` IS NOT GUARANTEED NON-NEGATIVE. With
+                // `enforce_positivity: false` (the default) the Cunge-derived
+                // Muskingum coefficients go negative on a large fraction of
+                // reach-timesteps, so `b_base` can be below zero. A raw
+                // `alpha*b_base` cap would then be negative, bind against a
+                // positive zeta, and rescale the whole RHS by `(1-alpha)` —
+                // turning a mass bound into a silent 10x attenuation. Caught by
+                // `tests/leakance_gamma_gradcheck.rs::an_unreached_bound_is_bit_identical`.
+                //
+                // `relu` is the physics, not a patch: a reach with no water
+                // available can lose none, so the cap there is zero.
+                let cap = b_rhs_base.clone().clamp_min(0.0) * alpha;
+                let bound = zeta.clone().min_pair(cap.clone());
+
+                // Two factors, because the forward splits b_rhs two ways:
+                //   d(b_rhs)/d(zeta)   = -(1 - s)
+                //   d(b_rhs)/d(b_base) = 1 - s * d(cap)/d(b_base)
+                //                      = 1 - s * alpha   where b_base > 0
+                //                      = 1               where b_base <= 0
+                // with s = 1 where the cap binds. Both are recorded here rather
+                // than recomputed in the backward, so the two cannot drift.
+                let binding = zeta.greater(cap).float();
+                let one_minus_binding = binding.clone().ones_like() - binding.clone();
+                let positive_base = b_rhs_base.clone().greater_elem(0.0).float();
+                let base_factor =
+                    binding.clone().ones_like() - binding * positive_base * alpha;
+                if let Some(ls) = leak_out.as_mut() {
+                    ls.rhs_bound = Some((unwrap(base_factor), unwrap(one_minus_binding)));
+                }
+                b_rhs_base - bound
+            }
+            None => b_rhs_base - zeta,
+        },
         None => b_rhs_base,
     };
 
