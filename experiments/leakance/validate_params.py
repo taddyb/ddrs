@@ -83,16 +83,22 @@ def main():
     if "conductance" in F:
         C = F["conductance"]
         # divide out the area-form factor so C is comparable to a real leakance
-        kv_mday = (C / AREA_FORM_FACTOR) * BED_THICK_M * 86400.0
+        # MULTIPLY, do not divide. Equal flux requires K_phys*A_phys = K_D*A_ours,
+        # so K_phys = K_D * A_ours/A_phys = K_D * p^(q-1) = K_D * 0.3445. Our area
+        # is SMALLER than the physical one, so the physically equivalent
+        # conductivity is SMALLER than the learned number, not larger.
+        kv_mday = (C * AREA_FORM_FACTOR) * BED_THICK_M * 86400.0
         lo, hi = KV_MEAS_MDAY
         report["leakance"] = {
             "assumed streambed thickness m": BED_THICK_M,
-            "area-form factor divided out": AREA_FORM_FACTOR,
+            "area-form factor applied (multiplied)": AREA_FORM_FACTOR,
             "conductance 1/s p10/median/p90": [float(np.percentile(C,10)), float(np.median(C)), float(np.percentile(C,90))],
             "implied Kv m/day p10/median/p90": [float(np.percentile(kv_mday,10)), float(np.median(kv_mday)), float(np.percentile(kv_mday,90))],
             "measured Kv range m/day": list(KV_MEAS_MDAY),
             "frac inside measured range": band(kv_mday, lo, hi),
             "frac below measured minimum": float((kv_mday < lo).mean()),
+            "box centre (geometric) 1/s": float(np.sqrt(1e-8 * 1e-4)),
+            "median distance from box centre, decades": float(abs(np.log10(np.median(C) / np.sqrt(1e-8 * 1e-4)))),
             "position in measured range (0=min,1=max, log scale)":
                 float(np.clip((np.log10(np.median(kv_mday)) - np.log10(lo)) / (np.log10(hi) - np.log10(lo)), 0, 1)),
         }
