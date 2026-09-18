@@ -173,6 +173,8 @@ pub fn axis_label(name: &str) -> &str {
     match name {
         "p_spatial" => "p",
         "q_spatial" => "q",
+        "K_D" => "kd",
+        "d_gw" => "dgw",
         other => other,
     }
 }

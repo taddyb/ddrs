@@ -103,7 +103,21 @@ pub struct PhysFields<I: Backend> {
 }
 
 /// Every parameter the landscape can hold or perturb.
-pub const AXIS_PARAMS: [&str; 4] = ["n", "p_spatial", "q_spatial", "gamma"];
+///
+/// `K_D` and `d_gw` joined on 2026-09-18. Before that the leakance directions
+/// were invisible to this instrument: a landscape of a leakance arm could only
+/// report where the ROUGHNESS parameters sat, with the exchange parameters
+/// pinned, which is not an answer to whether leakance is identifiable.
+///
+/// `leakance_factor` is deliberately NOT sweepable. It is the gate input, and
+/// the gate's own temperature anneal already drives its gradient to zero once a
+/// reach commits (`d(gate)/d(u)` = 3.2e-8 at u = 0.1, tau = 0.1), so a swept
+/// curvature along it would be reporting the anneal schedule, not the physics.
+pub const AXIS_PARAMS: [&str; 6] = ["n", "p_spatial", "q_spatial", "gamma", "K_D", "d_gw"];
+
+/// Parameters that only exist on a leakance arm, so they may only be swept or
+/// carried when `use_leakance` is set.
+pub const LEAKANCE_PARAMS: [&str; 3] = ["K_D", "d_gw", "leakance_factor"];
 
 /// `parameter_ranges` entry for an axis parameter.
 pub fn param_range(cfg: &crate::config::Config, name: &str) -> [f32; 2] {
@@ -113,12 +127,10 @@ pub fn param_range(cfg: &crate::config::Config, name: &str) -> [f32; 2] {
         "p_spatial" => r.p_spatial,
         "q_spatial" => r.q_spatial,
         "gamma" => r.gamma,
-        // Not axes — carried at their trained field on a leakance arm, so the
-        // landscape evaluates the model that was actually trained.
         "K_D" => r.k_d,
         "d_gw" => r.d_gw,
         "leakance_factor" => r.leakance_factor,
-        other => panic!("`{other}` is not a landscape parameter; axes: {AXIS_PARAMS:?}, carried also: K_D, d_gw, leakance_factor"),
+        other => panic!("`{other}` is not a landscape parameter; valid: {AXIS_PARAMS:?} plus leakance_factor (carried only)"),
     }
 }
 
@@ -169,6 +181,16 @@ where
         for a in axes {
             if !AXIS_PARAMS.contains(&a.as_str()) {
                 return Err(format!("unknown landscape axis `{a}`; valid axes are {AXIS_PARAMS:?}").into());
+            }
+            // A leakance axis on a non-leakance arm would sweep a head output
+            // that does not exist. Caught here rather than in `validate_axes`,
+            // which runs before the arm's config is resolved.
+            if LEAKANCE_PARAMS.contains(&a.as_str()) && !ctx.cfg.params.use_leakance {
+                return Err(format!(
+                    "landscape axis `{a}` requires an arm with `use_leakance: true`; \
+                     this arm does not learn it"
+                )
+                .into());
             }
         }
         if axes[0] == axes[1] || axes[0] == axes[2] || axes[1] == axes[2] {
@@ -253,14 +275,23 @@ where
                 if name == "gamma" && !learns_gamma {
                     continue;
                 }
+                // Leakance names go through the dedicated block below, which is
+                // gated on `use_leakance`. Carrying them here would demand a
+                // head output that does not exist on a non-leakance arm.
+                if LEAKANCE_PARAMS.contains(&name) {
+                    continue;
+                }
                 carried.push((name.to_string(), field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?));
             }
-            // Leakance fields ride along at their trained values. Without this
-            // the objective passed `k_d: None` and evaluated a NO-LEAKANCE
-            // model, which is why leakance arms were refused outright rather
-            // than silently mis-measured.
+            // Leakance fields ride along at their trained values unless they are
+            // being swept. Without this the objective passed `k_d: None` and
+            // evaluated a NO-LEAKANCE model, which is why leakance arms were
+            // refused outright rather than silently mis-measured.
             if ctx.cfg.params.use_leakance {
-                for name in ["K_D", "d_gw", "leakance_factor"] {
+                for name in LEAKANCE_PARAMS {
+                    if axes.iter().any(|a| a == name) {
+                        continue; // swept, not carried
+                    }
                     carried.push((
                         name.to_string(),
                         field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?,

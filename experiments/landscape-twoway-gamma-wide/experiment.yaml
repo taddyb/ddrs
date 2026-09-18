@@ -1,0 +1,35 @@
+# ITEM 1: where is gamma's optimum, if it has one?
+#
+# The 17x17 read at alpha_max 1.5 put gamma's best value at EXACTLY -1.500 on
+# both Juniata gauges, i.e. hard against the search-box edge. That is a wall,
+# not an optimum, so the 131x/169x curvature ratios are lower bounds on how
+# flat the gamma direction is.
+#
+# alpha_max 4.6 = ln(100), two decades. At alpha = -4.6 the trained gamma 0.429
+# becomes 0.0043, i.e. effectively no stage dependence at all.
+#
+# STRUCTURAL LIMIT worth stating: alpha is a LOG MULTIPLIER, phys = x0*exp(alpha),
+# so with x0 > 0 this parameterization can NEVER reach negative gamma even though
+# parameter_ranges.gamma now admits [-0.2, 0.85]. It can only approach zero. So
+# this run can conclude "gamma wants to vanish" but cannot find a negative
+# optimum if one exists.
+#
+# grid 0: Newton search only, no dense surface. The quantity of interest is
+# where the optimum LANDS, not the terrain around it.
+study: landscape
+arms:
+  - { name: twoway-ep30, run: 2026-09-17T16-38-16Z-train-and-test, checkpoint: epoch_30_mb_9 }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  axes: [n, gamma, q_spatial]
+  window_days: 365
+  water_year: 2000
+  n_windows: 1
+  alpha_max: 4.6051702
+  grid: 0
+  fd_step: 0.05
+  newton_iters: 20
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
