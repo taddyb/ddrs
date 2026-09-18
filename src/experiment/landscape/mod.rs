@@ -372,11 +372,11 @@ where
         GaugeSource::NestedReference => {
             let dbf = spec.gauges.gages_ii_dbf.as_ref().ok_or("nested-reference requires gages_ii_dbf")?;
             let class = read_gages_ii_class(dbf)?;
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, &opts.period)?;
+            let ctx = InfluenceContext::<I>::open_allowing_leakance(&arms[0], device, opts.force_cpu, &opts.period)?;
             nested_reference_selection(&ctx.dataset, &class, spec.gauges.max_downstream)?
         }
         GaugeSource::All => {
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, &opts.period)?;
+            let ctx = InfluenceContext::<I>::open_allowing_leakance(&arms[0], device, opts.force_cpu, &opts.period)?;
             let list = all_gauges_selection(&ctx.dataset);
             println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
             list
@@ -436,7 +436,7 @@ where
 {
     let t_arm = Instant::now();
     println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
-    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu, &opts.period)?;
+    let ctx = InfluenceContext::<I>::open_allowing_leakance(arm, device, opts.force_cpu, &opts.period)?;
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
     let n_windows = spec.n_windows.clamp(1, 4);

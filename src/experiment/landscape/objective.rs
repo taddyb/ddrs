@@ -113,7 +113,12 @@ pub fn param_range(cfg: &crate::config::Config, name: &str) -> [f32; 2] {
         "p_spatial" => r.p_spatial,
         "q_spatial" => r.q_spatial,
         "gamma" => r.gamma,
-        other => panic!("`{other}` is not a landscape axis parameter; valid: {AXIS_PARAMS:?}"),
+        // Not axes — carried at their trained field on a leakance arm, so the
+        // landscape evaluates the model that was actually trained.
+        "K_D" => r.k_d,
+        "d_gw" => r.d_gw,
+        "leakance_factor" => r.leakance_factor,
+        other => panic!("`{other}` is not a landscape parameter; axes: {AXIS_PARAMS:?}, carried also: K_D, d_gw, leakance_factor"),
     }
 }
 
@@ -250,6 +255,18 @@ where
                 }
                 carried.push((name.to_string(), field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?));
             }
+            // Leakance fields ride along at their trained values. Without this
+            // the objective passed `k_d: None` and evaluated a NO-LEAKANCE
+            // model, which is why leakance arms were refused outright rather
+            // than silently mis-measured.
+            if ctx.cfg.params.use_leakance {
+                for name in ["K_D", "d_gw", "leakance_factor"] {
+                    carried.push((
+                        name.to_string(),
+                        field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?,
+                    ));
+                }
+            }
             let x_storage = match params_map.get("x_storage") {
                 Some(x) => denormalize(
                     x.clone().inner(),
@@ -321,7 +338,13 @@ where
     fn normalize_ad(x_phys: Tensor<AD<I>, 1>, range: [f32; 2], log_space: bool) -> Tensor<AD<I>, 1> {
         let [lo, hi] = range;
         if log_space {
-            let log_lo = (lo + 1e-6).ln();
+            // Was `(lo + 1e-6).ln()`, the third copy of the bug PR #46 fixed in
+            // `routing/utils.rs::log_space_lower` and `training/forward.rs`.
+            // Harmless while `p_spatial` (lo = 1) was the only log-space axis,
+            // where the distortion is 1e-6. NOT harmless for `K_D` (lo = 1e-8),
+            // where `lo + 1e-6` is 100x the bound and collapses the box — which
+            // is exactly the parameter this file now carries.
+            let log_lo = crate::routing::utils::log_space_lower(lo);
             let log_hi = hi.ln();
             (x_phys.log() - log_lo) / (log_hi - log_lo)
         } else {
@@ -377,9 +400,9 @@ where
                     n: get("n").expect("n field"),
                     q_spatial: get("q_spatial").expect("q_spatial field"),
                     p_spatial: Some(get("p_spatial").expect("p_spatial field")),
-                    k_d: None,
-                    d_gw: None,
-                    leakance_factor: None,
+                    k_d: get("K_D"),
+                    d_gw: get("d_gw"),
+                    leakance_factor: get("leakance_factor"),
                     impervious_mask: None,
                     gamma: if self.learns_gamma { Some(get("gamma").expect("gamma field")) } else { None },
                 },

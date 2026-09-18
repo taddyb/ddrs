@@ -61,6 +61,18 @@ where
     /// dataset's time axis and every window resolved against it cover the
     /// period the model was actually trained on).
     pub fn open(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str) -> Result<Self, BoxError> {
+        Self::open_inner(arm, device, force_cpu, period, false)
+    }
+
+    /// As [`open`], but permitting a leakance arm. Only the landscape study may
+    /// use this, and only because it carries `K_D`/`d_gw`/`leakance_factor` at
+    /// their trained fields; anything that does not would silently evaluate a
+    /// different model than the one trained.
+    pub fn open_allowing_leakance(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str) -> Result<Self, BoxError> {
+        Self::open_inner(arm, device, force_cpu, period, true)
+    }
+
+    fn open_inner(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str, allow_leakance: bool) -> Result<Self, BoxError> {
         let mode = if period == PERIOD_TRAINING { ConfigMode::Training } else { ConfigMode::Testing };
         let mut cfg = Config::from_yaml_file_with_mode(&arm.config_path, mode)
             .map_err(|e| format!("arm `{}`: {e}", arm.name))?;
@@ -68,7 +80,12 @@ where
             cfg.params.sparse_solver = SparseSolver::Cpu;
             cfg.params.use_cuda_graphs = false;
         }
-        if cfg.params.use_leakance {
+        // The ADJOINT study still refuses leakance: its functionals are
+        // gradients w.r.t. lateral inflow, and zeta is an additional sink on
+        // the RHS whose contribution those functionals do not account for.
+        // The LANDSCAPE study now carries the leakance fields explicitly
+        // (`landscape/objective.rs`), so it opts out of this guard.
+        if cfg.params.use_leakance && !allow_leakance {
             return Err(format!("arm `{}`: leakance arms are out of scope for the adjoint study", arm.name).into());
         }
         if cfg.params.ddr_match {

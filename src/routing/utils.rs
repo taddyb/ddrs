@@ -35,7 +35,7 @@ use burn::tensor::{backend::Backend, Tensor};
 ///
 /// Shared with `src/training/forward.rs::physical_to_normalized` so the two
 /// directions cannot drift apart.
-pub(crate) fn log_space_lower(lo: f32) -> f32 {
+pub fn log_space_lower(lo: f32) -> f32 {
     if lo > 0.0 {
         lo.ln()
     } else {

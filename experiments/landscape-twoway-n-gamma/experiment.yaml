@@ -1,0 +1,43 @@
+# Where is the two-way leakance + n(d) run sitting in its own loss landscape?
+#
+# Read at epoch 30 of 50, while training is still going, because epoch 30 is the
+# last point at which the leakance GATE can still move: at epoch 31 its
+# temperature drops to 0.1, where committed reaches receive numerically zero
+# gradient (d(gate)/d(u) = 3.2e-8 at u = 0.1). So this is a snapshot of the
+# state the gate decisions were made from.
+#
+# PLANE: n-gamma, the two parameters this arm actually learns that the landscape
+# study can sweep. `AXIS_PARAMS` is ["n", "p_spatial", "q_spatial", "gamma"], so
+# K_D / d_gw / leakance_factor CANNOT be swept — the leakance directions are
+# invisible to this instrument. Read the result as "where are the roughness
+# parameters", not "where is the model".
+#
+# slice_center: trained pins unswept components at their trained values rather
+# than at alpha_star, so the origin is where the model actually is.
+#
+#   target/release/ddrs --workspace .ddrs experiment landscape-twoway-n-gamma --backend cpu
+study: landscape
+arms:
+  - { name: twoway-ep30, run: 2026-09-17T16-38-16Z-train-and-test, checkpoint: epoch_30_mb_9 }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  window_days: 365
+  water_year: 2000
+  n_windows: 1
+  # `axes` defaults to (n, p_spatial, q_spatial), which is wrong for this arm:
+  # it PRESCRIBES p = 21 and q = 0.65 and learns gamma instead. Sweeping a
+  # prescribed constant would have produced a flat direction and a meaningless
+  # "p is unidentifiable" reading.
+  axes: [n, gamma, q_spatial]
+  alpha_max: 1.5
+  # 17x17 rather than the usual 25x25: this is a mid-training read while the
+  # GPU is busy with the run itself, so it trades resolution for turnaround.
+  grid: 17
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-gamma"]
+  slice_center: trained
