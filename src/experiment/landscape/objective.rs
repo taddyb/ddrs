@@ -201,11 +201,11 @@ where
         let log = &ctx.cfg.params.log_space_parameters;
         let sigma = ctx
             .dataset
-            .gauge_obs_std(&[staid.clone()])
+            .gauge_obs_std_required(&[staid.clone()])
             .map_err(|e| format!("gauge std: {e}"))?
             .first()
             .copied()
-            .ok_or("gauge std unavailable (loss.kind must be nse-batch in the arm's config)")?;
+            .ok_or("gauge std unavailable")?;
         let eps = ctx.cfg.experiment.as_ref().map(|e| e.loss.eps).unwrap_or(0.1);
         // Which of (n, p_spatial, q_spatial) is a real model parameter vs
         // fixed at `params.defaults` for this arm. Same source of truth as
