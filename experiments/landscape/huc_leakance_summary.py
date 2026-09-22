@@ -70,9 +70,12 @@ def main():
     ap.add_argument("run_glob")
     ap.add_argument("--sel", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--min-nse0", type=float, default=None, help="keep only gauges with trained NSE >= this (drop broken fits)")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     df = collect(args.run_glob)
+    if args.min_nse0 is not None:
+        df = df[df.nse0 >= args.min_nse0]
     sel = pd.read_csv(args.sel, dtype={"staid": str, "huc2": str})
     df = df.merge(sel[["staid", "huc2", "AGGECOREGI", "STATE", "STANAME"]], on="staid", how="left")
     df["ratio_n_kd"] = df.h0_n / df.h0_kd.abs()
@@ -126,7 +129,8 @@ def main():
             ax.axhline(1, color="#52514e", lw=0.8, ls="--")
         ax.set_title(title, fontsize=10)
         ax.grid(alpha=0.3, axis="y")
-    fig.suptitle("Leakance-frame curvature by region: two-way leakance arm, WY2000, nse-batch, ten gauges per HUC2", fontsize=11)
+    fig.suptitle("Leakance-frame curvature by region: two-way leakance arm, WY2000, nse-batch, ten gauges per HUC2"
+                 + (f" (trained NSE >= {args.min_nse0:g} only, {len(df)} gauges)" if args.min_nse0 is not None else ""), fontsize=11)
     fig.tight_layout()
     fig.savefig(args.out / "huc_leakance_summary.png", dpi=150, facecolor=fig.get_facecolor())
     print(f"{len(df)} gauges -> {args.out}")
