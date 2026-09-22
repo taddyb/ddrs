@@ -175,3 +175,70 @@ done; wait
     --sel experiments/landscape-huc-leakance/huc_selection.csv --out output/huc_leakance --min-nse0 0.3
 ~/projects/ddr/.venv/bin/python experiments/landscape/curvature3d.py <gauge.nc> --out <dir> --tag huc
 ```
+
+## 7. Follow-ups 1 to 3, worked (2026-09-22, same day)
+
+### 7.1 Additive water-table sweep on the plains gauges (follow-up 1)
+
+`landscape.additive_axes: {d_gw: 2.0}` (commit on this branch) sweeps `d_gw` as
+`d_gw0 +/- 2 m` so `d - d_gw` can change sign. Bundle
+`experiments/landscape-plains-dgw-additive/` (the 14 well-fit plains gauges), runs
+`.ddrs/experiments/landscape-plains-dgw-additive/2026-09-22T13-*-shard-*-of-14`, reader
+`experiments/landscape/plains_additive_summary.py`, table
+`output/plains_additive/PLAINS_ADDITIVE_TABLE.md`.
+
+| 14 plains gauges | additive d_gw | multiplicative census |
+|---|---:|---:|
+| leakance-only dNSE, median | +0.090 | +0.099 |
+| plateau fraction, median | 0.25 | 0.30 |
+| d_gw offset at the loss minimum, median | +0.08 m | (sweep cannot cross) |
+| gauges whose minimum is within 0.2 m of the trained table | 10 of 14 | |
+| prefer raising the table (less losing) : lowering (more losing) | 10 : 4 | |
+
+Letting the sign flip changes nothing that matters. The reachable gain is the same, the
+minimum sits at the trained water table at most gauges, and at the gauges where raising
+and lowering are both available the two half-planes give nearly equal loss drops (Little
+Sioux 0.62 vs 0.56, Kettle 0.28 vs 0.27, Cedar 0.12 vs 0.12). The gain therefore comes
+from `K_D`, which multiplies the flux whatever its sign, and the hydrograph does not
+resolve the direction of exchange. Only three gauges (White River near Kadoka, Long
+Prairie, West Branch Du Page) put the minimum 1.3 to 2 m above the trained table, where the
+reach would be gaining. The "plains see leakance" statement of 3.2 stands, narrowed: the
+plains see the conductance magnitude, not the water-table position.
+
+### 7.2 The arid West is an inflow problem, not a routing problem (follow-up 2)
+
+The summed-Q' baseline (no routing, no leakance) over WY2000 at the 37 broken arid gauges
+has median NSE -2.05, against +0.53 at the 13 well-fit arid gauges and +0.72 at humid
+well-fit gauges. Its volume ratio (summed inflow over observed) splits the broken set:
+
+- **Volume deficit, ratio 0.34 to 0.72 (10 gauges):** Pecos below Sumner Dam, Rio Chama
+  below Abiquiu Dam, Big Thompson at Loveland, Verde near Camp Verde, Cherry Creek, the
+  three Sheyenne gauges, Keya Paha, Redwater. Reservoirs and diversions hold water the
+  inflow product delivers; every dam-named arid gauge (7 of 7) is in the broken set.
+- **Volume excess, ratio 2 to 7,860 (14 gauges):** Hondo Creek, Sabinal, South Fork San
+  Gabriel, Coleto, Bear Den, Rio Nutria, Zuni, Rocky Arroyo, Rio Hondo, White River near
+  Fort Apache. Mostly GAGES-II reference class, so not regulation: the inflow product
+  generates water that never reaches the gauge. That is transmission loss, the physics the
+  leakance term exists for, at magnitudes (50 to 99 % of inflow) far above what the trained
+  term can remove under the `K_D` box ceiling (1e-5) and the mass bound.
+- Regulation is therefore a subset explanation, not the population one: 13 of 17
+  reference-class arid gauges are also broken. The discriminator is low flow (broken median
+  1.6 m^3/s vs 6.0 fit).
+
+An arm that can be read in the arid West needs: the regulated gauges dropped from the
+population, a losing regime that can reach tens of percent of inflow (raise the `K_D`
+ceiling and `leakance_max_rhs_fraction`), and a loss that does not divide by a near-zero
+variance at ephemeral gauges.
+
+### 7.3 Leakance leverage is inflow-volume bias, quantified (follow-up 3)
+
+Over the 105 well-fit gauges, the leakance-only NSE gain correlates with the magnitude of
+the baseline volume error at Spearman +0.54 (p < 0.001), +0.61 on the plains (p = 0.02);
+the plateau shrinks as the volume error grows (Spearman -0.33, p = 0.001). Of the 38
+gauges whose best cell lowers the water table (more losing), 36 have an inflow volume above
+observed. The leakance leverage found in 3.2 is the loss asking for a mass sink where the
+inflow product over-delivers. Real exchange is not excluded, but at almost every gauge it
+points the same way as the bias, and discharge alone cannot separate them.
+
+Per-gauge values are in `output/huc_leakance/huc_leakance_gauges.csv`
+(`base_vol_ratio_wy2000`, `base_nse_wy2000`, `dnse_leak`, `CLASS`).
