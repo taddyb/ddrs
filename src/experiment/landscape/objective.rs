@@ -54,6 +54,10 @@ pub struct Objective<'a, I: Backend> {
     pub axes: [String; 3],
     pub ranges: [[f32; 2]; 3],
     pub log_space: [bool; 3],
+    /// Physical units per unit alpha for a slot swept additively (`x = x0 +
+    /// alpha * s`), `None` for the log-multiplier convention (`x = x0 *
+    /// exp(alpha)`). See `LandscapeSpec::additive_axes`.
+    pub additive: [Option<f32>; 3],
     /// `active[k]` is true when the slot-`k` axis parameter is in the head's
     /// `learnable_parameters` (a real model parameter); false when it is
     /// fixed at `params.defaults` for this arm. See `Objective::active`.
@@ -176,6 +180,7 @@ where
         objective: &str,
         deriv_weight: f32,
         axes: &[String; 3],
+        additive: [Option<f32>; 3],
     ) -> Result<Self, BoxError> {
         let device = &ctx.device;
         for a in axes {
@@ -321,7 +326,7 @@ where
             let end = start + Duration::days(window_days.saturating_sub(1) as i64);
             return Err(Box::new(NoValidObservations { start, end }));
         }
-        Ok(Self { ctx, windows, sigma, eps, axes: axes.clone(), ranges, log_space, active, learns_gamma, objective: objective.to_string(), deriv_weight })
+        Ok(Self { ctx, windows, sigma, eps, axes: axes.clone(), ranges, log_space, additive, active, learns_gamma, objective: objective.to_string(), deriv_weight })
     }
 
     /// Trained physical field of parameter `name` (axis slot or carried);
@@ -353,7 +358,11 @@ where
         let at = |name: &str| -> Option<Tensor<I, 1>> {
             if let Some(k) = self.axes.iter().position(|a| a == name) {
                 let r = self.ranges[k];
-                return Some((w.x0[k].clone() * alpha[k].exp()).clamp(r[0], r[1]));
+                let phys = match self.additive[k] {
+                    Some(s) => w.x0[k].clone() + alpha[k] * s,
+                    None => w.x0[k].clone() * alpha[k].exp(),
+                };
+                return Some(phys.clamp(r[0], r[1]));
             }
             w.carried.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
         };
@@ -408,8 +417,13 @@ where
             // constant.
             let mut norm: Vec<(String, Tensor<AD<I>, 1>)> = Vec::new();
             for (k, x0) in w.x0.iter().enumerate() {
-                let scale = leaves[k].clone().exp() * ones.clone(); // [n]
-                let phys = Tensor::<AD<I>, 1>::from_inner(x0.clone()) * scale;
+                // Log-multiplier slot: x = x0 * exp(alpha). Additive slot:
+                // x = x0 + alpha * s (physical units), so a signed field can
+                // cross zero. Either way the leaf broadcasts to [n].
+                let phys = match self.additive[k] {
+                    Some(s) => Tensor::<AD<I>, 1>::from_inner(x0.clone()) + leaves[k].clone().mul_scalar(s) * ones.clone(),
+                    None => Tensor::<AD<I>, 1>::from_inner(x0.clone()) * (leaves[k].clone().exp() * ones.clone()),
+                };
                 let [lo, hi] = self.ranges[k];
                 // clamped fraction (diagnostic)
                 let v: Vec<f32> = phys.clone().inner().into_data().to_vec::<f32>().unwrap();

@@ -123,6 +123,10 @@ pub struct LandscapeResult {
     pub active: [bool; 3],
     /// Parameter in each alpha slot (`LandscapeSpec::axes`).
     pub param_names: [String; 3],
+    /// Physical units per unit alpha for each additively swept slot, 0.0 for
+    /// a log-multiplier slot (`LandscapeSpec::additive_axes`). Readers
+    /// convert an additive slot's alpha to an offset by multiplying.
+    pub additive_scale: [f32; 3],
     /// Trained per-reach learned stage-roughness exponent; `Some` only on an
     /// arm whose head learns `gamma`.
     pub gamma0: Option<Vec<f32>>,
@@ -163,6 +167,10 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
         format!("log-multipliers on ({}) applied to the trained physical fields; alpha = 0 is the trained point", r.param_names.join(", ")).as_str(),
     )?;
     f.add_attribute("param_names", r.param_names.join(",").as_str())?;
+    f.add_attribute(
+        "additive_scale",
+        r.additive_scale.iter().map(|s| format!("{s}")).collect::<Vec<_>>().join(",").as_str(),
+    )?;
     f.add_attribute("objective", r.objective.as_str())?;
     f.add_attribute("eigvec_layout", "eigvec[component, k]: column k is the k-th eigenvector (descending eigenvalue) of the Hessian at alpha_star")?;
     f.add_attribute("coord_trained_definition", "c_k = v_k^T (0 - alpha_star): trained point in the eigenbasis of H(alpha_star)")?;
@@ -334,6 +342,7 @@ mod tests {
             dist_to_gauge_m: Vec::new(),
             active: [true, true, true],
             param_names: ["n".into(), "p_spatial".into(), "q_spatial".into()],
+            additive_scale: [0.0; 3],
             gamma0: None,
             slope: vec![1e-3, 2e-3],
             length: vec![500.0, 750.0],
