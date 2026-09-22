@@ -1,0 +1,57 @@
+# Per-gauge loss landscape at EVERY gauged location inside the Juniata River
+# Basin, as a nested cascade from a 9-reach headwater to the 213-reach outlet
+# at Newport. The question is whether the daily hydrograph constrains the
+# channel parameters equally well everywhere in a basin, or whether the
+# constraint degrades with contributing network size and position.
+#
+# Gauge selection: every staid in `gages_2000_area_balanced.csv` (the arm's own
+# population) whose COMID lies in Newport's (01567000) upstream subgraph in
+# merit_gages_conus_adjacency.zarr. Sorted by drainage area.
+#   01564500   9 reaches    445.6 km2  Aughwick Creek near Three Springs
+#   01558000  11 reaches    572.5 km2  Little Juniata River at Spruce Creek
+#   01556000  23 reaches    749.6 km2  Frankstown Br Juniata R at Williamsburg
+#   01562000  53 reaches   1944.0 km2  Raystown Br Juniata R at Saxton
+#   01559000  47 reaches   2111.3 km2  Juniata River at Huntingdon
+#   01563200  63 reaches   2485.1 km2  Rays Br Juniata R bl Rays Dam
+#   01563500 127 reaches   5261.9 km2  Juniata River at Mapleton Depot
+#   01567000 213 reaches   8657.3 km2  Juniata River at Newport
+# Two further JRB gauges (01557500 Bald Eagle Ck at Tyrone, 3 reaches;
+# 01560000 Dunning Ck at Belden, 13 reaches) exist in gages_3000 but NOT in
+# this arm's population, so they are out of scope here.
+#
+# Arm: uh-seed42, the only Juniata-relevant arm with n, p AND q all learnable,
+# so all three physical planes (n-p, n-q, p-q) are active and plot3d.py's
+# three-slice 3-D scene is meaningful. (The p21 arms fix p, which would leave
+# only n-q and plot3d.py is not `active`-aware.)
+#
+#   cargo build --release --bin ddrs
+#   target/release/ddrs --workspace .ddrs experiment landscape-jrb-all --backend cpu
+study: landscape
+arms:
+  - { name: uh-seed42, run: 2026-08-09T09-30-39Z-train-and-test, checkpoint: epoch_30_mb_1 }
+landscape:
+  gauges:
+    source: list
+    staids:
+      - "01564500"
+      - "01558000"
+      - "01556000"
+      - "01562000"
+      - "01559000"
+      - "01563200"
+      - "01563500"
+      - "01567000"
+  window_days: 365   # full water year, matches landscape-uh-* convention
+  water_year: 2000
+  n_windows: 1
+  alpha_max: 2.3025851     # ln 10; wide enough that alpha_star stays in-box
+                           # for the small headwater subgraphs
+  grid: 25                 # 25^2 per plane; step 0.19 log units
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-p", "n-q", "p-q", "stiff-sloppy"]
+  reach_grad: true   # per-reach dL/dln x at alpha=0 and alpha*, plus
+                     # dist_to_gauge_m: where in the network the gauge still
+                     # constrains anything

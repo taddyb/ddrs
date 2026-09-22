@@ -1,0 +1,39 @@
+# Same as experiments/landscape-jrb-zero/ but on the 20-epoch continuation of student zero
+# (config/experiments/synthetic_n_student_zero_e20.yaml): does more training move the
+# local optimum toward the truth, or is the displacement the shared head's own?
+# POSITIVE CONTROL for the curvature instrument: the Juniata nested cascade on
+# STUDENT ZERO (config/experiments/synthetic_n_student_zero.yaml), a head
+# trained with nothing in the way: the teacher's own Q'_true, noise-free
+# synthetic observations from a KNOWN Manning's n field (Leopold-Maddock in
+# uparea, which the head can represent exactly because log10_uparea is an
+# input), consensus geometry. If the instrument is sound it must report n as
+# the stiff direction with the local optimum at the truth. A large
+# displacement here, with no bias and no noise, is the shared head's doing,
+# not the data's, and separates "the data cannot identify it" from "the head
+# will not deliver it".
+#
+# Same ten gauges, axes, box, grid and planes as experiments/landscape-jrb-all/
+# so the two are directly comparable; fd_step 0.025 per FD_STEP_CHECK.md.
+# The loss is scored against the SYNTHETIC store because the arm's config.yaml
+# points `observations` there; that is the intended behaviour.
+#
+#   target/release/ddrs --workspace .ddrs-synthetic-n-zero experiment landscape-jrb-zero-e20 --backend cpu --shard I/10
+study: landscape
+arms:
+  - { name: student-zero, run: 2026-09-21T01-02-38Z-train, checkpoint: epoch_20_mb_35 }
+landscape:
+  gauges:
+    source: list
+    staids: ["01557500", "01560000", "01564500", "01558000", "01556000",
+             "01562000", "01559000", "01563200", "01563500", "01567000"]
+  window_days: 365
+  water_year: 2000
+  n_windows: 1
+  alpha_max: 2.3025851
+  grid: 25
+  fd_step: 0.025
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-p", "n-q", "p-q", "stiff-sloppy"]
+  reach_grad: true
