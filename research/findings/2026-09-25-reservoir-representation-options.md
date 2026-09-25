@@ -305,8 +305,13 @@ ResOpsUS (Steyaert et al. 2022, Sci. Data, 10.1038/s41597-022-01134-7): daily in
 storage for 679 reservoirs. ISTARF-CONUS: STARFIT parameters for 1,930 GRanD dams. GDROM v2
 (Zheng et al. 2025, Sci. Data, 10.1038/s41597-025-06162-7): reconstructed daily series for 2,017
 reservoirs. Caravan-format ResOpsUS used by Casado-Rodríguez 2026: 10.5281/zenodo.15978041.
-Satellite storage and area: GRSAD, GloLakes, Global Water Watch. None of these is on disk; the
-local reservoir data are DDR's NWM / RFC-DA tables and HydroLAKES.
+Satellite storage and area: GRSAD, GloLakes, Global Water Watch. When this section was written
+none of these was on disk. **Update, same day:** ResOpsUS v2 (Zenodo 10.5281/zenodo.6612040),
+ISTARF-CONUS (10.5281/zenodo.4602277) and the ResOpsUS+CARS attribute tables are now at
+`/mnt/ssd1/data/resops/`, fetched by `~/projects/remote_sensing_extraction/resops/fetch_resops.sh`,
+with a GRanD to MERIT COMID crosswalk (2,177 rows, 663 in ResOpsUS) and a coverage inventory under
+`derived/`: 298 reservoirs have at least 5 years of overlapping daily inflow and outflow, 289 of
+them mapped to a COMID. GDROM v2 and the satellite products are still not on disk.
 
 ## 5. Options
 
@@ -416,6 +421,12 @@ equivalent choice cost 0.08 NSE (§2.2) because the lag there was a day.
   should not be read.
 - Four dams are the whole sandbox. Raystown and Abiquiu are flood control; the two arid dams are
   scheduled. The DOR > 0.5 population has not been split by purpose.
+
+**Status (same day):** option C is implemented, off by default: `params.use_reservoirs` plus a
+`data_sources.reservoirs` CSV (`COMID,T_days`), commits `368786a`, `c10da38`, `9d5bab8`; see
+`.claude/RESERVOIRS.md`. It has been exercised only on the Juniata bundle with Raystown at
+`T = 1.23 d`. The next step for it is a `T` table fitted per dam from ResOpsUS inflow and outflow
+(§4.5), which is also the data option E needs.
 
 ### 5.7 Next measurements, in order
 

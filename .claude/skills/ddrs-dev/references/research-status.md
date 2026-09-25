@@ -690,8 +690,18 @@ was reverted in #143 and never evaluated at gauges.
   median trained NSE 0.495 against 0.739 unregulated, 0.12 to 0.38 below in every area bin; a
   perfect volume fix only reaches 0.553. Below DOR 0.5 there is no deficit. Excluding them moves
   the population median from 0.732 to 0.751.
+- **Option C implemented 2026-09-25, off by default** (`params.use_reservoirs`,
+  `data_sources.reservoirs`, a `COMID,T_days` CSV; see `.claude/RESERVOIRS.md`). Verified only on
+  the Juniata bundle with Raystown at `T = 1.23 d` (the routed gauge series changes); no CONUS skill
+  number exists yet, and no `T` table beyond that fixture.
+- **ResOpsUS is on disk** at `/mnt/ssd1/data/resops/` (ResOpsUS v2, ISTARF-CONUS, ResOpsUS+CARS
+  attributes; fetch scripts and provenance in `~/projects/remote_sensing_extraction/`). Derived:
+  `derived/grand_to_merit_comid.csv` (2,177 GRanD ids to MERIT COMID, 663 in ResOpsUS) and
+  `derived/resops_inventory.csv`: 298 reservoirs have at least 5 years of overlapping daily inflow
+  and outflow, 289 of them mapped to a COMID. That is the population for fitting `T` per dam.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
-  (option A); an observed-release boundary condition (option B, up to 216 of the 347).
+  (option A); an observed-release boundary condition (option B, up to 216 of the 347); a `T` table
+  fitted from ResOpsUS inflow and outflow for option C; operating rules from ISTARF-CONUS (option E).
 
 ## Open, not closed
 
