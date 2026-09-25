@@ -1,0 +1,60 @@
+# The Juniata nested cascade again, but in the LEAKANCE frame: axes
+# [n, K_D, d_gw] on the two-way leakance + n(d) arm, every gauged location
+# inside the basin, from a 3-reach headwater to the 213-reach outlet.
+#
+# Companion to experiments/landscape-jrb-all/ (axes n, p, q on uh-seed42).
+# Same gauge-selection rule (every gages_3000 staid whose COMID lies in
+# Newport's upstream subgraph); this arm trains on gages_3000 so all ten are
+# in population, including the two the uh-seed42 arm lacked:
+#   01557500   3 reaches    115 km2  Bald Eagle Ck at Tyrone
+#   01560000  13 reaches    445 km2  Dunning Ck at Belden
+#
+# Questions the (n, K_D, d_gw) frame asks that (n, p, q) cannot:
+#   1. Does K_D keep NEGATIVE curvature and pin at the box ceiling at every
+#      gauge (a runaway mass sink, not a sloppy direction), as it did on the
+#      Juniata pair in landscape-twoway-leakance-axes?
+#   2. Does d_gw stay orthogonal to n (corr +0.015/+0.028 on the pair) and
+#      does its curvature at the local optimum scale with contributing
+#      network size, as a summed mass term should?
+#   3. Is the d_gw direction flat at the TRAINED point but stiff at the local
+#      optimum everywhere (0.0002 -> 0.04 at Newport), i.e. is the population
+#      head parking d_gw in a disconnected regime?
+#
+# Checkpoint epoch_30_mb_9 and slice_center: trained match the existing
+# two-gauge read so the numbers are directly comparable. Epoch 30 is the last
+# point at which the leakance gate can still move (see the handoff of
+# 2026-09-18). Note alpha is a log multiplier, so d_gw cannot change sign
+# under this sweep; the gaining-reach direction (d_gw > depth) is untested.
+#
+#   cargo build --release --bin ddrs
+#   target/release/ddrs --workspace .ddrs experiment landscape-jrb-leakance --backend cpu --shard I/10
+study: landscape
+arms:
+  - { name: twoway-ep30, run: 2026-09-17T16-38-16Z-train-and-test, checkpoint: epoch_30_mb_9 }
+landscape:
+  gauges:
+    source: list
+    staids:
+      - "01557500"
+      - "01560000"
+      - "01564500"
+      - "01558000"
+      - "01556000"
+      - "01562000"
+      - "01559000"
+      - "01563200"
+      - "01563500"
+      - "01567000"
+  axes: [n, K_D, d_gw]
+  window_days: 365
+  water_year: 2000
+  n_windows: 1
+  alpha_max: 2.3025851
+  grid: 25
+  fd_step: 0.025      # the flat eigenvalue is biased high at 0.05 (FD_STEP_CHECK.md)
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-kd", "n-dgw", "kd-dgw"]
+  slice_center: trained
+  reach_grad: true

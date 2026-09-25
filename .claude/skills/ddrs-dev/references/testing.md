@@ -74,7 +74,10 @@ cargo test --lib && cargo test && \
   mkdir -p output && cargo run --release --example compare_ddr_sandbox
 ```
 If you touched `src/training/forward.rs` (disagg / leakance threading), also run
-`cargo test --test leakance_off_parity`.
+`cargo test --test leakance_off_parity`. If you touched any of the three head
+readers (`forward`, `forward_eval_core`, `probe_forward`) or
+`src/training/gate.rs`, also run
+`cargo test --features fixtures --test gamma_eval_parity --test leakance_gate`.
 
 If you touched `src/routing/leakance.rs`, `src/geometry.rs`'s depth inversion, or
 the S6/S25 leakance call site in `src/routing/mmc_op.rs::forward_chain_inner`, run
@@ -148,7 +151,7 @@ line citation outright rather than trusting it to stay pinned.
 | Gridded (DDM30) ingestion | `gridded_bundle` (sub-reach store → subdivided layout, gauge at the cell's last piece, cache hit, dataset opens), `cargo test --lib adjacency::gridded` (synthetic-store validation), `hourly_streamflow::time_major_store_reads_identically_to_divide_major`, `cargo test --lib zarr::tests::upstream_comids_names_each_subdivided_parent_once` |
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
-| Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting) |
+| Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting), `leakance_gate` (tau = 1 bit-exact identity through all three readers, gate gradcheck, saturation) |
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |

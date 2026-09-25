@@ -1,0 +1,36 @@
+# ITEM 3: are the LEAKANCE directions identifiable, measured against a
+# direction we know is well determined?
+#
+# Until 2026-09-18 AXIS_PARAMS was ["n","p_spatial","q_spatial","gamma"], so
+# K_D and d_gw could not be swept at all and every leakance landscape reported
+# only where the roughness parameters sat. This is the first time the exchange
+# parameters are on an axis.
+#
+# axes [n, K_D, d_gw] deliberately includes n as an internal yardstick: it is
+# the direction the 2026-09-17 read found stiff (curvature 3.8e-2 to 8.8e-2).
+# A curvature ratio against n is therefore interpretable without a second run.
+#
+# K_D is log-space, so this is also the first exercise of the denormalize path
+# that PR #46 fixed and that this file carried a third broken copy of until
+# today. If K_D's surface looks degenerate, check that before believing it.
+#
+# Dense 17x17 surfaces: unlike item 1, the terrain IS the question here.
+study: landscape
+arms:
+  - { name: twoway-ep30, run: 2026-09-17T16-38-16Z-train-and-test, checkpoint: epoch_30_mb_9 }
+landscape:
+  gauges:
+    pairs:
+      - ["01563500", "01567000"]
+  axes: [n, K_D, d_gw]
+  window_days: 365
+  water_year: 2000
+  n_windows: 1
+  alpha_max: 2.3025851
+  grid: 17
+  fd_step: 0.05
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-kd", "n-dgw", "kd-dgw"]
+  slice_center: trained

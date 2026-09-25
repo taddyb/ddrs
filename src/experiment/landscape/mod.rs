@@ -85,6 +85,17 @@ pub struct LandscapeSpec {
     /// `n-gamma`. Validated by `validate_axes`.
     #[serde(default = "d_axes")]
     pub axes: [String; 3],
+    /// Axes swept ADDITIVELY instead of as log multipliers, as `{name:
+    /// half_width}` in the parameter's physical units (metres for `d_gw`).
+    /// The alpha coordinate is unchanged, so grid, box, Newton and Hessian
+    /// code are untouched: slot `k` maps to `x0 + alpha * half_width /
+    /// alpha_max`, clamped to the parameter range, so alpha = ±alpha_max is
+    /// ±half_width. Needed for a signed field such as `d_gw`, where a
+    /// multiplier can never change the sign of `d - d_gw` (the
+    /// losing/gaining regime) and can never cross zero. Every key must be one
+    /// of `axes`. Default empty (every axis a log multiplier).
+    #[serde(default)]
+    pub additive_axes: std::collections::HashMap<String, f32>,
     /// Also compute per-reach `g_i = dL/d ln x_i` (x in n, p, q) at α = 0 and
     /// α*, plus `dist_to_gauge_m`, for the "perturbations in a watershed"
     /// study: where in the network the gauge still constrains parameters,
@@ -173,6 +184,8 @@ pub fn axis_label(name: &str) -> &str {
     match name {
         "p_spatial" => "p",
         "q_spatial" => "q",
+        "K_D" => "kd",
+        "d_gw" => "dgw",
         other => other,
     }
 }
@@ -240,6 +253,18 @@ impl LandscapeSpec {
         }
         if self.axes[0] == self.axes[1] || self.axes[0] == self.axes[2] || self.axes[1] == self.axes[2] {
             return Err(format!("landscape axes must be distinct, got {:?}", self.axes).into());
+        }
+        for (name, hw) in &self.additive_axes {
+            if !self.axes.contains(name) {
+                return Err(format!(
+                    "landscape additive_axes names `{name}`, which is not one of the axes {:?}",
+                    self.axes
+                )
+                .into());
+            }
+            if !(*hw > 0.0) {
+                return Err(format!("landscape additive_axes half-width for `{name}` must be > 0, got {hw}").into());
+            }
         }
         Ok(())
     }
@@ -372,11 +397,11 @@ where
         GaugeSource::NestedReference => {
             let dbf = spec.gauges.gages_ii_dbf.as_ref().ok_or("nested-reference requires gages_ii_dbf")?;
             let class = read_gages_ii_class(dbf)?;
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, &opts.period)?;
+            let ctx = InfluenceContext::<I>::open_allowing_leakance(&arms[0], device, opts.force_cpu, &opts.period)?;
             nested_reference_selection(&ctx.dataset, &class, spec.gauges.max_downstream)?
         }
         GaugeSource::All => {
-            let ctx = InfluenceContext::<I>::open(&arms[0], device, opts.force_cpu, &opts.period)?;
+            let ctx = InfluenceContext::<I>::open_allowing_leakance(&arms[0], device, opts.force_cpu, &opts.period)?;
             let list = all_gauges_selection(&ctx.dataset);
             println!("gauge source `all`: {} gauges the dataset can evaluate (subgraph + observations present)", list.len());
             list
@@ -436,7 +461,7 @@ where
 {
     let t_arm = Instant::now();
     println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
-    let ctx = InfluenceContext::<I>::open(arm, device, opts.force_cpu, &opts.period)?;
+    let ctx = InfluenceContext::<I>::open_allowing_leakance(arm, device, opts.force_cpu, &opts.period)?;
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
     let n_windows = spec.n_windows.clamp(1, 4);
@@ -522,7 +547,10 @@ where
     I::Device: 'static,
 {
     let staid = Staid::new(&g.staid);
-    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight, &spec.axes)?;
+    // Physical units per unit alpha for each additively swept slot; `None`
+    // keeps the log-multiplier convention. See `LandscapeSpec::additive_axes`.
+    let additive: [Option<f32>; 3] = std::array::from_fn(|k| spec.additive_axes.get(&spec.axes[k]).map(|hw| hw / spec.alpha_max));
+    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight, &spec.axes, additive)?;
     let h = spec.fd_step;
     let active = obj.active();
     let n_active_params = active.iter().filter(|&&a| a).count();
@@ -843,6 +871,7 @@ where
         q0: obj.trained_field(&obj.windows[0], "q_spatial").expect("q").into_data().to_vec::<f32>().unwrap(),
         gamma0: obj.trained_field(&obj.windows[0], "gamma").map(|t| t.into_data().to_vec::<f32>().unwrap()),
         param_names: spec.axes.clone(),
+        additive_scale: std::array::from_fn(|k| additive[k].unwrap_or(0.0)),
         comid: obj.windows[0].comids.clone(),
         reach_grad0,
         reach_grad_star,
@@ -1099,6 +1128,23 @@ mod tests {
         assert_eq!(spec.objective, "nse-batch");
         assert!(spec.validate_objective().is_ok());
         assert!(!spec.series);
+    }
+
+    #[test]
+    fn additive_axes_must_name_an_axis_with_positive_half_width() {
+        let ok: LandscapeSpec =
+            serde_yaml::from_str("gauges: {}\naxes: [n, K_D, d_gw]\nadditive_axes: {d_gw: 2.0}\n").unwrap();
+        assert!(ok.validate_axes().is_ok());
+        assert_eq!(ok.additive_axes["d_gw"], 2.0);
+        let not_an_axis: LandscapeSpec =
+            serde_yaml::from_str("gauges: {}\naxes: [n, K_D, d_gw]\nadditive_axes: {p_spatial: 1.0}\n").unwrap();
+        let err = not_an_axis.validate_axes().unwrap_err().to_string();
+        assert!(err.contains("p_spatial") && err.contains("not one of the axes"), "{err}");
+        let bad_width: LandscapeSpec =
+            serde_yaml::from_str("gauges: {}\naxes: [n, K_D, d_gw]\nadditive_axes: {d_gw: 0.0}\n").unwrap();
+        assert!(bad_width.validate_axes().unwrap_err().to_string().contains("must be > 0"));
+        let default: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert!(default.additive_axes.is_empty());
     }
 
     #[test]

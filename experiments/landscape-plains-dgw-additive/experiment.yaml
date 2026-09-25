@@ -1,0 +1,53 @@
+# Follow-up 1 of research/findings/2026-09-22-regional-leakance-curvature-findings.md:
+# the plains gauges (HUC 07, 09, 10) where the regional census found the loss
+# does respond to the leakance parameters, re-swept with d_gw ADDITIVE so the
+# water-table offset can cross the bed and `d - d_gw` can change sign. In the
+# multiplicative census every gain sat at the maximal-losing corner and the
+# gaining regime was untestable by construction.
+#
+# Same arm, window, objective, grid and planes as experiments/landscape-huc-leakance/.
+# `additive_axes: {d_gw: 2.0}` maps alpha in [-ln 10, ln 10] to d_gw0 +/- 2.0 m
+# (d_gw box is [-2, 3] m; trained d_gw is 0.1 to 0.4 m; plains channel depths
+# are of order 0.5 to 3 m, so the sweep crosses the bed). n and K_D stay log
+# multipliers. Read alpha_dgw * additive_scale[2] (netCDF attribute) as metres.
+#
+# The 14 gauges are the well-fit (trained NSE >= 0.3) plains gauges of the
+# census, each listed with the summed-Q' volume ratio over WY2000 (> 1 means
+# the inflow product overshoots the observed volume).
+#
+#   target/release/ddrs --workspace .ddrs experiment landscape-plains-dgw-additive --bundle <this dir> --backend cpu --shard I/14
+study: landscape
+arms:
+  - { name: twoway-ep30, run: 2026-09-17T16-38-16Z-train-and-test, checkpoint: epoch_30_mb_9 }
+landscape:
+  gauges:
+    source: list
+    staids:
+      - "05069000"   # Sand Hill River at Climax MN, NSE 0.55, Q'/obs 1.06
+      - "05130500"   # Sturgeon River near Chisholm MN, NSE 0.58, Q'/obs 1.64
+      - "05245100"   # Long Prairie River at Long Prairie MN, NSE 0.51, Q'/obs 0.87
+      - "05336700"   # Kettle River below Sandstone MN, NSE 0.70, Q'/obs 1.24
+      - "05406500"   # Black Earth Creek at Black Earth WI, NSE 0.86, Q'/obs 1.06
+      - "05451500"   # Iowa River at Marshalltown IA, NSE 0.71, Q'/obs 1.61
+      - "05473400"   # Cedar Creek near Oakland Mills IA, NSE 0.74, Q'/obs 0.97
+      - "05540130"   # West Branch Du Page River near Naperville IL, NSE 0.72, Q'/obs 0.86
+      - "05594100"   # Kaskaskia River near Venedy Station IL, NSE 0.59, Q'/obs 1.19
+      - "06407500"   # Spring Creek near Keystone SD, NSE 0.58, Q'/obs 1.37
+      - "06447000"   # White River near Kadoka SD, NSE 0.49, Q'/obs 1.14
+      - "06605000"   # Ocheyedan River near Spencer IA, NSE 0.68, Q'/obs 1.42
+      - "06605850"   # Little Sioux River at Linn Grove IA, NSE 0.45, Q'/obs 1.76
+      - "06803000"   # Salt Creek at Roca NE, NSE 0.47, Q'/obs 1.25
+  axes: [n, K_D, d_gw]
+  additive_axes: { d_gw: 2.0 }
+  window_days: 365
+  water_year: 2000
+  n_windows: 1
+  alpha_max: 2.3025851
+  grid: 25
+  fd_step: 0.025
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  planes: ["n-kd", "n-dgw", "kd-dgw"]
+  slice_center: trained
+  reach_grad: false

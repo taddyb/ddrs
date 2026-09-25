@@ -424,6 +424,54 @@ pub struct StageRoughnessSection {
     pub d_ref: f32,
 }
 
+/// YAML `params.leakance_gate:` block. Absent by default, and absent means the
+/// gate is not applied at all (byte-identical to the historical path).
+///
+/// Turns the head's `leakance_factor` output from a continuous multiplier into
+/// a temperature-annealed 0/1 selector,
+/// `g = sigmoid(logit(clamp(u, eps, 1 − eps)) / tau)`, applied to the
+/// NORMALIZED head output in every reader (`src/training/gate.rs::leakance_gate`).
+/// `tau = 1` is the exact identity; smaller `tau` sharpens toward a step at
+/// `u = 0.5`. The motivation is the exact scaling degeneracy between
+/// `leakance_factor` and `K_D` (they multiply, so only their product reaches
+/// the physics); a gate and a conductance are not degenerate with each other.
+///
+/// Requires `params.use_leakance: true` (`validate_leakance_gate`): a gate on a
+/// disabled term is silently inert.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeakanceGate {
+    /// Temperature schedule keyed by 1-indexed epoch, resolved exactly like
+    /// `experiment.learning_rate` (`LeakanceGate::resolve` takes the largest
+    /// key `<= epoch`; an epoch before the first key takes the first value).
+    /// Training uses the epoch's value; eval, the probe and `dump_parameters`
+    /// use the FINAL value (`LeakanceGate::final_temperature`), so the scored
+    /// model is the one training ended on. Values must be positive and finite.
+    pub temperature: BTreeMap<usize, f32>,
+}
+
+impl LeakanceGate {
+    /// Temperature in force at `epoch` (1-indexed). Mirrors
+    /// `src/training/optimizer.rs::resolve_lr`: largest key `<= epoch`, else
+    /// the first value. Panics on an empty schedule, which
+    /// `validate_leakance_gate` rejects at load.
+    pub fn resolve(&self, epoch: usize) -> f32 {
+        self.temperature
+            .range(..=epoch)
+            .next_back()
+            .map(|(_, &t)| t)
+            .unwrap_or_else(|| {
+                *self.temperature.values().next().expect("leakance_gate.temperature is empty")
+            })
+    }
+
+    /// The last scheduled temperature: what eval, the probe and
+    /// `dump_parameters` apply.
+    pub fn final_temperature(&self) -> f32 {
+        *self.temperature.values().next_back().expect("leakance_gate.temperature is empty")
+    }
+}
+
 /// YAML `kan_head.disaggregation:` block (presence enables the head, unless
 /// `enabled: false`). The head always consumes `(daily Q', that day's 24h
 /// precip)` — requires `data_sources.aorc_precip` to be set. See
@@ -733,6 +781,49 @@ pub struct Params {
     /// (Phase C on). Set to `false` to recover the prior unclamped behavior
     /// byte-identically (e.g. for the recovery control answer key).
     pub leakance_losing_only: bool,
+    /// Streambed thickness `M` (metres) for the leakance DISCONNECTION CAP.
+    ///
+    /// `Some(M)` caps the driving head at `depth + M`: once the water table
+    /// falls more than `M` below the bed, an unsaturated zone opens beneath the
+    /// channel, stream and aquifer are no longer hydraulically connected, and
+    /// the flux is set by the head across the bed layer alone rather than by
+    /// how far down the table sits. This is the MODFLOW river-package `RBOT`
+    /// behaviour, and it is what makes a DEEP `d_gw` box meaningful: without
+    /// it the linear head `depth - d_gw` grows without bound, so a large head
+    /// with a small `K_D` becomes indistinguishable from a small head with a
+    /// large one, and widening the box buys degeneracy rather than coverage.
+    ///
+    /// `None` (the default) leaves the head uncapped, byte-identical to every
+    /// run before 2026-09-17 and to the DDR `c2bd0f9` reference pinned by
+    /// `tests/leakance_reference_match.rs`.
+    ///
+    /// Typical alluvial streambeds are 0.1 to 1 m thick.
+    pub leakance_bed_thickness: Option<f32>,
+    /// Mass bound on leakance: `zeta <- min(zeta, alpha * b_rhs_base)`, with
+    /// `alpha` this fraction and `b_rhs_base = c2*i_t + c3*q_t + c4*q'_t` the
+    /// locally available water in the Muskingum RHS.
+    ///
+    /// `leakance_losing_only` constrains the SIGN of the exchange (a gaining
+    /// reach contributes zero) but nothing constrains its MAGNITUDE, so a large
+    /// enough conductance removes more water than the reach carries. The solve
+    /// then returns negative discharge and the S28 `clamp_min(discharge_lb)`
+    /// manufactures mass to conceal it.
+    ///
+    /// Measured 2026-09-17: a `K_D` box whose geometric centre sat 31.6x too
+    /// high drove 30.8% of CONUS reaches negative pre-clamp, against a
+    /// no-leakance baseline of 0.013-0.114% (six prior CONUS runs), and the gradient through that many saturated
+    /// clamps went non-finite on the first optimizer step. The flaw was
+    /// unobservable for the whole prior history of the feature because the
+    /// `log_space_lower` bug kept `K_D` frozen near 1e-7.
+    ///
+    /// With every Muskingum coefficient non-negative and inflows non-negative,
+    /// `b_rhs_base >= 0`, so `alpha < 1` keeps the bounded RHS strictly
+    /// positive and leakance can no longer drive a negative solve on its own.
+    /// Must lie in `(0, 1)`; `validate_leakance_mass_bound` rejects otherwise.
+    ///
+    /// `None` (the default) leaves zeta unbounded, byte-identical to every run
+    /// before 2026-09-17 and to the DDR `c2bd0f9` reference.
+    pub leakance_max_rhs_fraction: Option<f32>,
     /// Phase C: impervious hard-zero threshold. Reaches with
     /// `corridor_impervious > threshold` get `zeta ≡ 0` and zero gradient to
     /// their leakance params. Only applied when an impervious mask tensor is
@@ -779,6 +870,10 @@ pub struct Params {
     /// Stage-dependent Manning roughness, `n(d) = n_0·(d/d_ref)^(−gamma)`.
     /// Absent ⇒ `gamma = 0`, byte-identical to the historical solver.
     pub stage_roughness: Option<StageRoughnessSection>,
+    /// Temperature-annealed 0/1 gate on the head's `leakance_factor` output.
+    /// Absent ⇒ the output is used as-is, byte-identical to the historical
+    /// readers. See `LeakanceGate`.
+    pub leakance_gate: Option<LeakanceGate>,
 }
 
 impl Params {
@@ -814,11 +909,14 @@ impl Default for Params {
             use_cuda_graphs: false,
             use_leakance: false,
             leakance_losing_only: true,
+            leakance_bed_thickness: None,
+            leakance_max_rhs_fraction: None,
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
             subdivision: Subdivision::default(),
             stage_roughness: None,
+            leakance_gate: None,
         }
     }
 }
@@ -840,6 +938,8 @@ struct ParamsRaw {
     use_cuda_graphs: Option<bool>,
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
+    leakance_bed_thickness: Option<f32>,
+    leakance_max_rhs_fraction: Option<f32>,
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
     enforce_positivity: Option<bool>,
@@ -847,6 +947,8 @@ struct ParamsRaw {
     subdivision: Subdivision,
     #[serde(default)]
     stage_roughness: Option<StageRoughnessSection>,
+    #[serde(default)]
+    leakance_gate: Option<LeakanceGate>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -919,6 +1021,12 @@ impl From<ParamsRaw> for Params {
         if let Some(b) = r.use_leakance {
             p.use_leakance = b;
         }
+        if let Some(m) = r.leakance_bed_thickness {
+            p.leakance_bed_thickness = Some(m);
+        }
+        if let Some(a) = r.leakance_max_rhs_fraction {
+            p.leakance_max_rhs_fraction = Some(a);
+        }
         if let Some(b) = r.leakance_losing_only {
             p.leakance_losing_only = b;
         }
@@ -944,6 +1052,7 @@ impl From<ParamsRaw> for Params {
         // exactly what `Params::default()` carries.
         p.subdivision = r.subdivision;
         p.stage_roughness = r.stage_roughness;
+        p.leakance_gate = r.leakance_gate;
         p
     }
 }
@@ -1097,6 +1206,14 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_leakance_mass_bound(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_leakance_gate(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -1297,6 +1414,64 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// `params.leakance_max_rhs_fraction` bounds zeta by the locally available
+/// water. It only makes sense on a leakance run, and only in `(0, 1)`: at or
+/// above 1 the bounded RHS can reach zero and the guarantee it exists to
+/// provide (leakance alone never drives a negative solve) is lost.
+fn validate_leakance_mass_bound(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(alpha) = cfg.params.leakance_max_rhs_fraction else {
+        return Ok(());
+    };
+    if !cfg.params.use_leakance {
+        return Err(
+            "params: `leakance_max_rhs_fraction` requires `use_leakance: true` — it bounds \
+             the leakance flux, and there is no flux to bound without leakance."
+                .to_string(),
+        );
+    }
+    if !(alpha.is_finite() && alpha > 0.0 && alpha < 1.0) {
+        return Err(format!(
+            "params.leakance_max_rhs_fraction must lie strictly inside (0, 1), got {alpha}. \
+             It is the fraction of the Muskingum RHS that leakance may remove. At 1.0 the \
+             bounded RHS can reach exactly zero, so the property this bound exists to \
+             guarantee — that leakance alone cannot drive a negative solve — no longer \
+             holds. At or below 0 leakance is disabled, which `use_leakance: false` \
+             already expresses."
+        ));
+    }
+    Ok(())
+}
+
+/// `params.leakance_gate` is only meaningful on a leakance run, and its
+/// schedule must hold usable temperatures.
+fn validate_leakance_gate(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(gate) = cfg.params.leakance_gate.as_ref() else {
+        return Ok(());
+    };
+    if !cfg.params.use_leakance {
+        return Err(
+            "params: `leakance_gate` requires `use_leakance: true` — the gate transforms \
+             the head's `leakance_factor` output, which nothing reads while leakance is \
+             off, so the block would be silently inert."
+                .to_string(),
+        );
+    }
+    if gate.temperature.is_empty() {
+        return Err(
+            "params.leakance_gate: `temperature` must map at least one epoch to a \
+             temperature (e.g. `{1: 1.0, 10: 0.2}`)."
+                .to_string(),
+        );
+    }
+    if let Some((epoch, t)) = gate.temperature.iter().find(|(_, t)| !(t.is_finite() && **t > 0.0)) {
+        return Err(format!(
+            "params.leakance_gate: temperature at epoch {epoch} is {t}; every temperature \
+             must be positive and finite (1.0 is the exact identity, smaller sharpens)."
+        ));
+    }
+    Ok(())
+}
+
 /// A head that does not emit `q_spatial` holds it at `params.defaults.q_spatial`
 /// (the n_0 + gamma design). The default must exist and sit inside the box,
 /// because the readers normalize it into the box and the engine denormalizes
@@ -1335,12 +1510,25 @@ fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
         return Ok(());
     }
     let r = cfg.params.parameter_ranges.gamma;
-    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < 0.0 || r[1] <= r[0] || r[1] > 1.0 {
+    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < -0.5 || r[1] <= r[0] || r[1] > 1.0 {
         return Err(format!(
-            "params.parameter_ranges.gamma must be a valid range inside [0, 1] \
-             with lo < hi, got {r:?}. Channels get SMOOTHER as they fill so gamma \
-             is non-negative, and above 1 the depth exponent 3/(5+3q+3·gamma) \
-             collapses while roughness explodes as depth goes to zero."
+            "params.parameter_ranges.gamma must be a valid range inside [-0.5, 1] \
+             with lo < hi, got {r:?}. Above 1 the depth exponent 3/(5+3q+3·gamma) \
+             collapses while roughness explodes as depth goes to zero. Below \
+             -0.5 is refused as a guard, not as physics: the exponent's \
+             denominator only degenerates at gamma = -(5+3q)/3 (about -2.3 at \
+             q = 0.65), so -0.5 leaves a wide margin.
+
+             Negative gamma IS admitted, and deliberately. The usual argument \
+             that channels get smoother as they fill holds for an in-bank \
+             section, where the relative roughness of the bed falls as depth \
+             grows. It fails once flow reaches a vegetated floodplain or a \
+             composite section, where the effective roughness RISES with stage. \
+             A box floored at 0 cannot represent those reaches at all, and the \
+             2026-09-17 parameter-range audit measured learned gamma sitting \
+             hard against that floor on one product. The backward is exercised \
+             at negative gamma by `tests/sp8_gradcheck.rs` and, with leakance \
+             active, by `tests/leakance_gamma_gradcheck.rs`."
         ));
     }
     if cfg.params.ddr_match {
@@ -1356,15 +1544,6 @@ fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
             "`gamma` in kan_head.learnable_parameters requires \
              `use_cuda_graphs: false`. The captured graph is ddr_match-only and \
              bakes the constant-5/3 celerity in."
-                .to_string(),
-        );
-    }
-    if cfg.params.use_leakance {
-        return Err(
-            "`gamma` in kan_head.learnable_parameters is not supported together \
-             with `use_leakance: true`. Leakance routes through its own \
-             eight-parent op, which has no gamma parent, so gamma would silently \
-             receive no gradient."
                 .to_string(),
         );
     }
@@ -2562,6 +2741,77 @@ params:
             (Params::default().leakance_impervious_threshold - 0.7).abs() < 1e-9,
             "leakance_impervious_threshold must default to 0.7"
         );
+    }
+
+    fn write_yaml(name: &str, yaml: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, yaml).unwrap();
+        path
+    }
+
+    const GATE_HEAD: &str = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+"#;
+
+    #[test]
+    fn leakance_gate_absent_is_none() {
+        let path = write_yaml("ddrs_leakance_gate_absent.yaml", &format!("{GATE_HEAD}params:\n  use_leakance: true\n"));
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        assert!(cfg.params.leakance_gate.is_none());
+        assert!(Params::default().leakance_gate.is_none());
+    }
+
+    #[test]
+    fn leakance_gate_rejected_without_use_leakance() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_no_leakance.yaml",
+            &format!("{GATE_HEAD}params:\n  leakance_gate:\n    temperature: {{1: 1.0, 5: 0.2}}\n"),
+        );
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("leakance_gate") && msg.contains("use_leakance"),
+            "error should name both keys: {msg}"
+        );
+    }
+
+    #[test]
+    fn leakance_gate_rejects_empty_and_nonpositive_temperatures() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_empty.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{}}\n"),
+        );
+        let msg = Config::from_yaml_file(&path).unwrap_err().to_string();
+        assert!(msg.contains("temperature"), "{msg}");
+
+        let path = write_yaml(
+            "ddrs_leakance_gate_zero.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{1: 1.0, 5: 0.0}}\n"),
+        );
+        let msg = Config::from_yaml_file(&path).unwrap_err().to_string();
+        assert!(msg.contains("epoch 5") && msg.contains("positive"), "{msg}");
+    }
+
+    #[test]
+    fn leakance_gate_schedule_resolves_at_epoch_boundaries() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_schedule.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{1: 1.0, 3: 0.5, 6: 0.1}}\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        let gate = cfg.params.leakance_gate.as_ref().expect("block parsed");
+        // Same rule as `resolve_lr`: largest key <= epoch, first value before it.
+        assert_eq!(gate.resolve(0), 1.0);
+        assert_eq!(gate.resolve(1), 1.0);
+        assert_eq!(gate.resolve(2), 1.0);
+        assert_eq!(gate.resolve(3), 0.5);
+        assert_eq!(gate.resolve(5), 0.5);
+        assert_eq!(gate.resolve(6), 0.1);
+        assert_eq!(gate.resolve(100), 0.1);
+        assert_eq!(gate.final_temperature(), 0.1);
     }
 
     #[test]

@@ -487,6 +487,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 self.impervious_mask.as_ref().cloned(),
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
                 self.track_negative_discharge,
+                self.gamma.as_ref().cloned(),
             );
             if let Some(diag) = zeta_step {
                 fn add<I: Backend>(slot: &mut Option<Tensor<I, 1>>, v: Tensor<I, 1>) {

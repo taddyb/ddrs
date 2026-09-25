@@ -648,6 +648,15 @@ impl MeritGagesDataset {
         if !self.want_gauge_std {
             return Ok(Vec::new());
         }
+        self.gauge_obs_std_required(staids)
+    }
+
+    /// As [`gauge_obs_std`], but computed regardless of the configured loss.
+    /// For callers whose objective is their own choice rather than the arm's
+    /// training loss — the landscape study scores `nse-batch` at a gauge even
+    /// when the arm trained with L1 (the synthetic-n students). Shares the
+    /// same one-shot cache.
+    pub fn gauge_obs_std_required(&self, staids: &[Staid]) -> Result<Vec<f32>> {
         if self.gauge_std.get().is_none() {
             let full = crate::data::dates::RhoWindow {
                 start_day_idx: 0,

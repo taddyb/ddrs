@@ -10,6 +10,7 @@ use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
 use crate::routing::mmc::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use crate::routing::utils::denormalize;
+use crate::training::gate::leakance_gate;
 
 /// Gather + grouped sum: `output[g, t] = sum_{k : group_ids[k] == g} runoff[flat_indices[k], t]`.
 ///
@@ -322,13 +323,26 @@ pub fn manning_n_stats<I: Backend>(
 /// with autograd alive on the engine path.
 ///
 /// Mirrors `~/projects/ddr/scripts/train.py:67-73` (MLP forward + dmc forward).
+///
+/// `gate_tau` — the leakance-gate temperature in force for this forward
+/// (`LeakanceGate::resolve(epoch)`, resolved by the driver like the learning
+/// rate). Must be `Some` exactly when `params.leakance_gate` is configured and
+/// `None` otherwise; the mismatch is asserted so a caller cannot silently
+/// train an ungated model against a gated config or vice versa.
 pub fn forward<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<Autodiff<I>>,
     head: &KanHead<Autodiff<I>>,
     device: &I::Device,
     carry_state: bool,
+    gate_tau: Option<f32>,
 ) -> Tensor<Autodiff<I>, 2> {
+    assert_eq!(
+        gate_tau.is_some(),
+        cfg.params.leakance_gate.is_some(),
+        "forward: `gate_tau` must be Some exactly when `params.leakance_gate` is \
+         configured (resolve it with `LeakanceGate::resolve(epoch)`)"
+    );
     let n_active = tensors.adjacency.n;
     // The head runs at PARENT resolution; expand to the routing's sub-reach
     // rows before anything denormalizes or slices. No-op when not subdivided.
@@ -384,11 +398,15 @@ pub fn forward<I: Backend>(
                 );
             }
         }
-        (
-            params_map.get("K_D").cloned(),
-            params_map.get("d_gw").cloned(),
-            params_map.get("leakance_factor").cloned(),
-        )
+        // Temperature-annealed 0/1 gate on the NORMALIZED factor, applied to
+        // the head output before `setup_inputs` denormalizes it. Absent block
+        // ⇒ `gate_tau` is `None` and the output is untouched (byte-identical).
+        let factor = params_map.get("leakance_factor").cloned();
+        let factor = match gate_tau {
+            Some(tau) => factor.map(|u| leakance_gate(u, tau)),
+            None => factor,
+        };
+        (params_map.get("K_D").cloned(), params_map.get("d_gw").cloned(), factor)
     } else {
         (None, None, None)
     };
@@ -717,6 +735,14 @@ fn forward_eval_core<I: Backend>(
             params_map.get("d_gw").expect("checked above").clone(),
             params_map.get("leakance_factor").expect("checked above").clone(),
         );
+        // Gate at the FINAL scheduled temperature (mirrors `forward`, which
+        // takes the epoch's value): eval scores the model training ended on.
+        // Applied to the head output, so an override below still replaces
+        // the value that reaches denormalization. Pinned by
+        // `tests/gamma_eval_parity.rs` and `tests/leakance_gate.rs`.
+        if let Some(gate) = cfg.params.leakance_gate.as_ref() {
+            factor_t = leakance_gate(factor_t, gate.final_temperature());
+        }
         if let Some(ov) = overrides {
             assert_eq!(
                 ov.mask.len(),
