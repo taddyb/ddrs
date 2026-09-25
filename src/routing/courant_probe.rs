@@ -170,6 +170,7 @@ where
             &mut x_eff_out,
             /* track_neg */ true,
             /* gamma_in */ None,
+            /* reservoir */ None,
         );
 
         if t % sample_every == 0 {

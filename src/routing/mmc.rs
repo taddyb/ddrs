@@ -21,11 +21,12 @@
 use std::sync::Arc;
 
 use burn::backend::Autodiff;
-use burn::tensor::{backend::Backend, Tensor};
+use burn::tensor::{backend::Backend, Tensor, TensorData};
 
 use burn::tensor::TensorPrimitive;
 
 use crate::config::{Config, SparseSolver};
+use crate::routing::mmc_op::ReservoirTensors;
 use crate::routing::utils::denormalize;
 use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAdjacency};
 
@@ -115,6 +116,11 @@ pub struct MuskingumCunge<I: Backend> {
     /// Per-reach impervious hard-zero mask (inner backend, constant).
     /// Stored from `SpatialParameters::impervious_mask` at `setup_inputs`.
     impervious_mask: Option<Tensor<I, 1>>,
+    /// Linear-reservoir rows (option C in `.claude/RESERVOIRS.md`): per-row
+    /// dam mask and residence time `T` in seconds (inner backend, constant).
+    /// Set by `set_reservoir_rows`; `None` keeps the timestep op
+    /// byte-identical to the no-reservoir path.
+    reservoir: Option<ReservoirTensors<I>>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -214,6 +220,7 @@ impl<I: Backend> MuskingumCunge<I> {
             d_gw: None,
             leakance_factor: None,
             impervious_mask: None,
+            reservoir: None,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -427,6 +434,65 @@ impl<I: Backend> MuskingumCunge<I> {
         );
     }
 
+    /// Route `rows` as linear reservoirs with residence times `t_days` (days).
+    ///
+    /// Muskingum storage `S = K·[X·I + (1−X)·Q]` at `X = 0`, `K = T` is the
+    /// linear reservoir `S = T·Q`, so on those rows only the timestep op
+    /// replaces the K it computed with `T = t_days·86400 s` and the X with 0
+    /// (S19'' in `mmc_op::forward_chain_inner`). Every other row is bitwise
+    /// unchanged. `T` is prescribed data, not learned, so a dam row's `n`,
+    /// `q_spatial` and `p_spatial` get exactly zero gradient. See
+    /// `.claude/RESERVOIRS.md`, option C.
+    ///
+    /// Call AFTER [`Self::setup_inputs`]: `rows` index its network. Empty
+    /// `rows` leaves the override off. Returns `Err`, changing nothing, on a
+    /// length mismatch, a row `>= n_segments`, a duplicate row, or a `T` that
+    /// is not finite or is below one hour (at `X = 0`, `c3 >= 0` needs
+    /// `T >= dt/2`; one hour leaves margin).
+    ///
+    /// Only the plain timestep op carries the override: `route_timestep`
+    /// panics if rows are set while leakance or the CUDA-graph path is active.
+    pub fn set_reservoir_rows(&mut self, rows: &[usize], t_days: &[f32]) -> Result<(), String> {
+        const SECONDS_PER_DAY: f32 = 86_400.0;
+        const MIN_T_DAYS: f32 = 1.0 / 24.0;
+
+        let n = self
+            .n_segments
+            .ok_or("set_reservoir_rows: call setup_inputs first")?;
+        if rows.len() != t_days.len() {
+            return Err(format!(
+                "set_reservoir_rows: {} rows but {} residence times",
+                rows.len(),
+                t_days.len()
+            ));
+        }
+        let mut mask = vec![false; n];
+        let mut t_seconds = vec![0.0_f32; n];
+        for (&row, &t) in rows.iter().zip(t_days) {
+            if row >= n {
+                return Err(format!(
+                    "set_reservoir_rows: row {row} is outside the {n}-reach network"
+                ));
+            }
+            if mask[row] {
+                return Err(format!("set_reservoir_rows: row {row} is listed twice"));
+            }
+            if !t.is_finite() || t < MIN_T_DAYS {
+                return Err(format!(
+                    "set_reservoir_rows: row {row} has T = {t} d; T must be finite and >= 1/24 d"
+                ));
+            }
+            mask[row] = true;
+            t_seconds[row] = t * SECONDS_PER_DAY;
+        }
+
+        self.reservoir = (!rows.is_empty()).then(|| ReservoirTensors {
+            mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
+            t_seconds: Tensor::from_floats(t_seconds.as_slice(), &self.device),
+        });
+        Ok(())
+    }
+
     /// Muskingum-Cunge coefficients `(c1, c2, c3, c4)`. Direct port of
     /// `calculate_muskingum_coefficients`.
     pub fn calculate_muskingum_coefficients(
@@ -477,6 +543,11 @@ impl<I: Backend> MuskingumCunge<I> {
             self.d_gw.as_ref().cloned(),
             self.leakance_factor.as_ref().cloned(),
         ) {
+            assert!(
+                self.reservoir.is_none(),
+                "set_reservoir_rows is not supported with leakance (params.use_leakance): \
+                 the leakance op has no linear-reservoir K/X override"
+            );
             let mut zeta_step: Option<crate::routing::mmc_op::ZetaStepDiag<I>> = None;
             let q_next = crate::routing::mmc_op::timestep_forward_leakance::<I>(
                 &self.cfg, pattern, assembler,
@@ -516,6 +587,11 @@ impl<I: Backend> MuskingumCunge<I> {
             && self.sparse_solver == SparseSolver::Cuda
             && crate::sparse::dispatch::backend_is_cuda::<I>()
         {
+            assert!(
+                self.reservoir.is_none(),
+                "set_reservoir_rows is not supported with use_cuda_graphs: the captured \
+                 graph has no linear-reservoir K/X override"
+            );
             crate::routing::mmc_op::timestep_forward_via_graph::<I>(
                 &self.cfg, pattern, assembler,
                 n, q_spatial, p_spatial,
@@ -523,13 +599,14 @@ impl<I: Backend> MuskingumCunge<I> {
                 length, slope, x_storage,
             )
         } else {
-            crate::routing::mmc_op::timestep_forward::<I>(
+            crate::routing::mmc_op::timestep_forward_with_reservoirs::<I>(
                 &self.cfg, pattern, assembler,
                 n, q_spatial, p_spatial,
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
                 self.track_negative_discharge,
                 self.gamma.as_ref().cloned(),
+                self.reservoir.as_ref(),
             )
         }
     }

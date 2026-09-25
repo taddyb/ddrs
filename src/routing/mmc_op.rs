@@ -15,7 +15,7 @@ use burn::backend::autodiff::checkpoint::base::Checkpointer;
 use burn::backend::autodiff::checkpoint::strategy::NoCheckpointing;
 use burn::backend::autodiff::grads::Gradients;
 use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
-use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
+use burn::tensor::{backend::Backend, Bool, Tensor, TensorPrimitive};
 
 use crate::config::Config;
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
@@ -65,6 +65,17 @@ pub(crate) struct LeakanceTensors<I: Backend> {
     /// Optional per-reach impervious hard-zero mask (0.0 = impervious, 1.0 = normal).
     /// Constant, not autograd-tracked. `None` ⇒ all-ones (no-op, back-compat).
     pub mask: Option<Tensor<I, 1>>,
+}
+
+/// Linear-reservoir override (`.claude/RESERVOIRS.md`, option C) threaded into
+/// `forward_chain_inner`. On rows where `mask` is true, S19'' replaces the
+/// Muskingum K and X the chain computed with `t_seconds` and 0, and B19''
+/// zeroes the gradient into both. Inner-backend constants: `T` is prescribed
+/// data, never learned. `t_seconds` is only read where `mask` is true.
+#[derive(Clone)]
+pub(crate) struct ReservoirTensors<I: Backend> {
+    pub mask: Tensor<I, 1, Bool>,
+    pub t_seconds: Tensor<I, 1>,
 }
 
 /// Per-step eval-time leakance diagnostics captured by the zeta sink: this
@@ -187,6 +198,11 @@ pub(crate) struct TimestepState<B: Backend> {
     /// means that recorded result stays reproducible; the tensor path is what
     /// makes gamma learnable.
     pub gamma_t: Option<B::FloatTensorPrimitive>,
+    /// Dam rows of the linear-reservoir override ([`ReservoirTensors::mask`]).
+    /// The saved `k_muskingum` and `x_effective` already hold `T` and 0 there
+    /// (S19''), so B20..B23 need nothing; B19'' uses the mask to stop the
+    /// gradient into K and X on those rows. `None` ⇒ no op in the backward.
+    pub reservoir_mask: Option<B::BoolTensorPrimitive>,
 }
 
 #[derive(Debug)]
@@ -352,6 +368,12 @@ where
         // under `ddr_match`, Cunge-derived otherwise. `state.x_storage` is
         // deliberately never read here: it is not what c1..c4 were built from.
         let x_eff = wrap(state.x_effective.clone());
+        // Dam rows of the linear-reservoir override (S19''). `None` ⇒ B19''
+        // below adds no op.
+        let reservoir_mask = state
+            .reservoir_mask
+            .clone()
+            .map(Tensor::<I, 1, Bool>::from_primitive);
 
         let depth = wrap(state.depth.clone());
         let top_width = wrap(state.top_width.clone());
@@ -589,6 +611,14 @@ where
             None
         } else {
             let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
+            // B19'' (X half). On dam rows S19'' replaced X with the constant 0,
+            // so nothing flows on into the Cunge chain or the S19' cap. Masked
+            // HERE, before the branch split below, so `gk_from_x_cap` is zero
+            // on those rows as well.
+            let gx = match reservoir_mask.as_ref() {
+                Some(m) => gx.mask_fill(m.clone(), 0.0),
+                None => gx,
+            };
             // Same expression as the forward's S19 (including the +1e-12).
             let bscl =
                 top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
@@ -663,6 +693,14 @@ where
         // reaches where the floor binds.
         let gk_muskingum = match gk_from_x_cap {
             Some(g) => gk_muskingum + g,
+            None => gk_muskingum,
+        };
+        // B19'' (K half). On dam rows S19'' replaced K with the constant T.
+        // Masked AFTER the `gk_from_x_cap` fold and BEFORE the B18' floor mask
+        // and B18, so no path carries a dam row's K gradient into its
+        // celerity, and from there into its n, q_spatial and p_spatial.
+        let gk_muskingum = match reservoir_mask {
+            Some(m) => gk_muskingum.mask_fill(m, 0.0),
             None => gk_muskingum,
         };
 
@@ -1481,6 +1519,8 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     // Per-reach stage-roughness exponent when it is a learned KAN output.
     // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`.
     gamma_in: Option<Tensor<I, 1>>,
+    // Linear-reservoir override (S19''). `None` ⇒ no op, byte-identical.
+    reservoir: Option<&ReservoirTensors<I>>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -1678,6 +1718,24 @@ where
         } else {
             x_cunge
         }
+    };
+
+    // S19'': linear-reservoir override (`.claude/RESERVOIRS.md`, option C).
+    // Muskingum storage S = K·[X·I + (1−X)·Q] at X = 0, K = T is exactly the
+    // linear reservoir S = T·Q, so on dam rows the K and X computed above are
+    // replaced by the prescribed residence time T (seconds) and 0. Placed
+    // AFTER S18'/S19', so the positivity clamps never see T (at X = 0,
+    // c1 > 0 always and c3 >= 0 needs only T >= dt/2, which
+    // `set_reservoir_rows` guarantees), and BEFORE `x_eff_out`, the
+    // coefficients and the saved K, so B20..B23 read T and 0. `mask_where` /
+    // `mask_fill` copy every off-mask element unchanged, so every other row is
+    // bitwise identical. See B19'' for the backward.
+    let (k_muskingum, x_eff) = match reservoir {
+        Some(res) => (
+            k_muskingum.mask_where(res.mask.clone(), res.t_seconds.clone()),
+            x_eff.mask_fill(res.mask.clone(), 0.0),
+        ),
+        None => (k_muskingum, x_eff),
     };
     *x_eff_out = Some(unwrap(x_eff.clone()));
 
@@ -2220,9 +2278,10 @@ where
     (q_next_prim, saved)
 }
 
-/// Forward + register-on-tape entry point. Called from
-/// `MuskingumCunge::route_timestep` (Task 4). Returns Q_{t+1} as an
-/// autograd-tracked rank-1 tensor.
+/// Forward + register-on-tape entry point, without the linear-reservoir
+/// override. `MuskingumCunge::route_timestep` calls
+/// `timestep_forward_with_reservoirs`, which holds the body. Returns Q_{t+1}
+/// as an autograd-tracked rank-1 tensor.
 ///
 /// Parent order: [n, q_spatial, p_spatial, q_t, q_prime_t]. The three
 /// constants (length, slope, x_storage) are not differentiated through.
@@ -2249,6 +2308,42 @@ pub fn timestep_forward<I: Backend + 'static>(
     // SIXTH parent, so it receives a gradient and the KAN can train it.
     // `None` falls back to the global `params.stage_roughness.gamma`.
     gamma_at: Option<Tensor<Autodiff<I>, 1>>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    timestep_forward_with_reservoirs::<I>(
+        cfg, pattern, _assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        track_neg,
+        gamma_at,
+        None,
+    )
+}
+
+/// [`timestep_forward`] plus the linear-reservoir override
+/// ([`ReservoirTensors`], S19''/B19''). `MuskingumCunge::route_timestep`
+/// calls this directly; every other caller goes through `timestep_forward`,
+/// which passes `None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn timestep_forward_with_reservoirs<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    _assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    track_neg: bool,
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
+    reservoir: Option<&ReservoirTensors<I>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -2315,6 +2410,7 @@ where
         &mut x_eff_out,
         track_neg,
         gamma_chain.clone(),
+        reservoir,
     );
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
@@ -2378,6 +2474,7 @@ where
         gamma,
         d_ref,
         gamma_t: gamma_p.clone(),
+        reservoir_mask: reservoir.map(|r| r.mask.clone().into_primitive()),
     };
 
     // Register the op on the autograd tape. A learned gamma needs a sixth
@@ -2535,6 +2632,8 @@ where
         &mut x_eff_out,
         track_neg,
         gamma_p.clone().map(wrap),
+        // Reservoir rows are rejected with leakance (`route_timestep`).
+        None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
@@ -2624,6 +2723,7 @@ where
         gamma,
         d_ref,
         gamma_t: gamma_p.clone(),
+        reservoir_mask: None,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -2964,6 +3064,8 @@ where
         gamma: 0.0,
         d_ref: 1.0,
         gamma_t: None,
+        // Reservoir rows are rejected with CUDA graphs (`route_timestep`).
+        reservoir_mask: None,
     };
 
     let result_prim = match TimestepOp
@@ -3011,7 +3113,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None,
+        &mut None, &mut None, false, None, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -3074,7 +3176,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None,
+        &mut None, &mut None, false, None, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {
