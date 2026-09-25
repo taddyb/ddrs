@@ -21,7 +21,7 @@ use crate::data::dataset::RoutingTensors;
 use crate::nn::kan_head::KanHead;
 use crate::routing::utils::denormalize;
 use crate::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
-use crate::training::forward::{gather_params_to_subreaches, scatter_add_by_group};
+use crate::training::forward::{apply_reservoir_rows, gather_params_to_subreaches, scatter_add_by_group};
 use crate::training::gate::leakance_gate;
 
 /// Detach `t` from its autograd graph and re-lift it as a `require_grad`
@@ -219,6 +219,7 @@ pub fn probe_forward<I: Backend>(
         false,
         tensors.initial_state.clone(),
     );
+    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
     let runoff = engine.forward();
 
     (

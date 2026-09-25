@@ -8,6 +8,7 @@ use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
+use crate::data::store::ReservoirRows;
 use crate::routing::mmc::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use crate::routing::utils::denormalize;
 use crate::training::gate::leakance_gate;
@@ -179,6 +180,29 @@ pub fn fixed_output_normalized<B: Backend>(
     Tensor::full([n], v, device)
 }
 
+/// Arm a batch's linear-reservoir rows (`params.use_reservoirs`, option C in
+/// `.claude/RESERVOIRS.md`) on an engine that has just run `setup_inputs`.
+/// Every engine built for a dataset batch calls this, so the rows
+/// `data::store::reservoirs::reservoir_rows` mapped from that batch's COMID
+/// order reach train, eval and probe forwards alike. No-op when
+/// `use_reservoirs` is false.
+pub fn apply_reservoir_rows<I: Backend>(
+    cfg: &Config,
+    engine: &mut MuskingumCunge<I>,
+    rows: Option<&ReservoirRows>,
+) {
+    if !cfg.params.use_reservoirs {
+        return;
+    }
+    let rows = rows.expect(
+        "params.use_reservoirs is true but the batch carries no reservoir rows; \
+         build it with a MeritGagesDataset opened from the same config",
+    );
+    engine
+        .set_reservoir_rows(&rows.rows, &rows.t_days)
+        .expect("reservoir rows are mapped from this batch's own COMID order");
+}
+
 /// Direct-param forward pass for V1/V2 verification. No MLP, no autograd
 /// retention. Takes frozen physical parameters, runs the MC engine over the
 /// full window, and returns per-gauge hourly predictions `(num_gauges, T_hours)`.
@@ -241,6 +265,7 @@ pub fn forward_with_frozen_params<I: Backend>(
         carry_state,
         initial_state_ad,
     );
+    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
 
     // engine.forward() → (N, T_hours) on Autodiff<I>.
     // Drop autograd graph immediately — this is a verification path with no backward.
@@ -434,6 +459,7 @@ pub fn forward<I: Backend>(
         carry_state,
         tensors.initial_state.clone(),
     );
+    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
     // Enable negative-discharge tracking so the count appears in the training
     // log. When use_cuda_graphs is true, forward will print UNAVAILABLE instead.
     engine.enable_negative_discharge_tracking();
@@ -793,6 +819,7 @@ fn forward_eval_core<I: Backend>(
         carry_state,
         initial_state_ad,
     );
+    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
     if zeta.is_some() {
         engine.enable_zeta_accumulation();
     }
@@ -1001,6 +1028,7 @@ mod tests {
             },
             initial_state: None,
             impervious_mask: None,
+            reservoir_rows: None,
         }
     }
 

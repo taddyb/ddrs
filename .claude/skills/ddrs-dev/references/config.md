@@ -17,7 +17,8 @@ single most common cause of "my config change did nothing". On a binary older th
 §Top level · §`data_sources:` · §`experiment:` → §`experiment.loss:` ·
 §`testing:` overlay · §`kan_head:` → §`kan_head.disaggregation:` ·
 §`params:` → §`parameter_ranges` → §`attribute_minimums` · §Load-time guards ·
-§Adding a new routing parameter · §Adding a new boolean flag · §Leakance: enabling it
+§Adding a new routing parameter · §Adding a new boolean flag · §Leakance: enabling it ·
+§Reservoirs
 
 Jump straight to §Load-time guards if a config was **rejected**; to
 §`kan_head.disaggregation:` if anything mentions `use_precip` (it does not exist);
@@ -35,7 +36,7 @@ to §`params:` if you are looking for `tau` (it is not a routing sub-step count)
 
 `kan_head:` accepts `mlp:` as a serde alias (backward compat with pre-KAN configs).
 
-## `data_sources:` — 8 path fields
+## `data_sources:` — 10 path fields
 
 `attributes` is a `Vec<PathBuf>` accepting a **single path or a list**
 (feature-concatenated on COMID, NaN-filled, `deserialize_one_or_many_paths`).
@@ -51,6 +52,11 @@ Exactly one of the pair ⇒ error; neither source ⇒ `"adjacency sources are mi
 is rejected alongside `gridded_network` (the store is already split by DDR).
 
 `aorc_precip` is required whenever `kan_head.disaggregation:` is present — see below.
+
+`reservoirs` (added 2026-09-25) is the reservoir table CSV for `params.use_reservoirs`:
+header `COMID,T_days`, extra columns allowed and ignored. Required when
+`use_reservoirs: true`, ignored otherwise (but still fingerprinted into `sources.lock`
+when set). See §Reservoirs.
 
 ## `experiment:`
 
@@ -227,6 +233,7 @@ and bounds every topology from above.
 | `use_cuda_graphs` | false | Requires the DEPRECATED `ddr_match: true` (the captured kernel hardcodes the legacy 5/3 celerity); rejected alongside the corrected-physics default. `config/merit_training.yaml` set it true until 2026-08-19 |
 | `ddr_match` | **false** (since 2026-08-19) | DEPRECATED. `true` = legacy pre-#192 DDR physics (5/3 celerity, X ≡ 0.3, upstream-cols readout) — parses with a WARN, kept only for pre-#192 reproduction and CUDA graphs. DDR itself runs the corrected physics since DeepGroundwater/ddr#192. See `.claude/PHYSICS-CORRECTIONS.md` |
 | `use_leakance` | false | |
+| `use_reservoirs` | false | Route the COMIDs in `data_sources.reservoirs` as linear reservoirs `S = T·Q` (option C). `false` is bit-identical to no reservoir code. Rejected with leakance, CUDA graphs, `ddr_match`, subdivision, `gridded_network`; see §Reservoirs |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
 | `leakance_gate` | absent | Temperature-annealed 0/1 gate on the head's `leakance_factor` output; see §Leakance gate. Absent ⇒ byte-identical to the ungated readers. Requires `use_leakance: true` |
@@ -265,6 +272,8 @@ when subdivision is enabled), plus one at dataset open.
 | `validate_subdivision` | `subdivision.enabled: true` + `gridded_network` | `"params.subdivision"` + `"gridded_network"` |
 | | nested `validate_subdivision_reaches_the_builder`: `enabled: true` + explicit `conus_adjacency`/`gages_adjacency` pointing at a non-subdivided store | `"params.subdivision"` + `"conflicts with the explicit"` |
 | `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
+| `validate_reservoirs` | `use_reservoirs: true` without `data_sources.reservoirs` | `"use_reservoirs"` + `"data_sources.reservoirs"` |
+| | `use_reservoirs: true` + `use_leakance`, `use_cuda_graphs`, `ddr_match`, `subdivision.enabled` or `gridded_network` | `"use_reservoirs"` + the offending key. Runs before `validate_ddr_match`, so `use_cuda_graphs` reports the reservoir error first |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
 | `validate_leakance_gate` | `leakance_gate` block without `use_leakance: true` | `"leakance_gate"` + `"use_leakance"` |
 | | empty `leakance_gate.temperature` | `"temperature"` |
@@ -276,6 +285,7 @@ when subdivision is enabled), plus one at dataset open.
 | | `use_grad_accum: true` with steps < 2 | `"requires grad_accum_steps: N with N >= 2"` |
 | `validate_loss` | `loss.deriv-weight` non-finite or negative | `"deriv-weight"` |
 | `validate_disagg_vs_resolution` (runtime, `src/data/dataset.rs`) | `disaggregation:` + hourly-native streamflow store | hard error |
+| `read_reservoir_table` (runtime, dataset open) | a reservoir CSV without `COMID`/`T_days`, an unparseable row, `T_days` non-finite or `< 1/24`, a duplicate COMID, zero rows | `DataError` naming the CSV path |
 
 ## Adding a new routing parameter
 
@@ -375,3 +385,52 @@ central-difference gradcheck at five temperatures, monotonicity, limits,
 saturation without NaN/Inf) and the gated rows of `tests/gamma_eval_parity.rs`.
 This does not re-open the leakance verdict in `research-status.md`; it removes
 one degeneracy so a future arm can be judged on the gate, not on the product.
+
+## Reservoirs (`params.use_reservoirs` + `data_sources.reservoirs`, added 2026-09-25)
+
+Option C of `.claude/RESERVOIRS.md`: each dam reach listed in the table is routed as
+a linear reservoir `S = T·Q`, which is Muskingum at `K = T`, `X = 0`. `T` is
+prescribed data, not learned; a dam row's `n`/`q_spatial`/`p_spatial` get exactly
+zero gradient. Read `.claude/RESERVOIRS.md` before extending it.
+
+```yaml
+params:
+  use_reservoirs: true
+data_sources:
+  reservoirs: examples/juniata/data/juniata_reservoirs.csv   # COMID,T_days[,…]
+```
+
+CSV contract (`src/data/store/reservoirs.rs::read_reservoir_table`): a header
+naming `COMID` (MERIT reach id) and `T_days` (residence time, days); other columns
+ignored. Every row must parse, `T_days` must be finite and `>= 1/24` (one hour, the
+routing `dt`; `c3 >= 0` at `X = 0` needs `T >= dt/2`), COMIDs unique, at least one
+row. Any violation is a `DataError` naming the file, raised at dataset open.
+
+Wiring: `MeritGagesDataset::open` reads the table once; every batch (`collate`) and
+the eval static network map it onto their COMID order with
+`src/data/store/reservoirs.rs::reservoir_rows` (table COMIDs outside the network are
+skipped) and carry the result as `RoutingBatch::reservoir_rows`. Every engine site
+(`forward`, `forward_eval_core`, `forward_with_frozen_params`, `probe_forward`) calls
+`src/training/forward.rs::apply_reservoir_rows` right after `setup_inputs`, which
+calls `MuskingumCunge::set_reservoir_rows`. The eval network's match is logged once:
+`reservoirs: <k> of <m> table COMIDs are in the network`. A train-only run routes
+the reservoirs but prints no match line (training batches do not log).
+
+Rejected at load (`validate_reservoirs`): `use_reservoirs: true` without
+`data_sources.reservoirs`, or with `use_leakance: true`, `use_cuda_graphs: true`,
+`ddr_match: true`, `params.subdivision.enabled: true`, or
+`data_sources.gridded_network`. The engine panics if reservoir rows reach the
+leakance or CUDA-graph op, so these guards are what keeps a run from starting in a
+combination the override does not cover. The paper studies (`ddrs experiment`)
+refuse arms with `use_reservoirs: true`.
+
+Committed fixture: `examples/juniata/data/juniata_reservoirs.csv`, one row, Raystown
+Lake (COMID 73005301, GRanD 1613, `T_days = 1.23` from the sandbox fit in
+`research/findings/2026-09-25-reservoir-representation-options.md` §2.2), row 177
+of the 213-reach Juniata network, upstream of the Newport gauge. No CONUS table is
+committed yet: it is to be fitted from ResOpsUS, keyed through the GRanD → MERIT
+COMID crosswalk at `/mnt/ssd1/data/resops/derived/grand_to_merit_comid.csv`
+(workstation data, not a test input).
+Tests: `src/config.rs` (`use_reservoirs_*`), `src/data/store/reservoirs.rs`,
+`tests/reservoir_override.rs`, and the release-only
+`tests/juniata_acceptance.rs::juniata_reservoir_is_matched_logged_and_changes_the_gauge_series`.

@@ -225,6 +225,7 @@ fn minimal_routing_tensors(
         window,
         initial_state: None,
         impervious_mask: None,
+        reservoir_rows: None,
     }
 }
 

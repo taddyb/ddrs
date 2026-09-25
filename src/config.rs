@@ -138,6 +138,12 @@ pub struct DataSources {
     /// `research/specs/2026-09-08-ddrs-gridded-routing-design.md`.
     #[serde(default)]
     pub gridded_network: Option<std::path::PathBuf>,
+    /// Reservoir table CSV for `params.use_reservoirs` (option C in
+    /// `.claude/RESERVOIRS.md`): header `COMID,T_days`, extra columns
+    /// ignored; read by `data::store::reservoirs::read_reservoir_table`.
+    /// Required when `params.use_reservoirs: true`; ignored otherwise.
+    #[serde(default)]
+    pub reservoirs: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -850,6 +856,12 @@ pub struct Params {
     /// Absent ⇒ the output is used as-is, byte-identical to the historical
     /// readers. See `LeakanceGate`.
     pub leakance_gate: Option<LeakanceGate>,
+    /// Route the dam reaches listed in `data_sources.reservoirs` as linear
+    /// reservoirs `S = T·Q` (option C in `.claude/RESERVOIRS.md`, via
+    /// `MuskingumCunge::set_reservoir_rows`). Off by default; `false` routes
+    /// every reach as before, bit for bit. `validate_reservoirs` lists the
+    /// combinations rejected at load.
+    pub use_reservoirs: bool,
 }
 
 impl Params {
@@ -893,6 +905,7 @@ impl Default for Params {
             subdivision: Subdivision::default(),
             stage_roughness: None,
             leakance_gate: None,
+            use_reservoirs: false,
         }
     }
 }
@@ -925,6 +938,7 @@ struct ParamsRaw {
     stage_roughness: Option<StageRoughnessSection>,
     #[serde(default)]
     leakance_gate: Option<LeakanceGate>,
+    use_reservoirs: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -1029,6 +1043,9 @@ impl From<ParamsRaw> for Params {
         p.subdivision = r.subdivision;
         p.stage_roughness = r.stage_roughness;
         p.leakance_gate = r.leakance_gate;
+        if let Some(b) = r.use_reservoirs {
+            p.use_reservoirs = b;
+        }
         p
     }
 }
@@ -1174,6 +1191,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_geodataset(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_reservoirs(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -1355,6 +1376,66 @@ fn validate_geodataset(cfg: &Config) -> std::result::Result<(), String> {
          and it is inferred). If you meant to route the {other} network, change \
          `data_sources` instead — `ddrs sources use <group>` swaps the block for you."
     ))
+}
+
+/// `params.use_reservoirs` (option C in `.claude/RESERVOIRS.md`) is built for
+/// one combination: the corrected-physics, non-leakance, uncaptured timestep
+/// op on an un-split MERIT network. `route_timestep` panics if reservoir rows
+/// reach the leakance or CUDA-graph path, so every other combination is
+/// rejected here, before a run starts. A `data_sources.reservoirs` table with
+/// the flag off is allowed and ignored.
+fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
+    let p = &cfg.params;
+    if !p.use_reservoirs {
+        return Ok(());
+    }
+    let ds = cfg.data_sources.as_ref();
+    if ds.and_then(|d| d.reservoirs.as_ref()).is_none() {
+        return Err(
+            "params: `use_reservoirs: true` requires `data_sources.reservoirs`, the CSV \
+             (header `COMID,T_days`) listing each dam reach and its residence time."
+                .to_string(),
+        );
+    }
+    if p.use_leakance {
+        return Err(
+            "params: `use_reservoirs: true` requires `use_leakance: false`: the leakance \
+             timestep op has no linear-reservoir K/X override."
+                .to_string(),
+        );
+    }
+    if p.use_cuda_graphs {
+        return Err(
+            "params: `use_reservoirs: true` requires `use_cuda_graphs: false`: the captured \
+             CUDA graph has no linear-reservoir K/X override."
+                .to_string(),
+        );
+    }
+    if p.ddr_match {
+        return Err(
+            "params: `use_reservoirs: true` requires `ddr_match: false`: the override is \
+             built and verified on the corrected physics only, and the DEPRECATED legacy \
+             path exists to reproduce pre-#192 DDR results, which have no reservoirs."
+                .to_string(),
+        );
+    }
+    if p.subdivision.enabled {
+        return Err(
+            "params: `use_reservoirs: true` does not support `params.subdivision.enabled: \
+             true`: a split reach repeats its COMID on every piece, so one dam COMID would \
+             mark every piece as a reservoir with the whole reservoir's residence time."
+                .to_string(),
+        );
+    }
+    if ds.is_some_and(|d| d.gridded_network.is_some()) {
+        return Err(
+            "params: `use_reservoirs: true` does not support `data_sources.gridded_network`: \
+             the reservoir table is keyed on MERIT COMIDs, and a gridded network's rows are \
+             DDM30 cell sub-reaches."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
@@ -2897,5 +2978,125 @@ data_sources:
         assert_eq!(exp.batch_size, 64, "training default preserved");
         assert_eq!(exp.rho, Some(90), "training default rho preserved");
         assert_eq!(exp.start_time, "1981/10/01");
+    }
+
+    // ---- params.use_reservoirs + data_sources.reservoirs (option C) ----
+
+    /// A config whose `data_sources` uses `adjacency` (one YAML line per key,
+    /// indented two spaces), optionally carries `reservoirs:`, and whose
+    /// `params:` block is `params`. `/dev/null` paths are never opened at load.
+    fn reservoir_yaml(name: &str, adjacency: &str, reservoirs: bool, params: &str) -> std::path::PathBuf {
+        let table = if reservoirs { "  reservoirs: /dev/null/reservoirs.csv\n" } else { "" };
+        write_yaml_with_data_sources(
+            name,
+            &format!(
+                "data_sources:\n  attributes: /dev/null/attrs.nc\n{adjacency}  \
+                 streamflow: /dev/null/sf.ic\n  observations: /dev/null/obs.ic\n  \
+                 gages: /dev/null/gages.csv\n{table}params:\n{params}"
+            ),
+        )
+    }
+
+    const EXPLICIT_ADJ: &str =
+        "  conus_adjacency: /dev/null/conus.zarr\n  gages_adjacency: /dev/null/gages_adj.zarr\n";
+
+    /// Loads the config at `path` and asserts the load error names both
+    /// `use_reservoirs` and the offending key.
+    fn reservoir_rejection(path: std::path::PathBuf, offending: &str) {
+        let msg = Config::from_yaml_file(&path)
+            .expect_err("config must be rejected at load")
+            .to_string();
+        assert!(
+            msg.contains("use_reservoirs") && msg.contains(offending),
+            "error should name `use_reservoirs` and `{offending}`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn use_reservoirs_defaults_false() {
+        assert!(!Params::default().use_reservoirs);
+        let path = reservoir_yaml("ddrs_res_default.yaml", EXPLICIT_ADJ, false, "  tau: 9\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert!(!cfg.params.use_reservoirs);
+        assert!(cfg.data_sources.unwrap().reservoirs.is_none());
+    }
+
+    #[test]
+    fn use_reservoirs_with_table_loads() {
+        let path = reservoir_yaml("ddrs_res_ok.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("both keys, no conflicts, must load");
+        assert!(cfg.params.use_reservoirs);
+        assert_eq!(
+            cfg.data_sources.unwrap().reservoirs,
+            Some(std::path::PathBuf::from("/dev/null/reservoirs.csv"))
+        );
+    }
+
+    #[test]
+    fn reservoirs_table_without_the_flag_is_allowed() {
+        let path = reservoir_yaml("ddrs_res_table_only.yaml", EXPLICIT_ADJ, true, "  tau: 9\n");
+        let cfg = Config::from_yaml_file(&path).expect("a table with the flag off must load");
+        assert!(!cfg.params.use_reservoirs);
+    }
+
+    #[test]
+    fn use_reservoirs_without_table_rejected() {
+        let path = reservoir_yaml("ddrs_res_no_table.yaml", EXPLICIT_ADJ, false, "  use_reservoirs: true\n");
+        reservoir_rejection(path, "data_sources.reservoirs");
+    }
+
+    #[test]
+    fn use_reservoirs_with_leakance_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_leakance.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  use_leakance: true\n",
+        );
+        reservoir_rejection(path, "use_leakance");
+    }
+
+    #[test]
+    fn use_reservoirs_with_cuda_graphs_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_graphs.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  use_cuda_graphs: true\n",
+        );
+        reservoir_rejection(path, "use_cuda_graphs");
+    }
+
+    #[test]
+    fn use_reservoirs_with_ddr_match_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_ddr_match.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  ddr_match: true\n",
+        );
+        reservoir_rejection(path, "ddr_match");
+    }
+
+    #[test]
+    fn use_reservoirs_with_subdivision_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_subdivision.yaml",
+            "  geospatial_fabric: /dev/null/rivers.shp\n",
+            true,
+            "  use_reservoirs: true\n  subdivision:\n    enabled: true\n",
+        );
+        reservoir_rejection(path, "params.subdivision");
+    }
+
+    #[test]
+    fn use_reservoirs_with_gridded_network_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_gridded.yaml",
+            "  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr\n",
+            true,
+            "  use_reservoirs: true\n",
+        );
+        reservoir_rejection(path, "gridded_network");
     }
 }

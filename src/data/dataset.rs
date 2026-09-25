@@ -16,8 +16,9 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
-    AorcPrecipStore, AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, StateCache, StreamflowSource,
+    read_reservoir_table, reservoir_rows, AorcPrecipStore, AttributesStore, ConusAdjacencyStore,
+    GageMetadata, GagesAdjacencyStore, ObservationsStore, ReservoirRows, StateCache,
+    StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -86,6 +87,11 @@ pub struct RoutingBatch {
     /// stays `None`). NaN (no StreamCat coverage) → 1.0 (absence of
     /// imperviousness data ≠ concrete; leakance allowed).
     pub impervious_mask: Option<Vec<f32>>,
+    /// Dam rows of this network (positions in `divide_comids`) and their
+    /// residence times, from `data_sources.reservoirs`. `Some` exactly when
+    /// `params.use_reservoirs` is true (possibly with no rows, when no table
+    /// COMID is in this network); `None` leaves routing unchanged.
+    pub reservoir_rows: Option<ReservoirRows>,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +118,8 @@ struct StaticNetworkCache {
     /// Precomputed impervious mask (same as `RoutingBatch::impervious_mask`).
     /// Built once at static-network construction; cloned into every eval batch.
     impervious_mask: Option<Vec<f32>>,
+    /// Same as `RoutingBatch::reservoir_rows`, mapped once for the static network.
+    reservoir_rows: Option<ReservoirRows>,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,9 @@ pub struct RoutingTensors<B: Backend> {
     /// autograd. `None` when `corridor_impervious` is absent from attributes
     /// or leakance is disabled (byte-identical back-compat with PC1).
     pub impervious_mask: Option<Tensor<B, 1>>,
+    /// Carried from `RoutingBatch::reservoir_rows`; host-side indices, applied
+    /// by `training::forward::apply_reservoir_rows` after `setup_inputs`.
+    pub reservoir_rows: Option<ReservoirRows>,
 }
 
 impl RoutingBatch {
@@ -261,6 +272,7 @@ impl RoutingBatch {
             window: self.window,
             initial_state,
             impervious_mask,
+            reservoir_rows: self.reservoir_rows,
         }
     }
 }
@@ -358,6 +370,10 @@ pub struct MeritGagesDataset {
     /// leakance is enabled — `collate`/`build_static_network` will call
     /// `build_impervious_mask`. `None` ⇒ mask is never built (back-compat no-op).
     leakance_impervious_threshold: Option<f32>,
+    /// `data_sources.reservoirs`, read once at open when
+    /// `params.use_reservoirs` is true; `None` otherwise. Mapped onto each
+    /// batch's COMID order by `reservoir_rows`.
+    reservoirs: Option<Vec<(Comid, f32)>>,
 }
 
 /// Reject the disaggregation head when the streamflow store is hourly-native:
@@ -560,6 +576,17 @@ impl MeritGagesDataset {
             None
         };
 
+        let reservoirs = if cfg.params.use_reservoirs {
+            let path = ds.reservoirs.as_ref().ok_or_else(|| DataError::Malformed {
+                path: std::path::PathBuf::from("<config>"),
+                message: "params.use_reservoirs is true but data_sources.reservoirs is not set"
+                    .into(),
+            })?;
+            Some(read_reservoir_table(path)?)
+        } else {
+            None
+        };
+
         Ok(Self {
             conus,
             gages_adj,
@@ -598,6 +625,7 @@ impl MeritGagesDataset {
             ddr_match: cfg.params.ddr_match,
             state_cache,
             leakance_impervious_threshold,
+            reservoirs,
         })
     }
 
@@ -851,6 +879,12 @@ impl MeritGagesDataset {
 
         // ----- 7. Impervious mask (None when absent or leakance off) -----
         let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
+        // Reservoir rows in this batch's COMID order (None when use_reservoirs
+        // is off). Not logged: that would be once per training batch.
+        let reservoir_rows = self
+            .reservoirs
+            .as_deref()
+            .map(|table| reservoir_rows(table, &compressed.divide_comids));
 
         // ----- 8. Assemble -----
         Ok(RoutingBatch {
@@ -870,6 +904,7 @@ impl MeritGagesDataset {
             window: *window,
             initial_state,
             impervious_mask,
+            reservoir_rows,
         })
     }
 
@@ -1129,6 +1164,7 @@ impl MeritGagesDataset {
             },
             initial_state,
             impervious_mask: cache.impervious_mask.clone(),
+            reservoir_rows: cache.reservoir_rows.clone(),
         })
     }
 
@@ -1203,6 +1239,24 @@ impl MeritGagesDataset {
         // 6. Impervious mask (None when corridor_impervious absent or leakance off).
         let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
 
+        // 7. Reservoir rows. This is the full network the run routes at eval,
+        // built once per dataset, so the match is logged here and never per
+        // training batch. Written to fd 2 directly rather than via
+        // `eprintln!`: the libtest harness swallows the print macros, which
+        // would keep the line out of `run.log` (`cli::tee`) in
+        // `tests/juniata_acceptance.rs`.
+        let reservoir_rows = self.reservoirs.as_deref().map(|table| {
+            let rows = reservoir_rows(table, &compressed.divide_comids);
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "reservoirs: {} of {} table COMIDs are in the network",
+                rows.rows.len(),
+                table.len()
+            );
+            rows
+        });
+
         Ok(StaticNetworkCache {
             adjacency,
             outflow_idx: compressed.outflow_idx,
@@ -1212,6 +1266,7 @@ impl MeritGagesDataset {
             gauge_staids,
             divide_comids: compressed.divide_comids,
             impervious_mask,
+            reservoir_rows,
         })
     }
 }

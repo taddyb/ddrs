@@ -95,6 +95,19 @@ where
             )
             .into());
         }
+        // Both studies build their own engines
+        // (`InfluenceContext::forward_with_inflow_leaf`,
+        // `landscape::objective::Objective::forward_loss`) and never arm
+        // reservoir rows, so a reservoir arm would be evaluated as a different
+        // model than the one trained.
+        if cfg.params.use_reservoirs {
+            return Err(format!(
+                "arm `{}`: `params.use_reservoirs: true` arms are unsupported by the paper studies \
+                 (their engines route dam reaches as channels)",
+                arm.name
+            )
+            .into());
+        }
         let dataset = MeritGagesDataset::open(&cfg).map_err(|e| format!("arm `{}`: {e}", arm.name))?;
         <I as Backend>::seed(device, cfg.seed);
         let section = cfg
@@ -507,6 +520,42 @@ mod tests {
         assert_eq!(d[2], 0.0);
         assert_eq!(d[1], 300.0);
         assert_eq!(d[0], 500.0);
+    }
+
+    #[test]
+    fn reservoir_arms_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "mode: training\nseed: 1\nnp_seed: 1\ndata_sources:\n  attributes: /dev/null/a.nc\n  \
+             conus_adjacency: /dev/null/c.zarr\n  gages_adjacency: /dev/null/g.zarr\n  \
+             streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
+             gages: /dev/null/g.csv\n  reservoirs: /dev/null/r.csv\n\
+             params:\n  use_reservoirs: true\n",
+        )
+        .unwrap();
+        let arm = ResolvedArm {
+            name: "dam".into(),
+            run_id: "run".into(),
+            run_dir: dir.path().into(),
+            config_path,
+            checkpoint_dir: dir.path().into(),
+            checkpoint_label: "init".into(),
+        };
+        for allow_leakance in [false, true] {
+            let err = InfluenceContext::<burn::backend::NdArray<f32>>::open_inner(
+                &arm,
+                &Default::default(),
+                true,
+                PERIOD_TESTING,
+                allow_leakance,
+            )
+            .err()
+            .expect("a reservoir arm must be refused")
+            .to_string();
+            assert!(err.contains("use_reservoirs"), "{err}");
+        }
     }
 
     #[test]

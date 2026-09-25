@@ -504,3 +504,56 @@ fn reservoir_rows_with_leakance_panic() {
     mc.set_reservoir_rows(&[1], &[1.0]).unwrap();
     let _ = mc.forward();
 }
+
+// ---------------------------------------------------------------------------
+// A new `setup_inputs` clears the reservoir rows of the previous network.
+// ---------------------------------------------------------------------------
+
+/// `setup_inputs` binds a (possibly different) network, so reservoir rows set
+/// for the previous one must not survive it: routing after the second
+/// `setup_inputs` must be bitwise the no-reservoir result.
+#[test]
+fn setup_inputs_clears_reservoir_rows() {
+    let cfg = Config::default();
+    let device = Device::default();
+    let n_reach = 3;
+    let mut q_prime = Vec::new();
+    for t in 0..=24 {
+        q_prime.extend_from_slice(&[if t == 0 { 10.0 } else { 40.0 }, 2.0, 3.0]);
+    }
+    let params = Params::uniform(n_reach);
+    let plain = host(route(&cfg, chain3(), &q_prime, &params, None, None, false).q);
+
+    let setup = |mc: &mut MuskingumCunge<I>| {
+        let v = |x: &[f32]| Tensor::<AB, 1>::from_floats(x, &device);
+        mc.setup_inputs(
+            RoutingInputs::<I> {
+                adjacency: chain3(),
+                x_storage: Tensor::ones([n_reach], &device) * 0.3,
+            },
+            v(&q_prime).reshape([q_prime.len() / n_reach, n_reach]),
+            SpatialParameters::<I> {
+                n: v(&params.n),
+                q_spatial: v(&params.q_spatial),
+                p_spatial: Some(v(&params.p_spatial)),
+                k_d: None,
+                d_gw: None,
+                leakance_factor: None,
+                impervious_mask: None,
+                gamma: None,
+            },
+            false,
+            None,
+        );
+    };
+    let mut mc = MuskingumCunge::<I>::new(cfg.clone(), device.clone());
+    setup(&mut mc);
+    mc.set_reservoir_rows(&[1], &[1.5]).expect("valid reservoir rows");
+    setup(&mut mc);
+    let rerouted = host(mc.forward());
+
+    assert_eq!(plain.len(), rerouted.len());
+    for (i, (a, b)) in plain.iter().zip(&rerouted).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "idx {i}: no-reservoir {a} vs after re-setup {b}");
+    }
+}

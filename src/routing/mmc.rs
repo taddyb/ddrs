@@ -335,6 +335,9 @@ impl<I: Backend> MuskingumCunge<I> {
             .map(|t| denormalize(t, ranges.leakance_factor, log_space.iter().any(|s| s == "leakance_factor")));
         // Impervious mask: constant, no denormalization — stored as-is.
         self.impervious_mask = params.impervious_mask;
+        // Reservoir rows index the previous network, so they do not survive
+        // a new one: re-arm with `set_reservoir_rows` after this call.
+        self.reservoir = None;
 
         match initial_state {
             Some(q0_ext) => {

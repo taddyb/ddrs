@@ -208,6 +208,9 @@ pub fn plan(input: PlanInput, workspace: &Workspace) -> Result<PlanResult, CliEr
     if let Some(p) = &data_sources.gridded_network {
         pairs.push(("gridded_network".into(), p.clone()));
     }
+    if let Some(p) = &data_sources.reservoirs {
+        pairs.push(("reservoirs".into(), p.clone()));
+    }
     let mut sources = BTreeMap::new();
     for (key, path) in pairs {
         let live = match prior_lock.as_ref().and_then(|l| l.sources.get(&key)) {

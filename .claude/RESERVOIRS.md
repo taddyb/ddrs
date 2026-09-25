@@ -1,8 +1,14 @@
-# Reservoirs (not implemented; options of record 2026-09-25)
+# Reservoirs (option C implemented; options of record 2026-09-25)
 
-> ## STATUS: **no reservoir code in ddrs.** Options ranked, none built.
+> ## STATUS: **option C implemented, off by default.** Options B, D, E not built.
 >
-> A reach inside a reservoir is routed as an MC channel. The dMC fill-fraction law is **closed**
+> `params.use_reservoirs: true` + `data_sources.reservoirs: <csv>` (header `COMID,T_days`) routes
+> each listed dam reach as a linear reservoir `S = T·Q` through
+> `MuskingumCunge::set_reservoir_rows` (Muskingum `K := T`, `X := 0` on those rows only).
+> Committed fixture: `examples/juniata/data/juniata_reservoirs.csv` (Raystown Lake, COMID
+> 73005301, `T_days = 1.23`). Config contract, rejected combinations and wiring:
+> `skills/ddrs-dev/references/config.md` §Reservoirs. With the flag off (the default) every reach
+> is routed as an MC channel. The dMC fill-fraction law is **closed**
 > (a natural-lake law; never beat a one-parameter linear reservoir at four dams). DDR's level pool
 > (#137 to #139) was reverted in #143 without a gauge evaluation. Read the options doc before
 > building anything:
