@@ -582,7 +582,18 @@ impl MeritGagesDataset {
                 message: "params.use_reservoirs is true but data_sources.reservoirs is not set"
                     .into(),
             })?;
-            Some(read_reservoir_table(path)?)
+            let table = read_reservoir_table(path)?;
+            // Logged at open so a train-only run, which never builds the eval
+            // network's match line, still leaves the table in `run.log`. Same
+            // fd-2 write as `build_static_network`, for the same libtest reason.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "reservoirs: table {} has {} COMIDs",
+                path.display(),
+                table.len()
+            );
+            Some(table)
         } else {
             None
         };

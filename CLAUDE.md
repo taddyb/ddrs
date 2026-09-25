@@ -606,6 +606,7 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
   `research/findings/2026-07-30-docs-and-skills-audit.md`.
 - Sparse / autograd questions → `docs/book/reference/burn-autograd.md`
 - Algorithm questions → `.claude/ARCHITECTURE.md` and `~/projects/ddr/CLAUDE.md`
+- Reservoirs (`params.use_reservoirs`, off by default) → `.claude/RESERVOIRS.md` and `.claude/skills/ddrs-dev/references/config.md` §Reservoirs
 - Data layout questions → `src/data/mod.rs` and the relevant zarr/netcdf store
 - Anything user-facing about hyperparameters → `config/merit_training.yaml`
   (which is verbatim from DDR's `merit_training_config.yaml`)

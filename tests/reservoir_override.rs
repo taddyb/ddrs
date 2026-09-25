@@ -164,9 +164,11 @@ fn override_rows_route_as_linear_reservoir() {
     // Hot start from row 0, then a step in reach 0's lateral inflow from row
     // 1 on. `forward` routes step t with row t−1, so the step enters the
     // network at step 2 and the reservoir sees a rising inflow from then on.
+    // The dam's own lateral inflow ramps by 1 m³/s per row, so the recurrence
+    // below fails if step t is routed with row t instead of row t−1.
     let mut q_prime = Vec::with_capacity((steps + 1) * n_reach);
     for t in 0..=steps {
-        q_prime.extend_from_slice(&[if t == 0 { 10.0 } else { 40.0 }, 2.0, 3.0]);
+        q_prime.extend_from_slice(&[if t == 0 { 10.0 } else { 40.0 }, 2.0 + t as f32, 3.0]);
     }
     let params = Params::uniform(n_reach);
     let t_days = 1.5_f32;

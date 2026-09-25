@@ -8,7 +8,8 @@
 //! seed-42 result so legitimate op-reordering noise doesn't trip them;
 //! anything under them is a real regression.
 //!
-//! Runs only at opt-level 3 (~25 s; a debug build would take minutes):
+//! Runs only at opt-level 3 (~53 s for the file's three Juniata trainings; a
+//! debug build would take minutes):
 //!
 //!     cargo test --release --test juniata_acceptance -- --nocapture
 //!
@@ -173,6 +174,8 @@ fn juniata_reservoir_is_matched_logged_and_changes_the_gauge_series() {
     assert!(res_log.contains(MATCH_LINE), "run.log lacks {MATCH_LINE:?}:\n{res_log}");
     let n_lines = res_log.lines().filter(|l| l.contains(MATCH_TAIL)).count();
     assert_eq!(n_lines, 1, "the match must be logged once, not per batch");
+    // The table itself is logged at dataset open, so train-only runs carry it too.
+    assert!(res_log.contains("reservoirs: table "), "run.log lacks the table line:\n{res_log}");
     let plain_log = std::fs::read_to_string(plain_dir.join("run.log")).expect("read control run.log");
     assert!(!plain_log.contains(MATCH_TAIL), "control run logged a reservoir match");
 

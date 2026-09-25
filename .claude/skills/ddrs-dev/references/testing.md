@@ -22,6 +22,7 @@ cargo test --test leakance_gradcheck    # run even if you did not touch leakance
 cargo test --test leakance_off_parity   # any routing change can disturb OFF-parity
 cargo test --test zeta_accum
 cargo test --test leakance_reference_match  # the only DDR anchor leakance has
+cargo test --test reservoir_override    # the plain timestep op carries S19''/B19''
 ```
 
 Since 2026-09-02 the sandbox gate is machine-enforced twice over:
@@ -34,7 +35,7 @@ form (per-reach table, PNG, `DDRS_FORCE_GRAPHS` GPU path).
 ### Acceptance — end-to-end metric floors (Juniata)
 
 ```bash
-cargo test --release --test juniata_acceptance -- --nocapture   # ~20 s after build
+cargo test --release --test juniata_acceptance -- --nocapture   # ~53 s after build (3 trainings)
 ```
 
 The only test covering the full data → train → route → eval → metric chain.
@@ -48,6 +49,15 @@ debug_assertions** (a debug train takes minutes), so it only runs with
 `--release`; run it for any change to routing, training, eval, or the data
 readers when you want end-to-end confirmation. Verified 2026-09-02:
 NSE 0.7903 / KGE 0.8810 / baseline 0.6947 in 18.3 s.
+
+Since 2026-09-25 the file also holds the reservoir end-to-end test,
+`juniata_reservoir_is_matched_logged_and_changes_the_gauge_series`: two more
+trainings of the bundle, as committed and with `params.use_reservoirs: true`
+plus the Raystown Lake table. It asserts the match line
+`reservoirs: 1 of 1 table COMIDs are in the network` appears in `run.log`
+exactly once, the table line from dataset open is there too, the table is
+fingerprinted in the manifest, and the gauge series changes. The two tests
+serialize on a lock because the `run.log` tee is process-global.
 
 ```bash
 cargo test --release --test gridded_acceptance -- --nocapture   # ~30 s after build
@@ -90,6 +100,28 @@ commit `c2bd0f9` and is extracted from history by
 the `q_eps = q_spatial + 1e-6` width-exponent stabilisation (predicted 6.2e-6,
 measured 6.17e-6) - if a failure reports a larger difference, that is a real
 discrepancy against DDR, not a bar to widen.
+
+If you touched the linear-reservoir override (S19''/B19'' in
+`src/routing/mmc_op.rs::forward_chain_inner` and its backward, or
+`src/routing/mmc.rs::set_reservoir_rows`), the table reader
+`src/data/store/reservoirs.rs`, or its wiring
+(`src/training/forward.rs::apply_reservoir_rows`, `src/data/dataset.rs`,
+`src/config.rs::validate_reservoirs`), run:
+
+```bash
+cargo test --test reservoir_override
+cargo test --test ddr_sandbox_match
+mkdir -p output && cargo run --release --example compare_ddr_sandbox  # must print ABSOLUTE MATCH
+cargo test --release --test juniata_acceptance  # holds the reservoir end-to-end test
+```
+
+`reservoir_override` pins a dam row to the linear-reservoir recurrence and
+checks bit-identity with the override off, mass balance, gradcheck, zero
+gradient on a dam row's `n`/`q_spatial`/`p_spatial`, and row validation. The
+two sandbox gates confirm the override stayed out of the no-reservoir path,
+which every non-leakance, non-graph timestep now runs through. The unit tests
+(`cargo test --lib reservoir`: table reader, COMID mapping, load-time
+rejections) are part of `cargo test --lib`.
 
 ### Tier D — config YAML only
 ```bash
@@ -153,6 +185,7 @@ line citation outright rather than trusting it to stay pinned.
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
 | Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting), `leakance_gate` (tau = 1 bit-exact identity through all three readers, gate gradcheck, saturation) |
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
+| Reservoirs (option C) | `reservoir_override` (linear-reservoir recurrence, off is bit-identical, mass balance, gradcheck, zero dam-row gradient, row validation), `cargo test --lib reservoir` (table reader, COMID mapping, `use_reservoirs` load guards), `juniata_acceptance`'s `juniata_reservoir_is_matched_logged_and_changes_the_gauge_series` (release-only end-to-end); `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
 | Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |

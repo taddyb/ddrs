@@ -413,8 +413,10 @@ skipped) and carry the result as `RoutingBatch::reservoir_rows`. Every engine si
 (`forward`, `forward_eval_core`, `forward_with_frozen_params`, `probe_forward`) calls
 `src/training/forward.rs::apply_reservoir_rows` right after `setup_inputs`, which
 calls `MuskingumCunge::set_reservoir_rows`. The eval network's match is logged once:
-`reservoirs: <k> of <m> table COMIDs are in the network`. A train-only run routes
-the reservoirs but prints no match line (training batches do not log).
+`reservoirs: <k> of <m> table COMIDs are in the network`. Training batches do not
+log the match, so dataset open also logs `reservoirs: table <path> has <m> COMIDs`,
+which a train-only run carries in `run.log` too. `src/bin/probe_courant.rs` refuses
+`use_reservoirs: true`: it drives `forward_chain_inner` with no reservoir override.
 
 Rejected at load (`validate_reservoirs`): `use_reservoirs: true` without
 `data_sources.reservoirs`, or with `use_leakance: true`, `use_cuda_graphs: true`,
