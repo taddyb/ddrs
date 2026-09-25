@@ -87,6 +87,47 @@ data-driven reservoir-operation literature does), and the object set has to be G
 whose timing signature is visible below them, which at Raystown it barely is.
 
 One dam, one law, one capacity assumption. The capacity sensitivity spans a factor of four
-and does not change the ordering. A second dam with a different purpose (hydropower or
+and does not change the ordering.
+
+## 5. Verification (2026-09-25, after the user questioned the flat hydrographs)
+
+`experiments/reservoir/raystown_verify.py`, three checks:
+
+1. **Equivalence with dMC's own function.** dMC-dev's `_first_order_euler_storage` (copied
+   verbatim from `methods.py` at the PR #79 merge) run step by step in torch float64 on the
+   same inflow and initial state agrees with the sandbox loop to a maximum of 2e-5 m³/s over
+   5,479 days at three parameter settings, with identical NSE to four decimals. The sandbox
+   is the dMC law.
+2. **Step response against the analytic timescale.** Constant inflow 20 m³/s for five years,
+   then 60 m³/s. At the box corner (theta 3, b 3) the release e-folds in 93 days against an
+   analytic linearised timescale of 62 days at equilibrium; at dMC's default (theta 1.5,
+   b 0.8) it e-folds in 509 days against 608, and the equilibrium storage sits at 2.6 times
+   capacity. The law is that slow at this capacity by construction.
+3. **Capacity sweep.** Best train NSE on a 12 × 12 grid as `S0` shrinks:
+
+   | S0, MCM | best train NSE | at (theta, b) | response time S0 / (b · theta · q_ref) |
+   |---:|---:|---|---:|
+   | 1 | 0.754 | (2.5, 0.63) | 0.4 d |
+   | 3 | 0.735 | (2.5, 1.06) | 0.7 d |
+   | 10 | 0.711 | (3.0, 1.79) | 1.2 d |
+   | 30 | 0.682 | (3.0, 3.0) | 2.1 d |
+   | 100 | 0.545 | (3.0, 3.0) | 7.1 d |
+   | 300 | 0.341 | (3.0, 3.0) | 21 d |
+   | 940 | 0.175 | (3.0, 3.0) | 67 d |
+
+   Pass-through is 0.650. The law collapses onto and then past pass-through as capacity goes
+   to zero, exactly as it must if the code is right, and at 1 to 3 MCM it matches the fitted
+   0.66-day linear reservoir (0.737). Monotone in capacity, optimum on the box wall from
+   30 MCM upward.
+
+So the flatness is not the implementation. It is the design choice, in dMC, of total lake
+volume as `S0`: the law's response time is bounded below by `S0 / (b · theta · q_ref)`, and
+with 940 MCM that floor is 67 days at the edge of the parameter box. The dam's daily
+operations use an effective buffer of about 2 MCM (fitted timescale 0.66 d times mean
+inflow), 0.2 % of capacity. A law that used the operational buffer instead of total volume
+would work about as well as a one-day linear reservoir, which is to say it would beat
+pass-through by 0.1 NSE and still not represent the events. Making `S0` learnable would
+recover that, but only the ratio `S0 / (b · theta)` is identifiable, so it trades one
+unidentifiable pair for a three-way ridge. A second dam with a different purpose (hydropower or
 irrigation, where releases are decorrelated from inflow) would be the natural extension if
 the question is reopened.
