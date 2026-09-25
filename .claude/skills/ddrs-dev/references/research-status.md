@@ -12,7 +12,7 @@ retired all of them.
 §Gauge-set definitions · §Benchmarks → §The KGE claim · §Closed campaigns
 (leakance · selective equifinality H1–H6 · Q′-store waves · synthetic-n) ·
 **§Do-not-use list** · §Structural constants · §Evidence standard ·
-§Doc conventions · §Open, not closed
+§Doc conventions · §Reservoirs · §Open, not closed
 
 If you are about to cite a number, read §Gauge-set definitions and
 §Do-not-use list first — most wrong numbers here are population confusions, not
@@ -173,6 +173,9 @@ paper's R1–R5.
 | "10 attributes carry roughly one usable direction" | Their effective rank over 2,939,404 reaches is **6.11 of 10**, six directions for 90 % of variance (findings §32.1). The GBM ceiling R^2 = 0.160 measures how much of the target they explain, not how many directions they span — do not conflate the two |
 | "no objective can separate two outputs reading the same latent direction" as a reason to skip the objective question | The premise is withdrawn: at init the outputs are not reading the same direction. The §30 case for a geometry-aware objective stands on its own |
 | A single-seed init rho(n, q) as evidence that one head topology decouples better than another | Chance alone gives \|rho\| of order 1/sqrt(effective rank), which is 0.479 at the measured rank 4.36 — and the current head measures 0.466, i.e. exactly chance. Use the 8-seed sweep and compare each arm against its OWN chance line (findings §32.6) |
+| `dam_sandbox.py`'s "linear, T fitted" numbers as the linear reservoir's skill (Raystown 0.737 / 0.649, T 0.66 d; Abiquiu 0.73 / 0.66) | Driven by the previous day's inflow while pass-through uses the same day's. Same-day: Raystown 0.800 / 0.732, T 1.23 d; Abiquiu 0.743 / 0.677 (§Reservoirs) |
+| "The 17 % inflow-volume excess" as the Abiquiu sandbox's inflow bias | 1.17 is summed Q' at the dam gauge; the sandbox's mostly-observed inflow is 0.98 of release (arid doc §5) |
+| A median NSE over the 2,365 eval gauges quoted as "unregulated skill" | 347 of them are below DOR > 0.5 at median 0.495; without them the median is 0.751, not 0.732 (§Reservoirs) |
 | A CUDA wall-clock for CONUS training, or a CUDA-vs-CPU skill comparison | CUDA runs this model ~6x slower than CPU (~20 s vs ~3.5 s per micro-batch, GPU at 7 % utilisation) and is non-deterministic in scatter-add. Every reference CONUS result was produced on CPU — check `head -1 <run>/run.log`. See traps.md T13 |
 
 ## Head topology (2026-09-11)
@@ -666,6 +669,29 @@ n was already converged by update 20 of 60.
   east of the Rockies, worth 0.03 NSE at the median and up to 0.45 at the ten most egregious
   rivers (n × 3.9 to 8.6, low-gradient agricultural/coastal-plain rivers of the Midwest and
   Southeast).
+
+## Reservoirs (2026-09-22 to 25)
+
+Authority: `research/findings/2026-09-25-reservoir-representation-options.md` (linear reservoir,
+population, literature, options), `2026-09-22-raystown-storage-law-sandbox.md`,
+`2026-09-25-arid-dam-sandboxes.md`. ddrs has no reservoir code; DDR's level pool (#137 to #139)
+was reverted in #143 and never evaluated at gauges.
+
+- **Closed: the dMC fill-fraction law** `Q = Q0 (S / S0)^b` with `S0` = capacity. It is WaterGAP's
+  natural-lake law; with capacity as `S0` its response time is bounded below by weeks. Never beat a
+  one-parameter linear reservoir at four dams. Do not port it.
+- **Linear reservoir = Muskingum row with `X = 0`, `K = T`.** Same-day inflow: Raystown
+  0.800 / 0.732 (T 1.23 d, band 0.64 to 2.03), Abiquiu 0.743 / 0.677 (T 5.8 d); arid dams about 0.
+  Free Muskingum fits pick `X = 0` at all four dams.
+- **Release cap:** `min(S / T, Q_max)` gives Raystown 0.877 / 0.856 (`Q_max` 288 m³/s, ±17 %)
+  with observed inflow, but 0.844 / 0.703 with the trained model's inflow (linear alone 0.683,
+  trained model at the dam 0.622). Treat `Q_max` as data, not a learned parameter.
+- **Population (lower bound, NWM reservoir set):** 347 of 2,365 eval gauges have DOR > 0.5,
+  median trained NSE 0.495 against 0.739 unregulated, 0.12 to 0.38 below in every area bin; a
+  perfect volume fix only reaches 0.553. Below DOR 0.5 there is no deficit. Excluding them moves
+  the population median from 0.732 to 0.751.
+- **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
+  (option A); an observed-release boundary condition (option B, up to 216 of the 347).
 
 ## Open, not closed
 

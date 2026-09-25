@@ -82,3 +82,18 @@ rather than modelled.
    sets the thresholds.
 3. **Do not port the fill-fraction law** in any capacity parameterisation. Three dams, three
    purposes, one humid and two arid, and it never beat a one-parameter linear reservoir.
+
+## 5. Corrections (2026-09-25, same day)
+
+From `2026-09-25-reservoir-representation-options.md` §2:
+
+1. **The "Linear, T fitted" column is the lagged form.** `dam_sandbox.py`'s `simulate_linear` is
+   driven by `inflow[t - 1]` while pass-through uses `inflow[t]`. With same-day inflow the linear
+   reservoir scores 0.743 / 0.677 at Abiquiu (T 5.8 d) and 0.800 / 0.732 at Raystown (T 1.23 d);
+   Alamo and Santa Rosa are unchanged at about 0. The ordering above holds and the gap to the
+   storage law widens.
+2. **"The 17 % inflow-volume excess the summed Q' carries" (§2, Abiquiu) is not in the sandbox
+   inflow.** 1.17 is summed Q' over observed release at the dam gauge. The sandbox's inflow is
+   mostly observed upstream flow, and its volume over release is 0.98, so mass balance is not what
+   the storage law was missing there. The excess is real for the routed model: over WY1997-2010
+   the trained model's volume ratio is 1.18 both above Abiquiu (08286500) and below it (08287000).
