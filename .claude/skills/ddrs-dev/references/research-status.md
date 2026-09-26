@@ -699,6 +699,13 @@ was reverted in #143 and never evaluated at gauges.
   `derived/grand_to_merit_comid.csv` (2,177 GRanD ids to MERIT COMID, 663 in ResOpsUS) and
   `derived/resops_inventory.csv`: 298 reservoirs have at least 5 years of overlapping daily inflow
   and outflow, 289 of them mapped to a COMID. That is the population for fitting `T` per dam.
+- **Benchmark of record (2026-09-26):** `experiments/reservoir/benchmark/dam_benchmark.csv`, 121 dam-gauge pairs,
+  up to ten per HUC2 (nine regions full; 06 and 08 empty; 09, 11, 12, 13, 15 short), built by
+  `select_dam_benchmark.py`: GRanD dams of the NWM table, nearest eval gauge within 1.5x watershed area, gauge
+  carries NWIS peak code 6 in WY1996-2010, ResOpsUS dams first. Current trained-model median NSE 0.458
+  [0.387, 0.508] against summed Q' 0.371; regional medians at n = 10 are uncertain by 0.2 to 0.6, so compare
+  representations paired per gauge. Findings `2026-09-26-dam-benchmark.md`. USGS regulation flags (peak codes,
+  GAGES-II dams/classification) are at `/mnt/ssd1/data/usgs_regulation/`.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); a `T` table
   fitted from ResOpsUS inflow and outflow for option C; operating rules from ISTARF-CONUS (option E).
