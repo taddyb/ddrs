@@ -1,0 +1,34 @@
+{
+ "n_dams": 121,
+ "status": {
+  "fitted": 44,
+  "not in ResOpsUS": 39,
+  "no paired inflow/outflow": 38
+ },
+ "fit_window": {
+  "outside WY1997-2010": 44
+ },
+ "T_median_days": 22.607336237614867,
+ "T_quartiles_days": [
+  7.139866681403113,
+  69.80258239217393
+ ],
+ "n_T_on_upper_wall": 2,
+ "median_nse_fit": 0.4705416871098227,
+ "median_nse_pass_fit": -0.27018000757802385,
+ "median_nse_eval_obs_inflow": 0.46894645406053015,
+ "median_nse_pass_eval": -0.12058171722961919,
+ "n_with_eval_overlap": 44,
+ "by_tier": {
+  "1": {
+   "fitted": 43
+  },
+  "2": {
+   "no paired inflow/outflow": 38,
+   "fitted": 1
+  },
+  "3": {
+   "not in ResOpsUS": 39
+  }
+ }
+}

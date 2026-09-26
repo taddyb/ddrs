@@ -8,7 +8,11 @@
 > Committed fixture: `examples/juniata/data/juniata_reservoirs.csv` (Raystown Lake, COMID
 > 73005301, `T_days = 1.23`). Config contract, rejected combinations and wiring:
 > `skills/ddrs-dev/references/config.md` §Reservoirs. With the flag off (the default) every reach
-> is routed as an MC channel. The dMC fill-fraction law is **closed**
+> is routed as an MC channel. **Benchmark result (2026-09-26), C bolted onto a head trained
+> without it:** ΔNSE +0.015 (null) at the 44 dams with a ResOpsUS-fitted `T`, ΔKGE −0.081
+> (over-attenuation), a median `T` at the other 77 hurts (−0.143), no runtime cost; a head
+> trained with C on is the untested fair comparison
+> (`research/findings/2026-09-26-option-c-dam-benchmark-findings.md`). The dMC fill-fraction law is **closed**
 > (a natural-lake law; never beat a one-parameter linear reservoir at four dams). DDR's level pool
 > (#137 to #139) was reverted in #143 without a gauge evaluation. Read the options doc before
 > building anything:

@@ -26,6 +26,7 @@ is what a future session needs, not the narrative.
 | A forward-only sweep (grid search, sensitivity scan) grows RSS without bound | T16 |
 | A log-space parameter never moves off one end of its range, yet gradient checks pass | T17 |
 | `training_step_layer_b` step3 (MC forward max abs 1.01e-1) and `training_step_layer_c` step2 fail locally, green in CI | T18 |
+| Same checkpoint, same gauge, different prediction when evaluated with a different gauge CSV | T19 |
 
 ---
 
@@ -427,3 +428,26 @@ That tests the physics ddrs runs, but step 3's hand-built upstream-neighbour out
 its `ln(1 + 1e-6)` log-space lower bound (pre-T17) would have to follow. Until one lands,
 these two failures are known and carry no regression signal; a failure in any OTHER
 training-step sub-test is still real.
+
+## T19: A gauge's prediction depends on the other gauges in the eval set (2026-09-26)
+
+**Symptom.** The same checkpoint scores a gauge differently when the gauge CSV
+(`data_sources.gages`) changes, on the same backend and window. Found evaluating the
+121-gauge dam benchmark against the 2,365-gauge eval of the same run: 73 of 121 gauges
+differed, NSE by up to 1.58, per-gauge median relative flow difference up to 29 %.
+
+**Cause.** `src/data/collate.rs::build_flow_scale` (mirrors DDR `readers.py:270-330`) scales
+the lateral inflow `q'` of every batch gauge's outlet reach by that gauge's `FLOW_SCALE`.
+The scaled inflow is routed, so it reaches every gauge downstream. Adding or removing a
+gauge with `FLOW_SCALE` ≠ 1 changes the flow at all gauges below it. Not a CPU/CUDA effect.
+
+**Discriminating test.** For each differing gauge, list the eval gauges whose outlet COMID
+is in its subgraph (`merit_gages_conus_adjacency.zarr/<staid>/order`) and are present in
+one gauge set but not the other. On 2026-09-26 the gauges with no such gauge of
+`FLOW_SCALE` ≠ 1 matched the full eval to 1e-4 m³/s at 47 of 47; 73 of the 74 with one
+differed.
+
+**Consequence.** Paired comparisons are valid only within one gauge CSV. Never compare a
+subset eval's absolute metrics with a full-population table. Fix options (not applied):
+apply `FLOW_SCALE` to the gauge's output rather than the reach inflow (breaks DDR parity),
+or always evaluate on the full population and subset afterwards.

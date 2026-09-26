@@ -1,0 +1,199 @@
+{
+ "n_dams": 121,
+ "descriptive": {
+  "capacity_any": 121,
+  "hydrolakes_volume": 121,
+  "hydrolakes_res_time": 121,
+  "grand_purpose": 82,
+  "grand_year": 82,
+  "nwm_level_pool": 121,
+  "lake_name_blank": 31
+ },
+ "option_C": {
+  "T_fitted": 44,
+  "T_status": {
+   "fitted": 44,
+   "not in ResOpsUS": 39,
+   "no paired inflow/outflow": 38
+  },
+  "mass_balance_inflow_possible": 33,
+  "no_source": 44,
+  "hydrolakes_res_time_over_fitted_T_median": 13.978236711646131
+ },
+ "option_D": {
+  "istarf_Qmax_full_fit": 76,
+  "glofas_Qf": 22,
+  "observed_release_p99": 79,
+  "any_Qmax": 80,
+  "ready_T_and_observed_Qmax": 44
+ },
+ "option_E": {
+  "istarf": {
+   "full": 76,
+   "extrapolated": 43,
+   "storage_only": 2
+  },
+  "ready": 76
+ },
+ "option_B": {
+  "release_in_eval_ge_3y": 77,
+  "release_in_eval_any": 78
+ },
+ "by_huc2": {
+  "01": {
+   "n": 10,
+   "T": 0,
+   "mass_balance": 1,
+   "Qmax_obs": 1,
+   "rule_full": 1,
+   "release_eval": 1
+  },
+  "02": {
+   "n": 10,
+   "T": 2,
+   "mass_balance": 0,
+   "Qmax_obs": 2,
+   "rule_full": 2,
+   "release_eval": 2
+  },
+  "03": {
+   "n": 10,
+   "T": 3,
+   "mass_balance": 6,
+   "Qmax_obs": 9,
+   "rule_full": 9,
+   "release_eval": 9
+  },
+  "04": {
+   "n": 6,
+   "T": 0,
+   "mass_balance": 0,
+   "Qmax_obs": 0,
+   "rule_full": 0,
+   "release_eval": 0
+  },
+  "05": {
+   "n": 10,
+   "T": 3,
+   "mass_balance": 0,
+   "Qmax_obs": 3,
+   "rule_full": 3,
+   "release_eval": 3
+  },
+  "07": {
+   "n": 9,
+   "T": 0,
+   "mass_balance": 2,
+   "Qmax_obs": 3,
+   "rule_full": 2,
+   "release_eval": 3
+  },
+  "09": {
+   "n": 1,
+   "T": 0,
+   "mass_balance": 0,
+   "Qmax_obs": 1,
+   "rule_full": 1,
+   "release_eval": 1
+  },
+  "10": {
+   "n": 10,
+   "T": 6,
+   "mass_balance": 4,
+   "Qmax_obs": 10,
+   "rule_full": 10,
+   "release_eval": 10
+  },
+  "11": {
+   "n": 4,
+   "T": 1,
+   "mass_balance": 3,
+   "Qmax_obs": 4,
+   "rule_full": 4,
+   "release_eval": 4
+  },
+  "12": {
+   "n": 3,
+   "T": 0,
+   "mass_balance": 3,
+   "Qmax_obs": 3,
+   "rule_full": 3,
+   "release_eval": 3
+  },
+  "13": {
+   "n": 6,
+   "T": 2,
+   "mass_balance": 4,
+   "Qmax_obs": 6,
+   "rule_full": 5,
+   "release_eval": 4
+  },
+  "14": {
+   "n": 10,
+   "T": 10,
+   "mass_balance": 0,
+   "Qmax_obs": 10,
+   "rule_full": 9,
+   "release_eval": 10
+  },
+  "15": {
+   "n": 2,
+   "T": 0,
+   "mass_balance": 2,
+   "Qmax_obs": 2,
+   "rule_full": 1,
+   "release_eval": 2
+  },
+  "16": {
+   "n": 10,
+   "T": 4,
+   "mass_balance": 4,
+   "Qmax_obs": 8,
+   "rule_full": 8,
+   "release_eval": 8
+  },
+  "17": {
+   "n": 10,
+   "T": 3,
+   "mass_balance": 4,
+   "Qmax_obs": 8,
+   "rule_full": 8,
+   "release_eval": 7
+  },
+  "18": {
+   "n": 10,
+   "T": 10,
+   "mass_balance": 0,
+   "Qmax_obs": 10,
+   "rule_full": 10,
+   "release_eval": 10
+  }
+ },
+ "by_tier": {
+  "1": {
+   "n": 43,
+   "T": 43,
+   "mass_balance": 0,
+   "rule_full": 42
+  },
+  "2": {
+   "n": 39,
+   "T": 1,
+   "mass_balance": 33,
+   "rule_full": 34
+  },
+  "3": {
+   "n": 39,
+   "T": 0,
+   "mass_balance": 0,
+   "rule_full": 0
+  }
+ },
+ "network_kan_inputs": {
+  "reaches": 12759,
+  "reaches_nan": 147,
+  "gauges_with_nan": 33,
+  "dams_with_nan": 1,
+  "dams_on_gauge_reach": 80
+ }
+}

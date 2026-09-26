@@ -706,9 +706,18 @@ was reverted in #143 and never evaluated at gauges.
   [0.387, 0.508] against summed Q' 0.371; regional medians at n = 10 are uncertain by 0.2 to 0.6, so compare
   representations paired per gauge. Findings `2026-09-26-dam-benchmark.md`. USGS regulation flags (peak codes,
   GAGES-II dams/classification) are at `/mnt/ssd1/data/usgs_regulation/`.
+- **Option C on the benchmark, bolted onto a head trained without it (2026-09-26):** host
+  `2026-09-12T23-39-03Z` (`sr_n0_gamma`; the leakance run cannot host reservoirs). `T` fitted per dam
+  on ResOpsUS days outside WY1997-2010 for 44 of 121 dams (median 22.6 d); table
+  `experiments/reservoir/benchmark/reservoirs_T_fit.csv`. Paired ΔNSE +0.015 [−0.082, +0.066], 23 up /
+  21 down (null); ΔKGE −0.081, 36 of 44 down, α 0.885 → 0.607 (the head already supplies part of the
+  attenuation). `T` ≤ 60 d +0.040, `T` > 60 d −0.145 (post hoc). A median `T` at dams without a fit:
+  ΔNSE −0.143, 53 of 77 down. No runtime cost (461 s off and on, CPU, 11,522 reaches). Reservoir
+  attributes: `T` at 44, reconstructable at 33 more, no source at 44; not predictable from published
+  attributes. Findings `2026-09-26-option-c-dam-benchmark-findings.md`.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
-  (option A); an observed-release boundary condition (option B, up to 216 of the 347); a `T` table
-  fitted from ResOpsUS inflow and outflow for option C; operating rules from ISTARF-CONUS (option E).
+  (option A); an observed-release boundary condition (option B, up to 216 of the 347); a head
+  trained with option C on (the fair test of C); operating rules from ISTARF-CONUS (option E).
 
 ## Open, not closed
 
