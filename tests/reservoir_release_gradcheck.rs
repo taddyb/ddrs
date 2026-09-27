@@ -242,6 +242,93 @@ fn release_gradcheck_with_learned_gamma() {
     check("gamma op, dam 3", Base { dam: 3, t0: 0.8, a: 0.7, b: -0.4, gamma: Some(0.4), eps_ab: 1e-2 });
 }
 
+/// End to end: one weight of the release head's read-out, through
+/// `release_params` (sigmoid, log-space `T0`, linear `a`, `b`), the per-step
+/// seasonal `T`, the timestep op's `T` parent and the routing solve. The
+/// FD perturbs the weight value directly in a rebuilt head.
+#[test]
+fn release_head_weight_gradcheck_end_to_end() {
+    use burn::module::Param;
+    use ddrs::config::{ParameterRanges, ReleaseHeadSection};
+    use ddrs::nn::release_head::{init_release_head, release_params};
+
+    let device = Device::default();
+    let ranges = ParameterRanges::default();
+    let section = ReleaseHeadSection {
+        hidden_size: 6,
+        num_hidden_layers: 1,
+        grid: 5,
+        k: 3,
+        input_var_names: vec!["f1".into(), "f2".into()],
+        seasonal: true,
+    };
+    let features = || Tensor::<AB, 2>::from_floats([[0.8_f32, -1.2]], &device);
+    // Move the read-out off its init so T0 is a few days and a, b are nonzero.
+    let head0 = {
+        let mut h = init_release_head::<AB>(&section, &ranges, 42, &device);
+        h.output.bias = Some(Param::from_tensor(Tensor::from_floats([0.3_f32, 0.6, -0.5], &device)));
+        h
+    };
+    let (row, col) = (2, 0); // read-out weight [H, P]: hidden unit 2 -> T0
+    let with_weight = |delta: f32| {
+        let mut h = head0.clone();
+        let w = h.output.weight.val();
+        let mut v: Vec<f32> = w.clone().into_data().to_vec().unwrap();
+        let [_, p] = w.dims();
+        v[row * p + col] += delta;
+        h.output.weight = Param::from_tensor(
+            Tensor::<AB, 1>::from_floats(v.as_slice(), &device).reshape(w.dims()),
+        );
+        h
+    };
+
+    let route_with = |head: &ddrs::nn::KanHead<AB>| -> Tensor<AB, 2> {
+        let rp = release_params(head, features(), &ranges);
+        let spatial = SpatialParameters::<I> {
+            n: Tensor::from_floats(vec![0.5_f32; N_REACH].as_slice(), &device),
+            q_spatial: Tensor::from_floats(vec![0.5_f32; N_REACH].as_slice(), &device),
+            p_spatial: Some(Tensor::from_floats(vec![0.575_f32; N_REACH].as_slice(), &device)),
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
+            impervious_mask: None,
+            gamma: None,
+        };
+        let inputs = RoutingInputs::<I> {
+            adjacency: sandbox5(),
+            x_storage: Tensor::ones([N_REACH], &device) * 0.3,
+        };
+        let q = Tensor::<AB, 1>::from_floats(q_prime().as_slice(), &device).reshape([STEPS + 1, N_REACH]);
+        let mut mc = MuskingumCunge::<I>::new(Config::default(), device);
+        mc.setup_inputs(inputs, q, spatial, false, None);
+        mc.set_dam_release(DamRelease {
+            rows: vec![3],
+            t0_days: rp.t0_days,
+            seasonal: rp.seasonal,
+            phase: phase(),
+        })
+        .unwrap();
+        mc.forward()
+    };
+    let w = Tensor::<AB, 1>::from_floats(weights().as_slice(), &device).reshape([N_REACH, STEPS + 1]);
+    let grads = (route_with(&head0) * w).sum().backward();
+    let gw: Vec<f32> = head0.output.weight.val().grad(&grads).expect("weight grad").into_data().to_vec().unwrap();
+    let p = head0.output.weight.val().dims()[1];
+    let analytical = gw[row * p + col] as f64;
+
+    let loss = |h: &ddrs::nn::KanHead<AB>| -> f64 {
+        let q = route_with(h).into_data().to_vec::<f32>().unwrap();
+        q.iter().zip(weights()).map(|(&v, w)| v as f64 * w as f64).sum()
+    };
+    let eps = 2e-2_f32;
+    let fd = (loss(&with_weight(eps)) - loss(&with_weight(-eps))) / (2.0 * eps as f64);
+    let abs = (analytical - fd).abs();
+    let rel = abs / analytical.abs().max(fd.abs());
+    println!("release head weight [{row},{col}]: analytical={analytical:.6e} fd={fd:.6e} rel={rel:.3e}");
+    assert!(analytical != 0.0 && analytical.is_finite(), "vacuous weight gradient");
+    assert!(rel < REL_TOL || abs < ABS_TOL, "release head weight gradcheck rel {rel:.3e}");
+}
+
 #[test]
 fn clamped_release_has_exactly_zero_gradient() {
     // T0 = 1.5 h, a = -2, b = -2: T0·exp(-2 sin - 2 cos) < 1 h wherever
