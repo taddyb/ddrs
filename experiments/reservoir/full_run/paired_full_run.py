@@ -7,10 +7,12 @@ Arms (same config and seed, CPU, code 0ac6f2e on branch dam-release-head, train 
 Per gauge: NSE, KGE over the test window, as the run manifests score it; the summed-Q' baseline on the same gauges and
 days. Groups from experiments/reservoir/nid/nid_dams_by_gauge.csv: any NID dam >= 10 MCM upstream vs none, NID degree
 of regulation, dam on the gauge reach, and the 458 smoke-set dam gauges and their controls.
-Writes experiments/reservoir/full_run/paired_full_run.{json,csv}.
+Writes experiments/reservoir/full_run/paired_full_run[_<tag>].{json,csv}.
+Other seeds: paired_full_run.py --off <run id> --learned <run id> --tag seed43.
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -21,7 +23,13 @@ from scipy.stats import binomtest
 
 HERE = Path(__file__).resolve().parent
 RUNS = Path("/home/tbindas/projects/ddrs/.ddrs/runs")
-OFF, LEARNED = "2026-09-27T07-29-47Z-train-and-test", "2026-09-27T07-29-55Z-train-and-test"
+ap = argparse.ArgumentParser()
+ap.add_argument("--off", default="2026-09-27T07-29-47Z-train-and-test")
+ap.add_argument("--learned", default="2026-09-27T07-29-55Z-train-and-test")
+ap.add_argument("--tag", default="")
+args = ap.parse_args()
+OFF, LEARNED = args.off, args.learned
+STEM = "paired_full_run" + (f"_{args.tag}" if args.tag else "")
 NID = HERE.parent / "nid" / "nid_dams_by_gauge.csv"
 SMOKE = HERE.parent / "smoke" / "smoke_gauges.csv"
 
@@ -75,7 +83,7 @@ df = df.join(nid[["area_km2", "n_nid", "n_nid_ge10mcm", "nid_dor", "nid_on_gauge
 sm = pd.read_csv(SMOKE, dtype={"STAID": str}).set_index("STAID")
 df["smoke_role"] = df.index.map(sm.role)
 df["dnse"], df["dkge"] = df.nse_learned - df.nse_off, df.kge_learned - df.kge_off
-df.to_csv(HERE / "paired_full_run.csv")
+df.to_csv(HERE / f"{STEM}.csv")
 
 dammed = df.n_nid_ge10mcm > 0
 dor = pd.cut(df.nid_dor.where(dammed), [0, 0.1, 0.5, 1, 2, np.inf], labels=["<=0.1", "0.1-0.5", "0.5-1", "1-2", ">2"])
@@ -92,5 +100,5 @@ res = dict(
                              nse_base=float(df.nse_base[m].median()))
                      for g, m in [("dammed_ge10mcm", dammed), ("undammed", ~dammed)]},
 )
-json.dump(res, open(HERE / "paired_full_run.json", "w"), indent=1)
+json.dump(res, open(HERE / f"{STEM}.json", "w"), indent=1)
 print(json.dumps({k: res[k] for k in ["median", "paired_nse", "paired_kge", "by_dor", "median_by_group"]}, indent=1))

@@ -1,0 +1,31 @@
+{
+ "year": 1996,
+ "viewer": "02087183",
+ "viewer_year": 1996,
+ "gauges": [
+  {
+   "id": "02087183",
+   "label": "Large gain below a dam",
+   "note": "Third largest gain of the 917 dammed gauges; the two above it are desert rivers with negative NSE in both arms.",
+   "wy": 1996
+  },
+  {
+   "id": "06411500",
+   "label": "Typical dammed gauge",
+   "note": "Change in NSE equal to the dammed-gauge median; dam on the gauge reach, regulation 1.6.",
+   "wy": 1996
+  },
+  {
+   "id": "11407000",
+   "label": "Largest loss below a dam",
+   "note": "The largest loss at any dammed gauge.",
+   "wy": 1997
+  },
+  {
+   "id": "03353800",
+   "label": "Typical undammed gauge",
+   "note": "Change in NSE equal to the undammed median.",
+   "wy": 2003
+  }
+ ]
+}
