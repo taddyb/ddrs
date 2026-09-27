@@ -51,9 +51,19 @@ with NID features), `smoke_summary.json`. Network: 29,395 reaches.
 ## Known issues
 
 1. The drainage-area match is loose: median 1,400 km2 at dam gauges against 641 km2 at controls, since few large
-   undammed basins exist. On the 1.5x set, well-matched pairs gave the same answer as the rest.
-2. Rio Hondo below Diamond A Dam (08390800): no-dam NSE -17.5, change +6.3, dry most days. Summaries are medians.
-3. The grid: 3 dams hit the 1,000-day T0 wall (Courtright -1.62 -> -3.47, Sumner, Lake Almanor); 142 of the 335 dam
+   undammed basins exist; 36 % of pairs are within 1.5x in area, 45 % within 2x. Unlike the 1.5x set, match quality
+   matters here: well-matched pairs give dam minus control +0.0054 [+0.0014, +0.0156] (167 pairs), loose pairs
+   +0.0109 [+0.0058, +0.0182] (291). The difference is on the dam side (dam gains rise with area), so the loose
+   match does not create the effect, but +0.005 is the conservative figure.
+2. Dilution: gauges within 1.5x of their dam's area gain +0.017 [+0.007, +0.025] (312); gauges between 1.5x and 3x
+   gain +0.003 [-0.000, +0.006] (145). For the dams further up, the offline fit passes the tributaries between dam
+   and gauge through the bucket too, which a dam-row release in ddrs will not: keep check 2 to on-reach dams.
+3. Some controls gain from natural storage the no-dam model lacks: 7 of the 15 controls gaining more than 0.1 are
+   South Atlantic-Gulf swamp and spring-fed rivers (Santa Fe, Myakka, Econfina, Pearl).
+4. Group medians and per-gauge medians can disagree (the plain bucket has the higher group-median NSE, the seasonal
+   one the higher per-gauge change); quote the per-gauge paired numbers.
+5. Rio Hondo below Diamond A Dam (08390800): no-dam NSE -17.5, change +6.3, dry most days. Summaries are medians.
+6. The grid: 3 dams hit the 1,000-day T0 wall (Courtright -1.62 -> -3.47, Sumner, Lake Almanor); 142 of the 335 dam
    gauges with an active bucket have a or b on the +/-2 edge.
 
 ## What the implementation must show on this set

@@ -144,17 +144,18 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
     <div class="card">
       <h3>Dam gauges ({{N_DAM}})</h3>
       <ul>
-        <li>Every training gauge with an NID dam of 10 MCM or more upstream, where the nearest such dam drains at least two-thirds of the gauge's area, so the gauge sees that dam's release.</li>
+        <li>Every training gauge with an NID dam of 10 MCM or more upstream, where the nearest such dam drains at least a third of the gauge's area (gauge area at most 3 times the dam reach's). An earlier version required two-thirds (1.5 times); the looser rule adds gauges further below their dam, where the release is diluted by undammed tributaries.</li>
         <li>That dam was finished by 1980 and snapped to its MERIT reach by drainage-area match. Larger dams further up are allowed: {{N_CASCADE}} gauges sit below a chain of them.</li>
         <li>At least 80 % of days observed in both WY1982-1995 and WY1996-2010; drainage area at most 25,000 km².</li>
-        <li>{{N_ONREACH}} dams sit on the gauge's own reach. HUC 08 and 09 had no gauge under these rules and each got one with the dam further up (area ratio up to 10), marked <span class="tag">relaxed</span>.</li>
+        <li>{{N_ONREACH}} dams sit on the gauge's own reach. HUC 08 had no gauge under these rules and got one with the dam further up (area ratio up to 10), marked <span class="tag">relaxed</span>.</li>
       </ul>
     </div>
     <div class="card">
       <h3>Controls ({{N_CTL}})</h3>
       <ul>
         <li>One per dam gauge: no NID dam upstream, no "regulated" flag on its annual peaks, the same coverage rule.</li>
-        <li>Same HUC2 region and the closest drainage area in log terms, each used once, largest dam gauges matched first. {{N_CROSS}} came from another region when a region ran out.</li>
+        <li>Same HUC2 region and the closest drainage area in log terms, each used once, largest dam gauges matched first.</li>
+        <li>When a region ran out, the control came from outside it: the unused gauge with the smallest |log area ratio| + distance / 1,000 km, so a borrowed control is both similar in size and nearby. {{N_CROSS}} were borrowed this way.</li>
         <li>They answer one question: does a tuned bucket help because there is a dam, or because it smooths a model that is too flashy everywhere?</li>
       </ul>
     </div>
@@ -174,7 +175,7 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
   <h2>Where the gauges are</h2>
   <div class="brief">
     <div><b>Hypothesis</b><p>Controls can only separate a dam effect from generic smoothing if they sample the same climates as the dam gauges. Each region should hold dam gauges and controls in similar numbers.</p></div>
-    <div><b>In plain words</b><p>A map of the 628 gauges. The dam-gauge set follows where the big reservoirs are: the Pacific Northwest, California and the Northeast carry the most.</p></div>
+    <div><b>In plain words</b><p>A map of the {{N_ALL}} gauges. The dam-gauge set follows where the big reservoirs are: California, the Pacific Northwest and the Mid-Atlantic carry the most.</p></div>
     <div><b>What is drawn</b><p>CONUS Albers equal-area. Grey shapes are the 18 HUC2 water-resource regions, labelled by code. Ochre dots: dam gauges. Teal dots: controls. Hollow ochre diamonds: the {{N_DAMS_NET}} NID dams of 10 MCM or more in the routed network (toggle below). Hover a gauge for its name, region, drainage area and change in NSE; click it to open its hydrograph.</p></div>
   </div>
   <div class="fig">
@@ -251,10 +252,13 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
   <div class="brief">
     <div><b>Hypothesis</b><p>If the release law captures what dams do, tuning it should raise NSE at most dam gauges and leave the matched controls close to where they were. If it only smooths a flashy model, both groups should move by about the same amount.</p></div>
     <div><b>In plain words</b><p>NSE is 1 for a perfect hydrograph and 0 for no better than the mean flow. It is measured with and without the tuned bucket at every gauge. Each line sorts one group's changes from worst to best; a line further right means bigger gains.</p></div>
-    <div><b>What is drawn</b><p>Across: change in test NSE, seasonal bucket minus no dam, clipped to the range shown (counts beyond are printed at the edges). Up: share of gauges with a change at or below that value. Ochre: dam gauges. Teal: controls. Dots mark the medians; the grey vertical line is no change. Hover for the shares.</p></div>
+    <div><b>What is drawn</b><p>Across: change in test NSE, seasonal bucket minus no dam, clipped to the range shown (counts beyond are printed at the edges). Up: share of gauges with a change at or below that value. Ochre: dam gauges, split by default into gauges whose nearest large dam is on their own reach (solid) and gauges with that dam further up (dashed). Teal: controls. Dots mark the medians; the grey vertical line is no change. Hover for the shares.</p></div>
   </div>
   <div class="fig">
-    <div class="legend"><span><i class="sw" style="background:var(--dam)"></i>Dam gauges ({{N_DAM}})</span><span><i class="sw" style="background:var(--nodam)"></i>Controls, no dam ({{N_CTL}})</span></div>
+    <div class="pickers">
+      <label for="f1mode">Dam gauges<select id="f1mode"><option value="split">Split by where the dam is</option><option value="all">All together</option></select></label>
+      <div class="legend" id="f1leg"></div>
+    </div>
     <div class="figbox"><svg id="f1" class="wide" viewBox="0 0 900 360" role="img" aria-label="Cumulative distribution of the change in NSE at dam gauges and controls"></svg><div class="tip" id="t1" hidden></div></div>
   </div>
   <div class="brief">
@@ -325,8 +329,8 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
   <h2>Four hydrographs</h2>
   <div class="brief">
     <div><b>Hypothesis</b><p>Where the bucket helps, it should do what a reservoir does: cut the model's peaks, hold the water, and release it on the recession. Where it fails, the tuned response time should be implausible.</p></div>
-    <div><b>In plain words</b><p>Daily flow for one water year at four gauges: a dam gauge with a large gain, a typical dam gauge (median gain), the dam gauge with the largest loss, and a typical control. The set's largest gain, Rio Hondo below Diamond A Dam, is left out: its channel is dry on 85 % of days.</p></div>
-    <div><b>What is drawn</b><p>Daily flow in m³/s, linear scale, for the water year chosen below (WY1996 is the median-flow year at the first gauge). Dark: observed at the gauge. Teal: the model today, no dam. Ochre: the tuned release (seasonal bucket). Hover for daily values.</p></div>
+    <div><b>In plain words</b><p>Daily flow for one water year at four gauges: a dam gauge with a large gain, a typical dam gauge (median gain), the dam gauge with the largest loss, and a typical control. The two larger gains in the set are left out: Rio Hondo below Diamond A Dam and the Big Lost River near Atomic City carry less than 0.01 m³/s on 88 % and 75 % of days.</p></div>
+    <div><b>What is drawn</b><p>Daily flow in m³/s, linear scale, for the water year chosen below (WY2005 is close to the median-flow year at the first gauge, and a typical year at all four). Dark: observed at the gauge. Teal: the model today, no dam. Ochre: the tuned release (seasonal bucket). Hover for daily values.</p></div>
   </div>
   <div class="fig">
     <div class="pickers">
@@ -391,10 +395,10 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
   <h2>What the implementation must show on this set</h2>
   <div class="card">
     <ol>
-      <li><b>Pass-through start.</b> With every dam at T₀ = 1 hour, ddrs reproduces the no-dam run at all {{N_ALL}} gauges to within 1e-4 m³/s.</li>
+      <li><b>Off is identical.</b> With <span class="m">use_reservoirs: false</span>, the output is bitwise identical to the no-dam run on this gauge set. With every dam at a fixed T = 1 hour (a = b = 0), daily flow matches the no-dam run with NSE above 0.999 at all {{N_ALL}} gauges. A one-hour bucket at an hourly step is nearly, not exactly, pass-through.</li>
       <li><b>Engine matches this fit.</b> With the KAN head frozen and each gauge's nearest dam set to the fitted T₀, a and b, ddrs matches these tuned hydrographs at the {{N_ONREACH}} dams on their gauge's reach (NSE between the two above 0.99).</li>
       <li><b>Gradients.</b> T₀, a and b pass a finite-difference check.</li>
-      <li><b>Learning.</b> Training on 1981-1995 from the pass-through start moves T₀ off 1 hour where this fit found storage and leaves it near 1 hour where it found none; controls have no dam and keep none.</li>
+      <li><b>Learning.</b> Training on 1981-1995 from near pass-through moves T₀ up where this fit found storage and leaves it low where it found none; controls have no dam and keep none.</li>
       <li><b>Beat the controls.</b> {{CHECK5}}</li>
     </ol>
   </div>
@@ -639,11 +643,30 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
 
   // ---------- Figure 3: ECDF of the change in NSE ----------
   function fig1() {
+    var sel = $("f1mode");
+    sel.addEventListener("change", function () { fig1draw(sel.value); });
+    fig1draw(sel.value);
+  }
+  function fig1draw(mode) {
     var svg = $("f1"), tip = $("t1");
+    clear(svg); hideTip(tip);
     var X0 = 64, X1 = 640, Y0 = 20, Y1 = 306;
-    var groups = [["dam", "var(--dam)", "Dam gauges"], ["control", "var(--nodam)", "Controls"]].map(function (g) {
-      var v = D.meta.filter(function (m) { return m.role === g[0] && fin(m.d_seas); }).map(function (m) { return m.d_seas; }).sort(function (a, b) { return a - b; });
-      return { role: g[0], color: g[1], label: g[2], v: v, med: median(v) };
+    var defs = mode === "split"
+      ? [[function (m) { return m.role === "dam" && m.on_reach; }, "var(--dam)", "Dam on the gauge's reach", ""],
+         [function (m) { return m.role === "dam" && !m.on_reach; }, "var(--dam)", "Dam further up", "6 4"],
+         [function (m) { return m.role === "control"; }, "var(--nodam)", "Controls", ""]]
+      : [[function (m) { return m.role === "dam"; }, "var(--dam)", "Dam gauges", ""],
+         [function (m) { return m.role === "control"; }, "var(--nodam)", "Controls", ""]];
+    var groups = defs.map(function (g) {
+      var v = D.meta.filter(function (m) { return g[0](m) && fin(m.d_seas); }).map(function (m) { return m.d_seas; }).sort(function (a, b) { return a - b; });
+      return { color: g[1], label: g[2], dash: g[3], v: v, med: median(v) };
+    });
+    var L = $("f1leg"); clear(L);
+    groups.forEach(function (g) {
+      var s = document.createElement("span"), v = document.createElementNS(NS, "svg");
+      v.setAttribute("width", 22); v.setAttribute("height", 8); v.setAttribute("viewBox", "0 0 22 8");
+      el(v, "line", { x1: 1, x2: 21, y1: 4, y2: 4, stroke: g.color, "stroke-width": 3, "stroke-dasharray": g.dash || "none" });
+      s.appendChild(v); s.appendChild(document.createTextNode(g.label + " (" + g.v.length + ")")); L.appendChild(s);
     });
     var LO = -0.3, HI = 0.5;
     var sx = function (x) { return X0 + (X1 - X0) * (Math.max(LO, Math.min(HI, x)) - LO) / (HI - LO); };
@@ -655,14 +678,14 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
     groups.forEach(function (g, gi) {
       var n = g.v.length, d = "M" + X0 + " " + sy(0);
       g.v.forEach(function (v, k) { d += "H" + sx(v).toFixed(1) + "V" + sy((k + 1) / n).toFixed(1); });
-      el(svg, "path", { d: d + "H" + X1, fill: "none", stroke: g.color, "stroke-width": 2 });
+      el(svg, "path", { d: d + "H" + X1, fill: "none", stroke: g.color, "stroke-width": 2, "stroke-dasharray": g.dash || "none" });
       el(svg, "circle", { cx: sx(g.med), cy: sy(0.5), r: 5, fill: g.color, stroke: "var(--surface)", "stroke-width": 2 });
       var below = g.v.filter(function (v) { return v < LO; }).length, above = g.v.filter(function (v) { return v > HI; }).length;
-      var ly = sy(0.62) + gi * 42;
-      el(svg, "line", { x1: X1 + 16, x2: X1 + 34, y1: ly - 4, y2: ly - 4, stroke: g.color, "stroke-width": 3 });
+      var ly = sy(0.66) + gi * 42;
+      el(svg, "line", { x1: X1 + 16, x2: X1 + 34, y1: ly - 4, y2: ly - 4, stroke: g.color, "stroke-width": 3, "stroke-dasharray": g.dash ? "4 3" : "none" });
       txt(svg, X1 + 42, ly, g.label, "dl");
-      txt(svg, X1 + 42, ly + 16, "median " + sgn(g.med) + ", " + g.v.filter(function (v) { return v > 1e-9; }).length + " of " + n + " up", "axis");
-      if (below) txt(svg, X0 + 6, Y0 + 12 + gi * 14, g.label.toLowerCase() + ": " + below + " below −0.3", "axis");
+      txt(svg, X1 + 42, ly + 16, "median " + sgn(g.med) + ", n " + n, "axis");
+      if (below) txt(svg, X0 + 6, Y1 - 60 - gi * 14, g.label.toLowerCase() + ": " + below + " below −0.3", "axis");
       if (above) txt(svg, X1 - 6, Y1 - 60 - gi * 14, g.label.toLowerCase() + ": " + above + " above +0.5", "axis", "end");
     });
     var cross = el(svg, "line", { x1: -10, x2: -10, y1: Y0, y2: Y1, class: "cross" });
@@ -704,10 +727,11 @@ footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-t
       var hit = el(svg, "rect", { x: 0, y: y - RH / 2, width: 900, height: RH, class: "rowhit" });
       txt(svg, 8, y + 4, r.h + " " + HUCN[r.h], "dl");
       if (fin(r.md) && fin(r.mc)) el(svg, "line", { x1: sx(r.md), x2: sx(r.mc), y1: y, y2: y, stroke: "var(--rule)", "stroke-width": 2 });
-      if (fin(r.mc)) el(svg, "circle", { cx: sx(r.mc), cy: y, r: 5.5, class: "pt-nodam" });
-      if (fin(r.md)) el(svg, "circle", { cx: sx(r.md), cy: y, r: 5.5, class: "pt-dam" });
+      var tie = fin(r.md) && fin(r.mc) && Math.abs(sx(r.md) - sx(r.mc)) < 9;
+      if (fin(r.mc)) el(svg, "circle", { cx: sx(r.mc), cy: tie ? y + 4 : y, r: 5.5, class: "pt-nodam" });
+      if (fin(r.md)) el(svg, "circle", { cx: sx(r.md), cy: tie ? y - 4 : y, r: 5.5, class: "pt-dam" });
       txt(svg, X1 + 14, y + 4, r.nd + " · " + r.nc, "axis");
-      function show() { tipAt(tip, svg, 560, y, [bold(r.h + " " + HUCN[r.h]), span("dam gauges: " + r.nd + ", median " + sgn(r.md) + ", " + r.upd + " up"), span("controls: " + r.nc + ", median " + sgn(r.mc) + ", " + r.upc + " up")]); }
+      function show() { tipAt(tip, svg, 560, y, [bold(r.h + " " + HUCN[r.h]), span("dam gauges: " + r.nd + ", median " + sgn(r.md)), span("controls: " + r.nc + ", median " + sgn(r.mc))]); }
       hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show);
       hit.addEventListener("pointerleave", function () { hideTip(tip); });
     });

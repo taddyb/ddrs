@@ -70,10 +70,13 @@ PUB.mkdir(parents=True, exist_ok=True)
 site = PUB / "site"
 site.mkdir(exist_ok=True)
 (PUB / "dam_release_smoke.html").write_text(out)
+(PUB / "index.json").write_bytes((WEB / "index.json").read_bytes())
 (site / "index.html").write_text('<meta charset="utf-8">\n' + out)
-for nm in ["index.json", "series"]:
+# Preview folder: the page fetches index.json and series/hucNN.b64.txt (from to_b64.py), as published.
+for nm, target in [("index.json", PUB / "index.json"), ("series", PUB / "series")]:
     p = site / nm
-    if not p.exists():
-        os.symlink(WEB / nm, p)
+    if p.is_symlink() or p.exists():
+        p.unlink()
+    os.symlink(target, p)
 print("page bytes", len(out.encode()))
 print("placeholders filled", len(V))
