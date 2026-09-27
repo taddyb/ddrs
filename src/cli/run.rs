@@ -440,8 +440,27 @@ where
                 let mut test_dataset = MeritGagesDataset::open(&test_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
-                let latest = latest_checkpoint_base(&ckpt_dir)
-                    .ok_or_else(|| CliError::Runtime("no .mpk checkpoints found after Phase 1".into()))?;
+                // Phase 1 writes a checkpoint per optimizer step. A resume from
+                // `experiment.checkpoint` that has no step left to take (e.g. the
+                // resumed epoch is the last and its sampler is exhausted, as in the
+                // in-engine replay of a fixed dam table) writes none: the model is
+                // then exactly the resumed checkpoint, so the test phase evaluates it.
+                let latest = match latest_checkpoint_base(&ckpt_dir) {
+                    Some(latest) => latest,
+                    None => match train_cfg.experiment.as_ref().and_then(|e| e.checkpoint.as_ref()) {
+                        Some(resumed) => {
+                            eprintln!(
+                                "Phase 1 took no optimizer step and wrote no checkpoint; testing the \
+                                 resumed checkpoint {}",
+                                resumed.display()
+                            );
+                            crate::training::head_base(resumed)
+                        }
+                        None => {
+                            return Err(CliError::Runtime("no .mpk checkpoints found after Phase 1".into()))
+                        }
+                    },
+                };
 
                 let head_template: KanHead<I> = head_cfg.init::<I>(&device);
                 let head = load_kan_head::<I>(&latest, head_template, &device)

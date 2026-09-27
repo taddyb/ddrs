@@ -202,7 +202,13 @@ itself**, not its parent. Always pass
 
 Resume additionally requires `experiment.epochs > E` or the resumed run trains zero
 batches. Stored weights are f16, so a resumed trajectory drifts slowly — expected,
-not a bug.
+not a bug. Since 2026-09-27 a `train-and-test` resume that takes no step (the resumed
+epoch is the last and its sampler is exhausted) no longer fails the test phase with
+`no .mpk checkpoints found after Phase 1`: it logs `Phase 1 took no optimizer step and
+wrote no checkpoint; testing the resumed checkpoint <dir>` and evaluates that
+checkpoint. That is the in-engine replay recipe for a fixed dam table
+(`config/experiments/dam_release_smoke_replay_L2.yaml`); `juniata_acceptance` pins it
+bitwise against the run it resumes.
 
 ## T11 — Time-major `Qr(time, divide_id)` read as fill values (fixed 2026-09-09)
 

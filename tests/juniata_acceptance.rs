@@ -297,6 +297,40 @@ fn juniata_reservoir_is_matched_logged_and_changes_the_gauge_series() {
     assert!(res_dir.join("release_clamp.csv").is_file(), "reservoir run lacks release_clamp.csv");
     assert!(!plain_dir.join("release_clamp.csv").exists(), "control run wrote release_clamp.csv");
 
+    // The in-engine replay recipe: resume at the run's LAST checkpoint with the
+    // same epochs. No optimizer step is left, so Phase 1 writes no checkpoint and
+    // the test phase evaluates the resumed one: the gauge series must be the
+    // reservoir run's bit for bit.
+    let mut ckpts: Vec<(usize, usize, PathBuf)> = std::fs::read_dir(res_dir.join("checkpoints"))
+        .expect("read checkpoints")
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            let name = p.file_name()?.to_str()?.to_string();
+            let rest = name.strip_prefix("epoch_")?;
+            let (ep, mb) = rest.split_once("_mb_")?;
+            Some((ep.parse().ok()?, mb.parse().ok()?, p))
+        })
+        .collect();
+    ckpts.sort();
+    let (_, _, last) = ckpts.last().expect("the reservoir run wrote checkpoints").clone();
+    let mut replay = cfg.clone();
+    replay["experiment"]["checkpoint"] = last.display().to_string().into();
+    let tmp_rep = tempfile::tempdir().unwrap();
+    let rep_config = tmp_rep.path().join("ddrs.yaml");
+    std::fs::write(&rep_config, serde_yaml::to_string(&replay).unwrap()).unwrap();
+    let rep_dir = run_juniata(&rep_config, tmp_rep.path());
+    let rep_log = std::fs::read_to_string(rep_dir.join("run.log")).expect("read replay run.log");
+    assert!(
+        rep_log.contains("Phase 1 took no optimizer step and wrote no checkpoint; testing the resumed checkpoint"),
+        "replay run.log lacks the zero-step line:\n{rep_log}"
+    );
+    assert!(!rep_log.contains("  mb="), "the replay took a training step:\n{rep_log}");
+    let rep = gauge_predictions(&rep_dir);
+    assert!(
+        rep.iter().zip(&gauge_predictions(&res_dir)).all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the zero-step replay does not reproduce the reservoir run's test phase"
+    );
+
     let plain = gauge_predictions(&plain_dir);
     let res = gauge_predictions(&res_dir);
     assert_eq!(plain.len(), res.len());
