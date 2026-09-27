@@ -77,7 +77,9 @@
 //! Ω       = 2π / (365.25 · 86400 s)
 //! ```
 //!
-//! with `ω_t` from [`seasonal_phase`] (`sin 2ω`, `cos 2ω` by the double
+//! with `ω_t` the CONTINUOUS seasonal phase ([`rule_curve_phase_start`]):
+//! `ω = Ω·(seconds since 1970-01-01 00:00) + 2π/365.25`, so every hourly
+//! step advances it by exactly `Ω·dt` (`sin 2ω`, `cos 2ω` by the double
 //! angle). The trapezoid on `S` puts `−(S0_{t+1} − S0_t)` on the dam row's
 //! right-hand side, i.e. the dam row's lateral inflow becomes
 //! `q'_eff = q'_d − (S0_{t+1} − S0_t)/dt` for the step: the reservoir stores
@@ -85,15 +87,24 @@
 //! the CSR pattern and the hand-written backward are unchanged; the flux
 //! reaches the per-dam coefficients by ordinary autodiff through the
 //! timestep op's `q'` parent (whose gradient the op already returns, B25).
-//! `S0` is periodic in `ω`, so over whole years its increments telescope and
-//! the rule curve moves no volume. (At a calendar year boundary the phase
-//! table's `doy` restarts, so that one step's increment spans a few hours of
-//! phase more or less than an hour; its flux is off by that much, and the sum
-//! still telescopes.) [`rule_curve_increments`] tabulates the per-step phase
-//! increments in f64 so the flux carries no large-number cancellation.
-//! `Ibar_d` is the table's `inflow_mean_m3s` (training-period mean of the
-//! upstream-summed Q'); `c = rule_curve_max·tanh(θ)` per dam
+//! `S0` is periodic in `ω`, so over whole periods (365.25 d) its increments
+//! telescope to zero and the rule curve moves no volume; over any span they
+//! telescope to `S0(end) − S0(start)`. [`rule_curve_increments`] tabulates
+//! the per-step phase increments in f64 so the flux carries no large-number
+//! cancellation. `Ibar_d` is the table's `inflow_mean_m3s` (training-period
+//! mean of the upstream-summed Q'); `c = rule_curve_max·tanh(θ)` per dam
 //! (`crate::nn::dam_params`), so `θ = 0` is no rule curve bit for bit.
+//!
+//! **Why a continuous phase, not [`seasonal_phase`].** The seasonal `T` law
+//! reads the calendar day of year, pandas-style, to match its offline fit.
+//! Used for the rule curve (the first build, 2026-09-27), that phase restarts
+//! at 1 January, so the Dec 31 23:00 → Jan 1 00:00 step spanned +7 h of phase
+//! in a non-leap year and −17 h in a leap year: 7× (or −17×) the hourly flux
+//! in one step, enough to force the discharge clamp (review v2, finding 3).
+//! The continuous phase advances one hour of phase per hourly step always. It
+//! stays within about ±0.75 d of the day-of-year phase (the leap cycle), so
+//! the coefficients keep their meaning; it is 2π/365.25 at 1970-01-01 00:00,
+//! i.e. day-of-year 1 there. The `T` law keeps [`seasonal_phase`] unchanged.
 
 use chrono::{Datelike, NaiveDate};
 
@@ -133,23 +144,42 @@ pub fn seasonal_phase(window_start: NaiveDate, n_hours: usize) -> Vec<[f32; 2]> 
 /// Angular frequency of the seasonal cycle, rad/s: `2π / (365.25 d)`.
 pub const OMEGA_RAD_PER_S: f64 = 2.0 * std::f64::consts::PI / (DAYS_PER_YEAR * 86_400.0);
 
-/// The rule curve's per-step phase increments: row `s` (the step from phase
-/// row `s` to `s + 1`) is `H(ω_{s+1}) − H(ω_s)` with
+/// The rule curve's continuous seasonal phase `ω` (radians, in `[0, 2π)`) at
+/// hour 0 of `window_start`: `Ω·(seconds since 1970-01-01 00:00) + 2π/365.25`,
+/// reduced mod 2π. Row `h` of a window starting there has phase
+/// `ω_0 + Ω·3600·h`, so consecutive windows, test-phase chunks and year
+/// boundaries all line up with one hour of phase per hourly step. At
+/// 1970-01-01 00:00 it equals [`seasonal_phase`]'s day-of-year-1 phase, and it
+/// stays within about ±0.75 d of it (the leap cycle).
+pub fn rule_curve_phase_start(window_start: NaiveDate) -> f64 {
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid date");
+    let days = (window_start - epoch).num_days() as f64 + 1.0;
+    let cycles = days / DAYS_PER_YEAR;
+    2.0 * std::f64::consts::PI * (cycles - cycles.floor())
+}
+
 /// `H(ω) = [−cos ω, sin ω, −cos 2ω / 2, sin 2ω / 2] / Ω` (seconds), so that
-/// `S0_{s+1} − S0_s = Ibar · Σ_j ΔH[s, j]·c_j` for `c = (c1s, c1c, c2s, c2c)`.
-/// Computed in f64 from the f32 phase table, `n_rows − 1` rows, row-major
-/// `[n_rows − 1, 4]`.
-pub fn rule_curve_increments(phase: &[[f32; 2]], n_rows: usize) -> Vec<f32> {
-    let h = |[s, c]: [f32; 2]| -> [f64; 4] {
-        let (s, c) = (s as f64, c as f64);
-        let (s2, c2) = (2.0 * s * c, c * c - s * s);
-        let w = OMEGA_RAD_PER_S;
-        [-c / w, s / w, -c2 / (2.0 * w), s2 / (2.0 * w)]
-    };
+/// `S0(ω) = Ibar · Σ_j H_j(ω)·c_j` for `c = (c1s, c1c, c2s, c2c)`.
+pub fn rule_curve_h(w: f64) -> [f64; 4] {
+    let o = OMEGA_RAD_PER_S;
+    [-w.cos() / o, w.sin() / o, -(2.0 * w).cos() / (2.0 * o), (2.0 * w).sin() / (2.0 * o)]
+}
+
+/// The rule curve's per-step phase increments for a window whose row 0 has
+/// continuous phase `phase0` ([`rule_curve_phase_start`]): row `s` (the step
+/// from row `s` to `s + 1`, one hour) is `H(ω_{s+1}) − H(ω_s)` ([`rule_curve_h`])
+/// with `ω_s = phase0 + Ω·dt·s`, so that
+/// `S0_{s+1} − S0_s = Ibar · Σ_j ΔH[s, j]·c_j`. Computed in f64, `n_rows − 1`
+/// rows, row-major `[n_rows − 1, 4]`; they telescope to
+/// `H(ω_{n_rows−1}) − H(ω_0)`, which is zero over a whole period.
+pub fn rule_curve_increments(phase0: f64, n_rows: usize) -> Vec<f32> {
+    let dw = OMEGA_RAD_PER_S * crate::routing::mmc::DT_SECONDS as f64;
     let mut out = Vec::with_capacity(n_rows.saturating_sub(1) * 4);
+    let mut a = rule_curve_h(phase0);
     for s in 0..n_rows.saturating_sub(1) {
-        let (a, b) = (h(phase[s]), h(phase[s + 1]));
+        let b = rule_curve_h(phase0 + dw * (s + 1) as f64);
         out.extend((0..4).map(|j| (b[j] - a[j]) as f32));
+        a = b;
     }
     out
 }

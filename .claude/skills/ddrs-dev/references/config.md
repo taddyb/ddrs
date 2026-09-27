@@ -482,8 +482,11 @@ release_head:            # top-level block, deny_unknown_fields
 **Rule curve and per-dam parameters (added 2026-09-27).** `rule_curve: true` makes the storage
 law `S = T·Q + S0_d(t)` on either dam row, the flux
 `r_d = Ibar_d·Σ_{k=1,2}(c_{k,s} sin kω + c_{k,c} cos kω)` taken off the dam row's lateral inflow
-as `(S0_{t+1} − S0_t)/dt` after the `discharge` floor on `q'` (derivation, units and the
-year-boundary note in `src/routing/release.rs`). The coefficients are per-dam FREE parameters
+as `(S0_{t+1} − S0_t)/dt` after the `discharge` floor on `q'` (derivation and units in
+`src/routing/release.rs`). Its phase is CONTINUOUS (`rule_curve_phase_start`: `ω` advances
+`Ω·dt` every hourly step, `2π/365.25` at 1970-01-01), not the `T` law's day-of-year phase, so
+the Dec 31 → Jan 1 step carries one hour of phase (the first build's day-of-year phase gave that
+step +7 h, or −17 h in a leap year, of flux). The coefficients are per-dam FREE parameters
 (`src/nn/dam_params.rs`, one row per feature-table dam, init 0 = no rule curve bit for bit),
 not head outputs: offline they are not predictable from the NID features. `per_dam_t0` adds a
 per-dam `exp(δ)` on the head's `T0`. Both train with their own Adam at the constant

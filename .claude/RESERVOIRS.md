@@ -131,8 +131,11 @@ change.
   loss at their own constant lr, because offline they are not predictable from NID features
   (rule-curve report: +0.049 median NSE at DOR > 0.5 on-reach with per-dam calibration).
   `Ibar_d` = `inflow_mean_m3s` (`build_dam_inflow_clim.py`). Flaming Gorge (COMID 77013090) is
-  mis-snapped to a 32 km² reach, so its `Ibar` is ~0 and its rule curve inert.
-  `tests/reservoir_rule_curve.rs`.
+  mis-snapped to a 32 km² reach, so its `Ibar` is ~0 and its rule curve inert. The rule curve's
+  phase is continuous (`release::rule_curve_phase_start`, one hour of phase per hourly step,
+  within ±0.75 d of day-of-year), unlike the `T` law's calendar day of year: the first build
+  used the latter, whose restart at 1 January gave the year-boundary step +7 h (−17 h in a leap
+  year) of flux. `tests/reservoir_rule_curve.rs`.
 - **Release-only training (2026-09-27).** `release_head.routing_checkpoint` loads the routing
   head's weights (only `head.mpk`) from another run's checkpoint directory, and
   `release_head.freeze_routing: true` detaches it: the routing head stays bitwise at the

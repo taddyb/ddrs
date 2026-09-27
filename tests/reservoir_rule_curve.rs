@@ -29,7 +29,9 @@ use ddrs::data::store::{map_reservoir_rows, DamFeatures, ReservoirTable};
 use ddrs::nn::dam_params::DamParams;
 use ddrs::nn::release_head::init_release_head;
 use ddrs::routing::mmc::{DamRelease, RuleCurve, DT_SECONDS};
-use ddrs::routing::release::seasonal_phase;
+use ddrs::routing::release::{
+    rule_curve_h, rule_curve_increments, rule_curve_phase_start, seasonal_phase, OMEGA_RAD_PER_S,
+};
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use ddrs::sparse::SparseAdjacency;
 use ddrs::training::forward::apply_reservoir_rows_with;
@@ -122,7 +124,11 @@ fn route_sandbox(
         seasonal: ab.map(|(a, b)| (t(a), t(b))),
         phase: seasonal_phase(start, steps + 1),
         dam_row: row,
-        rule_curve: rule.map(|(coeffs, ibar)| RuleCurve { coeffs, inflow_mean: t(ibar) }),
+        rule_curve: rule.map(|(coeffs, ibar)| RuleCurve {
+            coeffs,
+            inflow_mean: t(ibar),
+            phase0: rule_curve_phase_start(start),
+        }),
     })
     .expect("release");
     mc.forward()
@@ -173,9 +179,10 @@ fn zero_coefficients_route_bitwise_like_no_rule_curve() {
 #[test]
 fn rule_curve_moves_no_volume_over_a_year_of_constant_inflow() {
     let device = Device::default();
-    // 2001 is not a leap year: 8,760 hours from 1 January to 1 January, so
-    // the last phase row is the first one again and S0 returns to its start.
-    let steps = 8760;
+    // One period of the continuous phase: 365.25 d = 8,766 hours, so the last
+    // phase row is the first one again (mod 2π) and S0 returns to its start.
+    // The window crosses the 2001 -> 2002 year boundary.
+    let steps = 8766;
     let start = NaiveDate::from_ymd_opt(2001, 1, 1).unwrap();
     let q_in = 50.0_f32;
     let q: Vec<f32> = (0..=steps).flat_map(|_| [q_in, 0.0, 0.0]).collect();
@@ -193,6 +200,7 @@ fn rule_curve_moves_no_volume_over_a_year_of_constant_inflow() {
             rule_curve: rule.then(|| RuleCurve {
                 coeffs: Tensor::<AB, 1>::from_floats(c, &device).reshape([1, 4]),
                 inflow_mean: t(&[q_in]),
+                phase0: rule_curve_phase_start(start),
             }),
         })
         .unwrap();
@@ -220,6 +228,76 @@ fn rule_curve_moves_no_volume_over_a_year_of_constant_inflow() {
     assert!(min_q > 1.0, "the dam never reaches the discharge floor in this test");
     assert!(max_dev > 5.0, "the rule curve must visibly reshape the outflow (max |dQ| {max_dev})");
     assert!(imb_rc.abs() < 1e-5, "the rule curve moved volume over a year: {imb_rc:.3e}");
+}
+
+// ---------------------------------------------------------------------------
+// 2b. The phase is continuous across year boundaries (leap and non-leap).
+// ---------------------------------------------------------------------------
+
+/// The flux of every step across Dec 31 → Jan 1 is one hour of phase: the
+/// increments `ΔH_s` (the flux is `Ibar/dt · c·ΔH_s`) match the exact
+/// one-hour difference of `H` at the continuous phase, change smoothly from
+/// step to step (no +7 h / −17 h jump), and telescope to `H(end) − H(start)`.
+/// Windows starting on different dates line up with one phase.
+#[test]
+fn rule_curve_flux_is_continuous_across_year_boundaries() {
+    let dw = OMEGA_RAD_PER_S * DT_SECONDS as f64;
+    // 2003 -> 2004 enters a leap year (the old day-of-year phase jumped +7 h
+    // there); 2004 -> 2005 leaves one (−17 h).
+    for (start, label) in [
+        (NaiveDate::from_ymd_opt(2003, 12, 30).unwrap(), "2003->2004 (non-leap Dec 31)"),
+        (NaiveDate::from_ymd_opt(2004, 12, 30).unwrap(), "2004->2005 (leap Dec 31)"),
+    ] {
+        let n_rows = 24 * 4 + 1; // Dec 30 00:00 .. Jan 3 00:00
+        let w0 = rule_curve_phase_start(start);
+        let dh = rule_curve_increments(w0, n_rows);
+        let rows: Vec<[f32; 4]> = dh.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        // The boundary step: Dec 31 23:00 -> Jan 1 00:00 is step 47.
+        for (s, r) in rows.iter().enumerate() {
+            let (a, b) = (rule_curve_h(w0 + dw * s as f64), rule_curve_h(w0 + dw * (s + 1) as f64));
+            for j in 0..4 {
+                let exact = b[j] - a[j];
+                // One hour of phase: |ΔH_j| <= dt (H' has unit amplitude in seconds).
+                assert!(
+                    (r[j] as f64 - exact).abs() <= 1e-6 * (DT_SECONDS as f64) + 1e-7 * exact.abs(),
+                    "{label}: step {s} coeff {j}: {} vs exact {exact}",
+                    r[j]
+                );
+                assert!(exact.abs() <= DT_SECONDS as f64 * 1.0001, "{label}: step {s} spans more than an hour");
+            }
+            if s > 0 {
+                // Smooth: consecutive steps differ by O(Ω·dt) of their size.
+                let prev = rows[s - 1];
+                for j in 0..4 {
+                    let jump = (r[j] - prev[j]).abs() as f64;
+                    assert!(
+                        jump <= 4.0 * dw * DT_SECONDS as f64,
+                        "{label}: step {s} coeff {j} jumps by {jump:.3e} s (old day-of-year phase: \
+                         a 7 h or 17 h step)"
+                    );
+                }
+            }
+        }
+        // Telescoping over the window.
+        let (h0, h1) = (rule_curve_h(w0), rule_curve_h(w0 + dw * (n_rows - 1) as f64));
+        for j in 0..4 {
+            let sum: f64 = rows.iter().map(|r| r[j] as f64).sum();
+            let rel = (sum - (h1[j] - h0[j])).abs() / (h1[j] - h0[j]).abs().max(DT_SECONDS as f64);
+            assert!(rel < 1e-4, "{label}: coeff {j}: increments sum {sum} vs H(end) - H(start) {}", h1[j] - h0[j]);
+        }
+        // A window starting a day later lines up with this one's row 24.
+        let w1 = rule_curve_phase_start(start + chrono::Duration::days(1));
+        let d = (w1 - (w0 + 24.0 * dw)).rem_euclid(2.0 * std::f64::consts::PI);
+        assert!(d.min(2.0 * std::f64::consts::PI - d) < 1e-9, "{label}: day-to-day phase offset {d:.3e}");
+    }
+    // Over one whole period (8,766 h) the increments telescope to zero.
+    let w0 = rule_curve_phase_start(NaiveDate::from_ymd_opt(2004, 3, 1).unwrap());
+    let dh = rule_curve_increments(w0, 8767);
+    for j in 0..4 {
+        let sum: f64 = dh.iter().skip(j).step_by(4).map(|&v| v as f64).sum();
+        let scale = 1.0 / OMEGA_RAD_PER_S;
+        assert!(sum.abs() / scale < 1e-6, "coeff {j}: one period sums to {sum:.3e} s (scale {scale:.3e})");
+    }
 }
 
 // ---------------------------------------------------------------------------

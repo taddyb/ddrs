@@ -137,6 +137,10 @@ pub struct RuleCurve<I: Backend> {
     pub coeffs: Tensor<Autodiff<I>, 2>,
     /// `[n_dams]` `Ibar`, m³/s (the table's `inflow_mean_m3s`).
     pub inflow_mean: Tensor<Autodiff<I>, 1>,
+    /// Continuous seasonal phase `ω` (rad) at lateral-inflow row 0, from
+    /// `crate::routing::release::rule_curve_phase_start(window_start)`; every
+    /// row advances it by `Ω·dt`. Not the `T` law's day-of-year `phase`.
+    pub phase0: f64,
 }
 
 /// [`DamRelease`] armed on an engine: the dam rows as device tensors, plus the
@@ -755,7 +759,7 @@ impl<I: Backend> MuskingumCunge<I> {
         // effective lateral inflow is the reservoir storing more than its
         // reach adds).
         let rule_curve = release.rule_curve.as_ref().map(|rc| {
-            let dh = crate::routing::release::rule_curve_increments(&release.phase, n_rows);
+            let dh = crate::routing::release::rule_curve_increments(rc.phase0, n_rows);
             let rows_i64: Vec<i64> = release.rows.iter().map(|&r| r as i64).collect();
             ArmedRuleCurve {
                 coeffs: rc.coeffs.clone(),

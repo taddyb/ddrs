@@ -295,6 +295,7 @@ pub fn apply_reservoir_rows_with<I: Backend>(
                 Some(RuleCurve {
                     coeffs: d.coefficients(idx.clone(), max).expect("rule_curve carries theta"),
                     inflow_mean: Tensor::<Autodiff<I>, 1>::from_floats(rows.inflow_mean.as_slice(), &device),
+                    phase0: crate::routing::release::rule_curve_phase_start(window_start),
                 })
             }
             _ => None,
@@ -320,6 +321,7 @@ pub fn apply_reservoir_rows_with<I: Backend>(
             RuleCurve {
                 coeffs: t(&flat).reshape([c.len(), 4]),
                 inflow_mean: t(&rows.inflow_mean),
+                phase0: crate::routing::release::rule_curve_phase_start(window_start),
             }
         });
         DamRelease {
