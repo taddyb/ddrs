@@ -626,11 +626,24 @@ pub struct ParameterRanges {
     /// depth goes to zero; 0.183 reproduces observed at-a-station hydraulic
     /// geometry when paired with `q ≈ 0.65`.
     pub gamma: [f32; 2],
+    /// Dam residence time `T0` in days, the release head's first output
+    /// (`params.reservoir_release: learned`). Always denormalised in LOG space.
+    /// YAML key `reservoir_T0`. The lower bound must be at least one hour
+    /// (`1/24` d): `T >= dt/2` keeps the dam row's `c3 >= 0`.
+    pub reservoir_t0: [f32; 2],
+    /// Seasonal coefficient `a` of `T(t) = T0·exp(a·sin ω_t + b·cos ω_t)`,
+    /// linear space. YAML key `reservoir_a`.
+    pub reservoir_a: [f32; 2],
+    /// Seasonal coefficient `b`, linear space. YAML key `reservoir_b`.
+    pub reservoir_b: [f32; 2],
 }
 
 impl Default for ParameterRanges {
     fn default() -> Self {
         Self {
+            reservoir_t0: [1.0 / 24.0, 365.0],
+            reservoir_a: [-2.0, 2.0],
+            reservoir_b: [-2.0, 2.0],
             gamma: [0.0, 0.5],
             n: [0.015, 0.25],
             q_spatial: [0.0, 1.0],
@@ -862,6 +875,57 @@ pub struct Params {
     /// every reach as before, bit for bit. `validate_reservoirs` lists the
     /// combinations rejected at load.
     pub use_reservoirs: bool,
+    /// Where each dam's residence time comes from when `use_reservoirs` is on.
+    /// `fixed` (the default) reads it from `data_sources.reservoirs` (option C,
+    /// optionally seasonal with `a`/`b` columns); `learned` emits
+    /// `(T0, a, b)` per dam from the `release_head:` block, trained jointly
+    /// with the routing head. See `.claude/RESERVOIRS.md`.
+    pub reservoir_release: ReservoirRelease,
+}
+
+/// `params.reservoir_release`. See [`Params::reservoir_release`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReservoirRelease {
+    /// `T` (and optional seasonal `a`, `b`) prescribed by the table.
+    #[default]
+    Fixed,
+    /// `(T0, a, b)` emitted by the release head from dam features.
+    Learned,
+}
+
+/// YAML `release_head:` block: the learned dam release head
+/// (`params.reservoir_release: learned`). A second `KanHead` instance,
+/// `Linear(F, H) -> KanLayer(H, H) x num_hidden_layers -> Linear(H, P) -> Sigmoid`
+/// with `P = 3` (`T0`, `a`, `b`), or `P = 1` (`T0`) when `seasonal: false`.
+/// Inputs are columns of the dam feature table (`data_sources.reservoirs`).
+/// See `src/nn/release_head.rs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseHeadSection {
+    #[serde(default = "default_release_hidden_size")]
+    pub hidden_size: usize,
+    #[serde(default = "default_release_num_hidden_layers")]
+    pub num_hidden_layers: usize,
+    #[serde(default = "default_grid")]
+    pub grid: usize,
+    #[serde(default = "default_k")]
+    pub k: usize,
+    /// Feature-table columns fed to the head, in this order.
+    pub input_var_names: Vec<String>,
+    /// `true`: `T(t) = T0·exp(a·sin ω_t + b·cos ω_t)`. `false`: constant `T0`.
+    #[serde(default = "default_true")]
+    pub seasonal: bool,
+}
+
+fn default_release_hidden_size() -> usize {
+    8
+}
+fn default_release_num_hidden_layers() -> usize {
+    1
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Params {
@@ -906,6 +970,7 @@ impl Default for Params {
             stage_roughness: None,
             leakance_gate: None,
             use_reservoirs: false,
+            reservoir_release: ReservoirRelease::Fixed,
         }
     }
 }
@@ -939,6 +1004,7 @@ struct ParamsRaw {
     #[serde(default)]
     leakance_gate: Option<LeakanceGate>,
     use_reservoirs: Option<bool>,
+    reservoir_release: Option<ReservoirRelease>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -969,6 +1035,16 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(v) = r.parameter_ranges.get("leakance_factor") {
             p.parameter_ranges.leakance_factor = *v;
+        }
+        // Learned dam release (`reservoir_release: learned`).
+        if let Some(v) = r.parameter_ranges.get("reservoir_T0") {
+            p.parameter_ranges.reservoir_t0 = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("reservoir_a") {
+            p.parameter_ranges.reservoir_a = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("reservoir_b") {
+            p.parameter_ranges.reservoir_b = *v;
         }
         // attribute_minimums — named field mapping.
         if let Some(&v) = r.attribute_minimums.get("discharge") {
@@ -1046,6 +1122,9 @@ impl From<ParamsRaw> for Params {
         if let Some(b) = r.use_reservoirs {
             p.use_reservoirs = b;
         }
+        if let Some(m) = r.reservoir_release {
+            p.reservoir_release = m;
+        }
         p
     }
 }
@@ -1060,6 +1139,8 @@ pub struct Config {
     pub data_sources: Option<DataSources>,
     pub experiment: Option<Experiment>,
     pub kan_head: Option<KanHeadConfigSection>,
+    /// The learned dam release head (`params.reservoir_release: learned`).
+    pub release_head: Option<ReleaseHeadSection>,
     pub mode: String,
     pub geodataset: String,
     pub seed: u64,
@@ -1116,6 +1197,7 @@ struct ConfigRaw {
     /// alias so existing YAML configs still parse during the migration.
     #[serde(alias = "mlp")]
     kan_head: Option<KanHeadConfigSection>,
+    release_head: Option<ReleaseHeadSection>,
     testing: TestingOverridesRaw,
 }
 
@@ -1133,6 +1215,7 @@ impl From<ConfigRaw> for Config {
             data_sources: r.data_sources,
             experiment: r.experiment,
             kan_head: r.kan_head,
+            release_head: r.release_head,
             mode: r.mode.unwrap_or_else(|| "training".to_string()),
             // Absent `geodataset:` is INFERRED from the adjacency source rather
             // than defaulting blindly to "merit", so a gridded config that
@@ -1386,6 +1469,60 @@ fn validate_geodataset(cfg: &Config) -> std::result::Result<(), String> {
 /// the flag off is allowed and ignored.
 fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
     let p = &cfg.params;
+    let learned = p.reservoir_release == ReservoirRelease::Learned;
+    // The learned release first: both halves of its contract would otherwise
+    // be silent no-ops (a `learned` switch with the flag off, or a head block
+    // nothing reads).
+    if cfg.release_head.is_some() && !learned {
+        return Err(
+            "`release_head:` is set but `params.reservoir_release` is not `learned`; the \
+             block would be ignored. Set `params.reservoir_release: learned` or remove it."
+                .to_string(),
+        );
+    }
+    if learned {
+        if !p.use_reservoirs {
+            return Err(
+                "params: `reservoir_release: learned` requires `use_reservoirs: true`; without \
+                 it no dam row is routed and the release head would never train."
+                    .to_string(),
+            );
+        }
+        let rh = cfg.release_head.as_ref().ok_or_else(|| {
+            "params: `reservoir_release: learned` requires a `release_head:` block (the dam \
+             release head: input_var_names, hidden_size, ...)."
+                .to_string()
+        })?;
+        if cfg.kan_head.is_none() {
+            return Err(
+                "params: `reservoir_release: learned` requires `kan_head`: the release head \
+                 trains jointly with the routing head."
+                    .to_string(),
+            );
+        }
+        if rh.input_var_names.is_empty() {
+            return Err(
+                "`release_head.input_var_names` is empty: list the dam feature-table columns \
+                 the release head reads."
+                    .to_string(),
+            );
+        }
+        let r = &p.parameter_ranges;
+        let [t_lo, t_hi] = r.reservoir_t0;
+        if !(t_lo >= 1.0 / 24.0 && t_lo < t_hi && t_hi.is_finite()) {
+            return Err(format!(
+                "params.parameter_ranges.reservoir_T0 = [{t_lo}, {t_hi}] must satisfy \
+                 1/24 <= lo < hi < inf (days; T >= dt/2 keeps the dam row's c3 >= 0)"
+            ));
+        }
+        for (name, [lo, hi]) in [("reservoir_a", r.reservoir_a), ("reservoir_b", r.reservoir_b)] {
+            if !(lo < hi && lo.is_finite() && hi.is_finite()) {
+                return Err(format!(
+                    "params.parameter_ranges.{name} = [{lo}, {hi}] must be finite with lo < hi"
+                ));
+            }
+        }
+    }
     if !p.use_reservoirs {
         return Ok(());
     }
@@ -3087,6 +3224,150 @@ data_sources:
             "  use_reservoirs: true\n  subdivision:\n    enabled: true\n",
         );
         reservoir_rejection(path, "params.subdivision");
+    }
+
+    // ---- params.reservoir_release + release_head (learned dam release) ----
+
+    const KAN_HEAD_BLOCK: &str = "kan_head:\n  hidden_size: 4\n  num_hidden_layers: 1\n  \
+        input_var_names: [aridity]\n  learnable_parameters: [n, q_spatial]\n";
+    const RELEASE_HEAD_BLOCK: &str =
+        "release_head:\n  input_var_names: [log10_storage, purpose_flood]\n";
+
+    /// `reservoir_yaml` plus extra top-level blocks appended after `params:`.
+    fn learned_yaml(name: &str, params: &str, extra: &str) -> std::path::PathBuf {
+        let path = reservoir_yaml(name, EXPLICIT_ADJ, true, params);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(extra);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    const LEARNED_PARAMS: &str = "  use_reservoirs: true\n  reservoir_release: learned\n";
+
+    #[test]
+    fn reservoir_release_defaults_fixed() {
+        assert_eq!(Params::default().reservoir_release, ReservoirRelease::Fixed);
+        let path = reservoir_yaml("ddrs_rel_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!(cfg.params.reservoir_release, ReservoirRelease::Fixed);
+        assert!(cfg.release_head.is_none());
+        let r = &cfg.params.parameter_ranges;
+        assert_eq!(r.reservoir_t0, [1.0 / 24.0, 365.0]);
+        assert_eq!(r.reservoir_a, [-2.0, 2.0]);
+        assert_eq!(r.reservoir_b, [-2.0, 2.0]);
+    }
+
+    #[test]
+    fn learned_release_loads_with_its_blocks() {
+        let path = learned_yaml(
+            "ddrs_rel_learned.yaml",
+            &format!(
+                "{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.05, 100.0]\n    \
+                 reservoir_a: [-1.0, 1.5]\n    reservoir_b: [-0.5, 0.5]\n"
+            ),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a complete learned config must load");
+        assert_eq!(cfg.params.reservoir_release, ReservoirRelease::Learned);
+        let rh = cfg.release_head.as_ref().expect("release_head");
+        assert_eq!(rh.input_var_names, vec!["log10_storage", "purpose_flood"]);
+        assert!(rh.seasonal, "seasonal defaults true");
+        assert_eq!((rh.hidden_size, rh.num_hidden_layers, rh.grid, rh.k), (8, 1, 5, 3));
+        let r = &cfg.params.parameter_ranges;
+        assert_eq!(r.reservoir_t0, [0.05, 100.0]);
+        assert_eq!(r.reservoir_a, [-1.0, 1.5]);
+        assert_eq!(r.reservoir_b, [-0.5, 0.5]);
+    }
+
+    fn learned_rejection(path: std::path::PathBuf, needles: &[&str]) {
+        let msg = Config::from_yaml_file(&path)
+            .expect_err("config must be rejected at load")
+            .to_string();
+        for n in needles {
+            assert!(msg.contains(n), "error should contain {n:?}, got: {msg}");
+        }
+    }
+
+    #[test]
+    fn learned_release_without_use_reservoirs_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_no_flag.yaml",
+            "  reservoir_release: learned\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_release: learned", "use_reservoirs"]);
+    }
+
+    #[test]
+    fn learned_release_without_release_head_rejected() {
+        let path = learned_yaml("ddrs_rel_no_head.yaml", LEARNED_PARAMS, KAN_HEAD_BLOCK);
+        learned_rejection(path, &["reservoir_release: learned", "release_head"]);
+    }
+
+    #[test]
+    fn learned_release_without_kan_head_rejected() {
+        let path = learned_yaml("ddrs_rel_no_kan.yaml", LEARNED_PARAMS, RELEASE_HEAD_BLOCK);
+        learned_rejection(path, &["reservoir_release: learned", "kan_head"]);
+    }
+
+    #[test]
+    fn release_head_with_fixed_release_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_fixed_head.yaml",
+            "  use_reservoirs: true\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["release_head", "reservoir_release: learned"]);
+    }
+
+    #[test]
+    fn release_head_without_inputs_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_empty_inputs.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}release_head:\n  input_var_names: []\n"),
+        );
+        learned_rejection(path, &["release_head.input_var_names"]);
+    }
+
+    #[test]
+    fn release_head_unknown_key_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_unknown_key.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  use_ressops: true\n"),
+        );
+        learned_rejection(path, &["use_ressops"]);
+    }
+
+    #[test]
+    fn reservoir_t0_floor_below_one_hour_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_t0_floor.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.01, 365.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_T0"]);
+    }
+
+    #[test]
+    fn inverted_release_ranges_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_a_inverted.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_a: [1.0, -1.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_a"]);
+    }
+
+    #[test]
+    fn learned_release_keeps_the_option_c_rejections() {
+        let path = learned_yaml(
+            "ddrs_rel_leakance.yaml",
+            &format!("{LEARNED_PARAMS}  use_leakance: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        reservoir_rejection(path, "use_leakance");
     }
 
     #[test]
