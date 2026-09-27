@@ -1,0 +1,137 @@
+AUDIT: harmonic rule-curve release law (L4), offline smoke result
+Audited directory: /home/tbindas/.claude/jobs/dacd6d8c/tmp/rulecurve/
+Audit outputs: /home/tbindas/.claude/jobs/dacd6d8c/tmp/rulecurve_audit/ (nothing in the repo was edited, nothing trained)
+
+VERDICT
+The +0.0494 median dNSE stands. I found no leakage, no recursion bug, no mask mismatch, no pairing bug and no bootstrap bug.
+My own implementation, written from the law's definition with a different optimiser, reproduces it on all 117 gauges:
++0.0494 [+0.0305, +0.0811], 92/25.
+
+The DiD of +0.047 stands only with corrections:
+- The point estimate is fragile. My refit gives +0.0375 with the same CI, [+0.023, +0.070]. Quote it as about +0.04.
+- The matched controls are much better modelled than the dam gauges: median L0 NSE 0.726 against 0.337.
+- Matched on baseline skill instead, the DiD is +0.021 to +0.043, depending on how the match is made. All versions have CI > 0.
+
+The attribution to the rule curve does NOT stand as framed:
+- The plain 1-parameter bucket (L2) already gets +0.025 on the same gauges.
+- The rule curve's paired out-of-sample increment over the plain bucket is only +0.0042 [+0.0008, +0.0089]. Over L1 it is +0.0095.
+- On training years that increment is +0.032, so most of the 4 coefficients' in-sample gain does not transfer.
+- The increment is not clearly dam-specific: DiD +0.0041 [-0.0004, +0.0082], and +0.001 to +0.002 against baseline-matched controls.
+- "L4 +0.049 vs L1 +0.027" is a difference of medians. It should not be read as "the rule curve adds +0.023".
+
+1. LEAKAGE: none found.
+Code reading:
+- Ibar = I[train].mean() (rc.py:74). The climatology uses train days only (rc.py:70).
+- The training mask is train & finite(O) (rc.py:65). The fit simulation stops at n_fit = last train day + 1 (rc.py:64).
+- The closed-form LS (rc.py:263-269) and the Nelder-Mead objective (rc.py:132-140) both see observations only through that mask.
+- Test years are simulated only at scoring (rc.py:121-129, 334-337), continuing the state from inputs alone.
+
+Empirical check (leak_test.py): at 6 random gauges I replaced the test-year observations with lognormal noise, tripled the test-year inflow and added 50. I then refit L1 and L4 with rc.py's own code. All fitted parameters and Ibar came back bit-identical.
+
+Windows:
+- The time axis runs 1981-10-02 to 2010-09-29, not 10-01 to 09-30 as the harness docstring says. The effect is harmless: spin-up is 364 d.
+- Train is 4748 d. Test is 5478 d and starts at index 5112 = n_fit.
+
+The inflow is the routed no-dam head, which was trained on 1981-10-01 to 1995-09-30 (/home/tbindas/projects/ddrs/.ddrs/runs/2026-09-12T23-39-03Z-train-and-test/config.yaml lines 68-69). The test years are therefore out-of-sample for the inflow model too. Observations are never an input.
+
+Latent issue, inert here: rc.py:61 fills NaN inflow with np.nanmean over the whole series, test years included. The harness has the same pattern (expected_release_fit.py:86, ceiling.py:57). The predictions have 0 NaNs in 916 x 10590, so it has no effect. Fix it before reusing the code on inflow with gaps.
+
+2. RECURSION: exact.
+- Flux sign: x = I - r with r = Ibar * (c @ [sin w, cos w, sin 2w, cos 2w]) and w = 2 pi doy/365.25 (rc.py:68, 110, 127), as the law states.
+- Floor: bucket.c:16 floors q at 0, and bucket.c:20 keeps S = avail - q, so a floored day keeps its deficit in storage and S may go negative. Mass is conserved; mean flux is zero, so beta is unchanged.
+- Initial state: S = T0 * x_0 (bucket.c:10), set 364 d before training starts.
+- C vs Python (check_recursion.py): I compared my pure-Python mass-balance loop, the shipped libbucket.so and a fresh gcc build of bucket.c.
+  - Gauges: 10, including three with 70-71% floored test days and two controls.
+  - Modes: feedback floor, no floor and engine clamp.
+  - Result: max abs difference 0.0 with identical floor flags. My closed-form IIR (lfilter) equals the loop exactly.
+- Re-scoring their fitted L0, L1 and L4 parameters with my simulator and metrics reproduces the test NSE at all 916 gauges to <= 4.4e-16. Ibar matches to 6e-14.
+
+3. MASK AND L0: correct.
+- metrics() masks test & finite(obs) & finite(sim) (rc.py:143-144). Simulations are always finite (no NaN inflow, T >= 0.05), so every law is scored on the same days.
+- L0 is the routed prediction itself (rc.py:124-125). It matches the harness nse_pass_test to 0.0 at all 916 gauges.
+- Minor inconsistency inherited from the harness: L1 is fitted with an unfloored T (rc.py:219) and scored with T >= 0.05 (rc.py:117). It moves test NSE slightly at 115/234 gauges; the median is +0.0267 either way.
+
+4. CONTROLS: same procedure, but not comparable in baseline skill.
+- run_fits.py:51-52 fits every smoke gauge with rc.fit_all. rc.py has no role-dependent branch, and bounds and grids are identical.
+- Pairing is 1:1: control_for is unique and covers all 458 dams.
+- The confound: the matched controls sit at median L0 NSE 0.726 against 0.337 at the dams, so they have little room to gain.
+  - Among all 458 controls, L4 helps poorly modelled ones: +0.045 at L0 <= 0 (n=13), +0.008 at L0 0-0.3, +0.038 at L0 0.3-0.5, +0.002 at L0 > 0.7.
+  - L1 gains about 0 at every L0 > 0 (-0.002 to 0.000); only the 13 controls with L0 <= 0 gain from it (+0.039).
+  - Controls matched to each dam on baseline NSE (5 nearest of 458) gain +0.008 to +0.017 with L4, not +0.0045. With L1 and L2 they gain -0.001 to +0.003.
+  - So part of the rule curve's gain corrects any seasonal model error, whatever its cause. The bucket part (L1/L2) is the dam-specific part.
+
+5. FITTING FREEDOM, BOUNDS, CONCENTRATION.
+Train vs test at the dams (medians of paired gains):
+  L4-L0 train +0.079, test +0.049 | L2-L0 train +0.023, test +0.025 | L1-L0 train +0.055, test +0.027
+  L4-L2 train +0.032, test +0.004 [+0.0008, +0.0089], 74/43 | L4-L1 train +0.011, test +0.0095 | L1-L2 train +0.012, test -0.0005
+The bucket transfers fully. The seasonal parameters (in L1 and L4 alike) mostly do not, and L4's harmonics transfer better than L1's seasonal T.
+
+Freedom-only placebo (placebo.py):
+- Same T0 plus 4 coefficients and the same fit, but with harmonics at a 591 d period (365.25 x golden ratio) and its 2nd harmonic.
+- On the dams it gains +0.0043 on train and -0.0035 on test vs L2 (19/98).
+- Arbitrary extra freedom does not survive the temporal hold-out, so the test-year numbers are honest out-of-sample skill.
+
+Bounds:
+- Dams: T0 is at the 0.05 d floor at 25/117 and at the 365 d ceiling at 1/117. 14 of 468 coefficients sit at +-3, across 9 gauges.
+- Controls: T0 at the floor 70/117. 1 coefficient at the bound.
+- Refitting those 9 dams with bounds +-6 changes test NSE by -1.06 to +0.017. One gauge (11214600) overfits.
+- The bounds act as mild regularisation and do not drive the headline.
+
+Concentration:
+- The median is robust. 67.5% of dams gain > +0.01 and 14.5% lose > 0.01.
+- Dropping the top 20 gauges leaves a median of +0.030. Leaving out one HUC2 at a time gives +0.038 to +0.076. HUC18 holds 32 of the 117.
+- The unclipped mean must never be quoted: 08390800 alone gains +7.6 NSE, 40% of the summed gain.
+- 30 dams have > 20% of test days floored (up to 71%, mostly CA flood-control and irrigation). They gain +0.068 against +0.048 for the rest.
+- The floor is not the source: the no-floor fit gives +0.0507 (reproduced).
+
+6. INDEPENDENT REPRODUCTION (audit_impl.py; does not import rc.py)
+Method:
+- I fitted all 117 dam gauges and their 117 controls.
+- L1 uses the harness grid, written fresh.
+- L4 uses a 60-point T0 grid with bounded linear LS (lsq_linear) on the unfloored IIR bucket, then TRF least_squares on the floored training residuals from the 3 best cells.
+
+Per-gauge comparison with fits_by_gauge.csv:
+- L0 and L1 are identical: L1 parameters match at 234/234, NSE difference 0.
+- L4 test NSE is within 0.01 at 111/117 dams and 114/117 controls (max 0.057 and 0.096; corr 1.000 and 0.999). The residual differences come from multi-modal optima under the floor.
+- Their Nelder-Mead reaches a slightly higher training NSE at 30% of dams.
+
+Results:
+  mine   L4 dam +0.0494 [+0.0305,+0.0811] 92/25 | ctl +0.0049 | DiD +0.0375 [+0.0229,+0.0700] 80/37
+  theirs L4 dam +0.0494 [+0.0300,+0.0811] 92/25 | ctl +0.0045 | DiD +0.0472 [+0.0229,+0.0700] 81/36
+  mine   L1 dam +0.0267 | DiD +0.0223 (identical to theirs); L4lin +0.0507; L4-L1 paired +0.0095 [+0.0039,+0.0194]
+
+The DiD median falls in a gap of the sorted values: order statistics 57-60 are 0.036, 0.042, 0.047, 0.048. A tiny optimiser difference therefore moves it by 0.01. Robust locations are higher: Hodges-Lehmann +0.061 to +0.063, 20% trimmed mean +0.055 to +0.057.
+
+7. BOOTSTRAP AND DiD PAIRING: correct.
+- summarise.py:42-43 aligns each control to its dam via control_for, and gd - gc is taken on aligned arrays (summarise.py:63-65).
+- My independent recomputation from the CSV reproduces every headline median and up/down count.
+- The CI is a percentile bootstrap of the median with 2000 draws and seed 42 (summarise.py:20-29). It is valid but lumpy: the lower DiD bound flips between +0.0138 and +0.0229 with the seed, because of the gap above.
+- The sign test is a two-sided binomial. It is correct.
+
+CORRECTED NUMBERS TO CARRY FORWARD (on-reach, DOR > 0.5, n = 117, test WY1996-2010)
+- L4 vs no dam: +0.049 [+0.028, +0.081], unchanged.
+- DiD vs HUC2/area-matched controls: about +0.04 [+0.02, +0.07], within the range +0.0375 to +0.047 across fits.
+- DiD vs controls matched on baseline skill (5 nearest of 458 on L0 NSE):
+  - Matched on test-period L0 NSE: +0.021 [+0.005, +0.050].
+  - Matched on train-period L0 NSE: +0.043 [+0.010, +0.068].
+  - 3 nearest within the same HUC2: +0.027 [+0.012, +0.061].
+- What the rule curve adds on top of a bucket (paired, test):
+  - Over L2: +0.004 [+0.001, +0.009]; mean clipped +0.013.
+  - Over L1: +0.0095 [+0.004, +0.017].
+  - Its DiD over L2 is +0.004 [-0.000, +0.008], so it is not established as dam-specific.
+- Flood-control dams (n = 43):
+  - L4 +0.129 and L2 +0.050, but L4-L2 is only +0.005 [0.000, +0.025].
+  - Most of the flood-control gain is the bucket itself (L1 +0.078).
+Implication for the plan: the evidence supports a per-dam bucket (T0) as the main dam-specific gain. It supports the 4 rule-curve coefficients only as a small add-on, and part of that add-on would absorb non-dam seasonal model error at gauged dams.
+
+FILES (/home/tbindas/.claude/jobs/dacd6d8c/tmp/rulecurve_audit/)
+- audit_impl.py: independent L0/L1/L4 implementation and fit.
+- audit_fits_234.csv: per-gauge output of audit_impl.py.
+- compare.py: comparison with fits_by_gauge.csv and the reproduced stats.
+- check_recursion.py (+ check_recursion.csv, libbucket_audit.so): C vs Python check.
+- leak_test.py: perturbation leakage test.
+- recompute_stats.py: the headline recomputed from the CSV.
+- freedom.py, increments.py: bounds, concentration and train vs test.
+- placebo.py (+ placebo_234.csv): wrong-period placebo and my own L2 fit.
+- baseline_match.py, baseline_match2.py, cf_controls.py: DiD with baseline-skill matching.
+- sel117.csv, pairs117.csv, ids234.csv: gauge lists.
