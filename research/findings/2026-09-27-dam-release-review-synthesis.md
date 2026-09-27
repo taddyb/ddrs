@@ -7,7 +7,8 @@ and whether the learned T0 correlates with dam size.
 `2026-09-27T07-29-47Z` / `07-29-55Z` (seed 42, off / learned) and `10-31-30Z` / `10-31-50Z` (seed 43); smoke arms
 `04-29-33Z` (off) and `07-30-13Z` (learned, fixed dam row); results page https://claude.ai/artifact/HhcubFbHpBdmpKykN7PeUT.
 **Evidence:** scripts, tables and figures of each review in `experiments/reservoir/review_2026-09-27/`
-(`opps_release`, `opps_training`, `opps_leakance`, `opps_metrics`, `t0_size`); reports where the agent could write one.
+(`opps_release`, `opps_training`, `opps_leakance`, `opps_metrics`, `t0_size`), each with its `report.md` (the release-law
+and metrics reports recovered verbatim from the agents' handbacks). Other side sessions: `experiments/reservoir/agent_reports/2026-09-27/`.
 All reviews read existing outputs only; no training.
 
 ## 1. What the reviews agree on
