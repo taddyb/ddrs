@@ -548,7 +548,9 @@ v3; absent = `replace`, every earlier config). That key is rejected with `reserv
 learned` (the block's `dam_row` owns it) and without `use_reservoirs`. `Config::dam_row` reads
 the block for a learned release, the params key otherwise. A fixed additive table may carry the
 rule-curve columns (`c1s, c1c, c2s, c2c` + `inflow_mean_m3s`), so an offline fit replays in the
-engine. The engine API
+engine (`experiments/reservoir/smoke/replay_offline_fits.py` builds `fixed_L2.csv` /
+`fixed_L4.csv`; `config/experiments/dam_release_smoke_replay_L{2,4}.yaml` route them with the
+smoke off arm's head, zero training steps, traps.md T10). The engine API
 (`MuskingumCunge::set_reservoir_rows_as`, `DamRelease::dam_row`) supports both.
 Tests: `tests/reservoir_additive.rs` (T = 0 and K_r = 0 identities, per-step storage balance,
 gradchecks in both `c1` regimes, opt-out on Juniata), the additive cases of
