@@ -219,7 +219,16 @@ pub fn probe_forward<I: Backend>(
         false,
         tensors.initial_state.clone(),
     );
-    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
+    // No release head here: a learned table panics in `apply_reservoir_rows`
+    // rather than routing its dams as channels.
+    apply_reservoir_rows(
+        cfg,
+        &mut engine,
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+        tensors.q_prime.dims()[0],
+        None,
+    );
     let runoff = engine.forward();
 
     (

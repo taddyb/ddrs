@@ -52,11 +52,12 @@ use crate::data::ids::Staid;
 use crate::data::sampler::{BatchSource, RandomSampler};
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    head_base, optim_base, save_optimizer, save_train_state, state_path, TrainCkptState,
+    head_base, optim_base, release_head_base, release_optim_base, save_optimizer,
+    save_train_state, state_path, TrainCkptState,
 };
-use crate::training::forward::forward;
+use crate::training::forward::{forward_with_release, release_t0_stats};
 use crate::training::loss::loss_denominator;
-use crate::training::optimizer::scale_grads;
+use crate::training::optimizer::{scale_grads, HeadOptimizer};
 use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
 
 /// Mutable state threaded through the training loop.
@@ -68,6 +69,10 @@ use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_do
 /// `seed_from_u64`) so it can be serde-checkpointed for exact resume.
 pub struct TrainState<I: Backend> {
     pub head: KanHead<Autodiff<I>>,
+    /// The learned dam release head and its own optimizer
+    /// (`params.reservoir_release: learned`); `None` otherwise, and then every
+    /// step below is the historical single-head step.
+    pub release: Option<ReleaseTrainer<I>>,
     pub epoch: usize,
     pub mini_batch: usize,
     pub rng: ChaCha12Rng,
@@ -75,6 +80,18 @@ pub struct TrainState<I: Backend> {
     /// from a checkpoint sidecar. Consumed by `train` on its first epoch
     /// (skipping the reshuffle); `None` for fresh runs.
     pub resume_sampler: Option<(Vec<usize>, usize)>,
+}
+
+/// The learned dam release head trained jointly with the routing head. A
+/// separate module with a separate optimizer of the same kind
+/// (`experiment.optimizer`), stepped at the same learning rate from the same
+/// backward pass. Its gradient is clipped on its own norm
+/// (`grad_clip_max_norm`), not jointly with the routing head's: a joint norm
+/// would let the release head's gradient, which is large while `T0` is far
+/// from the data, throttle the routing head's steps.
+pub struct ReleaseTrainer<I: Backend> {
+    pub head: KanHead<Autodiff<I>>,
+    pub optimizer: HeadOptimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
 }
 
 /// One micro-batch's forward + loss, before any backward.
@@ -90,6 +107,9 @@ struct MicroBatchOutcome<I: Backend> {
     /// see `forward::manning_n_stats` for why.
     median_n: f32,
     n_at_floor: f32,
+    /// Median `T0` (days) of the release head over this batch's dams and the
+    /// dam count, when the learned release is on and the batch has dams.
+    release_t0: Option<(f32, usize)>,
 }
 
 /// Steps 2–6 of the per-mini-batch flow (collate → forward → NaN filter →
@@ -102,6 +122,7 @@ fn run_micro_batch<I: Backend>(
     cfg: &Config,
     dataset: &MeritGagesDataset,
     head: &KanHead<Autodiff<I>>,
+    release_head: Option<&KanHead<Autodiff<I>>>,
     device: &I::Device,
     staids: &[Staid],
     window: &RhoWindow,
@@ -126,7 +147,10 @@ fn run_micro_batch<I: Backend>(
     let tensors = batch.to_tensors::<Autodiff<I>>(device);
     let (median_n, n_at_floor) =
         crate::training::forward::manning_n_stats::<I>(cfg, &tensors, head);
-    let pred_hourly = forward::<I>(cfg, &tensors, head, device, false, gate_tau);
+    let release_t0 =
+        release_head.and_then(|r| release_t0_stats::<I>(cfg, &tensors, r, device));
+    let pred_hourly =
+        forward_with_release::<I>(cfg, &tensors, head, release_head, device, false, gate_tau);
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
     let dims = daily.dims();
     let (g, t_days) = (dims[0], dims[1]);
@@ -216,7 +240,16 @@ fn run_micro_batch<I: Backend>(
         n_valid: loss_denominator(&exp.loss, surviving_g, t_post),
         median_n,
         n_at_floor,
+        release_t0,
     }))
+}
+
+/// ` release_T0_median=<d>d (<k> dams)` for the mini-batch log line, or empty.
+fn release_log(release_t0: Option<(f32, usize)>) -> String {
+    match release_t0 {
+        Some((t0, k)) => format!(" release_T0_median={t0:.4}d ({k} dams)"),
+        None => String::new(),
+    }
 }
 
 /// Step 8: write the `epoch_E_mb_M/` checkpoint directory (head.mpk +
@@ -240,6 +273,11 @@ fn save_step_checkpoint<I: Backend>(
     // Adam moments + train-loop position (rng, sampler permutation/cursor)
     // for exact resume.
     save_optimizer(&optim_base(&ckpt_dir), optimizer)?;
+    // The learned dam release head and its optimizer, when trained.
+    if let Some(r) = state.release.as_ref() {
+        save_kan_head(&release_head_base(&ckpt_dir), &r.head.clone().valid())?;
+        save_optimizer(&release_optim_base(&ckpt_dir), &r.optimizer)?;
+    }
     if let Some((sampler_indices, sampler_cursor)) = sampler.snapshot() {
         save_train_state(
             &state_path(&ckpt_dir),
@@ -316,6 +354,7 @@ pub fn train<I: Backend>(
                     cfg,
                     dataset,
                     &state.head,
+                    state.release.as_ref().map(|r| &r.head),
                     device,
                     &staids,
                     &window,
@@ -327,6 +366,7 @@ pub fn train<I: Backend>(
                     loss_f32,
                     median_n,
                     n_at_floor,
+                    release_t0,
                     ..
                 }) = outcome
                 else {
@@ -340,9 +380,23 @@ pub fn train<I: Backend>(
                     continue;
                 };
 
-                let grads = GradientsParams::from_grads(loss.backward(), &state.head);
+                // One backward, split between the two heads. Without the
+                // learned release this is the historical single-head step.
+                let (grads, release_grads) = match state.release.as_ref() {
+                    None => (GradientsParams::from_grads(loss.backward(), &state.head), None),
+                    Some(r) => {
+                        let mut raw = loss.backward();
+                        let g = GradientsParams::from_module(&mut raw, &state.head);
+                        let rg = GradientsParams::from_module(&mut raw, &r.head);
+                        (g, Some(rg))
+                    }
+                };
                 let grads = clip_grad_norm(grads, &state.head, grad_clip);
                 state.head = optimizer.step(lr as f64, state.head.clone(), grads);
+                if let (Some(r), Some(rg)) = (state.release.as_mut(), release_grads) {
+                    let rg = clip_grad_norm(rg, &r.head, grad_clip);
+                    r.head = r.optimizer.step(lr as f64, r.head.clone(), rg);
+                }
 
                 save_step_checkpoint::<I>(checkpoint_dir, epoch, state, &*optimizer, &sampler)?;
 
@@ -359,10 +413,11 @@ pub fn train<I: Backend>(
                 crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
 
                 eprintln!(
-                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%",
+                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%{}",
                     state.mini_batch,
                     loss_f32,
-                    n_at_floor * 100.0
+                    n_at_floor * 100.0,
+                    release_log(release_t0),
                 );
                 state.mini_batch += 1;
                 mb_done += 1;
@@ -377,6 +432,7 @@ pub fn train<I: Backend>(
             //    `accum_steps` micro-batches ─────────────────────────────────
             loop {
                 let mut accumulator = GradientsAccumulator::<KanHead<Autodiff<I>>>::new();
+                let mut release_accumulator = GradientsAccumulator::<KanHead<Autodiff<I>>>::new();
                 let mut total_n = 0usize;
                 let mut loss_weighted_sum = 0.0f64;
                 let mut micros_drawn = 0usize;
@@ -392,6 +448,7 @@ pub fn train<I: Backend>(
                         cfg,
                         dataset,
                         &state.head,
+                        state.release.as_ref().map(|r| &r.head),
                         device,
                         &staids,
                         &window,
@@ -404,6 +461,7 @@ pub fn train<I: Backend>(
                         n_valid,
                         median_n,
                         n_at_floor,
+                        release_t0,
                     }) = outcome
                     {
                         // Scale the mean loss back to a SUM before backward;
@@ -411,17 +469,29 @@ pub fn train<I: Backend>(
                         // the accumulated gradient is exactly the pooled-mean
                         // gradient (see module docs + equivalence test).
                         let scaled = loss.mul_scalar(n_valid as f32);
-                        let grads =
-                            GradientsParams::from_grads(scaled.backward(), &state.head);
-                        accumulator.accumulate(&state.head, grads);
+                        match state.release.as_ref() {
+                            None => {
+                                let grads =
+                                    GradientsParams::from_grads(scaled.backward(), &state.head);
+                                accumulator.accumulate(&state.head, grads);
+                            }
+                            Some(r) => {
+                                let mut raw = scaled.backward();
+                                let grads = GradientsParams::from_module(&mut raw, &state.head);
+                                let rgrads = GradientsParams::from_module(&mut raw, &r.head);
+                                accumulator.accumulate(&state.head, grads);
+                                release_accumulator.accumulate(&r.head, rgrads);
+                            }
+                        }
                         total_n += n_valid;
                         loss_weighted_sum += loss_f32 as f64 * n_valid as f64;
                         micros_valid += 1;
                         eprintln!(
                             "    micro {micros_drawn}/{accum_steps} gauges={} loss={loss_f32:.6} \
-                             n={n_valid} median_n={median_n:.5} n_at_floor={:.1}%",
+                             n={n_valid} median_n={median_n:.5} n_at_floor={:.1}%{}",
                             idx.len(),
                             n_at_floor * 100.0,
+                            release_log(release_t0),
                         );
                     }
                     // Free the micro-batch's activations/pool slices before the
@@ -445,6 +515,15 @@ pub fn train<I: Backend>(
                         scale_grads(accumulator.grads(), &state.head, 1.0 / total_n as f32);
                     let grads = clip_grad_norm(grads, &state.head, grad_clip);
                     state.head = optimizer.step(lr as f64, state.head.clone(), grads);
+                    if let Some(r) = state.release.as_mut() {
+                        let rg = scale_grads(
+                            release_accumulator.grads(),
+                            &r.head,
+                            1.0 / total_n as f32,
+                        );
+                        let rg = clip_grad_norm(rg, &r.head, grad_clip);
+                        r.head = r.optimizer.step(lr as f64, r.head.clone(), rg);
+                    }
 
                     save_step_checkpoint::<I>(
                         checkpoint_dir,

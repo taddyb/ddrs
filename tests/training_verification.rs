@@ -553,6 +553,7 @@ fn v3_train_one_epoch_runs_end_to_end() {
 
     let mut state = TrainState::<I> {
         head,
+        release: None,
         epoch: 1,
         mini_batch: 0,
         rng: ChaCha12Rng::seed_from_u64(42),

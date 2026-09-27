@@ -19,9 +19,9 @@ use crate::data::error::Result;
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
     head_base, load_disagg_head, load_kan_head, load_optimizer, load_train_state, optim_base,
-    state_path,
+    release_head_base, release_optim_base, state_path,
 };
-use crate::training::driver::TrainState;
+use crate::training::driver::{ReleaseTrainer, TrainState};
 use crate::training::optimizer::{build_head_optimizer, HeadOptimizer};
 
 /// Initialise the KAN head, the mutable training state, and the Adam
@@ -93,8 +93,40 @@ where
         }
     }
 
+    // The learned dam release head (`params.reservoir_release: learned`): a
+    // separate module + optimizer of the same kind, initialised after the
+    // routing head from its own seeded RNG, so the routing head's init is
+    // untouched. See `nn::release_head` for the pass-through init.
+    let learned_release = cfg.params.use_reservoirs
+        && cfg.params.reservoir_release == crate::config::ReservoirRelease::Learned;
+    let release = if learned_release {
+        let section = cfg
+            .release_head
+            .as_ref()
+            .expect("reservoir_release: learned requires a release_head block (validated at load)");
+        let head = crate::nn::release_head::init_release_head::<Autodiff<I>>(
+            section,
+            &cfg.params.parameter_ranges,
+            cfg.seed,
+            device,
+        );
+        eprintln!(
+            "release head: {} inputs, outputs {:?}, T0 at init {} h",
+            section.input_var_names.len(),
+            head.learnable_parameters(),
+            crate::nn::release_head::INIT_T0_HOURS
+        );
+        Some(ReleaseTrainer::<I> {
+            head,
+            optimizer: build_head_optimizer::<KanHead<Autodiff<I>>, Autodiff<I>>(optim_kind),
+        })
+    } else {
+        None
+    };
+
     let mut state = TrainState::<I> {
         head,
+        release,
         epoch: 1,
         mini_batch: 0,
         rng: ChaCha12Rng::seed_from_u64(cfg.seed),
@@ -116,6 +148,30 @@ where
             println!("warm start: restored Adam state from {}.mpk", optim.display());
         } else {
             println!("warm start: no {}.mpk — Adam starts cold", optim.display());
+        }
+
+        // The learned dam release head and its optimizer. A checkpoint from a
+        // run without the release (e.g. warm-starting the routing head from a
+        // no-dam run) has neither file, and the release head starts cold.
+        if let Some(r) = state.release.as_mut() {
+            let rhead = release_head_base(ckpt_dir);
+            if rhead.with_extension("mpk").is_file() {
+                r.head = load_kan_head::<Autodiff<I>>(&rhead, r.head.clone(), device)?;
+                println!("warm start: loaded release head from {}.mpk", rhead.display());
+                let roptim = release_optim_base(ckpt_dir);
+                if roptim.with_extension("mpk").is_file() {
+                    r.optimizer = load_optimizer(&roptim, r.optimizer.clone(), device)?;
+                    println!("warm start: restored release optimizer from {}.mpk", roptim.display());
+                } else {
+                    println!("warm start: no {}.mpk; release optimizer starts cold", roptim.display());
+                }
+            } else {
+                println!(
+                    "warm start: no {}.mpk; release head starts cold (T0 = {} h)",
+                    rhead.display(),
+                    crate::nn::release_head::INIT_T0_HOURS
+                );
+            }
         }
 
         // Train-loop position (epoch, mini-batch, rng, sampler).

@@ -21,7 +21,9 @@
 //! A second test runs the bundle again with `params.use_reservoirs: true` and
 //! the committed Raystown Lake table (`examples/juniata/data/
 //! juniata_reservoirs.csv`, option C of `.claude/RESERVOIRS.md`) and checks
-//! that the reservoir changes the routed gauge series.
+//! that the reservoir changes the routed gauge series. A third trains the
+//! bundle with the learned dam release (`reservoir_release: learned`,
+//! Raystown Dam as the one release-head dam) and checks its `T0` trains.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -127,6 +129,93 @@ fn juniata_train_and_test_meets_metric_floors_and_beats_baseline() {
         "routed NSE {nse:.4} does not beat the summed-Q' baseline {baseline_nse:.4} — \
          the routing isn't earning its keep"
     );
+}
+
+/// The 19 dam-feature columns of `examples/juniata/data/juniata_dam_features.csv`
+/// (`experiments/reservoir/release_head/build_dam_features.py`).
+const DAM_FEATURES: [&str; 19] = [
+    "log10_storage",
+    "log10_storage_max",
+    "log10_surface",
+    "log10_drainage",
+    "log10_storage_per_area",
+    "log10_max_discharge",
+    "height",
+    "year",
+    "log10_storage_max_missing",
+    "log10_surface_missing",
+    "log10_max_discharge_missing",
+    "year_missing",
+    "purpose_flood",
+    "purpose_hydro",
+    "purpose_supply",
+    "purpose_irrigation",
+    "purpose_recreation",
+    "purpose_navigation",
+    "purpose_other",
+];
+
+/// The learned dam release end to end: the bundle with Raystown Dam as a
+/// release-head dam (`reservoir_release: learned`), trained jointly with the
+/// routing head. The release head must train (its `T0` leaves the 4.5 h
+/// init), the test phase must resolve it and write `release_params.csv`, and
+/// the gauge series must stay finite.
+#[test]
+fn juniata_learned_release_trains_t0_and_writes_release_params() {
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "skipping: juniata learned-release run needs opt-level 3 — \
+             run `cargo test --release --test juniata_acceptance -- --nocapture`"
+        );
+        return;
+    }
+    let mut cfg: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(JUNIATA_CONFIG).unwrap()).unwrap();
+    cfg["params"]["use_reservoirs"] = true.into();
+    cfg["params"]["reservoir_release"] = "learned".into();
+    cfg["data_sources"]["reservoirs"] = "examples/juniata/data/juniata_dam_features.csv".into();
+    let mut rh = serde_yaml::Mapping::new();
+    rh.insert(
+        "input_var_names".into(),
+        serde_yaml::Value::Sequence(DAM_FEATURES.iter().map(|s| (*s).into()).collect()),
+    );
+    cfg["release_head"] = serde_yaml::Value::Mapping(rh);
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("ddrs.yaml");
+    std::fs::write(&config, serde_yaml::to_string(&cfg).unwrap()).unwrap();
+    let run_dir = run_juniata(&config, tmp.path());
+
+    let log = std::fs::read_to_string(run_dir.join("run.log")).expect("read run.log");
+    assert!(log.contains("release_T0_median="), "training log lacks the release T0 line");
+    assert!(log.contains("reservoirs: 1 of 1 table COMIDs are in the network"), "{log}");
+
+    let csv = std::fs::read_to_string(run_dir.join("release_params.csv"))
+        .expect("the test phase writes release_params.csv");
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[0], "COMID,T0_days,a,b,T_min_days,T_max_days");
+    assert_eq!(lines.len(), 2, "one dam: {csv}");
+    let f: Vec<&str> = lines[1].split(',').collect();
+    assert_eq!(f[0], "73005301");
+    let t0: f64 = f[1].parse().unwrap();
+    let (a, b): (f64, f64) = (f[2].parse().unwrap(), f[3].parse().unwrap());
+    let init = 4.5 / 24.0;
+    eprintln!(
+        "juniata learned release: Raystown T0 {t0:.4} d ({:.2} h, init 4.5 h), a {a:.4}, b {b:.4}",
+        t0 * 24.0
+    );
+    assert!(
+        (t0 - init).abs() / init > 0.01,
+        "T0 {t0} d did not move off its 4.5 h init: the release head did not train"
+    );
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("manifest.json")).expect("read manifest.json"),
+    )
+    .expect("parse manifest.json");
+    let nse = json_f64(&manifest["metrics"], "median_nse_finite");
+    let kge = json_f64(&manifest["metrics"], "median_kge_finite");
+    eprintln!("juniata learned release: routed NSE {nse:.4} / KGE {kge:.4}");
+    assert!(gauge_predictions(&run_dir).iter().all(|v| v.is_finite()));
 }
 
 /// Daily routed predictions at the gauge, `eval/predictions.zarr` `/predictions`.

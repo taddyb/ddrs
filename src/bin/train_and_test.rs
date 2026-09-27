@@ -160,6 +160,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let head_template: KanHead<I> = head_cfg.init::<I>(&device);
     let head = load_kan_head::<I>(&latest_ckpt, head_template, &device)?;
 
+    // Learned dam release: resolve the release head saved beside the routing
+    // head into a fixed seasonal table (no-op otherwise).
+    let mut test_dataset = test_dataset;
+    if let Some(dir) = latest_ckpt.parent() {
+        ddrs::training::release_eval::resolve_learned_release::<I>(
+            &test_cfg,
+            &mut test_dataset,
+            dir,
+            &device,
+        )?;
+    }
+
     let output = evaluate::<I>(
         &test_cfg,
         &test_dataset,

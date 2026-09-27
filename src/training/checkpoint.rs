@@ -20,8 +20,10 @@
 //! epoch_E_mb_M/
 //! ├── head.mpk      KAN weights      (CompactRecorder)
 //! ├── optim.mpk     Adam moments     (CompactRecorder)
-//! └── state.json    [`TrainCkptState`]: epoch, next mini-batch, serialized
-//!                   rng, sampler permutation + cursor
+//! ├── state.json    [`TrainCkptState`]: epoch, next mini-batch, serialized
+//! │                 rng, sampler permutation + cursor
+//! ├── release_head.mpk   learned dam release head  (only with
+//! └── release_optim.mpk  its optimizer moments      `reservoir_release: learned`)
 //! ```
 //!
 //! `experiment.checkpoint:` points at the directory; the inner filenames are
@@ -185,6 +187,20 @@ pub fn head_base(ckpt_dir: &Path) -> PathBuf {
 /// (`CompactRecorder` appends `.mpk` → `dir/optim.mpk`).
 pub fn optim_base(ckpt_dir: &Path) -> PathBuf {
     ckpt_dir.join("optim")
+}
+
+/// Recorder base for the learned dam release head inside a checkpoint dir:
+/// `dir/release_head` (→ `dir/release_head.mpk`). Written only by runs with
+/// `params.reservoir_release: learned`; a checkpoint without it loads into a
+/// learned config with the release head cold.
+pub fn release_head_base(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("release_head")
+}
+
+/// Recorder base for the release head's optimizer moments:
+/// `dir/release_optim` (→ `dir/release_optim.mpk`).
+pub fn release_optim_base(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("release_optim")
 }
 
 /// Train-loop state path inside a checkpoint dir: `dir/state.json`.

@@ -16,9 +16,9 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
-    read_reservoir_table, reservoir_rows, AorcPrecipStore, AttributesStore, ConusAdjacencyStore,
-    GageMetadata, GagesAdjacencyStore, ObservationsStore, ReservoirRows, StateCache,
-    StreamflowSource,
+    map_reservoir_rows, read_dam_features, read_fixed_release_table, AorcPrecipStore,
+    AttributesStore, ConusAdjacencyStore, FixedTable, GageMetadata, GagesAdjacencyStore,
+    ObservationsStore, ReservoirRows, ReservoirTable, StateCache, StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -371,9 +371,12 @@ pub struct MeritGagesDataset {
     /// `build_impervious_mask`. `None` ⇒ mask is never built (back-compat no-op).
     leakance_impervious_threshold: Option<f32>,
     /// `data_sources.reservoirs`, read once at open when
-    /// `params.use_reservoirs` is true; `None` otherwise. Mapped onto each
-    /// batch's COMID order by `reservoir_rows`.
-    reservoirs: Option<Vec<(Comid, f32)>>,
+    /// `params.use_reservoirs` is true; `None` otherwise. A `fixed` table
+    /// (`T_days`, optional seasonal `a`, `b`) or, for
+    /// `reservoir_release: learned`, the dam feature table until the test
+    /// phase resolves it (`resolve_learned_release`). Mapped onto each batch's
+    /// COMID order by `map_reservoir_rows`.
+    reservoirs: Option<ReservoirTable>,
 }
 
 /// Reject the disaggregation head when the streamflow store is hourly-native:
@@ -582,14 +585,34 @@ impl MeritGagesDataset {
                 message: "params.use_reservoirs is true but data_sources.reservoirs is not set"
                     .into(),
             })?;
-            let table = read_reservoir_table(path)?;
+            let table = match cfg.params.reservoir_release {
+                crate::config::ReservoirRelease::Fixed => {
+                    ReservoirTable::Fixed(read_fixed_release_table(path)?)
+                }
+                crate::config::ReservoirRelease::Learned => {
+                    let names = &cfg
+                        .release_head
+                        .as_ref()
+                        .ok_or_else(|| DataError::Malformed {
+                            path: std::path::PathBuf::from("<config>"),
+                            message: "reservoir_release: learned needs a release_head block".into(),
+                        })?
+                        .input_var_names;
+                    ReservoirTable::Learned(read_dam_features(path, names)?)
+                }
+            };
             // Logged at open so a train-only run, which never builds the eval
             // network's match line, still leaves the table in `run.log`. Same
             // fd-2 write as `build_static_network`, for the same libtest reason.
             use std::io::Write;
+            let kind = match &table {
+                ReservoirTable::Fixed(t) if t.seasonal => " (fixed, seasonal a/b)",
+                ReservoirTable::Fixed(_) => "",
+                ReservoirTable::Learned(_) => " (learned release, dam features)",
+            };
             let _ = writeln!(
                 std::io::stderr(),
-                "reservoirs: table {} has {} COMIDs",
+                "reservoirs: table {} has {} COMIDs{kind}",
                 path.display(),
                 table.len()
             );
@@ -894,8 +917,8 @@ impl MeritGagesDataset {
         // is off). Not logged: that would be once per training batch.
         let reservoir_rows = self
             .reservoirs
-            .as_deref()
-            .map(|table| reservoir_rows(table, &compressed.divide_comids));
+            .as_ref()
+            .map(|table| map_reservoir_rows(table, &compressed.divide_comids));
 
         // ----- 8. Assemble -----
         Ok(RoutingBatch {
@@ -1179,6 +1202,51 @@ impl MeritGagesDataset {
         })
     }
 
+    /// The reservoir table this dataset carries (`None` unless
+    /// `params.use_reservoirs`).
+    pub fn reservoir_table(&self) -> Option<&ReservoirTable> {
+        self.reservoirs.as_ref()
+    }
+
+    /// Replace a `reservoir_release: learned` feature table with the fixed
+    /// seasonal table a trained release head resolves it to
+    /// (`training::release_eval`), so the test phase routes the learned
+    /// `(T0, a, b)` through the ordinary `fixed` path. The release head is a
+    /// per-dam function of its features, so resolving every table dam once
+    /// is exactly what resolving each network's dams would give.
+    ///
+    /// Must run before the first `collate_window`: the static test network
+    /// caches its reservoir rows. Errors if it already exists, if the dataset
+    /// carries no learned table, or if `table` does not list exactly the
+    /// feature table's COMIDs.
+    pub fn resolve_learned_release(&mut self, table: FixedTable) -> Result<()> {
+        let err = |message: String| DataError::Malformed {
+            path: std::path::PathBuf::from("<resolve_learned_release>"),
+            message,
+        };
+        if self.static_network.get().is_some() {
+            return Err(err(
+                "the static test network is already built with the unresolved table; resolve \
+                 the learned release before the first collate_window"
+                    .into(),
+            ));
+        }
+        let features = match &self.reservoirs {
+            Some(ReservoirTable::Learned(f)) => f,
+            _ => return Err(err("the dataset carries no learned dam feature table".into())),
+        };
+        let resolved: Vec<Comid> = table.dams.iter().map(|d| d.comid).collect();
+        if resolved != features.comids {
+            return Err(err(format!(
+                "the resolved table lists {} COMIDs, the feature table {} (or in another order)",
+                resolved.len(),
+                features.comids.len()
+            )));
+        }
+        self.reservoirs = Some(ReservoirTable::Fixed(table));
+        Ok(())
+    }
+
     fn get_or_build_static_network(&self) -> Result<&StaticNetworkCache> {
         if let Some(c) = self.static_network.get() {
             return Ok(c);
@@ -1256,8 +1324,8 @@ impl MeritGagesDataset {
         // `eprintln!`: the libtest harness swallows the print macros, which
         // would keep the line out of `run.log` (`cli::tee`) in
         // `tests/juniata_acceptance.rs`.
-        let reservoir_rows = self.reservoirs.as_deref().map(|table| {
-            let rows = reservoir_rows(table, &compressed.divide_comids);
+        let reservoir_rows = self.reservoirs.as_ref().map(|table| {
+            let rows = map_reservoir_rows(table, &compressed.divide_comids);
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr(),

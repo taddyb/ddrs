@@ -9,7 +9,7 @@ use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
 use crate::data::store::ReservoirRows;
-use crate::routing::mmc::{MuskingumCunge, RoutingInputs, SpatialParameters};
+use crate::routing::mmc::{DamRelease, MuskingumCunge, RoutingInputs, SpatialParameters};
 use crate::routing::utils::denormalize;
 use crate::training::gate::leakance_gate;
 
@@ -180,16 +180,32 @@ pub fn fixed_output_normalized<B: Backend>(
     Tensor::full([n], v, device)
 }
 
-/// Arm a batch's linear-reservoir rows (`params.use_reservoirs`, option C in
-/// `.claude/RESERVOIRS.md`) on an engine that has just run `setup_inputs`.
-/// Every engine built for a dataset batch calls this, so the rows
-/// `data::store::reservoirs::reservoir_rows` mapped from that batch's COMID
-/// order reach train, eval and probe forwards alike. No-op when
+/// Arm a batch's dam rows (`params.use_reservoirs`, `.claude/RESERVOIRS.md`)
+/// on an engine that has just run `setup_inputs`. Every engine built for a
+/// dataset batch calls this, so the rows
+/// `data::store::reservoirs::map_reservoir_rows` mapped from that batch's
+/// COMID order reach train, eval and probe forwards alike. No-op when
 /// `use_reservoirs` is false.
+///
+/// By what the rows carry:
+/// - `features` (`reservoir_release: learned`): `release_head` runs on them
+///   (`nn::release_head::release_params`, autodiff alive) and the dams are
+///   armed with `MuskingumCunge::set_dam_release`, so `T0`, `a`, `b` train.
+///   Panics without a release head: a learned table must be resolved
+///   (`training::release_eval`) before any forward that has none.
+/// - `seasonal` (a fixed table with `a`, `b`): `set_dam_release` with
+///   constant tensors.
+/// - neither (option C): `set_reservoir_rows`, byte-identical to before.
+///
+/// `window_start` / `n_hours` place the batch's lateral-inflow rows in the
+/// year for the seasonal phase (`routing::release::seasonal_phase`).
 pub fn apply_reservoir_rows<I: Backend>(
     cfg: &Config,
     engine: &mut MuskingumCunge<I>,
     rows: Option<&ReservoirRows>,
+    window_start: chrono::NaiveDate,
+    n_hours: usize,
+    release_head: Option<&KanHead<Autodiff<I>>>,
 ) {
     if !cfg.params.use_reservoirs {
         return;
@@ -198,9 +214,77 @@ pub fn apply_reservoir_rows<I: Backend>(
         "params.use_reservoirs is true but the batch carries no reservoir rows; \
          build it with a MeritGagesDataset opened from the same config",
     );
+    let device = engine_device(engine);
+    let release = if let Some(features) = rows.features.as_ref() {
+        let head = release_head.expect(
+            "reservoir_release: learned rows reached a forward without a release head; \
+             resolve the learned release into a fixed table first \
+             (training::release_eval::resolve_learned_release)",
+        );
+        if rows.rows.is_empty() {
+            return;
+        }
+        let (n, f) = features.dim();
+        let x = Tensor::<Autodiff<I>, 1>::from_floats(
+            features.as_standard_layout().as_slice().expect("standard layout"),
+            &device,
+        )
+        .reshape([n, f]);
+        let p = crate::nn::release_head::release_params(head, x, &cfg.params.parameter_ranges);
+        DamRelease { rows: rows.rows.clone(), t0_days: p.t0_days, seasonal: p.seasonal, phase: vec![] }
+    } else if let Some((a, b)) = rows.seasonal.as_ref() {
+        if rows.rows.is_empty() {
+            return;
+        }
+        let t = |v: &[f32]| Tensor::<Autodiff<I>, 1>::from_floats(v, &device);
+        DamRelease {
+            rows: rows.rows.clone(),
+            t0_days: t(&rows.t_days),
+            seasonal: Some((t(a), t(b))),
+            phase: vec![],
+        }
+    } else {
+        engine
+            .set_reservoir_rows(&rows.rows, &rows.t_days)
+            .expect("reservoir rows are mapped from this batch's own COMID order");
+        return;
+    };
+    let phase = crate::routing::release::seasonal_phase(window_start, n_hours);
     engine
-        .set_reservoir_rows(&rows.rows, &rows.t_days)
-        .expect("reservoir rows are mapped from this batch's own COMID order");
+        .set_dam_release(DamRelease { phase, ..release })
+        .expect("dam rows are mapped from this batch's own COMID order");
+}
+
+/// The device an engine was built on (its routing state lives there).
+fn engine_device<I: Backend>(engine: &MuskingumCunge<I>) -> I::Device {
+    engine.discharge_state().expect("setup_inputs ran").device()
+}
+
+/// Median `T0` (days) the release head emits for this batch's dams, and how
+/// many dams there are. Diagnostic only: detached, read to the host, like
+/// [`manning_n_stats`]. `None` when the batch has no learned dam rows.
+pub fn release_t0_stats<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<Autodiff<I>>,
+    release_head: &KanHead<Autodiff<I>>,
+    device: &I::Device,
+) -> Option<(f32, usize)> {
+    let features = tensors.reservoir_rows.as_ref()?.features.as_ref()?;
+    let (n, f) = features.dim();
+    if n == 0 {
+        return None;
+    }
+    let x = Tensor::<Autodiff<I>, 1>::from_floats(
+        features.as_standard_layout().as_slice().expect("standard layout"),
+        device,
+    )
+    .reshape([n, f]);
+    let p = crate::nn::release_head::release_params(release_head, x, &cfg.params.parameter_ranges);
+    let mut t0: Vec<f32> = p.t0_days.detach().into_data().into_vec().unwrap();
+    t0.sort_unstable_by(|a, b| a.total_cmp(b));
+    let mid = t0.len() / 2;
+    let median = if t0.len() % 2 == 0 { 0.5 * (t0[mid - 1] + t0[mid]) } else { t0[mid] };
+    Some((median, n))
 }
 
 /// Direct-param forward pass for V1/V2 verification. No MLP, no autograd
@@ -265,7 +349,14 @@ pub fn forward_with_frozen_params<I: Backend>(
         carry_state,
         initial_state_ad,
     );
-    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
+    apply_reservoir_rows(
+        cfg,
+        &mut engine,
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+        tensors.q_prime.dims()[0],
+        None,
+    );
 
     // engine.forward() → (N, T_hours) on Autodiff<I>.
     // Drop autograd graph immediately — this is a verification path with no backward.
@@ -358,6 +449,21 @@ pub fn forward<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<Autodiff<I>>,
     head: &KanHead<Autodiff<I>>,
+    device: &I::Device,
+    carry_state: bool,
+    gate_tau: Option<f32>,
+) -> Tensor<Autodiff<I>, 2> {
+    forward_with_release(cfg, tensors, head, None, device, carry_state, gate_tau)
+}
+
+/// [`forward`] with the learned dam release head
+/// (`params.reservoir_release: learned`), which [`apply_reservoir_rows`] runs
+/// on the batch's dam features. `release_head: None` is exactly [`forward`].
+pub fn forward_with_release<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<Autodiff<I>>,
+    head: &KanHead<Autodiff<I>>,
+    release_head: Option<&KanHead<Autodiff<I>>>,
     device: &I::Device,
     carry_state: bool,
     gate_tau: Option<f32>,
@@ -459,7 +565,14 @@ pub fn forward<I: Backend>(
         carry_state,
         tensors.initial_state.clone(),
     );
-    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
+    apply_reservoir_rows(
+        cfg,
+        &mut engine,
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+        n_hourly,
+        release_head,
+    );
     // Enable negative-discharge tracking so the count appears in the training
     // log. When use_cuda_graphs is true, forward will print UNAVAILABLE instead.
     engine.enable_negative_discharge_tracking();
@@ -819,7 +932,14 @@ fn forward_eval_core<I: Backend>(
         carry_state,
         initial_state_ad,
     );
-    apply_reservoir_rows(cfg, &mut engine, tensors.reservoir_rows.as_ref());
+    apply_reservoir_rows(
+        cfg,
+        &mut engine,
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+        n_hourly,
+        None,
+    );
     if zeta.is_some() {
         engine.enable_zeta_accumulation();
     }

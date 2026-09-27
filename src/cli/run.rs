@@ -434,7 +434,7 @@ where
                     test_cfg.params.sparse_solver = crate::config::SparseSolver::Cpu;
                     test_cfg.params.use_cuda_graphs = false;
                 }
-                let test_dataset = MeritGagesDataset::open(&test_cfg)
+                let mut test_dataset = MeritGagesDataset::open(&test_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
                 let latest = latest_checkpoint_base(&ckpt_dir)
@@ -443,6 +443,24 @@ where
                 let head_template: KanHead<I> = head_cfg.init::<I>(&device);
                 let head = load_kan_head::<I>(&latest, head_template, &device)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                // Learned dam release: resolve the trained release head into a
+                // fixed seasonal table for the test phase, and keep the
+                // per-dam (T0, a, b) with the run. No-op otherwise.
+                let latest_dir = latest.parent().unwrap_or(&ckpt_dir).to_path_buf();
+                if let Some(table) = crate::training::release_eval::resolve_learned_release::<I>(
+                    &test_cfg,
+                    &mut test_dataset,
+                    &latest_dir,
+                    &device,
+                )
+                .map_err(|e| CliError::Other(Box::new(e)))?
+                {
+                    let csv = run_dir.join("release_params.csv");
+                    crate::training::release_eval::write_release_params_csv(&csv, &table)
+                        .map_err(|e| CliError::Other(Box::new(e)))?;
+                    eprintln!("release params -> {}", csv.display());
+                }
 
                 // In Testing mode, experiment.batch_size carries DAYS (not gauges)
                 // because the testing: overlay sets `batch_size: 15`.
