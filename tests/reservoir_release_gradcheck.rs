@@ -138,6 +138,7 @@ fn route(base: Base, require_grad: bool) -> (Tensor<AB, 2>, Leaves) {
         t0_days: t0.clone(),
         seasonal: Some((a.clone(), b.clone())),
         phase: phase(),
+        dam_row: ddrs::config::DamRow::Replace,
     })
     .expect("release");
     (mc.forward(), Leaves { t0, a, b, n, gamma })
@@ -269,6 +270,7 @@ fn release_head_weight_gradcheck_end_to_end() {
         k: 3,
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal: true,
+        dam_row: ddrs::config::DamRow::Replace,
         routing_checkpoint: None,
         freeze_routing: false,
     };
@@ -316,6 +318,7 @@ fn release_head_weight_gradcheck_end_to_end() {
             t0_days: rp.t0_days,
             seasonal: rp.seasonal,
             phase: phase(),
+            dam_row: ddrs::config::DamRow::Replace,
         })
         .unwrap();
         mc.forward()
@@ -497,6 +500,7 @@ fn clamped_release_has_exactly_zero_gradient() {
         t0_days: t0.clone(),
         seasonal: Some((a.clone(), b.clone())),
         phase: vec![[1.0, 0.0]; STEPS + 1],
+        dam_row: ddrs::config::DamRow::Replace,
     })
     .unwrap();
     let grads = mc.forward().sum().backward();

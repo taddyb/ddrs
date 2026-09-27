@@ -471,7 +471,23 @@ release_head:            # top-level block, deny_unknown_fields
   input_var_names: [log10_storage, ..., purpose_other]   # feature-table columns, required
   routing_checkpoint: /abs/.ddrs/runs/<id>/checkpoints/epoch_E_mb_M   # default absent
   freeze_routing: false  # default false; true requires routing_checkpoint
+  dam_row: replace       # default replace; additive adds T·Q to the reach's channel storage
 ```
+
+**`dam_row` (added 2026-09-27).** `replace` (default, every earlier run) makes the dam row the
+reservoir alone (`K := T`, `X := 0`, S19''/S19'''), so `T = 1 h` is faster than no dam on a reach
+whose `K_r` is hours, and `reservoir_T0` must start at `>= 1/24` d. `additive` keeps the reach's
+own Muskingum `K_r`, `X_r` and adds the reservoir: `S = K_r[X_r I + (1 − X_r) Q] + T·Q` (S19''''
+/ B19'''' in `mmc_op`; coefficients in `src/routing/release.rs`). `T = 0` is the channel row bit
+for bit, `T` has no floor, and `reservoir_T0` needs only `0 < lo` (log space); the dam reach's
+`n`/`q_spatial`/`p_spatial` keep their gradient through `K_r`, `X_r`. `c3 >= 0` needs
+`K_r(1 − X_r) + T_t >= dt/2`, met wherever the channel's own `c3 >= 0`. The test phase routes the
+resolved table through the same row. Only a learned config can select it: a `fixed` table has
+no `release_head:` block (rejected at load), so fixed tables always route `replace`; the engine
+API (`MuskingumCunge::set_reservoir_rows_as`, `DamRelease::dam_row`) supports both.
+Tests: `tests/reservoir_additive.rs` (T = 0 and K_r = 0 identities, per-step storage balance,
+gradchecks in both `c1` regimes, opt-out on Juniata), the additive cases of
+`tests/reservoir_release_training.rs`, `src/config.rs` (`dam_row_*`).
 
 **Release-only training (added 2026-09-27).** `routing_checkpoint` is a checkpoint DIRECTORY
 whose `head.mpk` initialises the ROUTING head: weights only, never its `optim.mpk` or

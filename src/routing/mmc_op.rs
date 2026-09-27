@@ -72,6 +72,11 @@ pub(crate) struct LeakanceTensors<I: Backend> {
 /// Muskingum K and X the chain computed with `t_seconds` and 0, and B19''
 /// zeroes the gradient into both. Inner-backend constants: `T` is prescribed
 /// data, never learned. `t_seconds` is only read where `mask` is true.
+///
+/// With `additive` the dam rows keep the reach's own K and X and ADD the
+/// reservoir storage `T·Q` to it (S19''''; `crate::routing::release`): `2·T`
+/// joins the denominator and c3's numerator, and the backward passes K and X
+/// through (B19''''). `t_prev_seconds` is then always `Some`.
 #[derive(Clone)]
 pub(crate) struct ReservoirTensors<I: Backend> {
     pub mask: Tensor<I, 1, Bool>,
@@ -82,6 +87,8 @@ pub(crate) struct ReservoirTensors<I: Backend> {
     /// (S19'''): `c3 = (2·T_t − dt)/(2·T_{t+1} + dt)`. `None` (option C, a
     /// constant T) leaves c3 as the Muskingum row computed it, bit for bit.
     pub t_prev_seconds: Option<Tensor<I, 1>>,
+    /// The additive dam row (`DamRow::Additive`) instead of the replace row.
+    pub additive: bool,
 }
 
 /// The learned (or seasonal) dam release: this step's residence time per dam,
@@ -103,6 +110,8 @@ pub(crate) struct ReleaseParent<I: Backend> {
     pub rows: Tensor<I, 1, Int>,
     /// `[n]` dam-row mask, true exactly at `rows`.
     pub mask: Tensor<I, 1, Bool>,
+    /// The additive dam row (S19'''' / B19'''') instead of the replace row.
+    pub additive: bool,
 }
 
 /// Per-step eval-time leakance diagnostics captured by the zeta sink: this
@@ -235,6 +244,12 @@ pub(crate) struct TimestepState<B: Backend> {
     /// `(2·T_t − dt)/(2·T_{t+1} + dt)` there; the backward needs `T_t` for
     /// c3's numerator in the denominator chain. `None` ⇒ no op in the backward.
     pub reservoir_t_prev: Option<B::FloatTensorPrimitive>,
+    /// The dam rows are the ADDITIVE row (S19''''): the saved `k_muskingum`
+    /// and `x_effective` are the reach's own there, the saved `denom` holds
+    /// `2K(1−X) + 2·T_{t+1} + dt`, and `reservoir_t_prev` is `Some`. B19''''
+    /// passes K and X through and returns `∂L/∂T` from the denominator and
+    /// c3's numerator. `false` ⇒ the replace row (or no dams).
+    pub reservoir_additive: bool,
 }
 
 #[derive(Debug)]
@@ -418,6 +433,11 @@ where
             .reservoir_mask
             .clone()
             .map(Tensor::<I, 1, Bool>::from_primitive);
+        // The additive dam row (S19'''') keeps the reach's own K and X, so the
+        // B19'' masks below apply to the REPLACE row only.
+        let additive = state.reservoir_additive;
+        // Dam-row mask of the replace row only (`None` for the additive row).
+        let replace_mask = if additive { None } else { reservoir_mask.clone() };
 
         let depth = wrap(state.depth.clone());
         let top_width = wrap(state.top_width.clone());
@@ -583,7 +603,12 @@ where
             .reservoir_t_prev
             .clone()
             .map(|p| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(p)));
+        // S19'''' (additive dam rows): c3's numerator is `2K(1−X) + 2·T_t − dt`,
+        // the same expression op for op as the forward's.
         let num_c3 = match (&reservoir_t_prev, reservoir_mask.as_ref()) {
+            (Some(tp), Some(m)) if additive => {
+                num_c3.mask_where(m.clone(), (two_k_1mx.clone() + tp.clone() * 2.0) - dt)
+            }
             (Some(tp), Some(m)) => num_c3.mask_where(m.clone(), tp.clone() * 2.0 - dt),
             _ => num_c3,
         };
@@ -606,7 +631,14 @@ where
         // S19''': on dam rows c3's numerator is `2·T_t − dt`, so this term is
         // `∂L/∂(2·T_t)` there, the step-start T's gradient, and does NOT reach
         // K (= T_{t+1}). Split it off before `g_2k1mx_total` is formed.
+        // B19'''' (additive dam rows): c3's numerator is `2K(1−X) + 2·T_t − dt`,
+        // so this term is BOTH `∂L/∂(2K(1−X))` and `∂L/∂(2·T_t)`: it stays in
+        // the channel chain and is copied, on the dam rows, to the step-start T.
         let (g_2k1mx_from_c3, g_2t_prev) = match (&reservoir_t_prev, reservoir_mask.as_ref()) {
+            (Some(_), Some(m)) if additive => (
+                g_2k1mx_from_c3.clone(),
+                Some(g_2k1mx_from_c3.mask_fill(m.clone().bool_not(), 0.0)),
+            ),
             (Some(_), Some(m)) => (
                 g_2k1mx_from_c3.clone().mask_fill(m.clone(), 0.0),
                 Some(g_2k1mx_from_c3.mask_fill(m.clone().bool_not(), 0.0)),
@@ -679,8 +711,9 @@ where
             // B19'' (X half). On dam rows S19'' replaced X with the constant 0,
             // so nothing flows on into the Cunge chain or the S19' cap. Masked
             // HERE, before the branch split below, so `gk_from_x_cap` is zero
-            // on those rows as well.
-            let gx = match reservoir_mask.as_ref() {
+            // on those rows as well. The additive row (B19'''') keeps the
+            // reach's X, so its gradient flows on like any channel row's.
+            let gx = match replace_mask.as_ref() {
                 Some(m) => gx.mask_fill(m.clone(), 0.0),
                 None => gx,
             };
@@ -766,11 +799,20 @@ where
         // rows, since B19'' zeroed `gx` there), and before the K-half mask
         // below discards it and before the B18' floor mask, which belongs to
         // the channel's `k_raw`, not to `T` (S19'' runs after S18').
+        //
+        // B19'''' (additive dam rows): `T_{t+1}` enters only the denominator,
+        // `D = 2K(1−X) + 2·T_{t+1} + dt`, so `∂L/∂T_{t+1} = 2·∂L/∂D` there,
+        // with `∂L/∂D = gdenom_total` (the same sum the channel chain reads
+        // for `2K(1−X)`); K and X keep their own chain untouched.
         let g_t_release = if mask.t_release {
             let m = reservoir_mask
                 .as_ref()
                 .expect("a tracked release T needs the dam-row mask in the saved state");
-            Some(gk_muskingum.clone().mask_fill(m.clone().bool_not(), 0.0))
+            if additive {
+                Some(gdenom_total.clone().mask_fill(m.clone().bool_not(), 0.0) * 2.0)
+            } else {
+                Some(gk_muskingum.clone().mask_fill(m.clone().bool_not(), 0.0))
+            }
         } else {
             None
         };
@@ -788,8 +830,9 @@ where
         // B19'' (K half). On dam rows S19'' replaced K with the constant T.
         // Masked AFTER the `gk_from_x_cap` fold and BEFORE the B18' floor mask
         // and B18, so no path carries a dam row's K gradient into its
-        // celerity, and from there into its n, q_spatial and p_spatial.
-        let gk_muskingum = match reservoir_mask {
+        // celerity, and from there into its n, q_spatial and p_spatial. The
+        // additive row keeps the reach's K, so its gradient flows on.
+        let gk_muskingum = match replace_mask {
             Some(m) => gk_muskingum.mask_fill(m, 0.0),
             None => gk_muskingum,
         };
@@ -1965,12 +2008,13 @@ where
     // coefficients and the saved K, so B20..B23 read T and 0. `mask_where` /
     // `mask_fill` copy every off-mask element unchanged, so every other row is
     // bitwise identical. See B19'' for the backward.
+    // The additive row (S19'''' below) keeps the reach's own K and X.
     let (k_muskingum, x_eff) = match reservoir {
-        Some(res) => (
+        Some(res) if !res.additive => (
             k_muskingum.mask_where(res.mask.clone(), res.t_seconds.clone()),
             x_eff.mask_fill(res.mask.clone(), 0.0),
         ),
-        None => (k_muskingum, x_eff),
+        _ => (k_muskingum, x_eff),
     };
     *x_eff_out = Some(unwrap(x_eff.clone()));
 
@@ -1979,6 +2023,20 @@ where
     let two_kx = two_k.clone() * x_eff.clone();
     let two_k_1mx = two_k.clone() * one_minus_x.clone();
     let denom = two_k_1mx.clone() + dt;
+    // S19'''': the ADDITIVE dam row (`crate::routing::release`). Storage is the
+    // reach's channel storage plus the reservoir's, S = K[X·I + (1−X)·Q] + T·Q,
+    // with the K, X computed above (after S18'/S19'). The trapezoid on it adds
+    // 2·T_{t+1} to the denominator (every coefficient) and 2·T_t to c3's
+    // numerator (below); c1, c2, c4 keep their channel numerators. Written as
+    // `(2K(1−X) + 2T) + dt` so T = 0 reproduces the channel row bit for bit
+    // (x + 0 = x in IEEE), and only dam rows are touched (`mask_where`).
+    let denom = match reservoir {
+        Some(res) if res.additive => denom.mask_where(
+            res.mask.clone(),
+            (two_k_1mx.clone() + res.t_seconds.clone() * 2.0) + dt,
+        ),
+        _ => denom,
+    };
     let c1 = (-two_kx.clone() + dt) / denom.clone();
     let c2 = (two_kx.clone() + dt) / denom.clone();
     let c3 = (two_k_1mx.clone() - dt) / denom.clone();
@@ -1994,6 +2052,11 @@ where
     // the generic c3's op for op (`T·2` vs `(K·2)·(1 − 0)`, exact in f32), so
     // `T_t == T_{t+1}` reproduces option C bit for bit.
     let c3 = match reservoir.and_then(|r| r.t_prev_seconds.as_ref().map(|tp| (r, tp))) {
+        // S19'''': c3 = (2K(1−X) + 2·T_t − dt)/D on additive dam rows.
+        Some((res, t_prev)) if res.additive => c3.mask_where(
+            res.mask.clone(),
+            ((two_k_1mx.clone() + t_prev.clone() * 2.0) - dt) / denom.clone(),
+        ),
         Some((res, t_prev)) => c3.mask_where(res.mask.clone(), (t_prev.clone() * 2.0 - dt) / denom.clone()),
         None => c3,
     };
@@ -2667,6 +2730,7 @@ where
             mask: r.mask.clone(),
             t_seconds: scatter(t_aut.as_ref().expect("set above").primitive.clone()),
             t_prev_seconds: Some(scatter(t_prev_aut.as_ref().expect("set above").primitive.clone())),
+            additive: r.additive,
         }
     });
     let reservoir = reservoir.or(release_res.as_ref());
@@ -2760,7 +2824,12 @@ where
                 TensorPrimitive::Float(p) => p,
                 _ => unreachable!(),
             }),
+        reservoir_additive: reservoir.is_some_and(|r| r.additive),
     };
+    debug_assert!(
+        !state.reservoir_additive || state.reservoir_t_prev.is_some(),
+        "the additive dam row needs the step-start T in the saved state"
+    );
 
     // Learned release: `T` is one more parent, so it routes through the
     // release siblings. Everything else below is untouched.
@@ -2868,6 +2937,40 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    timestep_forward_release_as::<I>(
+        cfg, pattern, assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        rows, t_next, t_prev,
+        crate::config::DamRow::Replace,
+    )
+}
+
+/// [`timestep_forward_release`] with the dam-row form chosen: `Replace`
+/// (S19''' / B19''') or `Additive` (S19'''' / B19'''').
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_release_as<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    rows: Vec<usize>,
+    t_next: Tensor<Autodiff<I>, 1>,
+    t_prev: Tensor<Autodiff<I>, 1>,
+    dam_row: crate::config::DamRow,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
     let device = q_t_at.device();
     let n = q_t_at.dims()[0];
     let mut mask = vec![false; n];
@@ -2881,6 +2984,7 @@ where
         t_prev_dams: t_prev,
         rows: Tensor::from_data(burn::tensor::TensorData::new(rows_i, [n_dams]), &device),
         mask: Tensor::from_data(burn::tensor::TensorData::from(mask.as_slice()), &device),
+        additive: dam_row == crate::config::DamRow::Additive,
     };
     timestep_forward_with_reservoirs::<I>(
         cfg, pattern, assembler,
@@ -3104,6 +3208,7 @@ where
         gamma_t: gamma_p.clone(),
         reservoir_mask: None,
         reservoir_t_prev: None,
+        reservoir_additive: false,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -3447,6 +3552,7 @@ where
         // Reservoir rows are rejected with CUDA graphs (`route_timestep`).
         reservoir_mask: None,
         reservoir_t_prev: None,
+        reservoir_additive: false,
     };
 
     let result_prim = match TimestepOp

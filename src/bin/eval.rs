@@ -108,7 +108,7 @@ fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<d
             &device,
         )? {
             let csv = cli.output.with_extension("release_params.csv");
-            ddrs::training::release_eval::write_release_params_csv(&csv, &table)?;
+            ddrs::training::release_eval::write_release_params_csv(&csv, &table, cfg.dam_row())?;
             eprintln!("release params -> {}", csv.display());
         }
     }

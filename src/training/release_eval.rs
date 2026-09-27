@@ -16,19 +16,20 @@ use std::path::Path;
 
 use burn::tensor::{backend::Backend, Tensor};
 
-use crate::config::{Config, ReservoirRelease};
+use crate::config::{Config, DamRow, ReservoirRelease};
 use crate::data::dataset::MeritGagesDataset;
 use crate::data::error::{DataError, Result};
 use crate::data::store::{DamFeatures, FixedDam, FixedTable, ReservoirTable};
 use crate::nn::kan_head::KanHead;
 use crate::nn::release_head::{init_release_head, release_params};
-use crate::routing::release::{seasonal_t_range, MIN_T_DAYS};
+use crate::routing::release::{seasonal_t_range, t_floor_days};
 use crate::training::checkpoint::{load_kan_head, release_head_base};
 
 /// Evaluate `head` on every dam of `features` and return the fixed table it
 /// resolves to, dams in the feature table's order. A non-seasonal head gives
-/// a non-seasonal table with `T_days = max(T0, 1/24)`, the same clamp the
-/// training path applies.
+/// a non-seasonal table with `T_days = max(T0, floor)`, the floor the training
+/// path applies for `cfg.dam_row()` (1/24 d on the replace row, none on the
+/// additive row), so the resolved table routes through the same row.
 pub fn resolve_release_table<B: Backend>(
     head: &KanHead<B>,
     features: &DamFeatures,
@@ -45,6 +46,7 @@ pub fn resolve_release_table<B: Backend>(
     let host = |t: Tensor<B, 1>| -> Vec<f32> { t.into_data().to_vec::<f32>().unwrap() };
     let t0 = host(p.t0_days);
     let seasonal = p.seasonal.is_some();
+    let floor = t_floor_days(cfg.dam_row());
     let (a, b) = match p.seasonal {
         Some((a, b)) => (host(a), host(b)),
         None => (vec![0.0; n], vec![0.0; n]),
@@ -53,8 +55,9 @@ pub fn resolve_release_table<B: Backend>(
         .map(|i| FixedDam {
             comid: features.comids[i],
             // Non-seasonal: option C reads T_days directly, so apply the clamp
-            // here (a no-op unless the sigmoid saturated at the box floor).
-            t_days: if seasonal { t0[i] } else { t0[i].max(MIN_T_DAYS) },
+            // here (a no-op unless the sigmoid saturated at the box floor;
+            // always a no-op on the additive row, whose floor is 0 < T0).
+            t_days: if seasonal { t0[i] } else { t0[i].max(floor) },
             a: a[i],
             b: b[i],
             // The activation year travels with the dam, so the test phase
@@ -108,12 +111,13 @@ pub fn resolve_learned_release<B: Backend>(
 }
 
 /// Write the resolved per-dam release parameters as CSV:
-/// `COMID,T0_days,a,b,T_min_days,T_max_days`.
-pub fn write_release_params_csv(path: &Path, table: &FixedTable) -> Result<()> {
+/// `COMID,T0_days,a,b,T_min_days,T_max_days`, the extremes after `dam_row`'s
+/// floor.
+pub fn write_release_params_csv(path: &Path, table: &FixedTable, dam_row: DamRow) -> Result<()> {
     let mut out = String::from("COMID,T0_days,a,b,T_min_days,T_max_days\n");
     for d in &table.dams {
         let (lo, hi) = if table.seasonal {
-            seasonal_t_range(d.t_days, d.a, d.b)
+            seasonal_t_range(d.t_days, d.a, d.b, dam_row)
         } else {
             (d.t_days, d.t_days)
         };

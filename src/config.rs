@@ -894,6 +894,25 @@ pub enum ReservoirRelease {
     Learned,
 }
 
+/// `release_head.dam_row`: how a dam row relates to its reach's own channel
+/// routing. See `crate::routing::release` for the two rows and their
+/// coefficients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DamRow {
+    /// The dam row REPLACES the reach's channel routing: Muskingum `K := T`,
+    /// `X := 0` (S19'' / S19''' in `mmc_op`), the linear reservoir `S = T·Q`
+    /// alone. `T >= 1 h` keeps `c3 >= 0`. Every config before 2026-09-27
+    /// routes this row.
+    #[default]
+    Replace,
+    /// The reservoir's storage is ADDED to the reach's channel storage,
+    /// `S = K_r·[X_r·I + (1 − X_r)·Q] + T·Q` with the reach's own Muskingum
+    /// `K_r`, `X_r` (S19'''' in `mmc_op`). `T = 0` is the channel row exactly,
+    /// so the release head can opt a dam out, and `T` may go down to 0.
+    Additive,
+}
+
 /// YAML `release_head:` block: the learned dam release head
 /// (`params.reservoir_release: learned`). A second `KanHead` instance,
 /// `Linear(F, H) -> KanLayer(H, H) x num_hidden_layers -> Linear(H, P) -> Sigmoid`
@@ -916,6 +935,11 @@ pub struct ReleaseHeadSection {
     /// `true`: `T(t) = T0·exp(a·sin ω_t + b·cos ω_t)`. `false`: constant `T0`.
     #[serde(default = "default_true")]
     pub seasonal: bool,
+    /// `replace` (default) or `additive`; see [`DamRow`]. The test phase
+    /// routes the resolved table through the same row. With `additive` the
+    /// `reservoir_T0` box may start below one hour (any `lo > 0`).
+    #[serde(default)]
+    pub dam_row: DamRow,
     /// A checkpoint DIRECTORY (`.../checkpoints/epoch_E_mb_M/`) whose
     /// `head.mpk` initialises the ROUTING head. Only those weights are read:
     /// not its `optim.mpk` (the routing optimizer starts cold), not its
@@ -945,6 +969,13 @@ fn default_true() -> bool {
 }
 
 impl Config {
+    /// The dam-row form of the learned release (`release_head.dam_row`);
+    /// [`DamRow::Replace`] for every config without a `release_head:` block,
+    /// which includes every `fixed` table (the block is rejected there).
+    pub fn dam_row(&self) -> DamRow {
+        self.release_head.as_ref().map(|r| r.dam_row).unwrap_or_default()
+    }
+
     /// True when the routing head is frozen for release-only training
     /// (`release_head.freeze_routing` under `reservoir_release: learned`).
     pub fn routing_frozen(&self) -> bool {
@@ -1543,11 +1574,26 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
         }
         let r = &p.parameter_ranges;
         let [t_lo, t_hi] = r.reservoir_t0;
-        if !(t_lo >= 1.0 / 24.0 && t_lo < t_hi && t_hi.is_finite()) {
-            return Err(format!(
-                "params.parameter_ranges.reservoir_T0 = [{t_lo}, {t_hi}] must satisfy \
-                 1/24 <= lo < hi < inf (days; T >= dt/2 keeps the dam row's c3 >= 0)"
-            ));
+        match rh.dam_row {
+            DamRow::Replace => {
+                if !(t_lo >= 1.0 / 24.0 && t_lo < t_hi && t_hi.is_finite()) {
+                    return Err(format!(
+                        "params.parameter_ranges.reservoir_T0 = [{t_lo}, {t_hi}] must satisfy \
+                         1/24 <= lo < hi < inf (days; with `release_head.dam_row: replace`, \
+                         T >= dt/2 keeps the dam row's c3 >= 0)"
+                    ));
+                }
+            }
+            DamRow::Additive => {
+                // T0 is denormalised in log space, so lo > 0; the additive
+                // row itself is the channel row at T = 0.
+                if !(t_lo > 0.0 && t_lo < t_hi && t_hi.is_finite()) {
+                    return Err(format!(
+                        "params.parameter_ranges.reservoir_T0 = [{t_lo}, {t_hi}] must satisfy \
+                         0 < lo < hi < inf (days; T0 is denormalised in log space)"
+                    ));
+                }
+            }
         }
         for (name, [lo, hi]) in [("reservoir_a", r.reservoir_a), ("reservoir_b", r.reservoir_b)] {
             if !(lo < hi && lo.is_finite() && hi.is_finite()) {
@@ -3424,6 +3470,49 @@ data_sources:
         );
         let cfg = Config::from_yaml_file(&path).expect("warm start without freeze loads");
         assert!(!cfg.routing_frozen());
+    }
+
+    #[test]
+    fn dam_row_defaults_replace_and_parses_additive() {
+        let path = learned_yaml(
+            "ddrs_rel_dam_row_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!(cfg.release_head.as_ref().unwrap().dam_row, DamRow::Replace);
+        assert_eq!(cfg.dam_row(), DamRow::Replace);
+        assert_eq!(Config::default().dam_row(), DamRow::Replace, "no release_head block");
+
+        // Additive allows a T0 floor far below one hour.
+        let path = learned_yaml(
+            "ddrs_rel_dam_row_additive.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.0001, 365.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("additive with a sub-hour T0 floor loads");
+        assert_eq!(cfg.dam_row(), DamRow::Additive);
+        assert_eq!(cfg.params.parameter_ranges.reservoir_t0, [0.0001, 365.0]);
+    }
+
+    #[test]
+    fn additive_dam_row_rejects_a_nonpositive_t0_floor() {
+        let path = learned_yaml(
+            "ddrs_rel_additive_zero_floor.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.0, 365.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n"),
+        );
+        learned_rejection(path, &["reservoir_T0", "0 < lo"]);
+    }
+
+    #[test]
+    fn unknown_dam_row_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_dam_row_bogus.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: parallel\n"),
+        );
+        learned_rejection(path, &["parallel"]);
     }
 
     #[test]

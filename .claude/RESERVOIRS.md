@@ -119,6 +119,12 @@ change.
   0.138 at init.
 - **Joint optimizer.** Same kind and lr as the routing head, separate moments, each head clipped
   on its own gradient norm.
+- **Additive dam row (2026-09-27, `release_head.dam_row: additive`).** The replace row (the
+  default) drops the reach's channel storage, so a 1 h bucket is faster than no dam and the head
+  cannot opt out. The additive row keeps the reach's `K_r`, `X_r` and adds `T·Q`:
+  `D = K_r(1 − X_r) + T_{t+1} + dt/2`, `c1 = (dt/2 − K_r X_r)/D`, `c2 = (dt/2 + K_r X_r)/D`,
+  `c3 = (K_r(1 − X_r) + T_t − dt/2)/D`, `c4 = dt/D` (S19'''' / B19''''). `T = 0` is the channel
+  row bit for bit, `K_r = 0` is the replace row, `T` has no floor. `tests/reservoir_additive.rs`.
 - **Release-only training (2026-09-27).** `release_head.routing_checkpoint` loads the routing
   head's weights (only `head.mpk`) from another run's checkpoint directory, and
   `release_head.freeze_routing: true` detaches it: the routing head stays bitwise at the

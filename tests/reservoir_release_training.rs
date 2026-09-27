@@ -65,16 +65,29 @@ fn section(seasonal: bool) -> ReleaseHeadSection {
         k: 3,
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal,
+        dam_row: ddrs::config::DamRow::Replace,
         routing_checkpoint: None,
         freeze_routing: false,
     }
 }
 
 fn learned_cfg(seasonal: bool) -> Config {
+    learned_cfg_as(seasonal, ddrs::config::DamRow::Replace)
+}
+
+/// `learned_cfg` with the dam-row form chosen. The additive row takes a T0
+/// box down to 1e-4 d, so the trained head can resolve below the replace
+/// row's one-hour floor.
+fn learned_cfg_as(seasonal: bool, dam_row: ddrs::config::DamRow) -> Config {
     let mut cfg = Config::default();
     cfg.params.use_reservoirs = true;
     cfg.params.reservoir_release = ReservoirRelease::Learned;
-    cfg.release_head = Some(section(seasonal));
+    let mut s = section(seasonal);
+    s.dam_row = dam_row;
+    if dam_row == ddrs::config::DamRow::Additive {
+        cfg.params.parameter_ranges.reservoir_t0 = [1e-4, 365.0];
+    }
+    cfg.release_head = Some(s);
     cfg
 }
 
@@ -95,8 +108,12 @@ fn features_with_years(years: Vec<Option<i32>>) -> DamFeatures {
 
 /// A trained-looking head: nonzero read-out so the dams differ and a, b != 0.
 fn trained_head(seasonal: bool) -> ddrs::nn::KanHead<AB> {
+    trained_head_in(seasonal, &learned_cfg(seasonal))
+}
+
+/// `trained_head` initialised on `cfg`'s `reservoir_T0` box.
+fn trained_head_in(seasonal: bool, cfg: &Config) -> ddrs::nn::KanHead<AB> {
     let device = Device::default();
-    let cfg = learned_cfg(seasonal);
     let mut head = init_release_head::<AB>(&section(seasonal), &cfg.params.parameter_ranges, 42, &device);
     let [h, p] = head.output.weight.val().dims();
     let w: Vec<f32> = (0..h * p).map(|i| ((i * 7 % 5) as f32 - 2.0) * 0.3).collect();
@@ -147,8 +164,12 @@ fn assert_bitwise(a: &[f32], b: &[f32]) {
 }
 
 fn training_vs_resolved(seasonal: bool) {
-    let cfg = learned_cfg(seasonal);
-    let head = trained_head(seasonal);
+    training_vs_resolved_as(seasonal, ddrs::config::DamRow::Replace);
+}
+
+fn training_vs_resolved_as(seasonal: bool, dam_row: ddrs::config::DamRow) {
+    let cfg = learned_cfg_as(seasonal, dam_row);
+    let head = trained_head_in(seasonal, &cfg);
 
     // Training path: the release head runs on the batch's feature rows.
     let rows = map_reservoir_rows(&ReservoirTable::Learned(features()), &network());
@@ -180,6 +201,41 @@ fn training_and_resolved_release_route_identically_seasonal() {
 #[test]
 fn training_and_resolved_release_route_identically_constant() {
     training_vs_resolved(false);
+}
+
+/// The additive dam row: the resolved test-phase table routes through the
+/// same row as training (`apply_reservoir_rows` reads `cfg.dam_row()` on both
+/// paths, and the non-seasonal resolution applies no one-hour floor).
+#[test]
+fn training_and_resolved_release_route_identically_additive_seasonal() {
+    training_vs_resolved_as(true, ddrs::config::DamRow::Additive);
+}
+
+#[test]
+fn training_and_resolved_release_route_identically_additive_constant() {
+    training_vs_resolved_as(false, ddrs::config::DamRow::Additive);
+}
+
+#[test]
+fn additive_resolution_keeps_t0_below_one_hour() {
+    use burn::module::Param;
+    let cfg = learned_cfg_as(false, ddrs::config::DamRow::Additive);
+    let mut head = trained_head_in(false, &cfg);
+    // Saturate the read-out low: T0 = the box floor, 1e-4 d.
+    head.output.bias = Some(Param::from_tensor(Tensor::from_floats([-40.0_f32], &Device::default())));
+    let table = resolve_release_table::<I>(&head.valid(), &features(), &cfg);
+    for d in &table.dams {
+        assert!(d.t_days < 1.0 / 24.0, "additive resolution clamped T0 to {} d", d.t_days);
+    }
+    let replace = learned_cfg(false);
+    let table = resolve_release_table::<I>(&head.valid(), &features(), &replace);
+    for d in &table.dams {
+        assert!(
+            d.t_days >= 1.0 / 24.0 && d.t_days < 1.0001 / 24.0,
+            "replace resolution keeps the one-hour floor, got {} d",
+            d.t_days
+        );
+    }
 }
 
 /// Route the sandbox with the learned release on `table` through the training

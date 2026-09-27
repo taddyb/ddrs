@@ -460,7 +460,7 @@ where
                 .map_err(|e| CliError::Other(Box::new(e)))?
                 {
                     let csv = run_dir.join("release_params.csv");
-                    crate::training::release_eval::write_release_params_csv(&csv, &table)
+                    crate::training::release_eval::write_release_params_csv(&csv, &table, test_cfg.dam_row())
                         .map_err(|e| CliError::Other(Box::new(e)))?;
                     eprintln!("release params -> {}", csv.display());
                 }
@@ -608,6 +608,7 @@ fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "routing_checkpoint": rh.routing_checkpoint.as_ref().map(|p| p.display().to_string()),
         "freeze_routing": rh.freeze_routing,
+        "dam_row": format!("{:?}", rh.dam_row).to_lowercase(),
     }))
 }
 

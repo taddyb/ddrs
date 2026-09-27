@@ -226,6 +226,10 @@ pub fn apply_reservoir_rows<I: Backend>(
     let active = rows.active_on(window_start);
     let rows = &active;
     let device = engine_device(engine);
+    // Replace or additive dam row (`release_head.dam_row`; `Replace` for any
+    // config without the block). The resolved test-phase table takes the
+    // same row as training, since it is routed from the same config.
+    let dam_row = cfg.dam_row();
     let release = if let Some(features) = rows.features.as_ref() {
         let head = release_head.expect(
             "reservoir_release: learned rows reached a forward without a release head; \
@@ -242,7 +246,13 @@ pub fn apply_reservoir_rows<I: Backend>(
         )
         .reshape([n, f]);
         let p = crate::nn::release_head::release_params(head, x, &cfg.params.parameter_ranges);
-        DamRelease { rows: rows.rows.clone(), t0_days: p.t0_days, seasonal: p.seasonal, phase: vec![] }
+        DamRelease {
+            rows: rows.rows.clone(),
+            t0_days: p.t0_days,
+            seasonal: p.seasonal,
+            phase: vec![],
+            dam_row,
+        }
     } else if let Some((a, b)) = rows.seasonal.as_ref() {
         if rows.rows.is_empty() {
             return;
@@ -253,10 +263,11 @@ pub fn apply_reservoir_rows<I: Backend>(
             t0_days: t(&rows.t_days),
             seasonal: Some((t(a), t(b))),
             phase: vec![],
+            dam_row,
         }
     } else {
         engine
-            .set_reservoir_rows(&rows.rows, &rows.t_days)
+            .set_reservoir_rows_as(&rows.rows, &rows.t_days, dam_row)
             .expect("reservoir rows are mapped from this batch's own COMID order");
         return;
     };

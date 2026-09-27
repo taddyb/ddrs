@@ -25,7 +25,7 @@ use burn::tensor::{backend::Backend, Bool, Int, Tensor, TensorData};
 
 use burn::tensor::TensorPrimitive;
 
-use crate::config::{Config, SparseSolver};
+use crate::config::{Config, DamRow, SparseSolver};
 use crate::routing::mmc_op::{ReleaseParent, ReservoirTensors};
 use crate::routing::release::{MIN_T_DAYS, SECONDS_PER_DAY};
 use crate::routing::utils::denormalize;
@@ -99,13 +99,16 @@ pub struct SpatialParameters<I: Backend> {
 
 /// A dam release for [`MuskingumCunge::set_dam_release`]: each dam row is a
 /// linear reservoir `S = T_d(t)·Q` with
-/// `T_d(t) = max(T0_d·exp(a_d·sin ω_t + b_d·cos ω_t), 1/24 d)`.
-/// See `crate::routing::release` for the phase convention and the clamp.
+/// `T_d(t) = max(T0_d·exp(a_d·sin ω_t + b_d·cos ω_t), 1/24 d)` (the replace
+/// row), or adds `T_d(t)·Q`, unfloored, to the reach's channel storage (the
+/// additive row, `dam_row: Additive`). See `crate::routing::release` for the
+/// phase convention, the two rows and the clamp.
 ///
 /// The tensors may be autodiff-tracked (the learned release: `T0`, `a`, `b`
 /// come from the release head) or constants (a seasonal `fixed` table). Either
 /// way `T` reaches the timestep op as a parent, so a tracked `T0` gets its
-/// gradient through the hand-written backward (B19''') and ordinary autodiff.
+/// gradient through the hand-written backward (B19''' / B19'''') and ordinary
+/// autodiff.
 pub struct DamRelease<I: Backend> {
     /// Dam row positions in the network, unique.
     pub rows: Vec<usize>,
@@ -116,6 +119,10 @@ pub struct DamRelease<I: Backend> {
     /// `(sin ω, cos ω)` per lateral-inflow row (hour of the window); must
     /// cover every routed step. `crate::routing::release::seasonal_phase`.
     pub phase: Vec<[f32; 2]>,
+    /// `Replace` (the dam row is the reservoir alone, `T` floored at 1 h) or
+    /// `Additive` (the reservoir's storage added to the reach's channel
+    /// storage, `T >= 0`, no floor). See `crate::routing::release`.
+    pub dam_row: DamRow,
 }
 
 /// [`DamRelease`] armed on an engine: the dam rows as device tensors, plus the
@@ -127,7 +134,9 @@ struct ArmedRelease<I: Backend> {
     t0_days: Tensor<Autodiff<I>, 1>,
     seasonal: Option<(Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>)>,
     phase: Vec<[f32; 2]>,
-    /// `max(T0, 1/24)·86400`, precomputed once for a non-seasonal release.
+    dam_row: DamRow,
+    /// `max(T0, 1/24)·86400` (replace) or `T0·86400` (additive),
+    /// precomputed once for a non-seasonal release.
     t_constant: Option<Tensor<Autodiff<I>, 1>>,
     /// This step's `(T_{t+1}, T_t)` (seconds), set by `forward` before
     /// `route_timestep`: the residence time at the step's end and start.
@@ -142,7 +151,13 @@ impl<I: Backend> ArmedRelease<I> {
             (Some((a, b)), _) => {
                 let [sin_w, cos_w] = self.phase[row];
                 let expo = a.clone() * sin_w + b.clone() * cos_w;
-                (self.t0_days.clone() * expo.exp()).clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY
+                let t_days = self.t0_days.clone() * expo.exp();
+                match self.dam_row {
+                    DamRow::Replace => t_days.clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY,
+                    // No floor: T >= 0 whenever T0 >= 0, and T = 0 is the
+                    // channel row. No clamp op either, so no zeroed gradient.
+                    DamRow::Additive => t_days * SECONDS_PER_DAY,
+                }
             }
             (None, None) => unreachable!("a non-seasonal release precomputes t_constant"),
         }
@@ -526,9 +541,21 @@ impl<I: Backend> MuskingumCunge<I> {
     /// Only the plain timestep op carries the override: `route_timestep`
     /// panics if rows are set while leakance or the CUDA-graph path is active.
     pub fn set_reservoir_rows(&mut self, rows: &[usize], t_days: &[f32]) -> Result<(), String> {
-        const SECONDS_PER_DAY: f32 = 86_400.0;
-        const MIN_T_DAYS: f32 = 1.0 / 24.0;
+        self.set_reservoir_rows_as(rows, t_days, DamRow::Replace)
+    }
 
+    /// [`Self::set_reservoir_rows`] with the dam-row form chosen. `Replace`
+    /// is option C exactly (T >= 1 h). `Additive` keeps each dam reach's own
+    /// Muskingum K and X and adds the reservoir storage `T·Q` to it
+    /// (S19'''' in `mmc_op`; `crate::routing::release`), so `T >= 0` and
+    /// `T = 0` routes the reach as the channel it is; the dam row's `n`,
+    /// `q_spatial`, `p_spatial` keep their gradient through K and X.
+    pub fn set_reservoir_rows_as(
+        &mut self,
+        rows: &[usize],
+        t_days: &[f32],
+        dam_row: DamRow,
+    ) -> Result<(), String> {
         let n = self
             .n_segments
             .ok_or("set_reservoir_rows: call setup_inputs first")?;
@@ -557,21 +584,36 @@ impl<I: Backend> MuskingumCunge<I> {
             if mask[row] {
                 return Err(format!("set_reservoir_rows: row {row} is listed twice"));
             }
-            if !t.is_finite() || t < MIN_T_DAYS {
-                return Err(format!(
-                    "set_reservoir_rows: row {row} has T = {t} d; T must be finite and >= 1/24 d"
-                ));
+            match dam_row {
+                DamRow::Replace if !t.is_finite() || t < MIN_T_DAYS => {
+                    return Err(format!(
+                        "set_reservoir_rows: row {row} has T = {t} d; T must be finite and >= 1/24 d"
+                    ));
+                }
+                DamRow::Additive if !t.is_finite() || t < 0.0 => {
+                    return Err(format!(
+                        "set_reservoir_rows: row {row} has T = {t} d; the additive dam row needs \
+                         a finite T >= 0"
+                    ));
+                }
+                _ => {}
             }
             mask[row] = true;
             t_seconds[row] = t * SECONDS_PER_DAY;
         }
 
-        self.reservoir = (!rows.is_empty()).then(|| ReservoirTensors {
-            mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
-            t_seconds: Tensor::from_floats(t_seconds.as_slice(), &self.device),
-            // Constant T: the Muskingum row at K = T, X = 0 already conserves
-            // S = T·Q, so c3 stays as computed (bit-identical option C).
-            t_prev_seconds: None,
+        let additive = dam_row == DamRow::Additive;
+        self.reservoir = (!rows.is_empty()).then(|| {
+            let t_seconds: Tensor<I, 1> = Tensor::from_floats(t_seconds.as_slice(), &self.device);
+            ReservoirTensors {
+                mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
+                // Constant T: the Muskingum row at K = T, X = 0 already
+                // conserves S = T·Q, so c3 stays as computed (bit-identical
+                // option C). The additive row reads T at both ends (S19'''').
+                t_prev_seconds: additive.then(|| t_seconds.clone()),
+                t_seconds,
+                additive,
+            }
         });
         Ok(())
     }
@@ -583,7 +625,9 @@ impl<I: Backend> MuskingumCunge<I> {
     /// are already set (the two are exclusive), on a row `>= n_segments` or
     /// listed twice, a `T0`/`a`/`b` length that is not `rows.len()`, or a
     /// `phase` shorter than the lateral-inflow window. `T0`'s own values are
-    /// not checked: the clamp at one hour holds `T >= dt` whatever they are.
+    /// not checked: on the replace row the clamp at one hour holds `T >= dt`
+    /// whatever they are; the additive row takes `T` as it comes (the release
+    /// head's `T0 > 0`, and `T = 0` is the channel row).
     ///
     /// Only the plain timestep op carries the release: `route_timestep`
     /// panics if it is set while leakance or the CUDA-graph path is active.
@@ -641,16 +685,18 @@ impl<I: Backend> MuskingumCunge<I> {
         }
 
         let rows_i32: Vec<i32> = release.rows.iter().map(|&r| r as i32).collect();
-        let t_constant = release
-            .seasonal
-            .is_none()
-            .then(|| release.t0_days.clone().clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY);
+        let dam_row = release.dam_row;
+        let t_constant = release.seasonal.is_none().then(|| match dam_row {
+            DamRow::Replace => release.t0_days.clone().clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY,
+            DamRow::Additive => release.t0_days.clone() * SECONDS_PER_DAY,
+        });
         self.release = Some(ArmedRelease {
             rows: Tensor::from_data(TensorData::new(rows_i32, [n_dams]), &self.device),
             mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
             t0_days: release.t0_days,
             seasonal: release.seasonal,
             phase: release.phase,
+            dam_row,
             t_constant,
             t_step: None,
         });
@@ -780,6 +826,7 @@ impl<I: Backend> MuskingumCunge<I> {
                         t_prev_dams: t_prev,
                         rows: r.rows.clone(),
                         mask: r.mask.clone(),
+                        additive: r.dam_row == DamRow::Additive,
                     }
                 }),
             )

@@ -93,6 +93,7 @@ fn route(adjacency: SparseAdjacency, q_prime: &[f32], dam: Dam) -> Vec<f32> {
                 t0_days: t(t0),
                 seasonal: seasonal.map(|(a, b)| (t(a), t(b))),
                 phase,
+                dam_row: ddrs::config::DamRow::Replace,
             })
             .expect("release")
         }
@@ -303,6 +304,7 @@ fn set_dam_release_rejects_bad_input() {
         t0_days: t(&[1.0]),
         seasonal: None,
         phase: phase.clone(),
+        dam_row: ddrs::config::DamRow::Replace,
     };
     assert!(err(DamRelease { rows: vec![3], ..ok() }).contains("outside"));
     assert!(err(DamRelease { rows: vec![1, 1], t0_days: t(&[1.0, 2.0]), ..ok() }).contains("twice"));
