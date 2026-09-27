@@ -129,21 +129,34 @@ struct ArmedRelease<I: Backend> {
     phase: Vec<[f32; 2]>,
     /// `max(T0, 1/24)·86400`, precomputed once for a non-seasonal release.
     t_constant: Option<Tensor<Autodiff<I>, 1>>,
-    /// This step's `T` (seconds), set by `forward` before `route_timestep`.
-    t_step: Option<Tensor<Autodiff<I>, 1>>,
+    /// This step's `(T_{t+1}, T_t)` (seconds), set by `forward` before
+    /// `route_timestep`: the residence time at the step's end and start.
+    t_step: Option<(Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>)>,
 }
 
 impl<I: Backend> ArmedRelease<I> {
-    /// `T` (seconds) for the step producing routed column `t`, in autodiff.
-    fn t_seconds_at(&self, t: usize) -> Tensor<Autodiff<I>, 1> {
+    /// `T` (seconds) at phase row `row` (hour `row` of the window), in autodiff.
+    fn t_seconds_at(&self, row: usize) -> Tensor<Autodiff<I>, 1> {
         match (&self.seasonal, &self.t_constant) {
             (None, Some(c)) => c.clone(),
             (Some((a, b)), _) => {
-                let [sin_w, cos_w] = self.phase[t];
+                let [sin_w, cos_w] = self.phase[row];
                 let expo = a.clone() * sin_w + b.clone() * cos_w;
                 (self.t0_days.clone() * expo.exp()).clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY
             }
             (None, None) => unreachable!("a non-seasonal release precomputes t_constant"),
+        }
+    }
+
+    /// `(T_{t+1}, T_t)` for the step producing routed column `t`: the
+    /// residence time at the step's end (phase row `t`) and start (row
+    /// `t − 1`), both from the closed form, so a window or test-phase chunk
+    /// start needs no carried state. A constant release hands the same tensor
+    /// for both.
+    fn t_step_at(&self, t: usize) -> (Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>) {
+        match &self.t_constant {
+            Some(c) => (c.clone(), c.clone()),
+            None => (self.t_seconds_at(t), self.t_seconds_at(t - 1)),
         }
     }
 }
@@ -556,6 +569,9 @@ impl<I: Backend> MuskingumCunge<I> {
         self.reservoir = (!rows.is_empty()).then(|| ReservoirTensors {
             mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
             t_seconds: Tensor::from_floats(t_seconds.as_slice(), &self.device),
+            // Constant T: the Muskingum row at K = T, X = 0 already conserves
+            // S = T·Q, so c3 stays as computed (bit-identical option C).
+            t_prev_seconds: None,
         });
         Ok(())
     }
@@ -755,12 +771,16 @@ impl<I: Backend> MuskingumCunge<I> {
                 self.track_negative_discharge,
                 self.gamma.as_ref().cloned(),
                 self.reservoir.as_ref(),
-                self.release.as_mut().map(|r| ReleaseParent {
-                    t_dams: r.t_step.take().expect(
+                self.release.as_mut().map(|r| {
+                    let (t_next, t_prev) = r.t_step.take().expect(
                         "a dam release is set but no step T was prepared; route through forward()",
-                    ),
-                    rows: r.rows.clone(),
-                    mask: r.mask.clone(),
+                    );
+                    ReleaseParent {
+                        t_dams: t_next,
+                        t_prev_dams: t_prev,
+                        rows: r.rows.clone(),
+                        mask: r.mask.clone(),
+                    }
                 }),
             )
         }
@@ -836,10 +856,11 @@ impl<I: Backend> MuskingumCunge<I> {
                 .clone()
                 .slice([(t - 1)..t, 0..num_segments])
                 .reshape([num_segments]);
-            // Dam release: this step's T, evaluated at the step's end hour t
-            // (`crate::routing::release`).
+            // Dam release: T at this step's end (hour t) and start (hour
+            // t − 1), for the storage-conserving dam row
+            // (`crate::routing::release`, S19''' in `mmc_op`).
             if let Some(r) = self.release.as_mut() {
-                r.t_step = Some(r.t_seconds_at(t));
+                r.t_step = Some(r.t_step_at(t));
             }
             let q_next = self.route_timestep(q_prime_t);
             columns.push(q_next.clone().unsqueeze_dim::<2>(1));

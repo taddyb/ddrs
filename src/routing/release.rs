@@ -10,10 +10,22 @@
 //!
 //! `doy` is 1-based like pandas `DatetimeIndex.dayofyear`, which the offline
 //! release fit (`experiments/reservoir/smoke/expected_release_fit.py`) uses, so
-//! hour 0 of a day carries exactly the fit's daily `ω`. The engine evaluates
-//! `T` at the END hour of each step: the step producing routed column `t`
-//! (from lateral-inflow row `t − 1`) reads phase row `t`, matching the offline
-//! law's implicit-Euler use of `T_t` to compute `Q_t`.
+//! hour 0 of a day carries exactly the fit's daily `ω`. The step producing
+//! routed column `t` (from lateral-inflow row `t − 1`) reads `T` at BOTH ends:
+//! `T_{t+1}` at phase row `t` and `T_t` at row `t − 1`. The dam row is the
+//! trapezoid on the storage `S = T·Q`,
+//!
+//! ```text
+//! T_{t+1}·Q_{t+1} − T_t·Q_t = dt·[(I_t + I_{t+1})/2 + q' − (Q_t + Q_{t+1})/2]
+//! c1 = c2 = dt/(2·T_{t+1} + dt),  c3 = (2·T_t − dt)/(2·T_{t+1} + dt),  c4 = 2·dt/(2·T_{t+1} + dt)
+//! ```
+//!
+//! which conserves storage exactly for any `T(t)` and is the Muskingum row at
+//! `K = T`, `X = 0` when `T` is constant (S19''' in `mmc_op`). Both ends come
+//! from the closed form, so a window or test-phase chunk start needs no state.
+//! (The first build set only `K := T_{t+1}`, which carries `Q` rather than `S`
+//! across a change in `T`; see
+//! `research/findings/2026-09-27-learned-dam-release-findings.md`, check 2.)
 //!
 //! The clamp keeps `T >= dt = 1 h`, above the `dt/2` that the dam row's
 //! `c3 = (2T − dt)/(2T + dt) >= 0` needs. Where it binds the gradient into

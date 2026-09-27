@@ -7,8 +7,10 @@
 //!
 //! 1. `a = b = 0` (and the non-seasonal form) is bitwise option C
 //!    (`set_reservoir_rows`) with the same `T`.
-//! 2. A headwater dam follows the seasonal linear-reservoir recurrence with
-//!    `T` evaluated at the step's END hour `t` (phase row `t`).
+//! 2. A headwater dam follows the storage-conserving seasonal recurrence
+//!    (trapezoid on `S = T·Q`): `c3 = (2·T_t − dt)/(2·T_{t+1} + dt)`, with
+//!    `T_t` at phase row `t − 1` and `T_{t+1}` at row `t`, and conserves
+//!    storage exactly: `T_{t+1}·Q_{t+1} − T_t·Q_t = dt·(q' − (Q_t + Q_{t+1})/2)`.
 //! 3. `seasonal_phase` is the fractional day of year, pandas-style (1-based).
 //! 4. Rows upstream of the dam are bitwise untouched.
 //! 5. Input validation.
@@ -142,7 +144,7 @@ fn zero_seasonal_coefficients_are_bitwise_option_c() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn headwater_dam_follows_the_seasonal_recurrence_at_the_step_end_hour() {
+fn headwater_dam_follows_the_storage_conserving_seasonal_recurrence() {
     let steps = 96;
     let n_reach = 3;
     let q = pulse_q_prime(n_reach, steps);
@@ -158,20 +160,70 @@ fn headwater_dam_follows_the_seasonal_recurrence_at_the_step_end_hour() {
     let cols = steps + 1;
     let dt = DT_SECONDS as f64;
     let mut worst = 0.0_f64;
+    let t_sec = |row: usize| {
+        let [s, c] = phase[row];
+        (t0 as f64 * (a as f64 * s as f64 + b as f64 * c as f64).exp()).max(1.0 / 24.0) * 86_400.0
+    };
     for t in 1..cols {
-        // Headwater: no upstream term, q0[t] = c3·q0[t−1] + c4·q'0[t−1],
-        // with T evaluated at phase row t (the step's end hour).
-        let [s, c] = phase[t];
-        let t_days = (t0 as f64 * (a as f64 * s as f64 + b as f64 * c as f64).exp()).max(1.0 / 24.0);
-        let t_sec = t_days * 86_400.0;
-        let denom = 2.0 * t_sec + dt;
-        let expected = (2.0 * t_sec - dt) / denom * res[t - 1] as f64
+        // Headwater: no upstream term, q0[t] = c3·q0[t−1] + c4·q'0[t−1] with
+        // c3 = (2·T_t − dt)/(2·T_{t+1} + dt), c4 = 2·dt/(2·T_{t+1} + dt):
+        // T_t at phase row t − 1 (the step's start), T_{t+1} at row t (its end).
+        let (t_prev, t_next) = (t_sec(t - 1), t_sec(t));
+        let denom = 2.0 * t_next + dt;
+        let expected = (2.0 * t_prev - dt) / denom * res[t - 1] as f64
             + 2.0 * dt / denom * q[(t - 1) * n_reach] as f64;
         let rel = (res[t] as f64 - expected).abs() / expected.abs();
         worst = worst.max(rel);
         assert!(rel < 2e-5, "step {t}: routed {} vs recurrence {expected} (rel {rel:.3e})", res[t]);
     }
     println!("seasonal recurrence: worst rel {worst:.3e}");
+}
+
+/// The dam row conserves `S = T·Q` whatever `T` does: over a window with a
+/// violent seasonal swing (a full cycle every 48 h, `T` from 0.7 to 13 d),
+/// inflow minus outflow equals the change in storage. The pre-fix row
+/// (`K := T_{t+1}` alone) carries `Q` across a change in `T` and fails this
+/// by a wide margin (it adds `Q·dT/dt`).
+#[test]
+fn seasonal_release_conserves_storage() {
+    // 10.25 cycles, so the window ends at a different T than it starts (a
+    // whole number of cycles with a steady inflow would hide the old row's
+    // error: Q stays at the inflow and T returns to where it began).
+    let steps = 492;
+    let n_reach = 3;
+    // Pulsed lateral inflow into the headwater dam: 10 m³/s with a
+    // 40 m³/s, 12-hour storm every 100 hours.
+    let lateral_at = |t: usize| if t % 100 < 12 { 40.0_f32 } else { 10.0 };
+    let q: Vec<f32> = (0..=steps).flat_map(|t| [lateral_at(t), 0.0, 0.0]).collect();
+    let phase: Vec<[f32; 2]> = (0..=steps)
+        .map(|t| {
+            let w = 2.0 * std::f32::consts::PI * t as f32 / 48.0;
+            [w.sin(), w.cos()]
+        })
+        .collect();
+    let (t0, a, b) = (3.0_f32, 1.5_f32, 0.0_f32);
+    let res = route(chain3(), &q, Dam::Release(&[0], &[t0], Some((&[a], &[b])), phase.clone()));
+    let dt = DT_SECONDS as f64;
+    let t_sec = |row: usize| {
+        let [s, c] = phase[row];
+        (t0 as f64 * (a as f64 * s as f64 + b as f64 * c as f64).exp()).max(1.0 / 24.0) * 86_400.0
+    };
+    // Reach 0 (the dam) only: q0 is res[0..=steps].
+    let mut inflow = 0.0_f64;
+    let mut outflow = 0.0_f64;
+    for t in 1..=steps {
+        // Step t routes lateral row t − 1, held over the step.
+        inflow += dt * lateral_at(t - 1) as f64;
+        outflow += dt * 0.5 * (res[t - 1] as f64 + res[t] as f64);
+    }
+    let ds = t_sec(steps) * res[steps] as f64 - t_sec(0) * res[0] as f64;
+    let imbalance = (inflow - outflow - ds).abs() / inflow;
+    println!(
+        "storage balance: inflow {inflow:.4e} outflow {outflow:.4e} dS {ds:.4e} imbalance {imbalance:.3e}; \
+         mean out / mean in {:.6}",
+        outflow / inflow
+    );
+    assert!(imbalance < 1e-4, "dam row does not conserve storage: imbalance {imbalance:.3e}");
 }
 
 #[test]

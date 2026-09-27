@@ -129,8 +129,13 @@ cargo test --release --test juniata_acceptance   # holds juniata_learned_release
 
 `reservoir_release_gradcheck` is the mandatory gate before any training run:
 central differences on `T0`, `a`, `b` at `T0` = 0.1, 1.5 and 20 d, with a
-learned gamma (the 7-parent op), one release-head read-out weight end to end,
-and exactly zero gradient where the one-hour clamp binds. At `T0 = 20` d it
+learned gamma (the 8-parent op), one release-head read-out weight end to end,
+exactly zero gradient where the one-hour clamp binds, and, at one step through
+`mmc_op::timestep_forward_release`, the step-start `T_t` and step-end `T_{t+1}`
+parents separately and as one leaf (constant `T`, whose gradient is their sum;
+the two nearly cancel there, so it is judged on the parts' scale).
+`reservoir_release::seasonal_release_conserves_storage` pins the storage
+balance of the dam row under a violent seasonal swing. At `T0 = 20` d it
 uses a 0.1 step on `a`, `b` (the module docs record the step sweep).
 `reservoir_release_training` pins that the training path (head on the feature
 rows) and the test-phase path (head resolved into a fixed seasonal table) route

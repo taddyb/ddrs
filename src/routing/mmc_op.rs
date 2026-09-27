@@ -75,7 +75,13 @@ pub(crate) struct LeakanceTensors<I: Backend> {
 #[derive(Clone)]
 pub(crate) struct ReservoirTensors<I: Backend> {
     pub mask: Tensor<I, 1, Bool>,
+    /// `T` at the step's END (`T_{t+1}`), seconds: the Muskingum K on dam rows.
     pub t_seconds: Tensor<I, 1>,
+    /// `T` at the step's START (`T_t`), seconds, for a time-varying release.
+    /// `Some` makes the dam row the storage-conserving trapezoid on `S = T·Q`
+    /// (S19'''): `c3 = (2·T_t − dt)/(2·T_{t+1} + dt)`. `None` (option C, a
+    /// constant T) leaves c3 as the Muskingum row computed it, bit for bit.
+    pub t_prev_seconds: Option<Tensor<I, 1>>,
 }
 
 /// The learned (or seasonal) dam release: this step's residence time per dam,
@@ -88,8 +94,11 @@ pub(crate) struct ReservoirTensors<I: Backend> {
 /// release head needs nothing hand-written.
 #[derive(Clone)]
 pub(crate) struct ReleaseParent<I: Backend> {
-    /// `[n_dams]`, seconds, aligned with `rows`.
+    /// `[n_dams]`, seconds, aligned with `rows`: `T_{t+1}`, the step's END.
     pub t_dams: Tensor<Autodiff<I>, 1>,
+    /// `[n_dams]`, seconds: `T_t`, the step's START. Only in c3's numerator
+    /// (S19'''); may be the same tensor as `t_dams` when `T` is constant.
+    pub t_prev_dams: Tensor<Autodiff<I>, 1>,
     /// `[n_dams]` dam row positions (unique).
     pub rows: Tensor<I, 1, Int>,
     /// `[n]` dam-row mask, true exactly at `rows`.
@@ -221,6 +230,11 @@ pub(crate) struct TimestepState<B: Backend> {
     /// (S19''), so B20..B23 need nothing; B19'' uses the mask to stop the
     /// gradient into K and X on those rows. `None` ⇒ no op in the backward.
     pub reservoir_mask: Option<B::BoolTensorPrimitive>,
+    /// `T_t` (seconds, full length; read on dam rows) when the dam rows are
+    /// the storage-conserving trapezoid (S19'''). The saved `c3` already holds
+    /// `(2·T_t − dt)/(2·T_{t+1} + dt)` there; the backward needs `T_t` for
+    /// c3's numerator in the denominator chain. `None` ⇒ no op in the backward.
+    pub reservoir_t_prev: Option<B::FloatTensorPrimitive>,
 }
 
 #[derive(Debug)]
@@ -274,7 +288,8 @@ pub(crate) struct ParentMask {
     pub q_t: bool,
     pub q_prime_t: bool,
     pub gamma: bool,
-    /// The dam residence time `T` of the learned release ([`ReleaseParent`]).
+    /// The dam residence time `T` of the learned release ([`ReleaseParent`])
+    /// at the step's end (`T_{t+1}`) and start (`T_t`). Set together.
     pub t_release: bool,
 }
 
@@ -308,10 +323,14 @@ pub(crate) struct ParentGrads<I: Backend> {
     /// exponent (B5), the velocity's `(d/d_ref)^gamma` (B15), and the
     /// celerity's `gamma·A/(T·d)` (B17).
     pub gamma: Option<Tensor<I, 1>>,
-    /// `∂L/∂K` on the dam rows (zero elsewhere), full length `[n]`, seconds:
-    /// the gradient of the learned release's `T` parent (B19'''). `Some`
-    /// exactly when `mask.t_release`.
+    /// `∂L/∂T_{t+1}` on the dam rows (zero elsewhere), full length `[n]`,
+    /// seconds: the dam row's `∂L/∂K`, which is the step-end `T` (B19''').
+    /// `Some` exactly when `mask.t_release`.
     pub t_release: Option<Tensor<I, 1>>,
+    /// `∂L/∂T_t` on the dam rows, full length: the step-start `T`, which only
+    /// c3's numerator reads (S19''', storage-conserving row). `Some` exactly
+    /// when `mask.t_release`.
+    pub t_release_prev: Option<Tensor<I, 1>>,
 }
 
 /// Register `grad` on `parent` when the parent is tracked. A tracked parent
@@ -557,6 +576,17 @@ where
         let num_c2 = two_kx.clone() + dt;
         // num_c3 = 2k(1-x) - dt
         let num_c3 = two_k_1mx.clone() - dt;
+        // S19''' (storage-conserving dam rows): there c3's numerator is
+        // `2·T_t − dt`, the step-START residence time, not `2K(1−X) − dt`.
+        // `None` (every non-release path, and option C) ⇒ untouched.
+        let reservoir_t_prev = state
+            .reservoir_t_prev
+            .clone()
+            .map(|p| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(p)));
+        let num_c3 = match (&reservoir_t_prev, reservoir_mask.as_ref()) {
+            (Some(tp), Some(m)) => num_c3.mask_where(m.clone(), tp.clone() * 2.0 - dt),
+            _ => num_c3,
+        };
         // num_c4 = 2dt (constant, no dependence on denom in numerator)
 
         // ∂denom_from_ci = -gci · num_i / denom²
@@ -573,6 +603,16 @@ where
         let g_2kx_from_c2 = gc2.clone() / denom.clone();
         // ∂num_c3/∂(2k(1-x)) = +1 → g_2k1mx_from_c3 = +gc3 / denom
         let g_2k1mx_from_c3 = gc3.clone() / denom.clone();
+        // S19''': on dam rows c3's numerator is `2·T_t − dt`, so this term is
+        // `∂L/∂(2·T_t)` there, the step-start T's gradient, and does NOT reach
+        // K (= T_{t+1}). Split it off before `g_2k1mx_total` is formed.
+        let (g_2k1mx_from_c3, g_2t_prev) = match (&reservoir_t_prev, reservoir_mask.as_ref()) {
+            (Some(_), Some(m)) => (
+                g_2k1mx_from_c3.clone().mask_fill(m.clone(), 0.0),
+                Some(g_2k1mx_from_c3.mask_fill(m.clone().bool_not(), 0.0)),
+            ),
+            _ => (g_2k1mx_from_c3, None),
+        };
         // denom = 2k(1-x) + dt → ∂denom/∂(2k(1-x)) = 1 → g_2k1mx_from_denom = gdenom_total
         let g_2k1mx_from_denom = gdenom_total.clone();
 
@@ -731,6 +771,17 @@ where
                 .as_ref()
                 .expect("a tracked release T needs the dam-row mask in the saved state");
             Some(gk_muskingum.clone().mask_fill(m.clone().bool_not(), 0.0))
+        } else {
+            None
+        };
+        // ∂L/∂T_t = 2·∂L/∂(2·T_t) (S19'''), zero off the dam rows.
+        let g_t_release_prev = if mask.t_release {
+            Some(
+                g_2t_prev
+                    .clone()
+                    .expect("a tracked release T needs the step-start T in the saved state")
+                    * 2.0,
+            )
         } else {
             None
         };
@@ -1159,6 +1210,7 @@ where
             q_prime_t: gq_prime_t,
             gamma: ggamma,
             t_release: g_t_release,
+            t_release_prev: g_t_release_prev,
         }
     }
 }
@@ -1274,6 +1326,7 @@ fn register_release_parent<I: Backend + 'static>(
     parent: Option<burn::backend::autodiff::NodeId>,
     g_full: Option<Tensor<I, 1>>,
     rows: &I::IntTensorPrimitive,
+    name: &str,
 ) where
     I::FloatTensorPrimitive: 'static,
 {
@@ -1282,12 +1335,14 @@ fn register_release_parent<I: Backend + 'static>(
     }
     let rows = Tensor::<I, 1, Int>::from_primitive(rows.clone());
     let g = g_full.map(|g| g.select(0, rows));
-    register_parent::<I>(grads, parent, g, "t_release");
+    // `register` accumulates, so the constant-T case (one tensor in both the
+    // step-end and step-start slots) receives the sum of the two gradients.
+    register_parent::<I>(grads, parent, g, name);
 }
 
-/// Six-parent sibling of [`TimestepOp`] for the learned dam release: parents
-/// `[n, q_spatial, p_spatial, q_t, q_prime_t, T]`, `T` the per-dam residence
-/// time in seconds ([`ReleaseParent`]). Same sibling-op pattern as
+/// Seven-parent sibling of [`TimestepOp`] for the learned dam release: parents
+/// `[n, q_spatial, p_spatial, q_t, q_prime_t, T_{t+1}, T_t]`, the per-dam
+/// residence time in seconds at the step's end and start ([`ReleaseParent`]). Same sibling-op pattern as
 /// [`TimestepGammaOp`] and [`TimestepLeakanceGammaOp`]: every existing run
 /// keeps its historical node, and only a run that routes dams through a
 /// release builds this one. The backward is [`timestep_backward_core`] with
@@ -1295,59 +1350,7 @@ fn register_release_parent<I: Backend + 'static>(
 #[derive(Debug)]
 pub(crate) struct TimestepReleaseOp;
 
-impl<I: Backend + 'static> Backward<I, 6> for TimestepReleaseOp
-where
-    I::FloatTensorPrimitive: 'static,
-{
-    type State = TimestepReleaseState<I>;
-
-    fn backward(
-        self,
-        ops: Ops<Self::State, 6>,
-        grads: &mut Gradients,
-        _checkpointer: &mut Checkpointer,
-    ) {
-        let state = ops.state;
-        debug_assert!(
-            state.base.gamma_t.is_none(),
-            "a learned gamma with a release must route through TimestepReleaseGammaOp"
-        );
-        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_t] = ops.parents;
-        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
-        let t_id = p_t.as_ref().map(|n| n.id);
-        let mask = ParentMask {
-            n: ids[0].is_some(),
-            q_spatial: ids[1].is_some(),
-            p_spatial: ids[2].is_some(),
-            q_t: ids[3].is_some(),
-            q_prime_t: ids[4].is_some(),
-            gamma: false,
-            t_release: t_id.is_some(),
-        };
-
-        let grad_out = grads.consume::<I>(&ops.node);
-        let g = timestep_backward_core::<I>(&state.base, grad_out, mask, None, |_gb_rhs| None);
-
-        register_parent::<I>(grads, ids[0], g.n, "n");
-        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
-        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
-        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
-        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
-        register_release_parent::<I>(grads, t_id, g.t_release, &state.rows);
-    }
-}
-
-/// Seven-parent sibling for the learned dam release with a learned
-/// stage-roughness exponent: `[n, q_spatial, p_spatial, q_t, q_prime_t,
-/// gamma, T]`. Gamma and the release touch disjoint rows: on a dam row the
-/// channel geometry (and so gamma) reaches the loss only through K and X,
-/// which B19'' cuts off, and on a channel row `T` is absent. The core
-/// therefore composes them without a cross-term;
-/// `tests/reservoir_release_gradcheck.rs` checks both parents.
-#[derive(Debug)]
-pub(crate) struct TimestepReleaseGammaOp;
-
-impl<I: Backend + 'static> Backward<I, 7> for TimestepReleaseGammaOp
+impl<I: Backend + 'static> Backward<I, 7> for TimestepReleaseOp
 where
     I::FloatTensorPrimitive: 'static,
 {
@@ -1361,12 +1364,67 @@ where
     ) {
         let state = ops.state;
         debug_assert!(
+            state.base.gamma_t.is_none(),
+            "a learned gamma with a release must route through TimestepReleaseGammaOp"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_t, p_tp] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        let t_id = p_t.as_ref().map(|n| n.id);
+        let tp_id = p_tp.as_ref().map(|n| n.id);
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: false,
+            t_release: t_id.is_some() || tp_id.is_some(),
+        };
+
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = timestep_backward_core::<I>(&state.base, grad_out, mask, None, |_gb_rhs| None);
+
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_release_parent::<I>(grads, t_id, g.t_release, &state.rows, "t_release");
+        register_release_parent::<I>(grads, tp_id, g.t_release_prev, &state.rows, "t_release_prev");
+    }
+}
+
+/// Eight-parent sibling for the learned dam release with a learned
+/// stage-roughness exponent: `[n, q_spatial, p_spatial, q_t, q_prime_t,
+/// gamma, T_{t+1}, T_t]`. Gamma and the release touch disjoint rows: on a dam row the
+/// channel geometry (and so gamma) reaches the loss only through K and X,
+/// which B19'' cuts off, and on a channel row `T` is absent. The core
+/// therefore composes them without a cross-term;
+/// `tests/reservoir_release_gradcheck.rs` checks both parents.
+#[derive(Debug)]
+pub(crate) struct TimestepReleaseGammaOp;
+
+impl<I: Backend + 'static> Backward<I, 8> for TimestepReleaseGammaOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepReleaseState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 8>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
             state.base.gamma_t.is_some(),
             "TimestepReleaseGammaOp requires a per-reach gamma in the saved state"
         );
-        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_gamma, p_t] = ops.parents;
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_gamma, p_t, p_tp] = ops.parents;
         let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt, &p_gamma].map(|p| p.as_ref().map(|n| n.id));
         let t_id = p_t.as_ref().map(|n| n.id);
+        let tp_id = p_tp.as_ref().map(|n| n.id);
         let mask = ParentMask {
             n: ids[0].is_some(),
             q_spatial: ids[1].is_some(),
@@ -1374,7 +1432,7 @@ where
             q_t: ids[3].is_some(),
             q_prime_t: ids[4].is_some(),
             gamma: ids[5].is_some(),
-            t_release: t_id.is_some(),
+            t_release: t_id.is_some() || tp_id.is_some(),
         };
 
         let grad_out = grads.consume::<I>(&ops.node);
@@ -1386,7 +1444,8 @@ where
         register_parent::<I>(grads, ids[3], g.q_t, "q_t");
         register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
         register_parent::<I>(grads, ids[5], g.gamma, "gamma");
-        register_release_parent::<I>(grads, t_id, g.t_release, &state.rows);
+        register_release_parent::<I>(grads, t_id, g.t_release, &state.rows, "t_release");
+        register_release_parent::<I>(grads, tp_id, g.t_release_prev, &state.rows, "t_release_prev");
     }
 }
 
@@ -1924,6 +1983,20 @@ where
     let c2 = (two_kx.clone() + dt) / denom.clone();
     let c3 = (two_k_1mx.clone() - dt) / denom.clone();
     let c4 = denom.clone().recip() * (2.0 * dt);
+    // S19''': storage-conserving dam rows for a time-varying release. The
+    // trapezoid on S = T·Q with T moving from T_t to T_{t+1} over the step,
+    //     T_{t+1}·Q_{t+1} − T_t·Q_t = dt·[(I_t + I_{t+1})/2 + q' − (Q_t + Q_{t+1})/2],
+    // is the Muskingum row at K = T_{t+1}, X = 0 with ONE change: c3's
+    // numerator reads the step-start T, `c3 = (2·T_t − dt)/(2·T_{t+1} + dt)`.
+    // A Muskingum row with only K := T_{t+1} carries Q across the change in T
+    // and adds a spurious Q·dT/dt (research/findings/
+    // 2026-09-27-learned-dam-release-findings.md, check 2). The expression is
+    // the generic c3's op for op (`T·2` vs `(K·2)·(1 − 0)`, exact in f32), so
+    // `T_t == T_{t+1}` reproduces option C bit for bit.
+    let c3 = match reservoir.and_then(|r| r.t_prev_seconds.as_ref().map(|tp| (r, tp))) {
+        Some((res, t_prev)) => c3.mask_where(res.mask.clone(), (t_prev.clone() * 2.0 - dt) / denom.clone()),
+        None => c3,
+    };
 
     // S24: i_t = N · q_t (inner-backend SpMV)
     let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
@@ -2579,16 +2652,22 @@ where
     // rows, giving the same `ReservoirTensors` the S19'' override reads. The
     // off-dam entries are never read (`mask_where`), so zeros are fine.
     let t_aut = release.as_ref().map(|r| unwrap_at(r.t_dams.clone()));
+    let t_prev_aut = release.as_ref().map(|r| unwrap_at(r.t_prev_dams.clone()));
     let release_res: Option<ReservoirTensors<I>> = release.as_ref().map(|r| {
-        let t_dams = wrap(t_aut.as_ref().expect("set above").primitive.clone());
         let n_rows = r.mask.dims()[0];
-        let t_seconds = Tensor::<I, 1>::zeros([n_rows], &I::float_device(&n_p)).select_assign(
-            0,
-            r.rows.clone(),
-            t_dams,
-            IndexingUpdateOp::Add,
-        );
-        ReservoirTensors { mask: r.mask.clone(), t_seconds }
+        let scatter = |p: I::FloatTensorPrimitive| {
+            Tensor::<I, 1>::zeros([n_rows], &I::float_device(&n_p)).select_assign(
+                0,
+                r.rows.clone(),
+                wrap(p),
+                IndexingUpdateOp::Add,
+            )
+        };
+        ReservoirTensors {
+            mask: r.mask.clone(),
+            t_seconds: scatter(t_aut.as_ref().expect("set above").primitive.clone()),
+            t_prev_seconds: Some(scatter(t_prev_aut.as_ref().expect("set above").primitive.clone())),
+        }
     });
     let reservoir = reservoir.or(release_res.as_ref());
 
@@ -2675,11 +2754,17 @@ where
         d_ref,
         gamma_t: gamma_p.clone(),
         reservoir_mask: reservoir.map(|r| r.mask.clone().into_primitive()),
+        reservoir_t_prev: reservoir
+            .and_then(|r| r.t_prev_seconds.clone())
+            .map(|t| match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }),
     };
 
     // Learned release: `T` is one more parent, so it routes through the
     // release siblings. Everything else below is untouched.
-    if let (Some(t), Some(r)) = (t_aut, release) {
+    if let (Some(t), Some(tp), Some(r)) = (t_aut, t_prev_aut, release) {
         let state = TimestepReleaseState::<I> { base: state, rows: r.rows.into_primitive() };
         let result_prim = match &gamma_aut {
             Some(g) => match TimestepReleaseGammaOp
@@ -2691,6 +2776,7 @@ where
                     qpt_aut.node.clone(),
                     g.node.clone(),
                     t.node.clone(),
+                    tp.node.clone(),
                 ])
                 .compute_bound()
                 .stateful()
@@ -2706,6 +2792,7 @@ where
                     qt_aut.node.clone(),
                     qpt_aut.node.clone(),
                     t.node.clone(),
+                    tp.node.clone(),
                 ])
                 .compute_bound()
                 .stateful()
@@ -2753,6 +2840,58 @@ where
     };
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
+}
+
+/// One routed step with the dam release, for tests and diagnostics: the
+/// `rows` are dams whose residence time is `t_next` (`T_{t+1}`, seconds) at
+/// the step's end and `t_prev` (`T_t`) at its start, both autodiff parents
+/// (S19''' / B19'''). The same tensor may be passed as both (constant T).
+/// `MuskingumCunge::set_dam_release` is the production entry.
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_release<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    rows: Vec<usize>,
+    t_next: Tensor<Autodiff<I>, 1>,
+    t_prev: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let device = q_t_at.device();
+    let n = q_t_at.dims()[0];
+    let mut mask = vec![false; n];
+    for &r in &rows {
+        mask[r] = true;
+    }
+    let rows_i: Vec<i32> = rows.iter().map(|&r| r as i32).collect();
+    let n_dams = rows_i.len();
+    let release = ReleaseParent {
+        t_dams: t_next,
+        t_prev_dams: t_prev,
+        rows: Tensor::from_data(burn::tensor::TensorData::new(rows_i, [n_dams]), &device),
+        mask: Tensor::from_data(burn::tensor::TensorData::from(mask.as_slice()), &device),
+    };
+    timestep_forward_with_reservoirs::<I>(
+        cfg, pattern, assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        false,
+        None,
+        None,
+        Some(release),
+    )
 }
 
 /// Leakance variant of [`timestep_forward`]. Identical to it, plus three extra
@@ -2964,6 +3103,7 @@ where
         d_ref,
         gamma_t: gamma_p.clone(),
         reservoir_mask: None,
+        reservoir_t_prev: None,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -3306,6 +3446,7 @@ where
         gamma_t: None,
         // Reservoir rows are rejected with CUDA graphs (`route_timestep`).
         reservoir_mask: None,
+        reservoir_t_prev: None,
     };
 
     let result_prim = match TimestepOp

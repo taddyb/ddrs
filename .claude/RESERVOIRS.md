@@ -8,13 +8,14 @@
 > `T_d(t) = max(T0_d·exp(a_d sin ω_t + b_d cos ω_t), 1 h)`, with `(T0, a, b)` from a release head
 > (a second `KanHead`, `src/nn/release_head.rs`) fed NID dam features and trained jointly with the
 > routing head from gauge observations only. `T` is an autodiff parent of the timestep op
-> (`TimestepReleaseOp` / `TimestepReleaseGammaOp`, B19''' in `src/routing/mmc_op.rs`), gradchecked
+> (`TimestepReleaseOp` / `TimestepReleaseGammaOp`, S19''' / B19''' in `src/routing/mmc_op.rs`), gradchecked
 > in `tests/reservoir_release_gradcheck.rs`. A `fixed` table may carry `a`, `b` columns for a
 > prescribed seasonal bucket. Section below; config contract in
 > `skills/ddrs-dev/references/config.md` §Reservoirs; smoke-set results in
 > `research/findings/2026-09-27-learned-dam-release-findings.md` (dam gauges ΔNSE +0.0049
-> [+0.0027, +0.0072], controls −0.0001, dam minus control +0.0058). **Open flaw:** a time-varying
-> `K := T(t)` does not conserve storage (Traps below); fix proposed, not implemented.
+> [+0.0027, +0.0072], controls −0.0001, dam minus control +0.0058, first build). The dam row is the
+> storage-conserving trapezoid on `S = T·Q` since 2026-09-27 (the first build's `K := T(t)` alone did
+> not conserve storage; Traps below).
 >
 > `params.use_reservoirs: true` + `data_sources.reservoirs: <csv>` (header `COMID,T_days`) routes
 > each listed dam reach as a linear reservoir `S = T·Q` through
@@ -83,10 +84,13 @@ change.
                     KanHead, P = 3        │
                                           ▼
  ω_t = 2π·doy(t)/365.25 ──▶ T_d(t) = max(T0_d·exp(a_d sin ω_t + b_d cos ω_t), 1/24 d)   ordinary Burn autodiff
-                                          │  seconds, one [n_dams] tensor per step
+                                          │  seconds, at BOTH ends of each step: T_t (row t−1), T_{t+1} (row t)
                                           ▼
- timestep op (TimestepReleaseOp): S19'' K := T_d(t), X := 0 on dam rows; one lower-triangular solve
- backward (B19'''): ∂L/∂T_d = the dam row's ∂L/∂K, which B19'' still masks away from n, q, p
+ timestep op (TimestepReleaseOp): S19'' K := T_{t+1}, X := 0 on dam rows, and S19''' c3's numerator
+   reads T_t:  c1 = c2 = dt/(2T_{t+1}+dt), c3 = (2T_t − dt)/(2T_{t+1}+dt), c4 = 2dt/(2T_{t+1}+dt)
+   = the trapezoid on S = T·Q, storage-conserving for any T(t); one lower-triangular solve
+ backward (B19'''): ∂L/∂T_{t+1} = the dam row's ∂L/∂K without c3's numerator term, ∂L/∂T_t = 2·gc3/denom;
+   B19'' still masks the dam row's K and X away from n, q, p
 ```
 
 - **Where the code is.** Engine: `src/routing/mmc.rs::set_dam_release` (`DamRelease`), the
@@ -99,8 +103,12 @@ change.
   `src/training/release_eval.rs` resolves the head ONCE into a fixed seasonal table
   (`MeritGagesDataset::resolve_learned_release`) and writes `<run>/release_params.csv`
   (`COMID, T0_days, a, b, T_min_days, T_max_days`).
-- **Phase convention.** `doy` is 1-based like pandas `dayofyear` (the offline fit's), and the step
-  producing routed column `t` uses phase row `t`, its end hour.
+- **Phase convention.** `doy` is 1-based like pandas `dayofyear` (the offline fit's). The step
+  producing routed column `t` reads `T` at phase rows `t − 1` (start) and `t` (end), both from the
+  closed form, so a window or test-phase chunk start needs no carried state.
+- **Constant `T` is option C bit for bit.** `c3`'s dam-row expression is the generic one op for op
+  (`T·2` against `(K·2)·(1 − 0)`, exact in f32), pinned by
+  `tests/reservoir_release.rs::zero_seasonal_coefficients_are_bitwise_option_c`.
 - **The clamp.** `T >= 1 h` keeps `c3 >= 0`. Where it binds, `T0`, `a`, `b` get exactly zero
   gradient for that step (`clamped_release_has_exactly_zero_gradient`).
 - **Init.** Read-out weights zero, bias at `T0 = 4.5 h`, `a = b = 0` for every dam; sigmoid slope
@@ -126,11 +134,12 @@ change.
 - **f32:** carry `S` as the active buffer (a few MCM), not total volume.
 - **Invariant 1:** off by default; DDR master has no reservoirs, so `ddr_sandbox_match` must not
   see any change.
-- **A time-varying `T` in a Muskingum row does not conserve storage (open, 2026-09-27).** The dam row as built
-  (`K := T_d(t)`, `X := 0`) carries `Q` across a change in `T`, so `S = T·Q` jumps: `dS/dt = I − Q + Q·dT/dt`.
-  Negligible for the learned arm (`|a|, |b|` stayed below 0.46), large for a long `T0` with a wide seasonal swing
-  (mass ratio 2.49 at `T0` 776 d). Proposed fix: on dam rows `c3 = (2T_t − dt)/(2T_{t+1} + dt)`, the
-  storage-conserving trapezoid, identical at constant `T`. See the findings doc, check 2.
+- **A time-varying `T` in a plain Muskingum row does not conserve storage (fixed 2026-09-27).** The first
+  build set only `K := T_d(t)`, `X := 0`, which carries `Q` across a change in `T`, so `S = T·Q` jumped:
+  `dS/dt = I − Q + Q·dT/dt` (mass ratio 2.49 at `T0` 776 d with amplitude 2). The dam row now reads
+  `T_t` in c3's numerator (S19'''), the trapezoid on `S`; pinned by
+  `tests/reservoir_release.rs::seasonal_release_conserves_storage`. Any future time-varying dam law
+  must keep the storage form. See the findings doc, check 2.
 - **A one-hour bucket is not pass-through relative to the no-dam model.** A dam row replaces its reach's channel
   routing (`K = L/c`, ~4 h at the median MERIT reach), so the change grows with the dam reach's length.
 - **Long `T` against `rho`.** Training windows are 90 days and start from a hotstart guess, so a

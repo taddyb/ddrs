@@ -736,12 +736,13 @@ was reverted in #143 and never evaluated at gauges.
   head, no observed dam data. Smoke set at the 3x rule (916 gauges; runs `2026-09-27T04-29-33Z` off,
   `2026-09-27T04-29-43Z` learned, worktree workspace, CPU): dam gauges ΔNSE +0.0049 [+0.0027, +0.0072], 300 / 158
   up; controls −0.0001; dam minus matched control +0.0058 [+0.0032, +0.0086]; ~70 % of the offline ceiling
-  (+0.0068); ΔKGE null. Learned `T0` median 0.56 d, `|a|, |b|` < 0.46. **Flaw found by smoke check 2:** a
-  Muskingum row with a time-varying `K := T(t)` conserves `Q`, not `S = T·Q` (spurious source `Q·dT/dt`; mass
-  ratio up to 2.49 at `T0` ~ 800 d with amplitude 2); the proposed fix is a storage-conserving dam row,
-  `c3 = (2T_t − dt)/(2T_{t+1} + dt)`, not yet implemented. Check 1b's "one-hour bucket is pass-through" premise
-  is wrong: a dam row replaces its reach's channel routing (median `K` ~4 h). Findings
-  `2026-09-27-learned-dam-release-findings.md`.
+  (+0.0068); ΔKGE null. Learned `T0` median 0.56 d, `|a|, |b|` < 0.46 (first build). **Flaw found by smoke
+  check 2, fixed the same day:** a Muskingum row with a time-varying `K := T(t)` conserves `Q`, not
+  `S = T·Q` (spurious source `Q·dT/dt`; mass ratio up to 2.49 at `T0` ~ 800 d with amplitude 2); the dam row
+  is now the storage-conserving trapezoid, `c3 = (2T_t − dt)/(2T_{t+1} + dt)`. Check 1b's "one-hour bucket is
+  pass-through" premise is wrong: a dam row replaces its reach's channel routing (median `K` ~4 h); the
+  adopted criterion is the bucket recurrence plus the median and the length dependence. Findings
+  `2026-09-27-learned-dam-release-findings.md` (post-fix numbers and the full-population arms there).
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
   routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release

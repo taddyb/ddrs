@@ -10,6 +10,14 @@
 //! residence time with `a`, `b` nonzero, with the learned-gamma sibling op,
 //! and at a clamped base where the gradient must be exactly zero.
 //!
+//! The storage-conserving dam row reads `T` at both ends of a step, so the op
+//! has two `T` parents: `T_{t+1}` (every coefficient's denominator) and `T_t`
+//! (c3's numerator). `step_gradcheck_t_prev_and_t_next_separately_and_together`
+//! checks each on its own at one step (via `timestep_forward_release`), and one
+//! leaf in both slots (constant `T`), whose gradient must be their sum. At
+//! constant `T` the two nearly cancel, so that case is judged against the
+//! parts' scale.
+//!
 //! ε: every parent here is nonlinear in the output (`T0`, `a`, `b` enter
 //! through `exp` and the Muskingum coefficients), so the step is relative,
 //! `max(1e-2·|x|, 1e-2)`, except `a`, `b` at the large `T0`. There the dam's
@@ -327,6 +335,129 @@ fn release_head_weight_gradcheck_end_to_end() {
     println!("release head weight [{row},{col}]: analytical={analytical:.6e} fd={fd:.6e} rel={rel:.3e}");
     assert!(analytical != 0.0 && analytical.is_finite(), "vacuous weight gradient");
     assert!(rel < REL_TOL || abs < ABS_TOL, "release head weight gradcheck rel {rel:.3e}");
+}
+
+// ---------------------------------------------------------------------------
+// One timestep, the two T parents on their own: `T_t` (the step's start,
+// only in c3's numerator) and `T_{t+1}` (its end, in every coefficient's
+// denominator). `timestep_forward_release` takes them as separate leaves.
+// ---------------------------------------------------------------------------
+
+/// One routed step on the sandbox with dams on reaches 3 and 4. Returns the
+/// weighted loss and the two T leaves (seconds, `[2]`). `same_leaf` routes
+/// ONE leaf into both parents, the constant-T case.
+fn one_step(t_prev: [f32; 2], t_next: [f32; 2], same_leaf: bool, grad: bool)
+    -> (Tensor<AB, 1>, Tensor<AB, 1>, Tensor<AB, 1>, Tensor<AB, 1>)
+{
+    use std::sync::Arc;
+    use ddrs::sparse::{AValuesAssembler, CsrPattern};
+    let device = Device::default();
+    let adj = sandbox5();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &device);
+    let c = |v: Vec<f32>| Tensor::<AB, 1>::from_floats(v.as_slice(), &device);
+    let leaf = |v: [f32; 2]| {
+        let t = Tensor::<AB, 1>::from_floats(v, &device);
+        if grad { t.require_grad() } else { t }
+    };
+    let tn = leaf(t_next);
+    let tp = if same_leaf { tn.clone() } else { leaf(t_prev) };
+    // A transient state: the dams hold more than their inflow, the rest less.
+    let q_t = c(vec![20.0, 9.0, 13.0, 40.0, 70.0]);
+    let q_prime = c(vec![22.0, 11.0, 11.0, 11.0, 22.0]);
+    let cfg = Config::default();
+    // Denormalized geometry, as `MuskingumCunge` hands the op (n, q, p).
+    let q = ddrs::routing::mmc_op::timestep_forward_release::<I>(
+        &cfg,
+        &pattern,
+        &assembler,
+        c(vec![0.05; N_REACH]),
+        c(vec![0.5; N_REACH]),
+        c(vec![21.0; N_REACH]),
+        q_t,
+        q_prime,
+        c(adj.length_m.clone()),
+        c(adj.slope.clone()),
+        c(vec![0.3; N_REACH]),
+        vec![3, 4],
+        tn.clone(),
+        tp.clone(),
+    );
+    let w = c(STEP_WEIGHTS.to_vec());
+    ((q.clone() * w).sum(), tp, tn, q)
+}
+
+const STEP_WEIGHTS: [f32; 5] = [1.0, 1.1, 1.2, 1.3, 1.4];
+
+/// The weighted loss accumulated in f64 on the host, for the finite differences.
+fn one_step_loss(t_prev: [f32; 2], t_next: [f32; 2]) -> f64 {
+    let q: Vec<f32> = one_step(t_prev, t_next, false, false).3.into_data().to_vec().unwrap();
+    q.iter().zip(STEP_WEIGHTS).map(|(&v, w)| v as f64 * w as f64).sum()
+}
+
+#[test]
+fn step_gradcheck_t_prev_and_t_next_separately_and_together() {
+    let mut failures = Vec::new();
+    // Small (2 h, 3 h) and large (5 d, 30 d) residence times, with T_t != T_{t+1}.
+    for (label, tp0, tn0) in [
+        ("small", [7_200.0_f32, 10_800.0], [9_000.0_f32, 8_000.0]),
+        ("large", [432_000.0_f32, 2_592_000.0], [480_000.0_f32, 2_400_000.0]),
+    ] {
+        let (loss, tp, tn, _) = one_step(tp0, tn0, false, true);
+        let grads = loss.backward();
+        let g = |t: &Tensor<AB, 1>| -> Vec<f32> { t.grad(&grads).expect("grad").into_data().to_vec().unwrap() };
+        let (gp, gn) = (g(&tp), g(&tn));
+        for dam in 0..2 {
+            for (which, analytical) in [("T_t", gp[dam] as f64), ("T_t+1", gn[dam] as f64)] {
+                let base = if which == "T_t" { tp0[dam] } else { tn0[dam] };
+                let eps = 1e-2 * base;
+                let bump = |d: f32| {
+                    let (mut p, mut n) = (tp0, tn0);
+                    if which == "T_t" { p[dam] += d } else { n[dam] += d }
+                    one_step_loss(p, n)
+                };
+                let fd = (bump(eps) - bump(-eps)) / (2.0 * eps as f64);
+                let abs = (analytical - fd).abs();
+                let rel = abs / analytical.abs().max(fd.abs()).max(1e-30);
+                println!("{label} dam {dam} {which}: analytical={analytical:.6e} fd={fd:.6e} rel={rel:.3e}");
+                assert!(analytical != 0.0, "{label} {which}: vacuous gradient");
+                if !(rel < REL_TOL || abs < 1e-9) {
+                    failures.push(format!("{label} dam {dam} {which}: rel {rel:.3e}"));
+                }
+            }
+        }
+        // Together: one leaf in both slots gets the sum of the two parents'
+        // gradients (constant T), and it matches a FD that moves both.
+        let t_same = tn0;
+        let (loss, _, t, _) = one_step(t_same, t_same, true, true);
+        let grads = loss.backward();
+        let g_same: Vec<f32> = t.grad(&grads).expect("grad").into_data().to_vec().unwrap();
+        let (loss2, tp2, tn2, _) = one_step(t_same, t_same, false, true);
+        let grads2 = loss2.backward();
+        let gp2: Vec<f32> = tp2.grad(&grads2).unwrap().into_data().to_vec().unwrap();
+        let gn2: Vec<f32> = tn2.grad(&grads2).unwrap().into_data().to_vec().unwrap();
+        for dam in 0..2 {
+            let eps = 1e-2 * t_same[dam];
+            let bump = |d: f32| {
+                let mut v = t_same;
+                v[dam] += d;
+                one_step_loss(v, v)
+            };
+            let fd = (bump(eps) - bump(-eps)) / (2.0 * eps as f64);
+            let sum = gp2[dam] as f64 + gn2[dam] as f64;
+            // At constant T the two parents' gradients nearly cancel (a step
+            // with dT = 0 is storage-neutral in T), so the together-gradient
+            // is judged on the scale of its parts, not of itself.
+            let scale = (gp2[dam] as f64).abs().max((gn2[dam] as f64).abs());
+            let rel = (g_same[dam] as f64 - fd).abs() / scale;
+            let rel_sum = (g_same[dam] as f64 - sum).abs() / scale;
+            println!("{label} dam {dam} together: one leaf {:.6e} = T_t + T_t+1 {sum:.6e} (rel {rel_sum:.1e}), fd {fd:.6e} (err / part {rel:.3e})", g_same[dam]);
+            if !(rel < REL_TOL) || !(rel_sum < 1e-6) {
+                failures.push(format!("{label} dam {dam} together: rel {rel:.3e} / sum {rel_sum:.1e}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "gradcheck failed: {failures:?}");
 }
 
 #[test]

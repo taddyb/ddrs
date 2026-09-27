@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use burn::backend::{Autodiff, NdArray};
-use burn::module::{AutodiffModule, Module};
+use burn::module::AutodiffModule;
 use burn::optim::{GradientsParams, Optimizer};
 use burn::tensor::Tensor;
 use chrono::NaiveDate;
