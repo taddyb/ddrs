@@ -1,21 +1,24 @@
 #!/usr/bin/env python
-"""Smoke-test gauge set for the learned dam release: a few gauges below NID dams in every HUC2, plus controls.
+"""Smoke-test gauge set for the learned dam release: every eval gauge just below a large NID dam, plus one matched
+undammed control per dam gauge.
 
-Built before any release code exists, so the implementation has a small, fast set with known expected results.
-Per HUC2 (GAGES-II HUC02 of the gauge), from the 2,365 training / eval gauges:
-  dam gauges (up to 2)  exactly one NID dam >= 10 MCM upstream (one clean signal); gauge drainage area <= 1.5x the
-                        dam reach's upstream area (the gauge sees the release); dam completed by 1980 (it exists
-                        through the 1981-1995 training window); snap class A, B or D (drainage-area checked);
-                        gauge area <= 25,000 km2 (keeps the smoke network small); >= 80 % daily observations in
-                        both WY1982-1995 and WY1996-2010. Ranked by NID degree of regulation (normal storage /
-                        mean annual flow); the first, then the next with a different primary purpose (else the next).
-  relaxed               a region with no dam gauge under those rules gets one with area ratio <= 10 (flagged).
-  control (1)           no NID dam upstream, no NWIS peak code 6 in WY1996-2010, same coverage rule, drainage area
-                        closest (log) to the region's dam gauges. Joint training can shift roughness everywhere, so
-                        the smoke test must show undammed gauges do not get worse.
-Writes, next to this script: smoke_gauges.csv (the set, one row per gauge), gages_smoke.csv (gages_3000.csv
-format, for data_sources.gages), smoke_dams.csv (every NID dam >= 10 MCM in the smoke network, with the features a
-release head would read), smoke_summary.json. Run under ~/projects/ddr/.venv.
+Built before any release code exists, so the implementation has a set with known expected results. From the 2,365
+training / eval gauges (HUC2 = GAGES-II HUC02 of the gauge):
+  dam gauges   at least one NID dam >= 10 MCM upstream; the NEAREST of them (upstream area closest to the gauge's)
+               has gauge drainage area <= 1.5x its reach's upstream area, so the gauge sees that dam's release (other
+               large dams further up are allowed: the release law puts a bucket on every one of them); that dam was
+               completed by 1980 (it exists through the 1981-1995 training window) and snapped by drainage-area match
+               (class A, B or D); gauge area <= 25,000 km2 (keeps the network small); >= 80 % daily observations in
+               both WY1982-1995 and WY1996-2010.
+  relaxed      a region with no such gauge gets the one with the smallest area ratio up to 10 (flagged).
+  controls     one per dam gauge: no NID dam upstream, no NWIS peak code 6 in WY1996-2010, same coverage rule, same
+               HUC2, drainage area closest in log, drawn without replacement. When a region runs out, the closest
+               area from any region (flagged `control_cross_huc`). Joint training can shift roughness everywhere, and
+               a release law fitted anywhere can smooth a flashy model, so dam gauges are judged against controls.
+Writes, next to this script: smoke_gauges.csv (one row per gauge; dam columns describe the nearest large dam),
+gages_smoke.csv (gages_3000.csv format, for data_sources.gages), smoke_dams.csv (every NID dam >= 10 MCM in the smoke
+network, with the NID features a release head would read), smoke_summary.json. Run under ~/projects/ddr/.venv.
+The 2026-09-26 first version (two dam gauges per region, 50 gauges) is commit 5a47623.
 """
 from __future__ import annotations
 
@@ -39,69 +42,62 @@ GII = pyogrio.read_dataframe("/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_
                              columns=["STAID", "HUC02"], read_geometry=False)
 GII["STAID"] = GII.STAID.astype(str).str.zfill(8)
 HUC = GII.set_index("STAID").HUC02.astype(str).str[:2]
-PER_HUC, MIN_COVER, MAX_AREA = 2, 0.8, 25000.0
+MIN_COVER, MAX_AREA, MAX_RATIO, RELAXED_RATIO = 0.8, 25000.0, 1.5, 10.0
 
 bygauge = pd.read_csv(NIDDIR / "nid_dams_by_gauge.csv", dtype={"STAID": str}).set_index("STAID")
 dams = pd.read_csv(NIDDIR / "nid_dams_in_eval_network.csv", low_memory=False)
 big = dams[dams.storage_mcm >= 10]
 
-# observation coverage in both windows, from the store ddrs trains on
 repo = icechunk.Repository.open(icechunk.local_filesystem_storage("/mnt/ssd1/data/icechunk/usgs_daily_observations"))
 obs = xr.open_zarr(repo.readonly_session("main").store, consolidated=False).streamflow
-ids = [s for s in REG.index if s in set(obs.gage_id.values)]
-o = obs.sel(gage_id=ids)
+o = obs.sel(gage_id=[s for s in REG.index if s in set(obs.gage_id.values)])
 wy = o.time.dt.year + (o.time.dt.month >= 10)
-cov_tr = o.where((wy >= 1982) & (wy <= 1995)).notnull().sum("time").compute() / int(((wy >= 1982) & (wy <= 1995)).sum())
-cov_te = o.where((wy >= 1996) & (wy <= 2010)).notnull().sum("time").compute() / int(((wy >= 1996) & (wy <= 2010)).sum())
-cover = pd.DataFrame({"cover_train": cov_tr.to_pandas(), "cover_test": cov_te.to_pandas()})
+tr, te = (wy >= 1982) & (wy <= 1995), (wy >= 1996) & (wy <= 2010)
+cover = pd.DataFrame({"cover_train": (o.where(tr).notnull().sum("time") / int(tr.sum())).compute().to_pandas(),
+                      "cover_test": (o.where(te).notnull().sum("time") / int(te.sum())).compute().to_pandas()})
 
 rows = []
 for s in REG.index:
     up = set(ADJ[s]["order"][:].astype(np.int64).tolist()) if s in ADJ else set()
     b = big[big.COMID.isin(up)]
-    rows.append(dict(STAID=s, huc2=HUC.get(s), n_big=len(b), dam_index=b.index[0] if len(b) == 1 else -1))
-cand = pd.DataFrame(rows).set_index("STAID")
-cand = cand.join(cover).join(bygauge[["area_km2", "n_nid", "nid_dor", "nse_trained"]])
+    area = bygauge.area_km2.get(s, np.nan)
+    r = dict(STAID=s, huc2=HUC.get(s), n_big=len(b))
+    if len(b):
+        k = b.index[int(np.argmin(np.abs(np.log(area / b.reach_uparea_km2.values))))]
+        n = big.loc[k]
+        r.update(dam_nid_id=n.nid_id, dam_name=n["name"], dam_COMID=n.COMID, dam_storage_mcm=n.storage_mcm, dam_da_km2=n.da_km2,
+                 dam_reach_uparea_km2=n.reach_uparea_km2, dam_max_discharge_m3s=n.max_discharge_m3s, dam_purpose=n.primary_purpose,
+                 dam_year=n.year, dam_snap_class=n.snap_class, dam_height_m=n.height_m, area_ratio=area / n.reach_uparea_km2)
+    rows.append(r)
+cand = pd.DataFrame(rows).set_index("STAID").join(cover).join(bygauge[["area_km2", "n_nid", "nid_dor", "nse_trained"]])
 cand["code6"] = cand.index.map(lambda s: PEAK.n_years_code6_wy1996_2010.get(s, 0) > 0)
-covered = (cand.cover_train >= MIN_COVER) & (cand.cover_test >= MIN_COVER)
+covered = (cand.cover_train >= MIN_COVER) & (cand.cover_test >= MIN_COVER) & (cand.area_km2 <= MAX_AREA)
+ok_dam = (cand.n_big > 0) & (cand.dam_year <= 1980) & cand.dam_snap_class.isin(["A", "B", "D"]) & covered
 
-d = cand[(cand.n_big == 1) & covered & (cand.area_km2 <= MAX_AREA)].copy()
-dd = big.loc[d.dam_index.values]
-d["dam_nid_id"], d["dam_name"], d["dam_COMID"] = dd.nid_id.values, dd.name.values, dd.COMID.values
-d["dam_storage_mcm"], d["dam_da_km2"], d["dam_reach_uparea_km2"] = dd.storage_mcm.values, dd.da_km2.values, dd.reach_uparea_km2.values
-d["dam_max_discharge_m3s"], d["dam_purpose"], d["dam_year"] = dd.max_discharge_m3s.values, dd.primary_purpose.values, dd.year.values
-d["dam_snap_class"], d["dam_height_m"] = dd.snap_class.values, dd.height_m.values
-d["area_ratio"] = d.area_km2 / d.dam_reach_uparea_km2
-d_any = d[(d.dam_year <= 1980) & d.dam_snap_class.isin(["A", "B", "D"])]
-d = d_any[d_any.area_ratio <= 1.5]
-
-picked = []
-for h, s in d.sort_values("nid_dor", ascending=False).groupby("huc2", sort=True):
-    first = s.iloc[0]
-    rest = s.iloc[1:]
-    other = rest[rest.dam_purpose != first.dam_purpose]
-    second = other.iloc[0] if len(other) else (rest.iloc[0] if len(rest) else None)
-    picked += [first.name] + ([second.name] if second is not None else [])
-dam_set = d.loc[picked].assign(role="dam", relaxed=False)
-# Regions with no strict candidate (HUC 08, 09 on 2026-09-26): one "relaxed" dam gauge, the single-large-dam gauge
-# with the smallest area ratio up to 10 (the dam is further up, so its release is diluted at the gauge).
+dam_set = cand[ok_dam & (cand.area_ratio <= MAX_RATIO)].assign(role="dam", relaxed=False)
 missing = sorted(set(cand.huc2.dropna()) - set(dam_set.huc2))
-relaxed = d_any[d_any.huc2.isin(missing) & (d_any.area_ratio <= 10)].sort_values("area_ratio").groupby("huc2").head(1)
+relaxed = cand[ok_dam & cand.huc2.isin(missing) & (cand.area_ratio <= RELAXED_RATIO)].sort_values("area_ratio").groupby("huc2").head(1)
 dam_set = pd.concat([dam_set, relaxed.assign(role="dam", relaxed=True)])
+dam_set["cascade"] = dam_set.n_big > 1
 
-ctrl_pool = cand[(cand.n_nid == 0) & ~cand.code6 & covered & (cand.area_km2 <= MAX_AREA)]
-ctrl = []
-for h, s in dam_set.groupby("huc2"):
-    pool = ctrl_pool[ctrl_pool.huc2 == h]
-    if len(pool):
-        target = np.exp(np.log(s.area_km2).mean())
-        ctrl.append((pool.area_km2.apply(np.log) - np.log(target)).abs().idxmin())
-ctrl_set = cand.loc[ctrl].assign(role="control")
+pool = cand[(cand.n_nid == 0) & ~cand.code6 & covered].copy()
+pool["la"] = np.log(pool.area_km2)
+ctrl_rows, used = [], set()
+for s, d in dam_set.sort_values("area_km2", ascending=False).iterrows():  # big basins first: fewer large controls
+    la = np.log(d.area_km2)
+    p = pool[~pool.index.isin(used)]
+    same = p[p.huc2 == d.huc2]
+    cross = len(same) == 0
+    pick = ((same if not cross else p).la - la).abs().idxmin()
+    used.add(pick)
+    ctrl_rows.append(dict(STAID=pick, control_for=s, control_cross_huc=cross))
+ctrl = pd.DataFrame(ctrl_rows).set_index("STAID")
+ctrl_set = cand.loc[ctrl.index].join(ctrl).assign(role="control")
 
-smoke = pd.concat([dam_set, ctrl_set]).sort_values(["huc2", "role"])
+smoke = pd.concat([dam_set, ctrl_set]).sort_values(["huc2", "role", "STAID"])
 smoke["staname"] = smoke.index.map(G3.set_index("STAID").STANAME)
 smoke.index.name = "STAID"
-smoke.drop(columns=["dam_index"]).to_csv(HERE / "smoke_gauges.csv")
+smoke.to_csv(HERE / "smoke_gauges.csv")
 G3[G3.STAID.isin(smoke.index)].to_csv(HERE / "gages_smoke.csv", index=False)
 
 net = set()
@@ -109,18 +105,17 @@ for s in smoke.index:
     net.update(ADJ[s]["order"][:].astype(np.int64).tolist())
 sd = big[big.COMID.isin(net)]
 sd.to_csv(HERE / "smoke_dams.csv", index=False)
+g3c = G3.set_index("STAID").COMID
+on_reach = (dam_set.dam_COMID.astype("Int64").values == dam_set.index.map(g3c).astype("Int64").values)
 
-huc_all = sorted(set(HUC.reindex(REG.index).dropna()))
 summary = dict(
-    dam_gauges=int((smoke.role == "dam").sum()), controls=int((smoke.role == "control").sum()),
-    hucs_with_dam_gauge=sorted(dam_set.huc2.unique().tolist()), relaxed_gauges=dam_set.index[dam_set.relaxed].tolist(),
-    hucs_without=sorted(set(huc_all) - set(dam_set.huc2)),
-    candidates_per_huc=d.groupby("huc2").size().to_dict(),
+    dam_gauges=len(dam_set), relaxed=dam_set.index[dam_set.relaxed].tolist(), cascades=int(dam_set.cascade.sum()),
+    dam_on_gauge_reach=int(on_reach.sum()), controls=len(ctrl_set), controls_cross_huc=int(ctrl_set.control_cross_huc.sum()),
+    per_huc={h: dict(dam=int((dam_set.huc2 == h).sum()), control=int((ctrl_set.huc2 == h).sum()))
+             for h in sorted(set(dam_set.huc2) | set(ctrl_set.huc2))},
     network_reaches=len(net), dams_ge10mcm_in_network=len(sd),
     median_nse_trained=dict(dam=float(dam_set.nse_trained.median()), control=float(ctrl_set.nse_trained.median())),
+    purposes=dam_set.dam_purpose.value_counts().to_dict(),
 )
 json.dump(summary, open(HERE / "smoke_summary.json", "w"), indent=1, default=str)
 print(json.dumps(summary, indent=1, default=str))
-pd.set_option("display.width", 250)
-print(smoke[["huc2", "role", "staname", "area_km2", "dam_name", "dam_storage_mcm", "dam_purpose", "dam_year", "area_ratio",
-             "nid_dor", "nse_trained"]].round(2).to_string())

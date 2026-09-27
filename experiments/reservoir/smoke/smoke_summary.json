@@ -1,53 +1,102 @@
 {
- "dam_gauges": 32,
- "controls": 18,
- "hucs_with_dam_gauge": [
-  "01",
-  "02",
-  "03",
-  "04",
-  "05",
-  "06",
-  "07",
-  "08",
-  "09",
-  "10",
-  "11",
-  "12",
-  "13",
-  "14",
-  "15",
-  "16",
-  "17",
-  "18"
- ],
- "relaxed_gauges": [
-  "05078000",
+ "dam_gauges": 314,
+ "relaxed": [
+  "05046000",
   "08015500"
  ],
- "hucs_without": [],
- "candidates_per_huc": {
-  "01": 4,
-  "02": 26,
-  "03": 10,
-  "04": 8,
-  "05": 15,
-  "06": 1,
-  "07": 6,
-  "10": 15,
-  "11": 6,
-  "12": 2,
-  "13": 5,
-  "14": 4,
-  "15": 1,
-  "16": 7,
-  "17": 27,
-  "18": 28
+ "cascades": 148,
+ "dam_on_gauge_reach": 214,
+ "controls": 314,
+ "controls_cross_huc": 17,
+ "per_huc": {
+  "01": {
+   "dam": 17,
+   "control": 7
+  },
+  "02": {
+   "dam": 39,
+   "control": 39
+  },
+  "03": {
+   "dam": 29,
+   "control": 32
+  },
+  "04": {
+   "dam": 13,
+   "control": 14
+  },
+  "05": {
+   "dam": 23,
+   "control": 26
+  },
+  "06": {
+   "dam": 1,
+   "control": 2
+  },
+  "07": {
+   "dam": 19,
+   "control": 22
+  },
+  "08": {
+   "dam": 1,
+   "control": 1
+  },
+  "09": {
+   "dam": 1,
+   "control": 1
+  },
+  "10": {
+   "dam": 23,
+   "control": 25
+  },
+  "11": {
+   "dam": 9,
+   "control": 9
+  },
+  "12": {
+   "dam": 4,
+   "control": 6
+  },
+  "13": {
+   "dam": 8,
+   "control": 8
+  },
+  "14": {
+   "dam": 10,
+   "control": 10
+  },
+  "15": {
+   "dam": 2,
+   "control": 2
+  },
+  "16": {
+   "dam": 12,
+   "control": 12
+  },
+  "17": {
+   "dam": 50,
+   "control": 52
+  },
+  "18": {
+   "dam": 53,
+   "control": 46
+  }
  },
- "network_reaches": 1431,
- "dams_ge10mcm_in_network": 32,
+ "network_reaches": 23024,
+ "dams_ge10mcm_in_network": 571,
  "median_nse_trained": {
-  "dam": 0.30197913894166617,
-  "control": 0.7053852906854603
+  "dam": 0.5336426304840629,
+  "control": 0.7528682555958599
+ },
+ "purposes": {
+  "Flood Risk Reduction": 109,
+  "Hydroelectric": 93,
+  "Water Supply": 38,
+  "Irrigation": 26,
+  "Recreation": 22,
+  "Other": 12,
+  "Navigation": 8,
+  "Fish and Wildlife Pond": 4,
+  "Debris Control": 2
  }
 }

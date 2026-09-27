@@ -726,10 +726,11 @@ was reverted in #143 and never evaluated at gauges.
   `experiments/reservoir/nid/nid_dams_in_eval_network.csv`. 1,560 eval gauges have a dam upstream vs 909 with the
   NWM table; DOR > 0.5: 308 (normal storage) or 410 (maximum). Use it, not the NWM table, for the dam list.
   Findings `2026-09-26-nid-dams-merit-findings.md`.
-- **Dam-release smoke set (2026-09-26):** `experiments/reservoir/smoke/` (README has the five pass/fail checks).
-  50 gauges, all 18 HUC2: 32 below a single NID dam >= 10 MCM, 18 undammed controls; 1,431 reaches; no-dam run
-  1981-2010 in 380 s CPU. Expected seasonal-bucket fit (routed inflow, fit 1983-1995, test 1996-2010): dam median
-  NSE 0.295 -> 0.306 (20 / 32 up), controls 0.710 -> 0.729. Use it before any full-population run.
+- **Dam-release smoke set (2026-09-26):** `experiments/reservoir/smoke/` (README has the five pass/fail checks and
+  known issues). 628 gauges, all 18 HUC2: 314 just below a NID dam >= 10 MCM, 314 matched undammed controls; 23,024
+  reaches; no-dam run 1981-2010 in 1,468 s CPU. Expected seasonal-bucket fit (routed inflow, fit 1983-1995, test
+  1996-2010): dam median NSE 0.526 -> 0.601, per-gauge +0.017 [+0.007, +0.026] (210 / 314 up); controls 0.000
+  (155 / 159); dam minus matched control +0.014. Results page https://claude.ai/artifact/UbLNfpeMRS4k44vGXM6uV2.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
   routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release
