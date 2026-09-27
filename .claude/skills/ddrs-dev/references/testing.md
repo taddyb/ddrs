@@ -115,6 +115,27 @@ mkdir -p output && cargo run --release --example compare_ddr_sandbox  # must pri
 cargo test --release --test juniata_acceptance  # holds the reservoir end-to-end test
 ```
 
+If you touched the learned or seasonal dam release (`src/routing/release.rs`,
+`MuskingumCunge::set_dam_release`, `ReleaseParent` / `TimestepReleaseOp` /
+`TimestepReleaseGammaOp` / the `t_release` branch of `timestep_backward_core`,
+`src/nn/release_head.rs`, `src/training/release_eval.rs`, the release parts of
+`forward.rs` / `driver.rs` / `bootstrap.rs`), add:
+
+```bash
+cargo test --test reservoir_release --test reservoir_release_gradcheck --test reservoir_release_training
+cargo test --lib -- reservoir release_head
+cargo test --release --test juniata_acceptance   # holds juniata_learned_release_trains_t0_and_writes_release_params
+```
+
+`reservoir_release_gradcheck` is the mandatory gate before any training run:
+central differences on `T0`, `a`, `b` at `T0` = 0.1, 1.5 and 20 d, with a
+learned gamma (the 7-parent op), one release-head read-out weight end to end,
+and exactly zero gradient where the one-hour clamp binds. At `T0 = 20` d it
+uses a 0.1 step on `a`, `b` (the module docs record the step sweep).
+`reservoir_release_training` pins that the training path (head on the feature
+rows) and the test-phase path (head resolved into a fixed seasonal table) route
+bitwise identically.
+
 `reservoir_override` pins a dam row to the linear-reservoir recurrence and
 checks bit-identity with the override off, mass balance, gradcheck, zero
 gradient on a dam row's `n`/`q_spatial`/`p_spatial`, and row validation. The
@@ -186,6 +207,7 @@ line citation outright rather than trusting it to stay pinned.
 | Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting), `leakance_gate` (tau = 1 bit-exact identity through all three readers, gate gradcheck, saturation) |
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Reservoirs (option C) | `reservoir_override` (linear-reservoir recurrence, off is bit-identical, mass balance, gradcheck, zero dam-row gradient, row validation), `cargo test --lib reservoir` (table reader, COMID mapping, `use_reservoirs` load guards), `juniata_acceptance`'s `juniata_reservoir_is_matched_logged_and_changes_the_gauge_series` (release-only end-to-end); `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
+| Learned / seasonal dam release | `reservoir_release` (a = b = 0 is bitwise option C, seasonal recurrence at the end-hour phase, clamp, phase table, untouched upstream rows, validation), `reservoir_release_gradcheck` (T0, a, b, head weight, gamma op, clamp), `reservoir_release_training` (training = resolved test path bitwise, no-head refusal, checkpoint + optimizer restore), `cargo test --lib release_head` (init, log-space T0), `juniata_acceptance`'s learned run |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
 | Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |

@@ -234,6 +234,7 @@ and bounds every topology from above.
 | `ddr_match` | **false** (since 2026-08-19) | DEPRECATED. `true` = legacy pre-#192 DDR physics (5/3 celerity, X ≡ 0.3, upstream-cols readout) — parses with a WARN, kept only for pre-#192 reproduction and CUDA graphs. DDR itself runs the corrected physics since DeepGroundwater/ddr#192. See `.claude/PHYSICS-CORRECTIONS.md` |
 | `use_leakance` | false | |
 | `use_reservoirs` | false | Route the COMIDs in `data_sources.reservoirs` as linear reservoirs `S = T·Q` (option C). `false` is bit-identical to no reservoir code. Rejected with leakance, CUDA graphs, `ddr_match`, subdivision, `gridded_network`; see §Reservoirs |
+| `reservoir_release` | `fixed` | `fixed`: `T` (and optional seasonal `a`, `b`) from the table. `learned`: `(T0, a, b)` per dam from the `release_head:` block, trained jointly with the routing head. `learned` requires `use_reservoirs`, `kan_head`, `release_head`; see §Reservoirs |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
 | `leakance_gate` | absent | Temperature-annealed 0/1 gate on the head's `leakance_factor` output; see §Leakance gate. Absent ⇒ byte-identical to the ungated readers. Requires `use_leakance: true` |
@@ -241,10 +242,12 @@ and bounds every topology from above.
 | `log_space_parameters` | `["p_spatial"]` | |
 | `defaults` | `{p_spatial: 21.0}` | Value used when a parameter is not in `learnable_parameters` |
 
-### `parameter_ranges` (7 keys parsed)
+### `parameter_ranges` (11 keys parsed)
 
 `n [0.015, 0.25]`, `q_spatial [0, 1]`, `p_spatial [1, 200]`, `x_storage [0, 0.5]`,
-`k_d [1e-8, 1e-6]`, `d_gw [-2, 2]`, `leakance_factor [0, 1]`.
+`k_d [1e-8, 1e-6]`, `d_gw [-2, 2]`, `leakance_factor [0, 1]`, `gamma [0, 0.5]`, and the learned
+dam release's `reservoir_T0 [1/24, 365]` (days, always LOG space), `reservoir_a [-2, 2]`,
+`reservoir_b [-2, 2]` (linear). Unknown keys are silently ignored (`parameter_ranges` is a map).
 
 Case quirk: **`K_D` is uppercase in YAML, `k_d` in Rust.** `x_storage` is only
 consumed when listed in `learnable_parameters`; otherwise routing uses a constant 0.3.
@@ -286,6 +289,9 @@ when subdivision is enabled), plus one at dataset open.
 | `validate_loss` | `loss.deriv-weight` non-finite or negative | `"deriv-weight"` |
 | `validate_disagg_vs_resolution` (runtime, `src/data/dataset.rs`) | `disaggregation:` + hourly-native streamflow store | hard error |
 | `read_reservoir_table` (runtime, dataset open) | a reservoir CSV without `COMID`/`T_days`, an unparseable row, `T_days` non-finite or `< 1/24`, a duplicate COMID, zero rows | `DataError` naming the CSV path |
+| `validate_reservoirs` (learned release) | `release_head:` without `reservoir_release: learned`; `learned` without `use_reservoirs`, `release_head` or `kan_head`; empty `release_head.input_var_names`; `reservoir_T0` lower bound below 1/24 or inverted; `reservoir_a`/`_b` inverted | `"release_head"` / `"reservoir_release: learned"` + the missing key / the range name |
+| `read_fixed_release_table` (runtime) | only one of `a`/`b`; non-finite `a`/`b` | `"`a` and `b`"` / `"row N"` |
+| `read_dam_features` (runtime, `learned`) | a listed feature column missing, a non-finite value, a duplicate COMID, zero rows | the column name / `"row N"` / `"listed twice"` |
 
 ## Adding a new routing parameter
 
@@ -436,3 +442,41 @@ COMID crosswalk at `/mnt/ssd1/data/resops/derived/grand_to_merit_comid.csv`
 Tests: `src/config.rs` (`use_reservoirs_*`), `src/data/store/reservoirs.rs`,
 `tests/reservoir_override.rs`, and the release-only
 `tests/juniata_acceptance.rs::juniata_reservoir_is_matched_logged_and_changes_the_gauge_series`.
+
+### Seasonal fixed table
+
+A `fixed` table may add BOTH `a` and `b` columns (`COMID,T_days,a,b`): each dam is then a
+prescribed seasonal bucket `T(t) = max(T_days·exp(a·sin ω_t + b·cos ω_t), 1 h)`, routed through
+`MuskingumCunge::set_dam_release` with constant tensors. `a = b = 0` is bitwise option C. Dataset
+open logs `reservoirs: table <path> has <m> COMIDs (fixed, seasonal a/b)`.
+
+### Learned release (`reservoir_release: learned`, added 2026-09-26)
+
+```yaml
+params:
+  use_reservoirs: true
+  reservoir_release: learned
+  parameter_ranges:
+    reservoir_T0: [0.041666668, 365.0]   # days, log space
+    reservoir_a: [-2.0, 2.0]
+    reservoir_b: [-2.0, 2.0]
+data_sources:
+  reservoirs: experiments/reservoir/release_head/dam_features.csv   # COMID + feature columns
+release_head:            # top-level block, deny_unknown_fields
+  hidden_size: 8         # default 8
+  num_hidden_layers: 1   # default 1
+  grid: 5                # default 5
+  k: 3                   # default 3
+  seasonal: true         # default true; false = constant T0 per dam (one output)
+  input_var_names: [log10_storage, ..., purpose_other]   # feature-table columns, required
+```
+
+The table is `experiments/reservoir/release_head/dam_features.csv` (1,024 COMIDs, NID >= 10 MCM,
+19 normalised features), rebuilt by `build_dam_features.py` under the DDR venv. Dataset open logs
+`... (learned release, dam features)`; training logs `release_T0_median=<d>d (<k> dams)` per
+mini-batch; the test phase logs `release head: resolved <m> dams from <ckpt>/release_head.mpk` and
+writes `<run>/release_params.csv` (the eval binary writes `<output>.release_params.csv`).
+Checkpoints carry `release_head.mpk` + `release_optim.mpk`; resuming a learned config from a
+checkpoint without them starts the release head cold (logged). Two arms of record:
+`config/experiments/dam_release_smoke_{off,learned}.yaml`. Not for the probe binaries or the
+paper studies (both refuse it).
