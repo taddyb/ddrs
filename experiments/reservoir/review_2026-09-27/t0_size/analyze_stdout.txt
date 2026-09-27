@@ -1,0 +1,223 @@
+              variable                                                       label  seed     n    rho     lo     hi      p
+0          storage_mcm                                        normal storage [MCM]    42  1024  0.665  0.628  0.698  0.000
+1          storage_mcm                                        normal storage [MCM]    43  1024  0.597  0.550  0.637  0.000
+2      storage_max_mcm                                           max storage [MCM]    42   988  0.778  0.752  0.804  0.000
+3      storage_max_mcm                                           max storage [MCM]    43   988  0.718  0.681  0.751  0.000
+4          surface_km2                                          surface area [km2]    42   949  0.405  0.349  0.459  0.000
+5          surface_km2                                          surface area [km2]    43   949  0.439  0.383  0.488  0.000
+6             height_m                                              dam height [m]    42  1024  0.552  0.509  0.594  0.000
+7             height_m                                              dam height [m]    43  1024  0.403  0.353  0.452  0.000
+8           da_eff_km2                                         drainage area [km2]    42  1024  0.101  0.036  0.169  0.001
+9           da_eff_km2                                         drainage area [km2]    43  1024  0.007 -0.064  0.076  0.829
+10   max_discharge_m3s                                        max discharge [m3/s]    42   844  0.345  0.285  0.407  0.000
+11   max_discharge_m3s                                        max discharge [m3/s]    43   844  0.086  0.022  0.154  0.012
+12    res_time_gauge_d                        residence time, gauge-flow proxy [d]    42  1024  0.364  0.304  0.419  0.000
+13    res_time_gauge_d                        residence time, gauge-flow proxy [d]    43  1024  0.422  0.372  0.480  0.000
+14    res_time_grand_d                         residence time, GRanD mean flow [d]    42   757  0.248  0.178  0.315  0.000
+15    res_time_grand_d                         residence time, GRanD mean flow [d]    43   757  0.330  0.256  0.396  0.000
+16     res_time_best_d  residence time, GRanD where available else gauge proxy [d]    42  1024  0.349  0.285  0.409  0.000
+17     res_time_best_d  residence time, GRanD where available else gauge proxy [d]    43  1024  0.411  0.356  0.467  0.000
+18  storage_per_area_m                                 storage / upstream area [m]    42  1024  0.412  0.355  0.466  0.000
+19  storage_per_area_m                                 storage / upstream area [m]    43  1024  0.478  0.424  0.529  0.000
+20                year                                              year completed    42   997  0.387  0.329  0.437  0.000
+21                year                                              year completed    43   997  0.340  0.288  0.394  0.000
+                   purpose  seed    n  T0_median_d  T0_q25  T0_q75  storage_median_mcm  restime_median_d  rho_storage  rho_storage_lo  rho_storage_hi  rho_restime  rho_restime_lo  rho_restime_hi
+2     Flood Risk Reduction    42  233        1.338   0.656   2.770              77.709           148.479        0.699           0.613           0.782        0.100          -0.030           0.220
+6               Irrigation    42   95        0.500   0.266   1.029              41.568           303.285        0.880           0.800           0.933        0.504           0.350           0.644
+16            Water Supply    42  154        0.422   0.281   0.643              40.349           228.831        0.749           0.653           0.814        0.523           0.397           0.632
+4            Hydroelectric    42  266        0.260   0.164   0.554              66.731            75.824        0.891           0.860           0.913        0.637           0.550           0.711
+0   Fish and Wildlife Pond    42   16        0.225   0.165   0.408              42.645           132.815        0.894           0.701           0.970        0.597           0.140           0.851
+14                Tailings    42   18        0.211   0.170   0.334              16.130           331.849        0.496          -0.045           0.803        0.284          -0.181           0.677
+10                   Other    42   47        0.202   0.144   0.309              38.448           219.226        0.683           0.459           0.810        0.618           0.394           0.783
+12              Recreation    42  154        0.190   0.156   0.257              22.570           223.583        0.453           0.319           0.583        0.507           0.373           0.626
+8               Navigation    42   25        0.106   0.098   0.114              19.489             1.156        0.810           0.581           0.925        0.413          -0.016           0.760
+3     Flood Risk Reduction    43  233        1.325   0.883   2.414              77.709           148.479        0.569           0.462           0.666        0.141           0.005           0.267
+1   Fish and Wildlife Pond    43   16        0.864   0.501   1.546              42.645           132.815        0.832           0.560           0.948        0.471          -0.113           0.859
+11                   Other    43   47        0.686   0.527   1.000              38.448           219.226        0.532           0.226           0.748        0.585           0.339           0.782
+15                Tailings    43   18        0.603   0.498   0.855              16.130           331.849        0.461          -0.013           0.748        0.459          -0.068           0.813
+17            Water Supply    43  154        0.484   0.340   0.779              40.349           228.831        0.759           0.667           0.823        0.494           0.354           0.606
+7               Irrigation    43   95        0.446   0.282   0.764              41.568           303.285        0.711           0.559           0.808        0.575           0.422           0.719
+5            Hydroelectric    43  266        0.364   0.226   0.687              66.731            75.824        0.786           0.724           0.828        0.685           0.596           0.761
+13              Recreation    43  154        0.363   0.286   0.500              22.570           223.583        0.653           0.531           0.735        0.450           0.305           0.582
+9               Navigation    43   25        0.109   0.108   0.112              19.489             1.156        0.035          -0.482           0.535        0.438          -0.072           0.777
+                                            comparison                  indep  seed     n    rho     lo     hi  median_learned_d  median_indep_d  log10_ratio_median  log10_ratio_q25  log10_ratio_q75  frac_within_factor2
+0            offline seasonal fit (dam on gauge reach)            off_seas_T0    42   202  0.461  0.353  0.561             0.567           1.750              -0.251           -1.009            0.442                0.178
+1            offline seasonal fit (dam on gauge reach)            off_seas_T0    43   202  0.498  0.396  0.593             0.694           1.750              -0.264           -0.809            0.582                0.183
+2              offline linear fit (dam on gauge reach)             off_lin_T0    42   202  0.441  0.334  0.556             0.567           0.823               0.014           -0.632            0.602                0.208
+3              offline linear fit (dam on gauge reach)             off_lin_T0    43   202  0.458  0.334  0.559             0.694           0.823               0.022           -0.583            0.701                0.248
+4        offline seasonal fit (all, nearest large dam)            off_seas_T0    42   339  0.394  0.299  0.474             0.533           0.817               0.013           -0.774            0.623                0.171
+5        offline seasonal fit (all, nearest large dam)            off_seas_T0    43   339  0.423  0.327  0.508             0.690           0.817               0.062           -0.650            0.753                0.174
+6   offline seasonal fit (on reach, offline NSE > 0.5)            off_seas_T0    42   122  0.377  0.211  0.524             0.412           0.491               0.009           -0.716            0.582                0.172
+7   offline seasonal fit (on reach, offline NSE > 0.5)            off_seas_T0    43   122  0.365  0.190  0.519             0.501           0.491               0.063           -0.678            0.770                0.156
+8                    ResOpsUS fit (own inflow/release)               resops_T    42    39  0.122 -0.215  0.462             1.470          15.230              -0.870           -1.454           -0.457                0.128
+9                    ResOpsUS fit (own inflow/release)               resops_T    43    39  0.033 -0.306  0.397             1.315          15.230              -0.864           -1.470           -0.544                0.077
+10       ResOpsUS fit (own inflow/release, incl. wall)               resops_T    42    41  0.048 -0.305  0.387             1.470          21.338              -0.901           -1.512           -0.512                0.122
+11       ResOpsUS fit (own inflow/release, incl. wall)               resops_T    43    41 -0.086 -0.416  0.276             1.269          21.338              -1.031           -1.724           -0.564                0.073
+12                           HydroLAKES residence time  hydrolakes_res_time_d    42   109  0.560  0.404  0.681             1.083         223.600              -2.230           -2.659           -1.940                0.000
+13                           HydroLAKES residence time  hydrolakes_res_time_d    43   109  0.573  0.406  0.699             1.069         223.600              -2.242           -2.569           -1.936                0.000
+14                        residence time (gauge proxy)       res_time_gauge_d    42  1024  0.364  0.304  0.418             0.353         158.912              -2.506           -2.977           -1.927                0.000
+15                        residence time (gauge proxy)       res_time_gauge_d    43  1024  0.422  0.365  0.478             0.527         158.912              -2.362           -2.781           -1.848                0.000
+{
+ "seed_rank_agreement": {
+  "n": 1024,
+  "rho": 0.8239516687826335,
+  "lo": 0.7986769635665952,
+  "hi": 0.8469051529497874,
+  "p": 2.3808023154046815e-254
+ },
+ "seed_log10_ratio_43_over_42": {
+  "median": 0.125094153998028,
+  "q25": 0.0005998920181122857,
+  "q75": 0.2759166447979377,
+  "frac_within_factor2": 0.75
+ },
+ "partial": {
+  "s42": {
+   "restime_given_storage": [
+    0.2242944665975252,
+    1024
+   ],
+   "storage_given_restime": [
+    0.6203539848723267,
+    1024
+   ],
+   "storage_given_drainage": [
+    0.6773937192590438,
+    1024
+   ],
+   "drainage_given_storage": [
+    -0.209919601294613,
+    1024
+   ],
+   "height_given_storage": [
+    0.39303761688026834,
+    1024
+   ]
+  },
+  "s43": {
+   "restime_given_storage": [
+    0.29860259012230883,
+    1024
+   ],
+   "storage_given_restime": [
+    0.5402784694406695,
+    1024
+   ],
+   "storage_given_drainage": [
+    0.6505312082316269,
+    1024
+   ],
+   "drainage_given_storage": [
+    -0.28060303458880304,
+    1024
+   ],
+   "height_given_storage": [
+    0.20842453097178906,
+    1024
+   ]
+  }
+ },
+ "collinearity": {
+  "storage_vs_drainage": 0.3925847951374678,
+  "storage_vs_restime": 0.3159321599368724,
+  "storage_vs_height": 0.4374772209500287,
+  "restime_gauge_vs_grand": {
+   "n": 757,
+   "rho": 0.8962653933863716,
+   "lo": 0.8660277705363983,
+   "hi": 0.9202205194420329,
+   "p": 8.479038342127733e-269
+  },
+  "restime_gauge_vs_hydrolakes": {
+   "n": 109,
+   "rho": 0.7398375490652538,
+   "lo": 0.6416068660015822,
+   "hi": 0.826080440198111,
+   "p": 3.9506052274719255e-20
+  }
+ },
+ "disagreement_drivers": {
+  "s42": {
+   "offline_ratio_vs_restime": {
+    "n": 202,
+    "rho": -0.060351561220382016,
+    "lo": -0.20318620755142078,
+    "hi": 0.08784733668022478,
+    "p": 0.3935418456656368
+   },
+   "offline_ratio_vs_storage": {
+    "n": 202,
+    "rho": -0.1379474512944291,
+    "lo": -0.25019720742099205,
+    "hi": -0.01337774510153929,
+    "p": 0.05025293864523972
+   },
+   "resops_ratio_vs_resopsT": {
+    "n": 41,
+    "rho": -0.7880769992597659,
+    "lo": -0.9030903521274529,
+    "hi": -0.593326800816794,
+    "p": 9.611914052830151e-10
+   }
+  },
+  "s43": {
+   "offline_ratio_vs_restime": {
+    "n": 202,
+    "rho": -0.09369506173468607,
+    "lo": -0.22815518237567686,
+    "hi": 0.05717776829650662,
+    "p": 0.18473618989697438
+   },
+   "offline_ratio_vs_storage": {
+    "n": 202,
+    "rho": -0.2187374653954066,
+    "lo": -0.3380939532502983,
+    "hi": -0.0898562316183445,
+    "p": 0.001762925910462919
+   },
+   "resops_ratio_vs_resopsT": {
+    "n": 41,
+    "rho": -0.8795050873181042,
+    "lo": -0.9441977200372129,
+    "hi": -0.7498757896527105,
+    "p": 3.793791291643509e-14
+   }
+  }
+ }
+}
+42 {'ridge_cv_r2': 0.907, 'ridge_train_r2': 0.913, 'lin4_cv_r2': 0.582, 'lin_storage_only_cv_r2': 0.525, 'lin_restime_only_cv_r2': 0.124, 'lin_storage+restime_cv_r2': 0.539, 'lin_storage+drainage_cv_r2': 0.539, 'gbm_cv_r2': 0.954, 'gbm_train_r2': 0.983}
+ ridge coef: {'purpose_flood': 0.335, 'year_missing': 0.315, 'log10_surface_missing': -0.275, 'log10_storage_max': 0.204, 'purpose_recreation': -0.195, 'purpose_irrigation': 0.175, 'purpose_other': -0.158, 'purpose_navigation': -0.134}
+ gbm perm: {'log10_storage_max': 0.529, 'purpose_flood': 0.186, 'log10_storage_per_area': 0.063, 'year': 0.051, 'purpose_irrigation': 0.045, 'log10_surface_missing': 0.041, 'log10_surface': 0.037, 'purpose_recreation': 0.025}
+43 {'ridge_cv_r2': 0.889, 'ridge_train_r2': 0.895, 'lin4_cv_r2': 0.538, 'lin_storage_only_cv_r2': 0.456, 'lin_restime_only_cv_r2': 0.213, 'lin_storage+restime_cv_r2': 0.516, 'lin_storage+drainage_cv_r2': 0.526, 'gbm_cv_r2': 0.931, 'gbm_train_r2': 0.976}
+ ridge coef: {'log10_surface_missing': -0.347, 'purpose_flood': 0.32, 'year_missing': 0.203, 'purpose_navigation': -0.199, 'log10_storage_max': 0.188, 'purpose_other': 0.128, 'purpose_recreation': -0.121, 'log10_storage_max_missing': 0.098}
+ gbm perm: {'log10_storage_max': 0.584, 'purpose_flood': 0.244, 'log10_storage_per_area': 0.12, 'log10_max_discharge': 0.066, 'log10_surface': 0.065, 'log10_surface_missing': 0.062, 'year': 0.031, 'purpose_other': 0.021}
+         COMID                       name       primary_purpose  storage_mcm  res_time_gauge_d  T0_days_s42  T0_days_s43  off_seas_T0  off_seas_lo  off_seas_hi  off_nse_seas   off_STAID  log10_ratio_s42  log10_ratio_s43
+728   75001908                 Sumner Dam  Flood Risk Reduction       78.560           196.252        0.791        1.020     1000.000      169.052     1000.000         0.062   8384500.0           -3.102           -2.992
+886   77016654                 Courtright         Hydroelectric      152.071          2899.529        0.801        1.035     1000.000     1000.000     1000.000        -3.469  11214600.0           -3.097           -2.985
+722   75000290                Platoro Dam  Flood Risk Reduction       65.999           307.108        0.636        2.027      775.742      362.134     1000.000         0.553   8245000.0           -3.086           -2.583
+811   77007891              Moon Lake Dam            Irrigation       61.057           210.751        0.434        0.341      280.922      101.731      601.775         0.665   9291000.0           -2.811           -2.916
+991   78022608                Henrys Lake                 Other       72.405           611.537        0.188        1.146      101.731        2.907      217.923         0.106  13039500.0           -2.734           -1.948
+919   77028005          Santa Felicia Dam          Water Supply      107.930           751.552        0.441        0.404      169.052       61.219     1000.000         0.192  11109800.0           -2.583           -2.621
+990   78022428               Deadwood Dam         Hydroelectric      189.946           325.936        0.510        1.069      169.052        0.491     1000.000         0.374  13236500.0           -2.520           -2.199
+852   77014099                Tulloch Dam         Hydroelectric       82.643            39.305        0.229        0.431       47.490       28.579       61.219         0.438  11302000.0           -2.316           -2.042
+855   77014215          Camanche Main Dam          Water Supply      748.723           253.374        2.872        2.807        0.050        0.050        1.053         0.686  11319500.0            1.759            1.749
+814   77008189          Coyote Valley Dam  Flood Risk Reduction       91.894           116.233        1.680        2.377        0.050        0.050        2.255         0.751  11461500.0            1.526            1.677
+729   75002278   Two Rivers Diamond A Dam  Flood Risk Reduction      207.225          7352.816        1.154        0.461        0.050        0.050        1.053        -0.106   8390500.0            1.363            0.964
+845   77013878              Camp Far West            Irrigation      115.627           121.248        1.383        0.453        0.064        0.050        8.028         0.803  11424000.0            1.332            0.847
+1016  78026526              Applegate Dam  Flood Risk Reduction      101.392            93.247        1.348        0.892        0.064        0.050        3.748         0.656  14362000.0            1.321            1.141
+944   78015961       Howard A. Hanson Dam  Flood Risk Reduction       32.071            13.401        1.301        0.993        0.064        0.050        1.750         0.639  12106700.0            1.305            1.188
+549   74037334  Eagle Creek Reservoir Dam  Flood Risk Reduction       29.604            68.853        1.000        1.710        0.050        0.050        0.296         0.836   3353500.0            1.301            1.534
+224   73005301               Raystown Dam  Flood Risk Reduction      634.010           210.266        5.055        3.329        0.296        0.050        1.053         0.654   1563200.0            1.233            1.051
+        COMID                 name       primary_purpose  storage_mcm  da_eff_km2  res_time_gauge_d  T0_days_s42  T0_days_s43  off_seas_T0 off_on_reach  resops_T  hydrolakes_res_time_d
+956  78017689         Dworshak Dam  Flood Risk Reduction     4277.715    6319.571           446.226       17.357       11.299          NaN          NaN       NaN                    NaN
+780  77006280         Oroville Dam  Flood Risk Reduction     4382.966    9352.447          1620.553       16.397       10.805        3.748         True    65.664                  376.8
+677  74053844      Bull Shoals Dam  Flood Risk Reduction     3759.653   15703.098           208.572       15.557       12.013          NaN          NaN       NaN                    NaN
+938  78013953     Hungry Horse Dam  Flood Risk Reduction     4277.715    4298.655           514.749       15.012       11.985        4.831         True       NaN                    NaN
+679  74053909       Table Rock Dam  Flood Risk Reduction     3332.868   10411.752           262.853       13.224        6.935          NaN          NaN       NaN                    NaN
+909  77020840           Navajo Dam  Flood Risk Reduction     2107.527    8303.683          1027.492       12.629        5.412       28.579        False   161.387                  336.6
+853  77014139      New Melones Dam         Hydroelectric     3355.071    2341.867          1729.427       12.325       13.485          NaN          NaN       NaN                    NaN
+917  77027270            Alamo Dam  Flood Risk Reduction     1737.976   12354.243          7885.327       12.280        4.664        3.748         True       NaN                    NaN
+848  77014034       Don Pedro Main         Hydroelectric     2503.968    3988.582           896.599       11.136        7.750       47.490         True    23.877                  503.1
+633  74045533  Harry S. Truman Dam  Flood Risk Reduction     1484.377   29784.863            62.012       10.898       13.937          NaN          NaN       NaN                    NaN
+997  78024158        Palisades Dam  Flood Risk Reduction     1728.108   13304.795           112.992       10.752        3.596      362.134         True       NaN                  165.8
+306  73011587           Buford Dam  Flood Risk Reduction     2364.585    2693.588           597.263       10.611       11.384       13.341         True       NaN                  563.8

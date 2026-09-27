@@ -1,0 +1,391 @@
+{
+ "dam": {
+  "n": 458,
+  "beta_pass_pct": [
+   0.8092,
+   0.9488,
+   1.0502,
+   1.1607,
+   1.2769
+  ],
+  "frac_beta_pass_gt_1_1": 0.373,
+  "frac_beta_pass_lt_0_9": 0.179,
+  "alpha_pass_pct": [
+   0.5768,
+   0.7547,
+   0.8874,
+   0.9984,
+   1.1099
+  ],
+  "alpha_seas_pct": [
+   0.541,
+   0.712,
+   0.8255,
+   0.9428,
+   1.0253
+  ],
+  "d_alpha_seas_minus_pass_pct": [
+   -0.1878,
+   -0.0925,
+   -0.0216,
+   -0.0044,
+   0.0036
+  ],
+  "r_pass_pct": [
+   0.5535,
+   0.6965,
+   0.8242,
+   0.8901,
+   0.9209
+  ],
+  "r_seas_pct": [
+   0.5875,
+   0.7262,
+   0.8477,
+   0.8971,
+   0.9233
+  ],
+  "d_r_seas_minus_pass_pct": [
+   -0.0166,
+   -0.0018,
+   0.0026,
+   0.0293,
+   0.0891
+  ],
+  "dkge_seas_pct": [
+   -0.0434,
+   -0.0139,
+   -0.0019,
+   0.0197,
+   0.0622
+  ],
+  "dnse_seas_pct": [
+   -0.0157,
+   -0.0026,
+   0.0068,
+   0.0707,
+   0.1951
+  ],
+  "frac_alpha_pass_lt_1": 0.753
+ },
+ "on_reach_dam": {
+  "n": 214,
+  "beta_pass_pct": [
+   0.7704,
+   0.925,
+   1.0231,
+   1.1308,
+   1.2674
+  ],
+  "frac_beta_pass_gt_1_1": 0.313,
+  "frac_beta_pass_lt_0_9": 0.234,
+  "alpha_pass_pct": [
+   0.5169,
+   0.6834,
+   0.8472,
+   0.9717,
+   1.0947
+  ],
+  "alpha_seas_pct": [
+   0.4946,
+   0.6485,
+   0.7832,
+   0.9066,
+   0.9994
+  ],
+  "d_alpha_seas_minus_pass_pct": [
+   -0.2058,
+   -0.1097,
+   -0.0202,
+   -0.0025,
+   0.0315
+  ],
+  "r_pass_pct": [
+   0.4682,
+   0.602,
+   0.7353,
+   0.8705,
+   0.9158
+  ],
+  "r_seas_pct": [
+   0.5314,
+   0.6406,
+   0.7943,
+   0.8747,
+   0.9183
+  ],
+  "d_r_seas_minus_pass_pct": [
+   -0.016,
+   -0.0008,
+   0.0059,
+   0.0536,
+   0.1401
+  ],
+  "dkge_seas_pct": [
+   -0.0467,
+   -0.0117,
+   -0.0006,
+   0.0295,
+   0.0901
+  ],
+  "dnse_seas_pct": [
+   -0.0166,
+   -0.0017,
+   0.0204,
+   0.1208,
+   0.2728
+  ],
+  "frac_alpha_pass_lt_1": 0.785
+ },
+ "control": {
+  "n": 458,
+  "beta_pass_pct": [
+   0.8581,
+   0.9547,
+   1.0411,
+   1.1345,
+   1.2835
+  ],
+  "frac_beta_pass_gt_1_1": 0.334,
+  "frac_beta_pass_lt_0_9": 0.146,
+  "alpha_pass_pct": [
+   0.6383,
+   0.7933,
+   0.8926,
+   0.9856,
+   1.0837
+  ],
+  "alpha_seas_pct": [
+   0.6473,
+   0.7799,
+   0.8746,
+   0.9651,
+   1.0532
+  ],
+  "d_alpha_seas_minus_pass_pct": [
+   -0.0396,
+   -0.0175,
+   -0.009,
+   -0.0037,
+   -0.0006
+  ],
+  "r_pass_pct": [
+   0.7297,
+   0.8429,
+   0.8913,
+   0.9182,
+   0.9406
+  ],
+  "r_seas_pct": [
+   0.7495,
+   0.8483,
+   0.8924,
+   0.9186,
+   0.9414
+  ],
+  "d_r_seas_minus_pass_pct": [
+   -0.0072,
+   -0.0025,
+   -0.0001,
+   0.0024,
+   0.0087
+  ],
+  "dkge_seas_pct": [
+   -0.013,
+   -0.0083,
+   -0.0027,
+   0.0004,
+   0.0085
+  ],
+  "dnse_seas_pct": [
+   -0.0103,
+   -0.0041,
+   0.0001,
+   0.0051,
+   0.0253
+  ],
+  "frac_alpha_pass_lt_1": 0.771
+ },
+ "dam_gauges_with_dNSE_gt_0.01": {
+  "n": 221,
+  "median_dkge": 0.0182,
+  "median_dalpha": -0.0837,
+  "median_dr": 0.0311,
+  "frac_alpha_pass_lt_1": 0.629
+ },
+ "log_beta_dam_minus_matched_control": {
+  "n": 458,
+  "pct": [
+   -0.3517,
+   -0.1359,
+   -0.0063,
+   0.1498,
+   0.3208
+  ],
+  "frac_pos": 0.491
+ },
+ "nid_max_discharge_on_reach": {
+  "n": 214,
+  "n_finite": 195,
+  "pct_m3s": [
+   173.0726,
+   471.4755,
+   1506.4562,
+   3398.0216,
+   6637.4688
+  ]
+ },
+ "seed42": {
+  "n": 1024,
+  "T0_hours_pct": [
+   3.288,
+   4.6494,
+   8.4767,
+   20.1578,
+   57.6136
+  ],
+  "frac_T0_within_10pct_of_init_4p5h": 0.095,
+  "frac_T0_gt_1d": 0.214,
+  "amp_pct": [
+   0.0656,
+   0.0914,
+   0.1329,
+   0.2046,
+   0.3041
+  ],
+  "spearman_T0_log_storage": 0.665,
+  "spearman_T0_log_storage_per_area": 0.412,
+  "spearman_T0_height": 0.552,
+  "T0_hours_by_purpose": {
+   "Fish and Wildlife Pond": [
+    16,
+    5.39
+   ],
+   "Flood Risk Reduction": [
+    231,
+    32.12
+   ],
+   "Hydroelectric": [
+    266,
+    6.24
+   ],
+   "Irrigation": [
+    95,
+    12.0
+   ],
+   "Navigation": [
+    25,
+    2.56
+   ],
+   "Other": [
+    48,
+    4.9
+   ],
+   "Recreation": [
+    155,
+    4.59
+   ],
+   "Tailings": [
+    19,
+    5.49
+   ],
+   "Water Supply": [
+    154,
+    10.14
+   ]
+  },
+  "doy_of_max_T_pct": [
+   23.2411,
+   37.1982,
+   254.3683,
+   283.1208,
+   327.4034
+  ]
+ },
+ "seed43": {
+  "n": 1024,
+  "T0_hours_pct": [
+   4.8784,
+   7.6029,
+   12.6556,
+   25.2215,
+   55.4578
+  ],
+  "frac_T0_within_10pct_of_init_4p5h": 0.069,
+  "frac_T0_gt_1d": 0.266,
+  "amp_pct": [
+   0.098,
+   0.1311,
+   0.1751,
+   0.2397,
+   0.3296
+  ],
+  "spearman_T0_log_storage": 0.597,
+  "spearman_T0_log_storage_per_area": 0.478,
+  "spearman_T0_height": 0.403,
+  "T0_hours_by_purpose": {
+   "Fish and Wildlife Pond": [
+    16,
+    20.73
+   ],
+   "Flood Risk Reduction": [
+    231,
+    31.8
+   ],
+   "Hydroelectric": [
+    266,
+    8.74
+   ],
+   "Irrigation": [
+    95,
+    10.7
+   ],
+   "Navigation": [
+    25,
+    2.61
+   ],
+   "Other": [
+    48,
+    17.03
+   ],
+   "Recreation": [
+    155,
+    8.85
+   ],
+   "Tailings": [
+    19,
+    15.51
+   ],
+   "Water Supply": [
+    154,
+    11.63
+   ]
+  },
+  "doy_of_max_T_pct": [
+   124.1236,
+   156.0942,
+   191.8795,
+   223.3339,
+   241.0895
+  ]
+ },
+ "seed42_vs_43": {
+  "n": 1024,
+  "spearman_T0": 0.824,
+  "median_abs_log_ratio_T0": 0.383,
+  "spearman_a": 0.604,
+  "spearman_b": 0.675,
+  "frac_amp_sign_agree_a": 0.735,
+  "frac_amp_sign_agree_b": 0.434
+ },
+ "on_reach_learned_vs_fit": {
+  "n": 214,
+  "n_fit_active": 170,
+  "median_fit_T0_active": 2.255,
+  "median_learned_T0_active": 0.776,
+  "median_log10_ratio_fit_over_learned": 0.555,
+  "spearman": 0.466,
+  "frac_fit_T0_gt_5d": 0.294,
+  "frac_learned_T0_gt_5d": 0.061
+ }
+}

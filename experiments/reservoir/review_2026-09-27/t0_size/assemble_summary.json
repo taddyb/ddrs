@@ -1,0 +1,44 @@
+{
+ "n_comids": 1024,
+ "n_T0_s42": 1024,
+ "n_T0_s43": 1024,
+ "n_features": 1024,
+ "q_gauge_how": {
+  "nearest": 777,
+  "on_reach": 247
+ },
+ "q_gauge_dist_km_quantiles": {
+  "0.1": 0.0,
+  "0.5": 13.3,
+  "0.9": 43.2
+ },
+ "n_grand_meanflow": 757,
+ "n_grand_obs_meanflow": 199,
+ "n_offline_fit": 339,
+ "n_offline_on_reach": 202,
+ "n_resops": 41,
+ "n_hydrolakes": 109,
+ "purposes": {
+  "Hydroelectric": 266,
+  "Flood Risk Reduction": 233,
+  "Recreation": 154,
+  "Water Supply": 154,
+  "Irrigation": 95,
+  "Other": 47,
+  "Navigation": 25,
+  "Tailings": 18,
+  "Fish and Wildlife Pond": 16,
+  "Unknown": 12,
+  "Grade Stabilization": 2,
+  "Debris Control": 2
+ },
+ "qmean_gauge_vs_grand": {
+  "n": 757,
+  "spearman": 0.9335617847590524,
+  "log10_ratio_median": -0.015138655708915386,
+  "log10_ratio_iqr": [
+   -0.11436913975940585,
+   0.08428401522360458
+  ]
+ }
+}

@@ -1,0 +1,20 @@
+gauges: 214 windows per gauge: 300
+sanity: Spearman(T_cont, lin_T0 csv) = 0.999; median T_cont 0.82 vs csv 0.87
+active (T_cont > floor): 158 of 214
+medians over active gauges (days):  T_cont 1.75
+  T_win90_5        median   1.75  ratio to cont: median 1.00, IQR 0.78-1.00; below half: 0.07; at floor: 0.01; Spearman with cont 0.98
+  T_oracle90_5     median   1.75  ratio to cont: median 1.00, IQR 1.00-1.29; below half: 0.03; at floor: 0.01; Spearman with cont 0.98
+  T_win90_30       median   1.75  ratio to cont: median 1.00, IQR 0.78-1.00; below half: 0.06; at floor: 0.02; Spearman with cont 0.98
+  T_win120_30      median   1.75  ratio to cont: median 1.00, IQR 0.78-1.29; below half: 0.07; at floor: 0.02; Spearman with cont 0.97
+  T_win180_30      median   1.75  ratio to cont: median 1.00, IQR 1.00-1.22; below half: 0.03; at floor: 0.01; Spearman with cont 0.98
+  T_win365_30      median   1.75  ratio to cont: median 1.00, IQR 1.00-1.00; below half: 0.03; at floor: 0.02; Spearman with cont 0.99
+  T_win365_5       median   1.75  ratio to cont: median 1.00, IQR 1.00-1.00; below half: 0.02; at floor: 0.01; Spearman with cont 0.99
+                    T_cont  T_win90_5  ...  T_win365_30   n
+bin                                    ...                 
+(0.06, 0.5]       0.229439   0.295767  ...     0.229439  39
+(0.5, 2.0]        1.052844   1.052844  ...     1.052844  44
+(2.0, 10.0]       3.747813   3.747813  ...     4.831264  43
+(10.0, 50.0]     17.197878  13.341113  ...    17.197878  25
+(50.0, 2000.0]  101.731305  17.197878  ...    47.490436   7
+
+[5 rows x 7 columns]
