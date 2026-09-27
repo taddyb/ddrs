@@ -156,6 +156,9 @@ struct MicroBatchOutcome<I: Backend> {
     /// Median `T0` (days) of the release head over this batch's dams and the
     /// dam count, when the learned release is on and the batch has dams.
     release_t0: Option<(f32, usize)>,
+    /// This micro-batch's dams for the per-step per-dam terms
+    /// (`crate::training::dam_terms`), when the run has per-dam parameters.
+    dam_record: Option<crate::training::dam_terms::DamBatchRecord>,
 }
 
 /// Steps 2–6 of the per-mini-batch flow (collate → forward → NaN filter →
@@ -200,18 +203,14 @@ fn run_micro_batch<I: Backend>(
     let pred_hourly = forward_with_release_dams::<I>(
         cfg, &tensors, head, release_head, dams, device, false, gate_tau,
     );
-    // `per_dam_l2 · Σ(θ² + δ²)` over this batch's active dams (their table
-    // rows), added to the optimised loss; the logged loss stays the data loss.
-    let penalty = dams.zip(cfg.release_head.as_ref()).and_then(|(d, rh)| {
-        if rh.per_dam_l2 <= 0.0 {
-            return None;
-        }
+    // This batch's dams (their table rows), for the per-dam terms the driver
+    // adds ONCE per optimizer step (`crate::training::dam_terms`), not here.
+    let dam_record = dams.and_then(|_| {
         let active = tensors.reservoir_rows.as_ref()?.active_on(tensors.window.window_start);
-        if active.table_index.is_empty() {
-            return None;
-        }
-        let idx = crate::nn::dam_params::table_index::<Autodiff<I>>(&active.table_index, device);
-        d.sum_sq(idx).map(|s| s * rh.per_dam_l2)
+        (!active.table_index.is_empty()).then(|| crate::training::dam_terms::DamBatchRecord {
+            window_start: tensors.window.window_start,
+            table_index: active.table_index,
+        })
     });
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
     let dims = daily.dims();
@@ -295,10 +294,6 @@ fn run_micro_batch<I: Backend>(
     // Config-selected objective (default L1); autograd alive on `p_filt`.
     let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss, sigma, sigma_d);
     let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
-    let loss = match penalty {
-        Some(p) => loss + p,
-        None => loss,
-    };
 
     Ok(Some(MicroBatchOutcome {
         loss,
@@ -307,6 +302,7 @@ fn run_micro_batch<I: Backend>(
         median_n,
         n_at_floor,
         release_t0,
+        dam_record,
     }))
 }
 
@@ -341,6 +337,45 @@ fn step_dams<I: Backend>(
     let (params, _touched) = d.optimizer.step(rh.per_dam_lr, d.params.clone(), &dg);
     d.params = params;
     rule_curve_c_stats(d, &dg, rh.rule_curve_max)
+}
+
+/// The step's per-dam terms (`crate::training::dam_terms`), evaluated ONCE on
+/// the per-dam parameters after the step's last micro-batch, backpropagated
+/// on their own, and added to `dam_grads` (the step's pooled data gradient
+/// of the per-dam parameters). Returns the combined gradient and the terms'
+/// values for the log; `dam_grads` unchanged when the run has no per-dam
+/// parameters or every term is off.
+fn add_dam_step_terms<I: Backend>(
+    cfg: &Config,
+    release: Option<&ReleaseTrainer<I>>,
+    terms: &crate::training::dam_terms::DamStepTerms,
+    dam_grads: Option<GradientsParams>,
+) -> (Option<GradientsParams>, Option<f32>) {
+    let Some((d, rh)) = release.and_then(|r| r.dams.as_ref()).zip(cfg.release_head.as_ref()) else {
+        return (dam_grads, None);
+    };
+    let Some(out) = terms.loss(&d.params, rh) else {
+        return (dam_grads, None);
+    };
+    let tg = GradientsParams::from_grads(out.total.backward(), &d.params);
+    let grads = match dam_grads {
+        Some(g) => {
+            let mut acc = GradientsAccumulator::<crate::nn::dam_params::DamParams<Autodiff<I>>>::new();
+            acc.accumulate(&d.params, g);
+            acc.accumulate(&d.params, tg);
+            acc.grads()
+        }
+        None => tg,
+    };
+    (Some(grads), Some(out.l2))
+}
+
+/// ` per_dam_l2_term=<v>` for the step's log line, or empty.
+fn dam_terms_log(l2: Option<f32>) -> String {
+    match l2 {
+        Some(v) => format!(" per_dam_l2_term={v:.4e}"),
+        None => String::new(),
+    }
 }
 
 /// ` rule_curve_|c|_median=<v> (<k> dams with gradient)`, or empty.
@@ -486,6 +521,7 @@ pub fn train<I: Backend>(
                     median_n,
                     n_at_floor,
                     release_t0,
+                    dam_record,
                     ..
                 }) = outcome
                 else {
@@ -526,6 +562,13 @@ pub fn train<I: Backend>(
                     let rg = clip_grad_norm(rg, &r.head, grad_clip);
                     r.head = r.optimizer.step(lr as f64, r.head.clone(), rg);
                 }
+                // The per-dam terms, once for this step (one micro-batch here).
+                let mut terms = crate::training::dam_terms::DamStepTerms::default();
+                if let (Some(rec), true) = (dam_record.as_ref(), dam_grads.is_some()) {
+                    terms.add(rec);
+                }
+                let (dam_grads, term_values) =
+                    add_dam_step_terms::<I>(cfg, state.release.as_ref(), &terms, dam_grads);
                 let rc_stats = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
 
                 save_step_checkpoint::<I>(checkpoint_dir, epoch, state, &*optimizer, &sampler)?;
@@ -543,12 +586,13 @@ pub fn train<I: Backend>(
                 crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
 
                 eprintln!(
-                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%{}{}",
+                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%{}{}{}",
                     state.mini_batch,
                     loss_f32,
                     n_at_floor * 100.0,
                     release_log(release_t0),
                     rule_curve_log(rc_stats),
+                    dam_terms_log(term_values),
                 );
                 state.mini_batch += 1;
                 mb_done += 1;
@@ -570,6 +614,8 @@ pub fn train<I: Backend>(
                 let mut loss_weighted_sum = 0.0f64;
                 let mut micros_drawn = 0usize;
                 let mut micros_valid = 0usize;
+                // The step's dams, for the per-dam terms added once below.
+                let mut dam_terms = crate::training::dam_terms::DamStepTerms::default();
 
                 while micros_drawn < accum_steps {
                     let Some(idx) = sampler.next_batch() else { break };
@@ -595,6 +641,7 @@ pub fn train<I: Backend>(
                         median_n,
                         n_at_floor,
                         release_t0,
+                        dam_record,
                     }) = outcome
                     {
                         // Scale the mean loss back to a SUM before backward;
@@ -623,6 +670,9 @@ pub fn train<I: Backend>(
                                 if let Some(d) = r.dams.as_ref() {
                                     let dgrads = GradientsParams::from_module(&mut raw, &d.params);
                                     dam_accumulator.accumulate(&d.params, dgrads);
+                                    if let Some(rec) = dam_record.as_ref() {
+                                        dam_terms.add(rec);
+                                    }
                                 }
                             }
                         }
@@ -672,6 +722,11 @@ pub fn train<I: Backend>(
                     let dam_grads = state.release.as_ref().and_then(|r| r.dams.as_ref()).map(|d| {
                         scale_grads(dam_accumulator.grads(), &d.params, 1.0 / total_n as f32)
                     });
+                    // The per-dam terms, once for the whole step, over the
+                    // union of its micro-batches' dams; their gradient joins
+                    // the pooled (1/Σn) data gradient unscaled.
+                    let (dam_grads, term_values) =
+                        add_dam_step_terms::<I>(cfg, state.release.as_ref(), &dam_terms, dam_grads);
                     let rc_stats = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
 
                     save_step_checkpoint::<I>(
@@ -683,10 +738,11 @@ pub fn train<I: Backend>(
                     )?;
 
                     eprintln!(
-                        "  mb={} loss={:.6} (accumulated {micros_valid}/{micros_drawn} micro-batches, n={total_n}){}",
+                        "  mb={} loss={:.6} (accumulated {micros_valid}/{micros_drawn} micro-batches, n={total_n}){}{}",
                         state.mini_batch,
                         loss_weighted_sum / total_n as f64,
                         rule_curve_log(rc_stats),
+                        dam_terms_log(term_values),
                     );
                 }
 

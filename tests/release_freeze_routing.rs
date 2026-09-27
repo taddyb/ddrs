@@ -282,6 +282,8 @@ fn frozen_routing_with_rule_curve_trains_the_per_dam_parameters() {
         ("seasonal", false.into()),
         ("rule_curve", true.into()),
         ("per_dam_t0", true.into()),
+        // The per-step L2 term runs through the real driver too.
+        ("per_dam_l2", 1e-3.into()),
     ];
     let cfg = frozen_cfg_with(tmp.path(), "rc.yaml", with_inflow.to_str().unwrap(), &ckpt, false, &extra);
     let reference = params(&reference_head(&cfg, &ckpt));

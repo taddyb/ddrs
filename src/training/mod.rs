@@ -12,6 +12,7 @@
 pub mod adadelta;
 pub mod bootstrap;
 pub mod checkpoint;
+pub mod dam_terms;
 pub mod driver;
 pub mod eval;
 pub mod forward;

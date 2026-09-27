@@ -978,8 +978,11 @@ pub struct ReleaseHeadSection {
     /// batch. Default 0.05; must be finite and > 0.
     #[serde(default = "default_per_dam_lr")]
     pub per_dam_lr: f32,
-    /// Weight of the L2 penalty `per_dam_l2·Σ(θ² + δ²)` over the batch's
-    /// active dams, added to each mini-batch loss. Default 0; rejected < 0.
+    /// Weight of the L2 penalty `per_dam_l2·Σ(θ² + δ²)` over the optimizer
+    /// step's dams (the union of its micro-batches' active dams, each once),
+    /// added ONCE per optimizer step (`crate::training::dam_terms`), so its
+    /// strength does not depend on how the batch is split into micro-batches.
+    /// Default 0; rejected < 0.
     #[serde(default)]
     pub per_dam_l2: f32,
 }

@@ -476,7 +476,8 @@ release_head:            # top-level block, deny_unknown_fields
   rule_curve_max: 1.0    # c = rule_curve_max·tanh(θ); > 0
   per_dam_t0: false      # T0_d = T0_head,d·exp(δ_d)
   per_dam_lr: 0.05       # constant lr of the per-dam parameters' own Adam; > 0
-  per_dam_l2: 0.0        # per_dam_l2·Σ(θ² + δ²) over the batch's active dams; >= 0
+  per_dam_l2: 0.0        # per_dam_l2·Σ(θ² + δ²) over the optimizer step's dams (union over its
+                         # micro-batches), added ONCE per step; >= 0
 ```
 
 **Rule curve and per-dam parameters (added 2026-09-27).** `rule_curve: true` makes the storage
