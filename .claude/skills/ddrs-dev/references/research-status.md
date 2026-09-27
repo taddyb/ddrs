@@ -720,6 +720,12 @@ was reverted in #143 and never evaluated at gauges.
   +0.027 [+0.010, +0.045], 89 of 121 up; seasonal `T` +0.040; area-matched undammed controls +0.000
   (65 / 56). Fitted `T0` 2.1 d at dams vs pass-through at controls. Cap overfits; KGE flat. This is the
   user's chosen direction: learn release parameters, tune against gauges, no schedules. Findings §9.
+- **NID dam table (2026-09-26):** `/mnt/ssd1/data/nid/` (fetch + snap scripts in
+  `~/projects/remote_sensing_extraction/nid/`). 11,796 CONUS dams snapped to MERIT (91 % same reach as the GRanD
+  crosswalk, 98.5 % same or adjacent); 5,935 inside eval networks (1,099 >= 10 MCM),
+  `experiments/reservoir/nid/nid_dams_in_eval_network.csv`. 1,560 eval gauges have a dam upstream vs 909 with the
+  NWM table; DOR > 0.5: 308 (normal storage) or 410 (maximum). Use it, not the NWM table, for the dam list.
+  Findings `2026-09-26-nid-dams-merit-findings.md`.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
   routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release

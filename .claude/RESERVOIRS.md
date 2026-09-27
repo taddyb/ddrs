@@ -67,8 +67,10 @@ change.
   upstream error.
 - **A boundary gauge must not be a training target**, and B's metrics are conditioned on observed
   releases: record the mode in the manifest.
-- **The reservoir table is the NWM / RFC-DA set** (`~/projects/ddr/data/merit_reservoir_params.csv`,
-  2,178 COMIDs). It misses dams outside it (Alamo). Counts built on it are lower bounds.
+- **The NWM / RFC-DA set** (`~/projects/ddr/data/merit_reservoir_params.csv`, 2,178 COMIDs) misses
+  dams (Alamo). Since 2026-09-26 the fuller list is the NID snapped to MERIT:
+  `experiments/reservoir/nid/nid_dams_in_eval_network.csv` (5,935 dams inside eval networks,
+  1,099 >= 10 MCM); see `research/findings/2026-09-26-nid-dams-merit-findings.md`.
 - **f32:** carry `S` as the active buffer (a few MCM), not total volume.
 - **Invariant 1:** off by default; DDR master has no reservoirs, so `ddr_sandbox_match` must not
   see any change.
