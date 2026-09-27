@@ -1,0 +1,106 @@
+{
+ "source": "experiments/reservoir/nid/nid_dams_in_eval_network.csv",
+ "filter": {
+  "min_storage_mcm": 10.0,
+  "snap_classes": [
+   "A",
+   "B",
+   "C",
+   "D"
+  ]
+ },
+ "n_dams_kept": 1099,
+ "n_comids": 1024,
+ "n_comids_with_several_dams": 51,
+ "feature_columns": [
+  "log10_storage",
+  "log10_storage_max",
+  "log10_surface",
+  "log10_drainage",
+  "log10_storage_per_area",
+  "log10_max_discharge",
+  "height",
+  "year",
+  "log10_storage_max_missing",
+  "log10_surface_missing",
+  "log10_max_discharge_missing",
+  "year_missing",
+  "purpose_flood",
+  "purpose_hydro",
+  "purpose_supply",
+  "purpose_irrigation",
+  "purpose_recreation",
+  "purpose_navigation",
+  "purpose_other"
+ ],
+ "continuous": {
+  "log10_storage": {
+   "median_fill": 1.6494884223570319,
+   "mean": 1.7609525280839935,
+   "std": 0.5776933395458854,
+   "n_missing": 0
+  },
+  "log10_storage_max": {
+   "median_fill": 1.8463055152649313,
+   "mean": 1.936884934868485,
+   "std": 0.590720354341578,
+   "n_missing": 36
+  },
+  "log10_surface": {
+   "median_fill": 0.8313921946484745,
+   "mean": 0.8698660597394026,
+   "std": 0.6484388423223678,
+   "n_missing": 75
+  },
+  "log10_drainage": {
+   "median_fill": 2.6160563238345973,
+   "mean": 2.7044664630876896,
+   "std": 0.7603922809957946,
+   "n_missing": 0
+  },
+  "log10_storage_per_area": {
+   "median_fill": -0.8452393106986312,
+   "mean": -0.9824298639052542,
+   "std": 0.7335613591603674,
+   "n_missing": 0
+  },
+  "log10_max_discharge": {
+   "median_fill": 2.929166142845047,
+   "mean": 2.82974175036449,
+   "std": 0.7779148603508992,
+   "n_missing": 180
+  },
+  "height": {
+   "median_fill": 25.908,
+   "mean": 34.869536718750005,
+   "std": 32.35852373790591,
+   "n_missing": 0
+  },
+  "year": {
+   "median_fill": 1951.0,
+   "mean": 1945.0859375,
+   "std": 30.650729585461644,
+   "n_missing": 27
+  }
+ },
+ "purposes": {
+  "purpose_flood": [
+   "Flood Risk Reduction"
+  ],
+  "purpose_hydro": [
+   "Hydroelectric"
+  ],
+  "purpose_supply": [
+   "Water Supply"
+  ],
+  "purpose_irrigation": [
+   "Irrigation"
+  ],
+  "purpose_recreation": [
+   "Recreation"
+  ],
+  "purpose_navigation": [
+   "Navigation"
+  ]
+ }
+}
