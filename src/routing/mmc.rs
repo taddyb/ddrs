@@ -21,12 +21,13 @@
 use std::sync::Arc;
 
 use burn::backend::Autodiff;
-use burn::tensor::{backend::Backend, Tensor, TensorData};
+use burn::tensor::{backend::Backend, Bool, Int, Tensor, TensorData};
 
 use burn::tensor::TensorPrimitive;
 
 use crate::config::{Config, SparseSolver};
-use crate::routing::mmc_op::ReservoirTensors;
+use crate::routing::mmc_op::{ReleaseParent, ReservoirTensors};
+use crate::routing::release::{MIN_T_DAYS, SECONDS_PER_DAY};
 use crate::routing::utils::denormalize;
 use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAdjacency};
 
@@ -96,6 +97,57 @@ pub struct SpatialParameters<I: Backend> {
     pub gamma: Option<Tensor<Autodiff<I>, 1>>,
 }
 
+/// A dam release for [`MuskingumCunge::set_dam_release`]: each dam row is a
+/// linear reservoir `S = T_d(t)·Q` with
+/// `T_d(t) = max(T0_d·exp(a_d·sin ω_t + b_d·cos ω_t), 1/24 d)`.
+/// See `crate::routing::release` for the phase convention and the clamp.
+///
+/// The tensors may be autodiff-tracked (the learned release: `T0`, `a`, `b`
+/// come from the release head) or constants (a seasonal `fixed` table). Either
+/// way `T` reaches the timestep op as a parent, so a tracked `T0` gets its
+/// gradient through the hand-written backward (B19''') and ordinary autodiff.
+pub struct DamRelease<I: Backend> {
+    /// Dam row positions in the network, unique.
+    pub rows: Vec<usize>,
+    /// `[rows.len()]` residence time scale `T0`, days.
+    pub t0_days: Tensor<Autodiff<I>, 1>,
+    /// `(a, b)`, each `[rows.len()]`. `None` is a constant `T = T0`.
+    pub seasonal: Option<(Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>)>,
+    /// `(sin ω, cos ω)` per lateral-inflow row (hour of the window); must
+    /// cover every routed step. `crate::routing::release::seasonal_phase`.
+    pub phase: Vec<[f32; 2]>,
+}
+
+/// [`DamRelease`] armed on an engine: the dam rows as device tensors, plus the
+/// constant `T` (seconds) when the release is not seasonal, and the step `T`
+/// `forward` hands to `route_timestep`.
+struct ArmedRelease<I: Backend> {
+    rows: Tensor<I, 1, Int>,
+    mask: Tensor<I, 1, Bool>,
+    t0_days: Tensor<Autodiff<I>, 1>,
+    seasonal: Option<(Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>)>,
+    phase: Vec<[f32; 2]>,
+    /// `max(T0, 1/24)·86400`, precomputed once for a non-seasonal release.
+    t_constant: Option<Tensor<Autodiff<I>, 1>>,
+    /// This step's `T` (seconds), set by `forward` before `route_timestep`.
+    t_step: Option<Tensor<Autodiff<I>, 1>>,
+}
+
+impl<I: Backend> ArmedRelease<I> {
+    /// `T` (seconds) for the step producing routed column `t`, in autodiff.
+    fn t_seconds_at(&self, t: usize) -> Tensor<Autodiff<I>, 1> {
+        match (&self.seasonal, &self.t_constant) {
+            (None, Some(c)) => c.clone(),
+            (Some((a, b)), _) => {
+                let [sin_w, cos_w] = self.phase[t];
+                let expo = a.clone() * sin_w + b.clone() * cos_w;
+                (self.t0_days.clone() * expo.exp()).clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY
+            }
+            (None, None) => unreachable!("a non-seasonal release precomputes t_constant"),
+        }
+    }
+}
+
 /// Differentiable Muskingum-Cunge routing engine.
 pub struct MuskingumCunge<I: Backend> {
     cfg: Config,
@@ -121,6 +173,9 @@ pub struct MuskingumCunge<I: Backend> {
     /// Set by `set_reservoir_rows`; `None` keeps the timestep op
     /// byte-identical to the no-reservoir path.
     reservoir: Option<ReservoirTensors<I>>,
+    /// Seasonal or learned dam release (`set_dam_release`). Exclusive with
+    /// `reservoir`. `None` keeps the timestep op byte-identical.
+    release: Option<ArmedRelease<I>>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -221,6 +276,7 @@ impl<I: Backend> MuskingumCunge<I> {
             leakance_factor: None,
             impervious_mask: None,
             reservoir: None,
+            release: None,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -338,6 +394,7 @@ impl<I: Backend> MuskingumCunge<I> {
         // Reservoir rows index the previous network, so they do not survive
         // a new one: re-arm with `set_reservoir_rows` after this call.
         self.reservoir = None;
+        self.release = None;
 
         match initial_state {
             Some(q0_ext) => {
@@ -462,6 +519,13 @@ impl<I: Backend> MuskingumCunge<I> {
         let n = self
             .n_segments
             .ok_or("set_reservoir_rows: call setup_inputs first")?;
+        if self.release.is_some() {
+            return Err(
+                "set_reservoir_rows: a dam release is already set with set_dam_release; \
+                 the two are exclusive"
+                    .into(),
+            );
+        }
         if rows.len() != t_days.len() {
             return Err(format!(
                 "set_reservoir_rows: {} rows but {} residence times",
@@ -492,6 +556,87 @@ impl<I: Backend> MuskingumCunge<I> {
         self.reservoir = (!rows.is_empty()).then(|| ReservoirTensors {
             mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
             t_seconds: Tensor::from_floats(t_seconds.as_slice(), &self.device),
+        });
+        Ok(())
+    }
+
+    /// Route `release.rows` as seasonal linear reservoirs (see [`DamRelease`]).
+    ///
+    /// Call AFTER [`Self::setup_inputs`]. Empty `rows` leaves the engine as
+    /// with no release. Returns `Err`, changing nothing, when option C rows
+    /// are already set (the two are exclusive), on a row `>= n_segments` or
+    /// listed twice, a `T0`/`a`/`b` length that is not `rows.len()`, or a
+    /// `phase` shorter than the lateral-inflow window. `T0`'s own values are
+    /// not checked: the clamp at one hour holds `T >= dt` whatever they are.
+    ///
+    /// Only the plain timestep op carries the release: `route_timestep`
+    /// panics if it is set while leakance or the CUDA-graph path is active.
+    pub fn set_dam_release(&mut self, release: DamRelease<I>) -> Result<(), String> {
+        let n = self
+            .n_segments
+            .ok_or("set_dam_release: call setup_inputs first")?;
+        if self.reservoir.is_some() {
+            return Err(
+                "set_dam_release: option C rows are already set with set_reservoir_rows; \
+                 the two are exclusive"
+                    .into(),
+            );
+        }
+        let n_dams = release.rows.len();
+        let mut mask = vec![false; n];
+        for &row in &release.rows {
+            if row >= n {
+                return Err(format!("set_dam_release: row {row} is outside the {n}-reach network"));
+            }
+            if mask[row] {
+                return Err(format!("set_dam_release: row {row} is listed twice"));
+            }
+            mask[row] = true;
+        }
+        if release.t0_days.dims()[0] != n_dams {
+            return Err(format!(
+                "set_dam_release: T0 has {} entries but there are {n_dams} dam rows",
+                release.t0_days.dims()[0]
+            ));
+        }
+        if let Some((a, b)) = &release.seasonal {
+            if a.dims()[0] != n_dams || b.dims()[0] != n_dams {
+                return Err(format!(
+                    "set_dam_release: a has {} and b has {} entries but there are {n_dams} dam rows",
+                    a.dims()[0],
+                    b.dims()[0]
+                ));
+            }
+        }
+        let n_rows = self
+            .q_prime
+            .as_ref()
+            .map(|q| q.dims()[0])
+            .ok_or("set_dam_release: call setup_inputs first")?;
+        if release.phase.len() < n_rows {
+            return Err(format!(
+                "set_dam_release: phase has {} rows but the window routes {n_rows}",
+                release.phase.len()
+            ));
+        }
+        if n_dams == 0 {
+            self.release = None;
+            return Ok(());
+        }
+
+        let rows_i32: Vec<i32> = release.rows.iter().map(|&r| r as i32).collect();
+        let t_constant = release
+            .seasonal
+            .is_none()
+            .then(|| release.t0_days.clone().clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY);
+        self.release = Some(ArmedRelease {
+            rows: Tensor::from_data(TensorData::new(rows_i32, [n_dams]), &self.device),
+            mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
+            t0_days: release.t0_days,
+            seasonal: release.seasonal,
+            phase: release.phase,
+            t_constant,
+            t_step: None,
         });
         Ok(())
     }
@@ -547,9 +692,9 @@ impl<I: Backend> MuskingumCunge<I> {
             self.leakance_factor.as_ref().cloned(),
         ) {
             assert!(
-                self.reservoir.is_none(),
-                "set_reservoir_rows is not supported with leakance (params.use_leakance): \
-                 the leakance op has no linear-reservoir K/X override"
+                self.reservoir.is_none() && self.release.is_none(),
+                "set_reservoir_rows / set_dam_release are not supported with leakance \
+                 (params.use_leakance): the leakance op has no linear-reservoir K/X override"
             );
             let mut zeta_step: Option<crate::routing::mmc_op::ZetaStepDiag<I>> = None;
             let q_next = crate::routing::mmc_op::timestep_forward_leakance::<I>(
@@ -591,9 +736,9 @@ impl<I: Backend> MuskingumCunge<I> {
             && crate::sparse::dispatch::backend_is_cuda::<I>()
         {
             assert!(
-                self.reservoir.is_none(),
-                "set_reservoir_rows is not supported with use_cuda_graphs: the captured \
-                 graph has no linear-reservoir K/X override"
+                self.reservoir.is_none() && self.release.is_none(),
+                "set_reservoir_rows / set_dam_release are not supported with use_cuda_graphs: \
+                 the captured graph has no linear-reservoir K/X override"
             );
             crate::routing::mmc_op::timestep_forward_via_graph::<I>(
                 &self.cfg, pattern, assembler,
@@ -610,6 +755,13 @@ impl<I: Backend> MuskingumCunge<I> {
                 self.track_negative_discharge,
                 self.gamma.as_ref().cloned(),
                 self.reservoir.as_ref(),
+                self.release.as_mut().map(|r| ReleaseParent {
+                    t_dams: r.t_step.take().expect(
+                        "a dam release is set but no step T was prepared; route through forward()",
+                    ),
+                    rows: r.rows.clone(),
+                    mask: r.mask.clone(),
+                }),
             )
         }
     }
@@ -684,6 +836,11 @@ impl<I: Backend> MuskingumCunge<I> {
                 .clone()
                 .slice([(t - 1)..t, 0..num_segments])
                 .reshape([num_segments]);
+            // Dam release: this step's T, evaluated at the step's end hour t
+            // (`crate::routing::release`).
+            if let Some(r) = self.release.as_mut() {
+                r.t_step = Some(r.t_seconds_at(t));
+            }
             let q_next = self.route_timestep(q_prime_t);
             columns.push(q_next.clone().unsqueeze_dim::<2>(1));
             self.discharge_t = Some(q_next);
