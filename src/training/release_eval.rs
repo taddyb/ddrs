@@ -23,7 +23,8 @@ use crate::data::store::{DamFeatures, FixedDam, FixedTable, ReservoirTable};
 use crate::nn::kan_head::KanHead;
 use crate::nn::release_head::{init_release_head, release_params};
 use crate::routing::release::{seasonal_t_range, t_floor_days};
-use crate::training::checkpoint::{load_kan_head, release_head_base};
+use crate::nn::dam_params::DamParams;
+use crate::training::checkpoint::{load_dam_params, load_kan_head, release_dams_base, release_head_base};
 
 /// Evaluate `head` on every dam of `features` and return the fixed table it
 /// resolves to, dams in the feature table's order. A non-seasonal head gives
@@ -32,6 +33,21 @@ use crate::training::checkpoint::{load_kan_head, release_head_base};
 /// additive row), so the resolved table routes through the same row.
 pub fn resolve_release_table<B: Backend>(
     head: &KanHead<B>,
+    features: &DamFeatures,
+    cfg: &Config,
+) -> FixedTable {
+    resolve_release_table_with(head, None, features, cfg)
+}
+
+/// [`resolve_release_table`] with the per-dam parameters
+/// (`release_head.rule_curve` / `per_dam_t0`): `T_days` is the effective
+/// `T0_head·exp(δ)`, and the table carries each dam's rule-curve
+/// coefficients `rule_curve_max·tanh(θ)` and its `Ibar`, computed with the
+/// same tensor ops training applies to the batch's rows, so the test phase
+/// routes the same rule curve bit for bit.
+pub fn resolve_release_table_with<B: Backend>(
+    head: &KanHead<B>,
+    dams: Option<&DamParams<B>>,
     features: &DamFeatures,
     cfg: &Config,
 ) -> FixedTable {
@@ -44,7 +60,28 @@ pub fn resolve_release_table<B: Backend>(
     .reshape([n, f]);
     let p = release_params(head, x, &cfg.params.parameter_ranges);
     let host = |t: Tensor<B, 1>| -> Vec<f32> { t.into_data().to_vec::<f32>().unwrap() };
-    let t0 = host(p.t0_days);
+    let section = cfg.release_head.as_ref();
+    let all: Vec<usize> = (0..n).collect();
+    let idx = || crate::nn::dam_params::table_index::<B>(&all, &device);
+    let t0_days = match (dams, section.is_some_and(|s| s.per_dam_t0)) {
+        (Some(d), true) => p.t0_days * d.t0_factor(idx()).expect("per_dam_t0 carries delta"),
+        _ => p.t0_days,
+    };
+    let t0 = host(t0_days);
+    let rule_curve = match (dams, section.filter(|s| s.rule_curve)) {
+        (Some(d), Some(s)) => {
+            let c: Vec<f32> = d
+                .coefficients(idx(), s.rule_curve_max)
+                .expect("rule_curve carries theta")
+                .into_data()
+                .to_vec()
+                .unwrap();
+            Some(c.chunks(4).map(|r| [r[0], r[1], r[2], r[3]]).collect::<Vec<[f32; 4]>>())
+        }
+        _ => None,
+    };
+    // Ibar travels with the rule curve (and whenever the table has it).
+    let inflow_mean = features.inflow_mean.clone();
     let seasonal = p.seasonal.is_some();
     let floor = t_floor_days(cfg.dam_row());
     let (a, b) = match p.seasonal {
@@ -65,7 +102,11 @@ pub fn resolve_release_table<B: Backend>(
             year_completed: features.years.get(i).copied().flatten(),
         })
         .collect();
-    FixedTable { dams, seasonal }
+    assert!(
+        rule_curve.is_none() || inflow_mean.is_some(),
+        "a rule curve resolves only with the table's inflow_mean_m3s (checked at dataset open)"
+    );
+    FixedTable { dams, seasonal, rule_curve, inflow_mean }
 }
 
 /// For a `reservoir_release: learned` config: load the release head from
@@ -97,15 +138,32 @@ pub fn resolve_learned_release<B: Backend>(
             })
         }
     };
-    let table = resolve_release_table(&head, &features, cfg);
+    // The per-dam parameters (rule curve, per-dam T0), saved at full
+    // precision next to the release head. A config that trains them cannot
+    // be resolved without them.
+    let dams = if section.has_per_dam() {
+        let dbase = release_dams_base(ckpt_dir);
+        let template = DamParams::<B>::zeros(
+            features.comids.len(),
+            section.rule_curve,
+            section.per_dam_t0,
+            device,
+        );
+        Some(load_dam_params::<B>(&dbase, template, device)?)
+    } else {
+        None
+    };
+    let table = resolve_release_table_with(&head, dams.as_ref(), &features, cfg);
     dataset.resolve_learned_release(table.clone())?;
     use std::io::Write;
     let _ = writeln!(
         std::io::stderr(),
-        "release head: resolved {} dams from {}.mpk (seasonal: {})",
+        "release head: resolved {} dams from {}.mpk (seasonal: {}, rule curve: {}, per-dam T0: {})",
         table.dams.len(),
         base.display(),
-        table.seasonal
+        table.seasonal,
+        table.rule_curve.is_some(),
+        section.per_dam_t0
     );
     Ok(Some(table))
 }
@@ -114,14 +172,26 @@ pub fn resolve_learned_release<B: Backend>(
 /// `COMID,T0_days,a,b,T_min_days,T_max_days`, the extremes after `dam_row`'s
 /// floor.
 pub fn write_release_params_csv(path: &Path, table: &FixedTable, dam_row: DamRow) -> Result<()> {
-    let mut out = String::from("COMID,T0_days,a,b,T_min_days,T_max_days\n");
-    for d in &table.dams {
+    // With a rule curve, the coefficients and Ibar follow (the columns the
+    // fixed-table reader accepts; T0_days is the effective T0).
+    let rule = table.rule_curve.as_ref().zip(table.inflow_mean.as_ref());
+    let mut out = String::from("COMID,T0_days,a,b,T_min_days,T_max_days");
+    if rule.is_some() {
+        out.push_str(",c1s,c1c,c2s,c2c,inflow_mean_m3s");
+    }
+    out.push('\n');
+    for (i, d) in table.dams.iter().enumerate() {
         let (lo, hi) = if table.seasonal {
             seasonal_t_range(d.t_days, d.a, d.b, dam_row)
         } else {
             (d.t_days, d.t_days)
         };
-        out.push_str(&format!("{},{},{},{},{},{}\n", d.comid.0, d.t_days, d.a, d.b, lo, hi));
+        out.push_str(&format!("{},{},{},{},{},{}", d.comid.0, d.t_days, d.a, d.b, lo, hi));
+        if let Some((c, q)) = rule {
+            let [c1s, c1c, c2s, c2c] = c[i];
+            out.push_str(&format!(",{c1s},{c1c},{c2s},{c2c},{}", q[i]));
+        }
+        out.push('\n');
     }
     std::fs::write(path, out).map_err(|source| DataError::Io { path: path.to_path_buf(), source })
 }

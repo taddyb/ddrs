@@ -68,6 +68,11 @@ fn section(seasonal: bool) -> ReleaseHeadSection {
         dam_row: ddrs::config::DamRow::Replace,
         routing_checkpoint: None,
         freeze_routing: false,
+        rule_curve: false,
+        rule_curve_max: 1.0,
+        per_dam_t0: false,
+        per_dam_lr: 0.05,
+        per_dam_l2: 0.0,
     }
 }
 
@@ -103,6 +108,7 @@ fn features_with_years(years: Vec<Option<i32>>) -> DamFeatures {
         names: vec!["f1".into(), "f2".into()],
         values: ndarray::array![[0.8_f32, -1.2], [0.0, 0.0], [-0.5, 1.7]],
         years,
+        inflow_mean: None,
     }
 }
 
@@ -266,6 +272,7 @@ fn a_dam_completed_after_the_window_start_routes_as_a_channel() {
         names: vec!["f1".into(), "f2".into()],
         values: ndarray::array![[-0.5_f32, 1.7]],
         years: vec![None],
+        inflow_mean: None,
     });
     assert_bitwise(&partial, &only_103);
 

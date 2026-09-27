@@ -1,0 +1,442 @@
+//! The harmonic rule curve (`release_head.rule_curve`, `src/routing/release.rs`):
+//! `S = T·Q + S0_d(t)`, the flux `r_d = Ibar_d·Σ_k(c_{k,s} sin kω + c_{k,c} cos kω)`
+//! taken off the dam row's lateral inflow as `(S0_{t+1} − S0_t)/dt`, with
+//! per-dam free coefficients `c = rule_curve_max·tanh(θ)` and a per-dam `T0`
+//! multiplier `exp(δ)` (`src/nn/dam_params.rs`).
+//!
+//! 1. `θ = 0` (zero coefficients) routes bitwise like no rule curve, on both
+//!    dam rows, at the engine and through `apply_reservoir_rows_with`.
+//! 2. Over one calendar year of constant inflow the flux moves no volume: the
+//!    dam's outflow volume equals its inflow volume less the bucket's storage
+//!    change, to f32 tolerance, while the flux visibly reshapes the outflow.
+//! 3. Finite-difference gradcheck of `θ` (all four coefficients) and `δ` on
+//!    the sandbox network, replace and additive rows: the gradient reaches
+//!    them through the timestep op's `q'` parent and ordinary autodiff.
+//! 4. The training path (per-dam parameters on the batch's rows) and the
+//!    resolved test-phase table (coefficients, effective `T0`, `Ibar` per dam)
+//!    route bitwise identically, and `release_params.csv` carries them.
+//! 5. `rule_curve: true` on a table without `inflow_mean_m3s` fails at
+//!    dataset open.
+
+use burn::backend::{Autodiff, NdArray};
+use burn::module::Param;
+use burn::tensor::Tensor;
+use chrono::NaiveDate;
+
+use ddrs::config::{Config, DamRow, ReleaseHeadSection, ReservoirRelease};
+use ddrs::data::ids::Comid;
+use ddrs::data::store::{map_reservoir_rows, DamFeatures, ReservoirTable};
+use ddrs::nn::dam_params::DamParams;
+use ddrs::nn::release_head::init_release_head;
+use ddrs::routing::mmc::{DamRelease, RuleCurve, DT_SECONDS};
+use ddrs::routing::release::seasonal_phase;
+use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
+use ddrs::sparse::SparseAdjacency;
+use ddrs::training::forward::apply_reservoir_rows_with;
+use ddrs::training::release_eval::{resolve_release_table_with, write_release_params_csv};
+
+type I = NdArray<f32>;
+type AB = Autodiff<I>;
+type Device = <I as burn::tensor::backend::BackendTypes>::Device;
+
+const REL_TOL: f64 = 5e-3;
+const ABS_TOL: f64 = 1e-4;
+
+fn network(n: usize, edges: &[(usize, usize)]) -> SparseAdjacency {
+    let mut dense = vec![0.0_f32; n * n];
+    for &(up, down) in edges {
+        dense[down * n + up] = 1.0;
+    }
+    SparseAdjacency::from_dense(n, &dense, vec![5000.0; n], vec![0.001; n])
+}
+
+/// `1 → 3`, `2 → 3`, `0 → 4`, `3 → 4`.
+fn sandbox5() -> SparseAdjacency {
+    network(5, &[(1, 3), (2, 3), (0, 4), (3, 4)])
+}
+
+/// `0 → 1 → 2`.
+fn chain3() -> SparseAdjacency {
+    network(3, &[(0, 1), (1, 2)])
+}
+
+fn engine(cfg: &Config, adjacency: SparseAdjacency, q_prime: &[f32]) -> MuskingumCunge<I> {
+    let device = Device::default();
+    let n = adjacency.n;
+    let rows = q_prime.len() / n;
+    let leaf = |v: f32| Tensor::<AB, 1>::from_floats(vec![v; n].as_slice(), &device);
+    let q = Tensor::<AB, 1>::from_floats(q_prime, &device).reshape([rows, n]);
+    let mut mc = MuskingumCunge::<I>::new(cfg.clone(), device);
+    mc.setup_inputs(
+        RoutingInputs { adjacency, x_storage: Tensor::ones([n], &device) * 0.3 },
+        q,
+        SpatialParameters {
+            n: leaf(0.5),
+            q_spatial: leaf(0.5),
+            p_spatial: Some(leaf(0.575)),
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
+            impervious_mask: None,
+            gamma: None,
+        },
+        false,
+        None,
+    );
+    mc
+}
+
+fn sandbox_q_prime(steps: usize) -> Vec<f32> {
+    let base = [22.0_f32, 11.0, 11.0, 11.0, 22.0];
+    (0..=steps)
+        .flat_map(|t| {
+            let s = (t as f32 / 24.0 * std::f32::consts::PI).sin();
+            base.map(|b| b * (1.0 + 1.5 * s * s))
+        })
+        .collect()
+}
+
+fn assert_bitwise(a: &[f32], b: &[f32], what: &str) {
+    assert_eq!(a.len(), b.len(), "{what}: length");
+    for (i, (x, y)) in a.iter().zip(b).enumerate() {
+        assert_eq!(x.to_bits(), y.to_bits(), "{what}: idx {i}: {x} vs {y}");
+    }
+}
+
+/// Route the sandbox with one dam on reach 3: `T0` days (seasonal `a`, `b`
+/// when `Some`), and a rule curve `coeffs` with `Ibar` when `Some`.
+fn route_sandbox(
+    steps: usize,
+    start: NaiveDate,
+    row: DamRow,
+    t0: Tensor<AB, 1>,
+    ab: Option<(f32, f32)>,
+    rule: Option<(Tensor<AB, 2>, f32)>,
+) -> Tensor<AB, 2> {
+    let device = Device::default();
+    let mut mc = engine(&Config::default(), sandbox5(), &sandbox_q_prime(steps));
+    let t = |v: f32| Tensor::<AB, 1>::from_floats([v], &device);
+    mc.set_dam_release(DamRelease {
+        rows: vec![3],
+        t0_days: t0,
+        seasonal: ab.map(|(a, b)| (t(a), t(b))),
+        phase: seasonal_phase(start, steps + 1),
+        dam_row: row,
+        rule_curve: rule.map(|(coeffs, ibar)| RuleCurve { coeffs, inflow_mean: t(ibar) }),
+    })
+    .expect("release");
+    mc.forward()
+}
+
+fn host2(q: Tensor<AB, 2>) -> Vec<f32> {
+    q.into_data().to_vec().unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// 1. θ = 0 is no rule curve, bit for bit.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zero_coefficients_route_bitwise_like_no_rule_curve() {
+    let device = Device::default();
+    let start = NaiveDate::from_ymd_opt(2001, 5, 10).unwrap();
+    for row in [DamRow::Replace, DamRow::Additive] {
+        for ab in [None, Some((0.6_f32, -0.3_f32))] {
+            let t0 = || Tensor::<AB, 1>::from_floats([0.7_f32], &device);
+            let none = host2(route_sandbox(72, start, row, t0(), ab, None));
+            let zero = host2(route_sandbox(
+                72,
+                start,
+                row,
+                t0(),
+                ab,
+                Some((Tensor::zeros([1, 4], &device), 25.0)),
+            ));
+            assert_bitwise(&zero, &none, &format!("{row:?} {ab:?}: c = 0 vs no rule curve"));
+            let some = host2(route_sandbox(
+                72,
+                start,
+                row,
+                t0(),
+                ab,
+                Some((Tensor::from_floats([[0.3_f32, -0.2, 0.1, 0.15]], &device), 25.0)),
+            ));
+            assert!(some != none, "{row:?}: a nonzero rule curve must act");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 2. One year: the rule curve moves no volume.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rule_curve_moves_no_volume_over_a_year_of_constant_inflow() {
+    let device = Device::default();
+    // 2001 is not a leap year: 8,760 hours from 1 January to 1 January, so
+    // the last phase row is the first one again and S0 returns to its start.
+    let steps = 8760;
+    let start = NaiveDate::from_ymd_opt(2001, 1, 1).unwrap();
+    let q_in = 50.0_f32;
+    let q: Vec<f32> = (0..=steps).flat_map(|_| [q_in, 0.0, 0.0]).collect();
+    let t0_days = 1.0_f32;
+    let c = [0.3_f32, -0.2, 0.1, 0.15];
+    let route = |rule: bool| -> Vec<f32> {
+        let mut mc = engine(&Config::default(), chain3(), &q);
+        let t = |v: &[f32]| Tensor::<AB, 1>::from_floats(v, &device);
+        mc.set_dam_release(DamRelease {
+            rows: vec![0],
+            t0_days: t(&[t0_days]),
+            seasonal: None,
+            phase: seasonal_phase(start, steps + 1),
+            dam_row: DamRow::Replace,
+            rule_curve: rule.then(|| RuleCurve {
+                coeffs: Tensor::<AB, 1>::from_floats(c, &device).reshape([1, 4]),
+                inflow_mean: t(&[q_in]),
+            }),
+        })
+        .unwrap();
+        // Reach 0 (the dam): row 0 of [n, steps + 1].
+        host2(mc.forward())[..=steps].to_vec()
+    };
+    let with = route(true);
+    let without = route(false);
+    let dt = DT_SECONDS as f64;
+    let t_sec = t0_days as f64 * 86_400.0;
+    let balance = |out: &[f32]| {
+        let inflow = steps as f64 * dt * q_in as f64;
+        let outflow: f64 = (1..=steps).map(|s| dt * 0.5 * (out[s - 1] as f64 + out[s] as f64)).sum();
+        let ds = t_sec * (out[steps] as f64 - out[0] as f64);
+        (inflow, outflow, (inflow - outflow - ds) / inflow)
+    };
+    let (inflow, out_rc, imb_rc) = balance(&with);
+    let (_, out_plain, imb_plain) = balance(&without);
+    let min_q = with.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_dev = with.iter().zip(&without).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max);
+    println!(
+        "one year: inflow {inflow:.6e} m3, outflow with rule curve {out_rc:.6e} (imbalance {imb_rc:.2e}), \
+         without {out_plain:.6e} (imbalance {imb_plain:.2e}); min Q {min_q:.2} m3/s, max |dQ| {max_dev:.2} m3/s"
+    );
+    assert!(min_q > 1.0, "the dam never reaches the discharge floor in this test");
+    assert!(max_dev > 5.0, "the rule curve must visibly reshape the outflow (max |dQ| {max_dev})");
+    assert!(imb_rc.abs() < 1e-5, "the rule curve moved volume over a year: {imb_rc:.3e}");
+}
+
+// ---------------------------------------------------------------------------
+// 3. Gradcheck of θ and δ.
+// ---------------------------------------------------------------------------
+
+const MAX_C: f32 = 0.8;
+const T0_HEAD: f32 = 0.6;
+const IBAR: f32 = 10.0;
+
+fn weights(steps: usize) -> Vec<f32> {
+    (0..5 * (steps + 1))
+        .map(|i| {
+            let (r, t) = (i / (steps + 1), i % (steps + 1));
+            if t == 0 { 0.0 } else { 1.0 + 0.1 * r as f32 + 0.01 * (t % 7) as f32 }
+        })
+        .collect()
+}
+
+/// The sandbox routed with the dam's `T0 = T0_HEAD·exp(δ)` and coefficients
+/// `MAX_C·tanh(θ)`, from leaves `theta` `[1, 4]` and `delta` `[1]`.
+fn route_leaves(row: DamRow, theta: Tensor<AB, 2>, delta: Tensor<AB, 1>) -> Tensor<AB, 2> {
+    let device = Device::default();
+    let t0 = Tensor::<AB, 1>::from_floats([T0_HEAD], &device) * delta.exp();
+    let c = theta.tanh() * MAX_C;
+    let start = NaiveDate::from_ymd_opt(2001, 5, 10).unwrap();
+    route_sandbox(72, start, row, t0, Some((0.5, -0.4)), Some((c, IBAR)))
+}
+
+fn loss_at(row: DamRow, theta: [f32; 4], delta: f32) -> f64 {
+    let device = Device::default();
+    let q = host2(route_leaves(
+        row,
+        Tensor::<AB, 1>::from_floats(theta, &device).reshape([1, 4]),
+        Tensor::from_floats([delta], &device),
+    ));
+    q.iter().zip(weights(72)).map(|(&v, w)| v as f64 * w as f64).sum()
+}
+
+#[test]
+fn theta_and_delta_gradcheck() {
+    let device = Device::default();
+    let theta0 = [0.4_f32, -0.3, 0.2, 0.5];
+    let delta0 = 0.3_f32;
+    let mut failures = Vec::new();
+    for row in [DamRow::Replace, DamRow::Additive] {
+        let theta = Tensor::<AB, 1>::from_floats(theta0, &device).reshape([1, 4]).require_grad();
+        let delta = Tensor::<AB, 1>::from_floats([delta0], &device).require_grad();
+        let w = Tensor::<AB, 1>::from_floats(weights(72).as_slice(), &device).reshape([5, 73]);
+        let grads = (route_leaves(row, theta.clone(), delta.clone()) * w).sum().backward();
+        let gt: Vec<f32> = theta.grad(&grads).expect("theta grad").into_data().to_vec().unwrap();
+        let gd: f32 = delta.grad(&grads).expect("delta grad").into_scalar();
+        let eps = 1e-2_f32;
+        let mut cases: Vec<(String, f64, f64)> = (0..4)
+            .map(|k| {
+                let bump = |d: f32| {
+                    let mut th = theta0;
+                    th[k] += d;
+                    loss_at(row, th, delta0)
+                };
+                let fd = (bump(eps) - bump(-eps)) / (2.0 * eps as f64);
+                (format!("{row:?} theta[{k}]"), gt[k] as f64, fd)
+            })
+            .collect();
+        let fd_delta = (loss_at(row, theta0, delta0 + eps) - loss_at(row, theta0, delta0 - eps)) / (2.0 * eps as f64);
+        cases.push((format!("{row:?} delta"), gd as f64, fd_delta));
+        for (label, a, f) in cases {
+            let abs = (a - f).abs();
+            let rel = abs / a.abs().max(f.abs()).max(1e-12);
+            println!("{label}: analytical={a:.6e} fd={f:.6e} rel={rel:.3e}");
+            assert!(a != 0.0 && a.is_finite(), "{label}: vacuous gradient");
+            if !(rel < REL_TOL || abs < ABS_TOL) {
+                failures.push(format!("{label}: rel {rel:.3e}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "gradcheck failed: {failures:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 4. Training path = resolved test-phase table.
+// ---------------------------------------------------------------------------
+
+fn section(dam_row: DamRow) -> ReleaseHeadSection {
+    ReleaseHeadSection {
+        hidden_size: 6,
+        num_hidden_layers: 1,
+        grid: 5,
+        k: 3,
+        input_var_names: vec!["f1".into(), "f2".into()],
+        seasonal: true,
+        dam_row,
+        routing_checkpoint: None,
+        freeze_routing: false,
+        rule_curve: true,
+        rule_curve_max: MAX_C,
+        per_dam_t0: true,
+        per_dam_lr: 0.05,
+        per_dam_l2: 0.0,
+    }
+}
+
+fn learned_cfg(dam_row: DamRow) -> Config {
+    let mut cfg = Config::default();
+    cfg.params.use_reservoirs = true;
+    cfg.params.reservoir_release = ReservoirRelease::Learned;
+    cfg.release_head = Some(section(dam_row));
+    cfg
+}
+
+/// Dams on reaches 3 and 4 (COMIDs 103, 104) plus one outside the network.
+fn features() -> DamFeatures {
+    DamFeatures {
+        comids: vec![Comid(104), Comid(999), Comid(103)],
+        names: vec!["f1".into(), "f2".into()],
+        values: ndarray::array![[0.8_f32, -1.2], [0.0, 0.0], [-0.5, 1.7]],
+        years: vec![None, None, None],
+        inflow_mean: Some(vec![40.0, 5.0, 12.0]),
+    }
+}
+
+/// Per-dam parameters with distinct rows (table order: 104, 999, 103).
+fn dam_params() -> DamParams<AB> {
+    let device = Device::default();
+    let mut d = DamParams::<AB>::zeros(3, true, true, &device);
+    d.theta = Some(Param::from_tensor(Tensor::from_floats(
+        [[0.4, -0.3, 0.2, 0.5], [0.0; 4], [-0.6, 0.1, 0.3, -0.2]],
+        &device,
+    )));
+    d.delta = Some(Param::from_tensor(Tensor::from_floats([0.5, 0.0, -0.4], &device)));
+    d
+}
+
+fn sandbox_engine(cfg: &Config, steps: usize) -> MuskingumCunge<I> {
+    engine(cfg, sandbox5(), &sandbox_q_prime(steps))
+}
+
+#[test]
+fn training_and_resolved_rule_curve_route_identically() {
+    use burn::module::AutodiffModule;
+    let steps = 96;
+    let start = NaiveDate::from_ymd_opt(1990, 4, 20).unwrap();
+    let network: Vec<Comid> = (0..5).map(|i| Comid(100 + i)).collect();
+    for row in [DamRow::Replace, DamRow::Additive] {
+        let cfg = learned_cfg(row);
+        let device = Device::default();
+        let head = init_release_head::<AB>(&section(row), &cfg.params.parameter_ranges, 42, &device);
+        let dams = dam_params();
+
+        let rows = map_reservoir_rows(&ReservoirTable::Learned(features()), &network);
+        assert_eq!(rows.table_index, vec![2, 0], "reach 3 is table row 2, reach 4 row 0");
+        let mut a = sandbox_engine(&cfg, steps);
+        apply_reservoir_rows_with(&cfg, &mut a, Some(&rows), start, steps + 1, Some(&head), Some(&dams));
+        let train = host2(a.forward());
+
+        let table = resolve_release_table_with::<I>(&head.valid(), Some(&dams.valid()), &features(), &cfg);
+        let rc = table.rule_curve.as_ref().expect("the resolved table carries the rule curve");
+        assert_eq!(table.inflow_mean, Some(vec![40.0, 5.0, 12.0]));
+        assert!((rc[0][0] - MAX_C * 0.4_f32.tanh()).abs() < 1e-6, "c of table row 0");
+        assert_eq!(rc[1], [0.0; 4]);
+        // Effective T0 = head T0 · exp(δ): the head's T0 is the same for every
+        // dam at init, so the ratio of rows 0 and 1 is exp(0.5).
+        let ratio = table.dams[0].t_days / table.dams[1].t_days;
+        assert!((ratio - 0.5_f32.exp()).abs() < 1e-5, "effective T0 ratio {ratio}");
+
+        let rows_b = map_reservoir_rows(&ReservoirTable::Fixed(table.clone()), &network);
+        let mut b = sandbox_engine(&cfg, steps);
+        apply_reservoir_rows_with(&cfg, &mut b, Some(&rows_b), start, steps + 1, None, None);
+        let resolved = host2(b.forward());
+        assert_bitwise(&train, &resolved, &format!("{row:?}: training vs resolved rule curve"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("release_params.csv");
+        write_release_params_csv(&csv, &table, row).unwrap();
+        let text = std::fs::read_to_string(&csv).unwrap();
+        assert!(
+            text.starts_with("COMID,T0_days,a,b,T_min_days,T_max_days,c1s,c1c,c2s,c2c,inflow_mean_m3s\n"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "per-dam parameters")]
+fn learned_rule_curve_without_dam_params_is_refused() {
+    let cfg = learned_cfg(DamRow::Additive);
+    let device = Device::default();
+    let head = init_release_head::<AB>(&section(DamRow::Additive), &cfg.params.parameter_ranges, 42, &device);
+    let network: Vec<Comid> = (0..5).map(|i| Comid(100 + i)).collect();
+    let rows = map_reservoir_rows(&ReservoirTable::Learned(features()), &network);
+    let mut a = sandbox_engine(&cfg, 24);
+    let start = NaiveDate::from_ymd_opt(1990, 4, 20).unwrap();
+    apply_reservoir_rows_with(&cfg, &mut a, Some(&rows), start, 25, Some(&head), None);
+}
+
+// ---------------------------------------------------------------------------
+// 5. The inflow column is required.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rule_curve_without_inflow_column_fails_at_dataset_open() {
+    let mut cfg: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string("examples/juniata/ddrs.yaml").unwrap()).unwrap();
+    cfg["params"]["use_reservoirs"] = true.into();
+    cfg["params"]["reservoir_release"] = "learned".into();
+    cfg["data_sources"]["reservoirs"] = "examples/juniata/data/juniata_dam_features.csv".into();
+    let mut rh = serde_yaml::Mapping::new();
+    rh.insert("input_var_names".into(), serde_yaml::Value::Sequence(vec!["log10_storage".into()]));
+    rh.insert("rule_curve".into(), true.into());
+    cfg["release_head"] = serde_yaml::Value::Mapping(rh);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ddrs.yaml");
+    std::fs::write(&path, serde_yaml::to_string(&cfg).unwrap()).unwrap();
+    let cfg = Config::from_yaml_file(&path).expect("the config itself is valid");
+    let err = match ddrs::data::MeritGagesDataset::open(&cfg) {
+        Ok(_) => panic!("a rule curve without inflow_mean_m3s must not open"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("inflow_mean_m3s") && err.contains("rule_curve"), "{err}");
+}

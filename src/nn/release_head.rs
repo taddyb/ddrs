@@ -166,6 +166,11 @@ mod tests {
             dam_row: crate::config::DamRow::Replace,
             routing_checkpoint: None,
             freeze_routing: false,
+            rule_curve: false,
+            rule_curve_max: 1.0,
+            per_dam_t0: false,
+            per_dam_lr: 0.05,
+            per_dam_l2: 0.0,
         }
     }
 

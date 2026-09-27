@@ -189,6 +189,7 @@ fn route(s: Setup, arm: Arm, grad: bool) -> Routed {
                 seasonal: ab.clone(),
                 phase: phase(),
                 dam_row: row,
+                rule_curve: None,
             })
             .expect("release");
             t0_leaf = Some(t0);
@@ -591,6 +592,11 @@ fn additive_release_head_weight_gradcheck_end_to_end() {
         dam_row: DamRow::Additive,
         routing_checkpoint: None,
         freeze_routing: false,
+        rule_curve: false,
+        rule_curve_max: 1.0,
+        per_dam_t0: false,
+        per_dam_lr: 0.05,
+        per_dam_l2: 0.0,
     };
     let features = || Tensor::<AB, 2>::from_floats([[0.8_f32, -1.2]], &device);
     let head0 = {
@@ -630,6 +636,7 @@ fn additive_release_head_weight_gradcheck_end_to_end() {
             seasonal: rp.seasonal,
             phase: phase(),
             dam_row: DamRow::Additive,
+            rule_curve: None,
         })
         .unwrap();
         mc.forward()

@@ -472,7 +472,34 @@ release_head:            # top-level block, deny_unknown_fields
   routing_checkpoint: /abs/.ddrs/runs/<id>/checkpoints/epoch_E_mb_M   # default absent
   freeze_routing: false  # default false; true requires routing_checkpoint
   dam_row: replace       # default replace; additive adds T·Q to the reach's channel storage
+  rule_curve: false      # per-dam harmonic rule curve S0_d(t); needs inflow_mean_m3s in the table
+  rule_curve_max: 1.0    # c = rule_curve_max·tanh(θ); > 0
+  per_dam_t0: false      # T0_d = T0_head,d·exp(δ_d)
+  per_dam_lr: 0.05       # constant lr of the per-dam parameters' own Adam; > 0
+  per_dam_l2: 0.0        # per_dam_l2·Σ(θ² + δ²) over the batch's active dams; >= 0
 ```
+
+**Rule curve and per-dam parameters (added 2026-09-27).** `rule_curve: true` makes the storage
+law `S = T·Q + S0_d(t)` on either dam row, the flux
+`r_d = Ibar_d·Σ_{k=1,2}(c_{k,s} sin kω + c_{k,c} cos kω)` taken off the dam row's lateral inflow
+as `(S0_{t+1} − S0_t)/dt` after the `discharge` floor on `q'` (derivation, units and the
+year-boundary note in `src/routing/release.rs`). The coefficients are per-dam FREE parameters
+(`src/nn/dam_params.rs`, one row per feature-table dam, init 0 = no rule curve bit for bit),
+not head outputs: offline they are not predictable from the NID features. `per_dam_t0` adds a
+per-dam `exp(δ)` on the head's `T0`. Both train with their own Adam at the constant
+`per_dam_lr` (a dam gets a gradient only when a gauge below it is in the batch), clipped on
+their own norm, saved as `release_dams.mpk` (FULL precision) + `release_dams_optim.mpk` in each
+checkpoint and restored on resume. The gradient reaches `θ` through the timestep op's `q'`
+parent (no op change). `Ibar_d` is the table's raw `inflow_mean_m3s` column
+(`experiments/reservoir/release_head/build_dam_inflow_clim.py`); `rule_curve: true` without it
+fails at dataset open. The resolved test-phase table carries `c1s, c1c, c2s, c2c`, the effective
+`T0` and `inflow_mean_m3s` per dam (also in `release_params.csv`), and a `fixed` table may carry
+the same optional columns (all four `c` or none; `c` requires `inflow_mean_m3s`). Training logs
+`rule_curve_|c|_median=<v> (<k> dams with gradient)` per optimizer step and, whenever dams are
+armed, `dam-row steps at the discharge clamp: <k>/<m>` per forward. Tests:
+`tests/reservoir_rule_curve.rs`, `tests/release_freeze_routing.rs` (frozen + rule curve),
+`src/nn/dam_params.rs`, `src/data/store/reservoirs.rs`, `src/config.rs` (`rule_curve_*`,
+`*_per_dam_*`).
 
 **`dam_row` (added 2026-09-27).** `replace` (default, every earlier run) makes the dam row the
 reservoir alone (`K := T`, `X := 0`, S19''/S19'''), so `T = 1 h` is faster than no dam on a reach

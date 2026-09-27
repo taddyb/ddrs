@@ -14,6 +14,9 @@
 //!    the loss is a constant, the driver takes no step at all, and the frozen
 //!    run routes BITWISE like a plain forward of the checkpoint under a
 //!    config without reservoirs.
+//! 3. With the rule curve and per-dam `T0` on the additive row, the per-dam
+//!    parameters train while the routing head stays bitwise, and a resume
+//!    restores them bitwise.
 //!
 //! Windows are 20 days so the debug build stays fast.
 
@@ -79,6 +82,18 @@ fn write(dir: &Path, name: &str, cfg: &serde_yaml::Value) -> Config {
 /// The Juniata bundle with the learned release on `dam_table`, the routing
 /// head frozen at `routing_ckpt`.
 fn frozen_cfg(dir: &Path, name: &str, dam_table: &str, routing_ckpt: &Path, accum: bool) -> Config {
+    frozen_cfg_with(dir, name, dam_table, routing_ckpt, accum, &[])
+}
+
+/// [`frozen_cfg`] plus extra `release_head` keys.
+fn frozen_cfg_with(
+    dir: &Path,
+    name: &str,
+    dam_table: &str,
+    routing_ckpt: &Path,
+    accum: bool,
+    extra: &[(&str, serde_yaml::Value)],
+) -> Config {
     let mut cfg = juniata_yaml();
     cfg["params"]["use_reservoirs"] = true.into();
     cfg["params"]["reservoir_release"] = "learned".into();
@@ -94,6 +109,9 @@ fn frozen_cfg(dir: &Path, name: &str, dam_table: &str, routing_ckpt: &Path, accu
     );
     rh.insert("routing_checkpoint".into(), routing_ckpt.display().to_string().into());
     rh.insert("freeze_routing".into(), true.into());
+    for (k, v) in extra {
+        rh.insert((*k).into(), v.clone());
+    }
     cfg["release_head"] = serde_yaml::Value::Mapping(rh);
     write(dir, name, &cfg)
 }
@@ -237,4 +255,66 @@ fn frozen_run_with_no_dam_armed_routes_like_the_checkpoint() {
         .unwrap();
     assert!(!plain.is_empty() && plain.iter().all(|v| v.is_finite()));
     assert_bitwise("frozen run vs plain forward of the checkpoint", &frozen, &plain);
+}
+
+/// 3. Frozen routing with the rule curve and per-dam `T0` (the smoke arms
+///    S3/S4): the per-dam parameters train (Raystown's `θ` and `δ` leave
+///    zero) at their own learning rate while the routing head stays bitwise
+///    at the checkpoint; the run's checkpoints carry `release_dams.mpk` at
+///    full precision, and a resume restores them bitwise.
+#[test]
+fn frozen_routing_with_rule_curve_trains_the_per_dam_parameters() {
+    let device = Device::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let ckpt = routing_checkpoint(tmp.path());
+
+    // The Juniata dam table plus Raystown's Ibar (33.006 m3/s, the CONUS
+    // table's value from build_dam_inflow_clim.py).
+    let table = std::fs::read_to_string(DAM_TABLE).unwrap();
+    let mut lines = table.lines();
+    let header = format!("{},inflow_mean_m3s", lines.next().unwrap());
+    let body: Vec<String> = lines.map(|l| format!("{l},33.006")).collect();
+    let with_inflow = tmp.path().join("dams_inflow.csv");
+    std::fs::write(&with_inflow, format!("{header}\n{}\n", body.join("\n"))).unwrap();
+
+    let extra = [
+        ("dam_row", "additive".into()),
+        ("seasonal", false.into()),
+        ("rule_curve", true.into()),
+        ("per_dam_t0", true.into()),
+    ];
+    let cfg = frozen_cfg_with(tmp.path(), "rc.yaml", with_inflow.to_str().unwrap(), &ckpt, false, &extra);
+    let reference = params(&reference_head(&cfg, &ckpt));
+    let dataset = MeritGagesDataset::open(&cfg).unwrap();
+    let (_, mut state, mut optimizer) = bootstrap_head_and_state::<I>(&cfg, &device).unwrap();
+    let dams0 = params(&state.release.as_ref().unwrap().dams.as_ref().expect("per-dam parameters").params);
+    assert!(dams0.iter().all(|&v| v == 0.0), "per-dam parameters start at zero");
+
+    let run_ckpts = tmp.path().join("checkpoints");
+    train::<I>(&cfg, &dataset, &mut state, &mut optimizer, &device, &run_ckpts, None, None).unwrap();
+
+    assert_bitwise("routing head after rule-curve training", &params(&state.head), &reference);
+    let d = &state.release.as_ref().unwrap().dams.as_ref().unwrap().params;
+    let theta = d.theta.as_ref().unwrap().val().into_data().to_vec::<f32>().unwrap();
+    let delta = d.delta.as_ref().unwrap().val().into_data().to_vec::<f32>().unwrap();
+    println!("Raystown after 3 steps: theta {theta:?} delta {delta:?}");
+    assert!(theta.iter().all(|&v| v != 0.0), "every rule-curve coefficient trains: {theta:?}");
+    assert!(delta[0] != 0.0, "the per-dam T0 multiplier trains");
+
+    // Resume from the last checkpoint: the per-dam parameters come back bitwise.
+    let mut saved: Vec<PathBuf> =
+        std::fs::read_dir(&run_ckpts).unwrap().map(|e| e.unwrap().path()).collect();
+    saved.sort();
+    let last = saved.last().unwrap();
+    assert!(last.join("release_dams.mpk").is_file() && last.join("release_dams_optim.mpk").is_file());
+    let mut resume: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(tmp.path().join("rc.yaml")).unwrap()).unwrap();
+    resume["experiment"]["checkpoint"] = last.display().to_string().into();
+    let cfg2 = write(tmp.path(), "rc_resume.yaml", &resume);
+    let (_, state2, _) = bootstrap_head_and_state::<I>(&cfg2, &device).unwrap();
+    let d2 = &state2.release.as_ref().unwrap().dams.as_ref().unwrap().params;
+    let theta2 = d2.theta.as_ref().unwrap().val().into_data().to_vec::<f32>().unwrap();
+    let delta2 = d2.delta.as_ref().unwrap().val().into_data().to_vec::<f32>().unwrap();
+    assert_bitwise("theta after resume", &theta2, &theta);
+    assert_bitwise("delta after resume", &delta2, &delta);
 }

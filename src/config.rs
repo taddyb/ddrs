@@ -956,6 +956,47 @@ pub struct ReleaseHeadSection {
     /// `routing_checkpoint` (checked at load). Default false.
     #[serde(default)]
     pub freeze_routing: bool,
+    /// Per-dam harmonic rule curve (`src/routing/release.rs`): the storage
+    /// law becomes `S = T·Q + S0_d(t)`, a periodic `S0` whose flux
+    /// `r_d(t) = Ibar_d·Σ_{k=1,2}(c_{k,s} sin kω_t + c_{k,c} cos kω_t)` is taken
+    /// off the dam row's lateral inflow. The four coefficients are per-dam
+    /// FREE parameters (`crate::nn::dam_params`), calibrated through the gauge
+    /// loss; `Ibar_d` is the table's `inflow_mean_m3s` column (required,
+    /// checked at dataset open). Default false.
+    #[serde(default)]
+    pub rule_curve: bool,
+    /// Bound on each rule-curve coefficient: `c = rule_curve_max·tanh(θ)`.
+    /// Default 1.0; must be finite and > 0.
+    #[serde(default = "default_rule_curve_max")]
+    pub rule_curve_max: f32,
+    /// Per-dam free multiplier on the head's `T0`: `T0_d = T0_head,d·exp(δ_d)`.
+    /// Default false.
+    #[serde(default)]
+    pub per_dam_t0: bool,
+    /// Constant learning rate of the per-dam parameters' own optimizer (Adam):
+    /// a dam's parameters get a gradient only when a gauge below it is in the
+    /// batch. Default 0.05; must be finite and > 0.
+    #[serde(default = "default_per_dam_lr")]
+    pub per_dam_lr: f32,
+    /// Weight of the L2 penalty `per_dam_l2·Σ(θ² + δ²)` over the batch's
+    /// active dams, added to each mini-batch loss. Default 0; rejected < 0.
+    #[serde(default)]
+    pub per_dam_l2: f32,
+}
+
+impl ReleaseHeadSection {
+    /// Whether the run carries per-dam free parameters (`rule_curve` or
+    /// `per_dam_t0`), i.e. a `crate::nn::dam_params::DamParams` module.
+    pub fn has_per_dam(&self) -> bool {
+        self.rule_curve || self.per_dam_t0
+    }
+}
+
+fn default_rule_curve_max() -> f32 {
+    1.0
+}
+fn default_per_dam_lr() -> f32 {
+    0.05
 }
 
 fn default_release_hidden_size() -> usize {
@@ -1563,6 +1604,24 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
                  the release head reads."
                     .to_string(),
             );
+        }
+        if !(rh.rule_curve_max.is_finite() && rh.rule_curve_max > 0.0) {
+            return Err(format!(
+                "release_head.rule_curve_max = {} must be finite and > 0",
+                rh.rule_curve_max
+            ));
+        }
+        if !(rh.per_dam_lr.is_finite() && rh.per_dam_lr > 0.0) {
+            return Err(format!(
+                "release_head.per_dam_lr = {} must be finite and > 0",
+                rh.per_dam_lr
+            ));
+        }
+        if !(rh.per_dam_l2.is_finite() && rh.per_dam_l2 >= 0.0) {
+            return Err(format!(
+                "release_head.per_dam_l2 = {} must be finite and >= 0",
+                rh.per_dam_l2
+            ));
         }
         if rh.freeze_routing && rh.routing_checkpoint.is_none() {
             return Err(
@@ -3470,6 +3529,58 @@ data_sources:
         );
         let cfg = Config::from_yaml_file(&path).expect("warm start without freeze loads");
         assert!(!cfg.routing_frozen());
+    }
+
+    #[test]
+    fn rule_curve_keys_default_off_and_parse() {
+        let path = learned_yaml(
+            "ddrs_rel_rc_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert!(!rh.rule_curve && !rh.per_dam_t0 && !rh.has_per_dam());
+        assert_eq!((rh.rule_curve_max, rh.per_dam_lr, rh.per_dam_l2), (1.0, 0.05, 0.0));
+
+        let path = learned_yaml(
+            "ddrs_rel_rc_on.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  rule_curve_max: 0.5\n  \
+                 per_dam_t0: true\n  per_dam_lr: 0.01\n  per_dam_l2: 0.001\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a rule-curve config loads");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert!(rh.rule_curve && rh.per_dam_t0 && rh.has_per_dam());
+        assert_eq!((rh.rule_curve_max, rh.per_dam_lr, rh.per_dam_l2), (0.5, 0.01, 0.001));
+    }
+
+    #[test]
+    fn negative_per_dam_l2_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_rc_l2.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  per_dam_l2: -0.1\n"),
+        );
+        learned_rejection(path, &["per_dam_l2"]);
+    }
+
+    #[test]
+    fn nonpositive_rule_curve_max_and_per_dam_lr_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_rc_max.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  rule_curve_max: 0.0\n"),
+        );
+        learned_rejection(path, &["rule_curve_max"]);
+        let path = learned_yaml(
+            "ddrs_rel_rc_lr.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  per_dam_t0: true\n  per_dam_lr: -1.0\n"),
+        );
+        learned_rejection(path, &["per_dam_lr"]);
     }
 
     #[test]

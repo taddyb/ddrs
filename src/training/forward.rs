@@ -9,7 +9,7 @@ use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
 use crate::data::store::ReservoirRows;
-use crate::routing::mmc::{DamRelease, MuskingumCunge, RoutingInputs, SpatialParameters};
+use crate::routing::mmc::{DamRelease, MuskingumCunge, RoutingInputs, RuleCurve, SpatialParameters};
 use crate::routing::utils::denormalize;
 use crate::training::gate::leakance_gate;
 
@@ -211,6 +211,26 @@ pub fn apply_reservoir_rows<I: Backend>(
     n_hours: usize,
     release_head: Option<&KanHead<Autodiff<I>>>,
 ) {
+    apply_reservoir_rows_with(cfg, engine, rows, window_start, n_hours, release_head, None);
+}
+
+/// [`apply_reservoir_rows`] with the learned release's per-dam parameters
+/// (`release_head.rule_curve` / `per_dam_t0`; `crate::nn::dam_params`),
+/// gathered at each batch dam's feature-table row (`ReservoirRows::table_index`):
+/// the rule-curve coefficients `rule_curve_max·tanh(θ)` with the table's
+/// `Ibar`, and `T0 = T0_head·exp(δ)`. A fixed table carrying rule-curve
+/// columns (the resolved test-phase table) arms the same rule curve from
+/// constants. Panics when a learned config with either option reaches a
+/// forward without `dams`, as it does without a release head.
+pub fn apply_reservoir_rows_with<I: Backend>(
+    cfg: &Config,
+    engine: &mut MuskingumCunge<I>,
+    rows: Option<&ReservoirRows>,
+    window_start: chrono::NaiveDate,
+    n_hours: usize,
+    release_head: Option<&KanHead<Autodiff<I>>>,
+    dams: Option<&crate::nn::dam_params::DamParams<Autodiff<I>>>,
+) {
     if !cfg.params.use_reservoirs {
         return;
     }
@@ -246,24 +266,69 @@ pub fn apply_reservoir_rows<I: Backend>(
         )
         .reshape([n, f]);
         let p = crate::nn::release_head::release_params(head, x, &cfg.params.parameter_ranges);
+        // Per-dam free parameters, at each batch dam's feature-table row.
+        let section = cfg.release_head.as_ref();
+        let (rule_on, t0_on) = section.map_or((false, false), |s| (s.rule_curve, s.per_dam_t0));
+        let per_dam = (rule_on || t0_on).then(|| {
+            let d = dams.expect(
+                "release_head.rule_curve / per_dam_t0 rows reached a forward without the \
+                 per-dam parameters (training::driver::DamTrainer); resolve the learned \
+                 release into a fixed table first",
+            );
+            assert_eq!(rows.table_index.len(), rows.rows.len(), "learned rows carry their table rows");
+            (d, crate::nn::dam_params::table_index::<Autodiff<I>>(&rows.table_index, &device))
+        });
+        let t0_days = match (&per_dam, t0_on) {
+            (Some((d, idx)), true) => {
+                p.t0_days * d.t0_factor(idx.clone()).expect("per_dam_t0 carries delta")
+            }
+            _ => p.t0_days,
+        };
+        let rule_curve = match (&per_dam, rule_on) {
+            (Some((d, idx)), true) => {
+                assert_eq!(
+                    rows.inflow_mean.len(),
+                    rows.rows.len(),
+                    "release_head.rule_curve needs the table's inflow_mean_m3s (checked at dataset open)"
+                );
+                let max = section.expect("rule_on").rule_curve_max;
+                Some(RuleCurve {
+                    coeffs: d.coefficients(idx.clone(), max).expect("rule_curve carries theta"),
+                    inflow_mean: Tensor::<Autodiff<I>, 1>::from_floats(rows.inflow_mean.as_slice(), &device),
+                })
+            }
+            _ => None,
+        };
         DamRelease {
             rows: rows.rows.clone(),
-            t0_days: p.t0_days,
+            t0_days,
             seasonal: p.seasonal,
             phase: vec![],
             dam_row,
+            rule_curve,
         }
-    } else if let Some((a, b)) = rows.seasonal.as_ref() {
+    } else if rows.seasonal.is_some() || rows.rule_curve.is_some() {
+        // A seasonal fixed table, or one carrying a (resolved) rule curve:
+        // the release path with constant tensors.
         if rows.rows.is_empty() {
             return;
         }
         let t = |v: &[f32]| Tensor::<Autodiff<I>, 1>::from_floats(v, &device);
+        let rule_curve = rows.rule_curve.as_ref().map(|c| {
+            assert_eq!(rows.inflow_mean.len(), rows.rows.len(), "a rule-curve table carries Ibar");
+            let flat: Vec<f32> = c.iter().flatten().copied().collect();
+            RuleCurve {
+                coeffs: t(&flat).reshape([c.len(), 4]),
+                inflow_mean: t(&rows.inflow_mean),
+            }
+        });
         DamRelease {
             rows: rows.rows.clone(),
             t0_days: t(&rows.t_days),
-            seasonal: Some((t(a), t(b))),
+            seasonal: rows.seasonal.as_ref().map(|(a, b)| (t(a), t(b))),
             phase: vec![],
             dam_row,
+            rule_curve,
         }
     } else {
         engine
@@ -289,6 +354,7 @@ pub fn release_t0_stats<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<Autodiff<I>>,
     release_head: &KanHead<Autodiff<I>>,
+    dams: Option<&crate::nn::dam_params::DamParams<Autodiff<I>>>,
     device: &I::Device,
 ) -> Option<(f32, usize)> {
     let active = tensors.reservoir_rows.as_ref()?.active_on(tensors.window.window_start);
@@ -303,7 +369,15 @@ pub fn release_t0_stats<I: Backend>(
     )
     .reshape([n, f]);
     let p = crate::nn::release_head::release_params(release_head, x, &cfg.params.parameter_ranges);
-    let mut t0: Vec<f32> = p.t0_days.detach().into_data().into_vec().unwrap();
+    // The effective T0 with `per_dam_t0` (T0_head·exp(δ)).
+    let factor = dams.filter(|_| active.table_index.len() == n).and_then(|d| {
+        d.t0_factor(crate::nn::dam_params::table_index::<Autodiff<I>>(&active.table_index, device))
+    });
+    let t0_days = match factor {
+        Some(f) => p.t0_days * f,
+        None => p.t0_days,
+    };
+    let mut t0: Vec<f32> = t0_days.detach().into_data().into_vec().unwrap();
     t0.sort_unstable_by(|a, b| a.total_cmp(b));
     let mid = t0.len() / 2;
     let median = if t0.len() % 2 == 0 { 0.5 * (t0[mid - 1] + t0[mid]) } else { t0[mid] };
@@ -491,6 +565,24 @@ pub fn forward_with_release<I: Backend>(
     carry_state: bool,
     gate_tau: Option<f32>,
 ) -> Tensor<Autodiff<I>, 2> {
+    forward_with_release_dams(cfg, tensors, head, release_head, None, device, carry_state, gate_tau)
+}
+
+/// [`forward_with_release`] with the learned release's per-dam parameters
+/// (`release_head.rule_curve` / `per_dam_t0`), passed on to
+/// [`apply_reservoir_rows_with`]. `dams: None` is exactly
+/// [`forward_with_release`].
+#[allow(clippy::too_many_arguments)]
+pub fn forward_with_release_dams<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<Autodiff<I>>,
+    head: &KanHead<Autodiff<I>>,
+    release_head: Option<&KanHead<Autodiff<I>>>,
+    dams: Option<&crate::nn::dam_params::DamParams<Autodiff<I>>>,
+    device: &I::Device,
+    carry_state: bool,
+    gate_tau: Option<f32>,
+) -> Tensor<Autodiff<I>, 2> {
     assert_eq!(
         gate_tau.is_some(),
         cfg.params.leakance_gate.is_some(),
@@ -588,13 +680,14 @@ pub fn forward_with_release<I: Backend>(
         carry_state,
         tensors.initial_state.clone(),
     );
-    apply_reservoir_rows(
+    apply_reservoir_rows_with(
         cfg,
         &mut engine,
         tensors.reservoir_rows.as_ref(),
         tensors.window.window_start,
         n_hourly,
         release_head,
+        dams,
     );
     // Enable negative-discharge tracking so the count appears in the training
     // log. When use_cuda_graphs is true, forward will print UNAVAILABLE instead.

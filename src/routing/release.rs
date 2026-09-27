@@ -65,6 +65,35 @@
 //! Where the replace row's one-hour clamp binds, the gradient into `T0`, `a`
 //! and `b` is exactly zero for that step (Burn's `clamp_min` backward), which
 //! is the correct subgradient of a flat function.
+//!
+//! # The harmonic rule curve (`release_head.rule_curve`, 2026-09-27)
+//!
+//! The storage law gains a periodic target, `S = T·Q + S0_d(t)` (on either
+//! row), whose derivative is the redistribution flux
+//!
+//! ```text
+//! r_d(t)  = Ibar_d · Σ_{k=1,2} (c_{k,s} sin kω_t + c_{k,c} cos kω_t)          m³/s
+//! S0_d(t) = Ibar_d · Σ_{k=1,2} (−c_{k,s} cos kω_t + c_{k,c} sin kω_t) / (k·Ω)  m³
+//! Ω       = 2π / (365.25 · 86400 s)
+//! ```
+//!
+//! with `ω_t` from [`seasonal_phase`] (`sin 2ω`, `cos 2ω` by the double
+//! angle). The trapezoid on `S` puts `−(S0_{t+1} − S0_t)` on the dam row's
+//! right-hand side, i.e. the dam row's lateral inflow becomes
+//! `q'_eff = q'_d − (S0_{t+1} − S0_t)/dt` for the step: the reservoir stores
+//! (`r > 0`) or releases (`r < 0`) on top of the bucket. The system matrix,
+//! the CSR pattern and the hand-written backward are unchanged; the flux
+//! reaches the per-dam coefficients by ordinary autodiff through the
+//! timestep op's `q'` parent (whose gradient the op already returns, B25).
+//! `S0` is periodic in `ω`, so over whole years its increments telescope and
+//! the rule curve moves no volume. (At a calendar year boundary the phase
+//! table's `doy` restarts, so that one step's increment spans a few hours of
+//! phase more or less than an hour; its flux is off by that much, and the sum
+//! still telescopes.) [`rule_curve_increments`] tabulates the per-step phase
+//! increments in f64 so the flux carries no large-number cancellation.
+//! `Ibar_d` is the table's `inflow_mean_m3s` (training-period mean of the
+//! upstream-summed Q'); `c = rule_curve_max·tanh(θ)` per dam
+//! (`crate::nn::dam_params`), so `θ = 0` is no rule curve bit for bit.
 
 use chrono::{Datelike, NaiveDate};
 
@@ -99,6 +128,30 @@ pub fn seasonal_phase(window_start: NaiveDate, n_hours: usize) -> Vec<[f32; 2]> 
             [w.sin() as f32, w.cos() as f32]
         })
         .collect()
+}
+
+/// Angular frequency of the seasonal cycle, rad/s: `2π / (365.25 d)`.
+pub const OMEGA_RAD_PER_S: f64 = 2.0 * std::f64::consts::PI / (DAYS_PER_YEAR * 86_400.0);
+
+/// The rule curve's per-step phase increments: row `s` (the step from phase
+/// row `s` to `s + 1`) is `H(ω_{s+1}) − H(ω_s)` with
+/// `H(ω) = [−cos ω, sin ω, −cos 2ω / 2, sin 2ω / 2] / Ω` (seconds), so that
+/// `S0_{s+1} − S0_s = Ibar · Σ_j ΔH[s, j]·c_j` for `c = (c1s, c1c, c2s, c2c)`.
+/// Computed in f64 from the f32 phase table, `n_rows − 1` rows, row-major
+/// `[n_rows − 1, 4]`.
+pub fn rule_curve_increments(phase: &[[f32; 2]], n_rows: usize) -> Vec<f32> {
+    let h = |[s, c]: [f32; 2]| -> [f64; 4] {
+        let (s, c) = (s as f64, c as f64);
+        let (s2, c2) = (2.0 * s * c, c * c - s * s);
+        let w = OMEGA_RAD_PER_S;
+        [-c / w, s / w, -c2 / (2.0 * w), s2 / (2.0 * w)]
+    };
+    let mut out = Vec::with_capacity(n_rows.saturating_sub(1) * 4);
+    for s in 0..n_rows.saturating_sub(1) {
+        let (a, b) = (h(phase[s]), h(phase[s + 1]));
+        out.extend((0..4).map(|j| (b[j] - a[j]) as f32));
+    }
+    out
 }
 
 /// Smallest and largest `T` (days) the seasonal law reaches over a year,

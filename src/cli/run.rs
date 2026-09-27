@@ -609,6 +609,8 @@ fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
         "routing_checkpoint": rh.routing_checkpoint.as_ref().map(|p| p.display().to_string()),
         "freeze_routing": rh.freeze_routing,
         "dam_row": format!("{:?}", rh.dam_row).to_lowercase(),
+        "rule_curve": rh.rule_curve,
+        "per_dam_t0": rh.per_dam_t0,
     }))
 }
 

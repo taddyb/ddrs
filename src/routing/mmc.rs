@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use burn::backend::Autodiff;
-use burn::tensor::{backend::Backend, Bool, Int, Tensor, TensorData};
+use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use burn::tensor::TensorPrimitive;
 
@@ -123,6 +123,20 @@ pub struct DamRelease<I: Backend> {
     /// `Additive` (the reservoir's storage added to the reach's channel
     /// storage, `T >= 0`, no floor). See `crate::routing::release`.
     pub dam_row: DamRow,
+    /// The harmonic rule curve, `S = T·Q + S0_d(t)`; `None` is none.
+    pub rule_curve: Option<RuleCurve<I>>,
+}
+
+/// Per-dam harmonic rule curve for [`DamRelease`] (`crate::routing::release`):
+/// the flux `r_d(t) = Ibar_d·Σ_k(c_{k,s} sin kω_t + c_{k,c} cos kω_t)`, whose
+/// step increment `(S0_{t+1} − S0_t)/dt` is taken off the dam row's lateral
+/// inflow. The coefficients may be autodiff-tracked (learned per-dam free
+/// parameters); their gradient arrives through the timestep op's `q'` parent.
+pub struct RuleCurve<I: Backend> {
+    /// `[n_dams, 4]`, `(c1s, c1c, c2s, c2c)`, dimensionless.
+    pub coeffs: Tensor<Autodiff<I>, 2>,
+    /// `[n_dams]` `Ibar`, m³/s (the table's `inflow_mean_m3s`).
+    pub inflow_mean: Tensor<Autodiff<I>, 1>,
 }
 
 /// [`DamRelease`] armed on an engine: the dam rows as device tensors, plus the
@@ -141,6 +155,10 @@ struct ArmedRelease<I: Backend> {
     /// This step's `(T_{t+1}, T_t)` (seconds), set by `forward` before
     /// `route_timestep`: the residence time at the step's end and start.
     t_step: Option<(Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>)>,
+    /// Rule curve: `(S0_{t+1} − S0_t)/dt` per step and dam, m³/s,
+    /// `[n_rows − 1, n_dams]` (row `t − 1` for the step producing column `t`),
+    /// and the dam rows as an autodiff index for the scatter onto `q'`.
+    rule_flux: Option<(Tensor<Autodiff<I>, 2>, Tensor<Autodiff<I>, 1, Int>)>,
 }
 
 impl<I: Backend> ArmedRelease<I> {
@@ -679,6 +697,16 @@ impl<I: Backend> MuskingumCunge<I> {
                 release.phase.len()
             ));
         }
+        if let Some(rc) = &release.rule_curve {
+            if rc.coeffs.dims() != [n_dams, 4] || rc.inflow_mean.dims()[0] != n_dams {
+                return Err(format!(
+                    "set_dam_release: rule curve has coefficients {:?} and Ibar {:?}; \
+                     want [{n_dams}, 4] and [{n_dams}]",
+                    rc.coeffs.dims(),
+                    rc.inflow_mean.dims()
+                ));
+            }
+        }
         if n_dams == 0 {
             self.release = None;
             return Ok(());
@@ -690,6 +718,25 @@ impl<I: Backend> MuskingumCunge<I> {
             DamRow::Replace => release.t0_days.clone().clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY,
             DamRow::Additive => release.t0_days.clone() * SECONDS_PER_DAY,
         });
+        // Rule curve: every step's (S0_{t+1} − S0_t)/dt per dam, once, in
+        // autodiff: ΔH [n_rows − 1, 4] (host f64, `rule_curve_increments`)
+        // times cᵀ [4, n_dams], times Ibar/dt. Taken off the dam rows' q' in
+        // `forward`, after the discharge floor on q' (a negative effective
+        // lateral inflow is the reservoir storing more than its reach adds).
+        let rule_flux = release.rule_curve.as_ref().map(|rc| {
+            let n_steps = n_rows - 1;
+            let dh = crate::routing::release::rule_curve_increments(&release.phase, n_rows);
+            let dh = Tensor::<Autodiff<I>, 1>::from_floats(dh.as_slice(), &self.device)
+                .reshape([n_steps, 4]);
+            let scale = (rc.inflow_mean.clone() / self.dt).unsqueeze_dim::<2>(0);
+            let flux = dh.matmul(rc.coeffs.clone().transpose()) * scale;
+            let rows_i64: Vec<i64> = release.rows.iter().map(|&r| r as i64).collect();
+            let rows_ad = Tensor::<Autodiff<I>, 1, Int>::from_data(
+                TensorData::new(rows_i64, [n_dams]),
+                &self.device,
+            );
+            (flux, rows_ad)
+        });
         self.release = Some(ArmedRelease {
             rows: Tensor::from_data(TensorData::new(rows_i32, [n_dams]), &self.device),
             mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
@@ -699,6 +746,7 @@ impl<I: Backend> MuskingumCunge<I> {
             dam_row,
             t_constant,
             t_step: None,
+            rule_flux,
         });
         Ok(())
     }
@@ -909,6 +957,17 @@ impl<I: Backend> MuskingumCunge<I> {
             if let Some(r) = self.release.as_mut() {
                 r.t_step = Some(r.t_step_at(t));
             }
+            // Rule curve: q'_eff = q' − (S0_{t+1} − S0_t)/dt on the dam rows
+            // (`crate::routing::release`). A scatter-add of −flux onto the
+            // dam rows only; every other entry is copied bit for bit.
+            let q_prime_t = match self.release.as_ref().and_then(|r| r.rule_flux.as_ref()) {
+                Some((flux, rows)) => {
+                    let n_dams = rows.dims()[0];
+                    let step = flux.clone().slice([(t - 1)..t, 0..n_dams]).reshape([n_dams]);
+                    q_prime_t.select_assign(0, rows.clone(), -step, IndexingUpdateOp::Add)
+                }
+                None => q_prime_t,
+            };
             let q_next = self.route_timestep(q_prime_t);
             columns.push(q_next.clone().unsqueeze_dim::<2>(1));
             self.discharge_t = Some(q_next);
@@ -948,6 +1007,15 @@ impl<I: Backend> MuskingumCunge<I> {
                 eprintln!(
                     "  reaches with negative discharges pre clamp: {neg}/{total} ({:.3}%)",
                     100.0 * neg as f64 / total as f64
+                );
+            }
+            // Dam rows at the S28 discharge floor, whenever dams are armed
+            // (the rule curve can ask a dam to store more than it holds).
+            let (dam_hit, dam_total) = crate::routing::mmc_op::dam_clamp_stats();
+            if dam_total > 0 {
+                eprintln!(
+                    "  dam-row steps at the discharge clamp: {dam_hit}/{dam_total} ({:.3}%)",
+                    100.0 * dam_hit as f64 / dam_total as f64
                 );
             }
         }

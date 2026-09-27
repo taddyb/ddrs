@@ -52,10 +52,11 @@ use crate::data::ids::Staid;
 use crate::data::sampler::{BatchSource, RandomSampler};
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    head_base, optim_base, release_head_base, release_optim_base, save_optimizer,
+    head_base, optim_base, release_dams_base, release_dams_optim_base, release_head_base,
+    release_optim_base, save_dam_params, save_optimizer,
     save_train_state, state_path, TrainCkptState,
 };
-use crate::training::forward::{forward_with_release, release_t0_stats};
+use crate::training::forward::{forward_with_release_dams, release_t0_stats};
 use crate::training::loss::loss_denominator;
 use crate::training::optimizer::{scale_grads, HeadOptimizer};
 use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
@@ -94,6 +95,47 @@ pub struct TrainState<I: Backend> {
 pub struct ReleaseTrainer<I: Backend> {
     pub head: KanHead<Autodiff<I>>,
     pub optimizer: HeadOptimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
+    /// The per-dam free parameters (`release_head.rule_curve` /
+    /// `per_dam_t0`) and their own optimizer; `None` without either option.
+    pub dams: Option<DamTrainer<I>>,
+}
+
+/// Per-dam free parameters (`crate::nn::dam_params`) with their own Adam,
+/// stepped at the constant `release_head.per_dam_lr` (a dam's parameters get
+/// a gradient only when a gauge below it is in the batch, so the heads'
+/// schedule would barely move them), clipped on their own norm.
+pub struct DamTrainer<I: Backend> {
+    pub params: crate::nn::dam_params::DamParams<Autodiff<I>>,
+    pub optimizer: HeadOptimizer<crate::nn::dam_params::DamParams<Autodiff<I>>, Autodiff<I>>,
+}
+
+/// `median |c|` over the rule-curve coefficients of the dams whose logits
+/// received a nonzero gradient in `grads`, and how many dams that is: the
+/// per-step rule-curve diagnostic. `None` without a rule curve or when no
+/// dam received a gradient.
+fn rule_curve_c_stats<I: Backend>(
+    dams: &DamTrainer<I>,
+    grads: &GradientsParams,
+    rule_curve_max: f32,
+) -> Option<(f32, usize)> {
+    let theta = dams.params.theta.as_ref()?;
+    let g = grads.get::<I, 2>(theta.id)?;
+    let [n, k] = g.dims();
+    let g: Vec<f32> = g.into_data().to_vec().ok()?;
+    let th: Vec<f32> = theta.val().into_data().to_vec().ok()?;
+    let mut c = Vec::new();
+    let mut n_dams = 0;
+    for d in 0..n {
+        if (0..k).any(|j| g[d * k + j] != 0.0) {
+            n_dams += 1;
+            c.extend((0..k).map(|j| (rule_curve_max * th[d * k + j].tanh()).abs()));
+        }
+    }
+    if c.is_empty() {
+        return None;
+    }
+    c.sort_unstable_by(|a, b| a.total_cmp(b));
+    Some((c[c.len() / 2], n_dams))
 }
 
 /// One micro-batch's forward + loss, before any backward.
@@ -124,7 +166,7 @@ fn run_micro_batch<I: Backend>(
     cfg: &Config,
     dataset: &MeritGagesDataset,
     head: &KanHead<Autodiff<I>>,
-    release_head: Option<&KanHead<Autodiff<I>>>,
+    release: Option<&ReleaseTrainer<I>>,
     device: &I::Device,
     staids: &[Staid],
     window: &RhoWindow,
@@ -149,10 +191,26 @@ fn run_micro_batch<I: Backend>(
     let tensors = batch.to_tensors::<Autodiff<I>>(device);
     let (median_n, n_at_floor) =
         crate::training::forward::manning_n_stats::<I>(cfg, &tensors, head);
+    let release_head = release.map(|r| &r.head);
+    let dams = release.and_then(|r| r.dams.as_ref()).map(|d| &d.params);
     let release_t0 =
-        release_head.and_then(|r| release_t0_stats::<I>(cfg, &tensors, r, device));
-    let pred_hourly =
-        forward_with_release::<I>(cfg, &tensors, head, release_head, device, false, gate_tau);
+        release_head.and_then(|r| release_t0_stats::<I>(cfg, &tensors, r, dams, device));
+    let pred_hourly = forward_with_release_dams::<I>(
+        cfg, &tensors, head, release_head, dams, device, false, gate_tau,
+    );
+    // `per_dam_l2 · Σ(θ² + δ²)` over this batch's active dams (their table
+    // rows), added to the optimised loss; the logged loss stays the data loss.
+    let penalty = dams.zip(cfg.release_head.as_ref()).and_then(|(d, rh)| {
+        if rh.per_dam_l2 <= 0.0 {
+            return None;
+        }
+        let active = tensors.reservoir_rows.as_ref()?.active_on(tensors.window.window_start);
+        if active.table_index.is_empty() {
+            return None;
+        }
+        let idx = crate::nn::dam_params::table_index::<Autodiff<I>>(&active.table_index, device);
+        d.sum_sq(idx).map(|s| s * rh.per_dam_l2)
+    });
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
     let dims = daily.dims();
     let (g, t_days) = (dims[0], dims[1]);
@@ -235,6 +293,10 @@ fn run_micro_batch<I: Backend>(
     // Config-selected objective (default L1); autograd alive on `p_filt`.
     let loss = crate::training::batch_loss(p_filt, o_filt, &exp.loss, sigma, sigma_d);
     let loss_f32: f32 = loss.clone().into_scalar().elem::<f32>();
+    let loss = match penalty {
+        Some(p) => loss + p,
+        None => loss,
+    };
 
     Ok(Some(MicroBatchOutcome {
         loss,
@@ -255,6 +317,33 @@ fn loss_is_tracked<I: Backend>(loss: &Tensor<Autodiff<I>, 1>) -> bool {
     match loss.clone().into_primitive() {
         burn::tensor::TensorPrimitive::Float(p) => !p.node.requirement.is_none(),
         _ => unreachable!("a loss is a float tensor"),
+    }
+}
+
+/// Step the per-dam parameters on `dam_grads` (clipped on their own norm) at
+/// the constant `release_head.per_dam_lr`, returning the rule-curve
+/// diagnostic ([`rule_curve_c_stats`], read before the step). A no-op
+/// without per-dam parameters or gradients.
+fn step_dams<I: Backend>(
+    cfg: &Config,
+    release: Option<&mut ReleaseTrainer<I>>,
+    dam_grads: Option<GradientsParams>,
+    grad_clip: f32,
+) -> Option<(f32, usize)> {
+    let d = release?.dams.as_mut()?;
+    let dg = dam_grads?;
+    let rh = cfg.release_head.as_ref().expect("per-dam parameters come from the release_head block");
+    let stats = rule_curve_c_stats(d, &dg, rh.rule_curve_max);
+    let dg = clip_grad_norm(dg, &d.params, grad_clip);
+    d.params = d.optimizer.step(rh.per_dam_lr as f64, d.params.clone(), dg);
+    stats
+}
+
+/// ` rule_curve_|c|_median=<v> (<k> dams with gradient)`, or empty.
+fn rule_curve_log(stats: Option<(f32, usize)>) -> String {
+    match stats {
+        Some((c, k)) => format!(" rule_curve_|c|_median={c:.4} ({k} dams with gradient)"),
+        None => String::new(),
     }
 }
 
@@ -291,6 +380,11 @@ fn save_step_checkpoint<I: Backend>(
     if let Some(r) = state.release.as_ref() {
         save_kan_head(&release_head_base(&ckpt_dir), &r.head.clone().valid())?;
         save_optimizer(&release_optim_base(&ckpt_dir), &r.optimizer)?;
+        // The per-dam parameters (full precision) and their optimizer.
+        if let Some(d) = r.dams.as_ref() {
+            save_dam_params(&release_dams_base(&ckpt_dir), &d.params.clone().valid())?;
+            save_optimizer(&release_dams_optim_base(&ckpt_dir), &d.optimizer)?;
+        }
     }
     if let Some((sampler_indices, sampler_cursor)) = sampler.snapshot() {
         save_train_state(
@@ -375,7 +469,7 @@ pub fn train<I: Backend>(
                     cfg,
                     dataset,
                     &state.head,
-                    state.release.as_ref().map(|r| &r.head),
+                    state.release.as_ref(),
                     device,
                     &staids,
                     &window,
@@ -405,14 +499,19 @@ pub fn train<I: Backend>(
                 // learned release this is the historical single-head step.
                 // With the routing head frozen only the release head takes
                 // a step, and a batch with no active dam takes none.
-                let (grads, release_grads) = match state.release.as_ref() {
-                    None => (Some(GradientsParams::from_grads(loss.backward(), &state.head)), None),
-                    Some(_) if frozen && !loss_is_tracked::<I>(&loss) => (None, None),
+                let (grads, release_grads, dam_grads) = match state.release.as_ref() {
+                    None => (
+                        Some(GradientsParams::from_grads(loss.backward(), &state.head)),
+                        None,
+                        None,
+                    ),
+                    Some(_) if frozen && !loss_is_tracked::<I>(&loss) => (None, None, None),
                     Some(r) => {
                         let mut raw = loss.backward();
                         let g = (!frozen).then(|| GradientsParams::from_module(&mut raw, &state.head));
                         let rg = GradientsParams::from_module(&mut raw, &r.head);
-                        (g, Some(rg))
+                        let dg = r.dams.as_ref().map(|d| GradientsParams::from_module(&mut raw, &d.params));
+                        (g, Some(rg), dg)
                     }
                 };
                 if let Some(grads) = grads {
@@ -423,6 +522,7 @@ pub fn train<I: Backend>(
                     let rg = clip_grad_norm(rg, &r.head, grad_clip);
                     r.head = r.optimizer.step(lr as f64, r.head.clone(), rg);
                 }
+                let rc_stats = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
 
                 save_step_checkpoint::<I>(checkpoint_dir, epoch, state, &*optimizer, &sampler)?;
 
@@ -439,11 +539,12 @@ pub fn train<I: Backend>(
                 crate::sparse::cusparse::cuda_memory_cleanup::<I>(device);
 
                 eprintln!(
-                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%{}",
+                    "  mb={} loss={:.6} median_n={median_n:.5} n_at_floor={:.1}%{}{}",
                     state.mini_batch,
                     loss_f32,
                     n_at_floor * 100.0,
                     release_log(release_t0),
+                    rule_curve_log(rc_stats),
                 );
                 state.mini_batch += 1;
                 mb_done += 1;
@@ -459,6 +560,8 @@ pub fn train<I: Backend>(
             loop {
                 let mut accumulator = GradientsAccumulator::<KanHead<Autodiff<I>>>::new();
                 let mut release_accumulator = GradientsAccumulator::<KanHead<Autodiff<I>>>::new();
+                let mut dam_accumulator =
+                    GradientsAccumulator::<crate::nn::dam_params::DamParams<Autodiff<I>>>::new();
                 let mut total_n = 0usize;
                 let mut loss_weighted_sum = 0.0f64;
                 let mut micros_drawn = 0usize;
@@ -474,7 +577,7 @@ pub fn train<I: Backend>(
                         cfg,
                         dataset,
                         &state.head,
-                        state.release.as_ref().map(|r| &r.head),
+                        state.release.as_ref(),
                         device,
                         &staids,
                         &window,
@@ -513,6 +616,10 @@ pub fn train<I: Backend>(
                                 }
                                 let rgrads = GradientsParams::from_module(&mut raw, &r.head);
                                 release_accumulator.accumulate(&r.head, rgrads);
+                                if let Some(d) = r.dams.as_ref() {
+                                    let dgrads = GradientsParams::from_module(&mut raw, &d.params);
+                                    dam_accumulator.accumulate(&d.params, dgrads);
+                                }
                             }
                         }
                         total_n += n_valid;
@@ -558,6 +665,10 @@ pub fn train<I: Backend>(
                         let rg = clip_grad_norm(rg, &r.head, grad_clip);
                         r.head = r.optimizer.step(lr as f64, r.head.clone(), rg);
                     }
+                    let dam_grads = state.release.as_ref().and_then(|r| r.dams.as_ref()).map(|d| {
+                        scale_grads(dam_accumulator.grads(), &d.params, 1.0 / total_n as f32)
+                    });
+                    let rc_stats = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
 
                     save_step_checkpoint::<I>(
                         checkpoint_dir,
@@ -568,9 +679,10 @@ pub fn train<I: Backend>(
                     )?;
 
                     eprintln!(
-                        "  mb={} loss={:.6} (accumulated {micros_valid}/{micros_drawn} micro-batches, n={total_n})",
+                        "  mb={} loss={:.6} (accumulated {micros_valid}/{micros_drawn} micro-batches, n={total_n}){}",
                         state.mini_batch,
                         loss_weighted_sum / total_n as f64,
+                        rule_curve_log(rc_stats),
                     );
                 }
 

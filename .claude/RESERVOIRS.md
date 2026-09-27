@@ -125,6 +125,14 @@ change.
   `D = K_r(1 − X_r) + T_{t+1} + dt/2`, `c1 = (dt/2 − K_r X_r)/D`, `c2 = (dt/2 + K_r X_r)/D`,
   `c3 = (K_r(1 − X_r) + T_t − dt/2)/D`, `c4 = dt/D` (S19'''' / B19''''). `T = 0` is the channel
   row bit for bit, `K_r = 0` is the replace row, `T` has no floor. `tests/reservoir_additive.rs`.
+- **Harmonic rule curve (2026-09-27, `release_head.rule_curve`, `per_dam_t0`).** `S = T·Q + S0_d(t)`,
+  flux `r_d = Ibar_d·Σ_{k=1,2}(c_{k,s} sin kω + c_{k,c} cos kω)` off the dam row's `q'`; per-dam
+  free coefficients `c = rule_curve_max·tanh(θ)` (and `T0·exp(δ)`) calibrated through the gauge
+  loss at their own constant lr, because offline they are not predictable from NID features
+  (rule-curve report: +0.049 median NSE at DOR > 0.5 on-reach with per-dam calibration).
+  `Ibar_d` = `inflow_mean_m3s` (`build_dam_inflow_clim.py`). Flaming Gorge (COMID 77013090) is
+  mis-snapped to a 32 km² reach, so its `Ibar` is ~0 and its rule curve inert.
+  `tests/reservoir_rule_curve.rs`.
 - **Release-only training (2026-09-27).** `release_head.routing_checkpoint` loads the routing
   head's weights (only `head.mpk`) from another run's checkpoint directory, and
   `release_head.freeze_routing: true` detaches it: the routing head stays bitwise at the

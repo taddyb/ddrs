@@ -18,10 +18,11 @@ use crate::config::Config;
 use crate::data::error::Result;
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    head_base, load_disagg_head, load_kan_head, load_optimizer, load_train_state, optim_base,
+    head_base, load_dam_params, load_disagg_head, load_kan_head, load_optimizer, load_train_state,
+    optim_base, release_dams_base, release_dams_optim_base,
     release_head_base, release_optim_base, state_path,
 };
-use crate::training::driver::{ReleaseTrainer, TrainState};
+use crate::training::driver::{DamTrainer, ReleaseTrainer, TrainState};
 use crate::training::optimizer::{build_head_optimizer, HeadOptimizer};
 
 /// Initialise the KAN head, the mutable training state, and the Adam
@@ -143,9 +144,40 @@ where
             head.learnable_parameters(),
             crate::nn::release_head::INIT_T0_HOURS
         );
+        // Per-dam free parameters (rule curve, per-dam T0): one row per dam
+        // of the feature table, all zero, with their own Adam (constant
+        // `per_dam_lr`, stepped by the driver).
+        let dams = if section.has_per_dam() {
+            let path = cfg
+                .data_sources
+                .as_ref()
+                .and_then(|d| d.reservoirs.as_ref())
+                .expect("use_reservoirs requires data_sources.reservoirs (validated at load)");
+            let n = crate::data::store::read_dam_features(path, &section.input_var_names)?.comids.len();
+            let params = crate::nn::dam_params::DamParams::<Autodiff<I>>::zeros(
+                n,
+                section.rule_curve,
+                section.per_dam_t0,
+                device,
+            );
+            eprintln!(
+                "release head: per-dam parameters for {n} table dams (rule_curve: {}, per_dam_t0: {}, \
+                 lr {} constant, l2 {})",
+                section.rule_curve, section.per_dam_t0, section.per_dam_lr, section.per_dam_l2
+            );
+            Some(DamTrainer::<I> {
+                params,
+                optimizer: build_head_optimizer::<crate::nn::dam_params::DamParams<Autodiff<I>>, Autodiff<I>>(
+                    crate::config::OptimizerKind::Adam,
+                ),
+            })
+        } else {
+            None
+        };
         Some(ReleaseTrainer::<I> {
             head,
             optimizer: build_head_optimizer::<KanHead<Autodiff<I>>, Autodiff<I>>(optim_kind),
+            dams,
         })
     } else {
         None
@@ -198,6 +230,22 @@ where
                     rhead.display(),
                     crate::nn::release_head::INIT_T0_HOURS
                 );
+            }
+            // The per-dam parameters and their optimizer, when both the run
+            // and the checkpoint carry them.
+            if let Some(d) = r.dams.as_mut() {
+                let dbase = release_dams_base(ckpt_dir);
+                if dbase.with_extension("mpk").is_file() {
+                    d.params = load_dam_params::<Autodiff<I>>(&dbase, d.params.clone(), device)?;
+                    println!("warm start: loaded per-dam parameters from {}.mpk", dbase.display());
+                    let doptim = release_dams_optim_base(ckpt_dir);
+                    if doptim.with_extension("mpk").is_file() {
+                        d.optimizer = load_optimizer(&doptim, d.optimizer.clone(), device)?;
+                        println!("warm start: restored per-dam optimizer from {}.mpk", doptim.display());
+                    }
+                } else {
+                    println!("warm start: no {}.mpk; per-dam parameters start at zero", dbase.display());
+                }
             }
         }
 

@@ -590,24 +590,38 @@ impl MeritGagesDataset {
                     ReservoirTable::Fixed(read_fixed_release_table(path)?)
                 }
                 crate::config::ReservoirRelease::Learned => {
-                    let names = &cfg
-                        .release_head
-                        .as_ref()
-                        .ok_or_else(|| DataError::Malformed {
-                            path: std::path::PathBuf::from("<config>"),
-                            message: "reservoir_release: learned needs a release_head block".into(),
-                        })?
-                        .input_var_names;
-                    ReservoirTable::Learned(read_dam_features(path, names)?)
+                    let section = cfg.release_head.as_ref().ok_or_else(|| DataError::Malformed {
+                        path: std::path::PathBuf::from("<config>"),
+                        message: "reservoir_release: learned needs a release_head block".into(),
+                    })?;
+                    let features = read_dam_features(path, &section.input_var_names)?;
+                    // The rule curve's flux scale is a table column, not a
+                    // feature: without it the rule curve cannot run.
+                    if section.rule_curve && features.inflow_mean.is_none() {
+                        return Err(DataError::Malformed {
+                            path: path.clone(),
+                            message: format!(
+                                "release_head.rule_curve needs the `{}` column (Ibar, the \
+                                 training-period mean of upstream-summed Q', m3/s) in the dam table; \
+                                 build it with experiments/reservoir/release_head/build_dam_inflow_clim.py",
+                                crate::data::store::INFLOW_MEAN_COLUMN
+                            ),
+                        });
+                    }
+                    ReservoirTable::Learned(features)
                 }
             };
             // Logged at open so a train-only run, which never builds the eval
             // network's match line, still leaves the table in `run.log`. Same
             // fd-2 write as `build_static_network`, for the same libtest reason.
             use std::io::Write;
+            let rule_curve = cfg.release_head.as_ref().is_some_and(|r| r.rule_curve);
             let kind = match &table {
                 ReservoirTable::Fixed(t) if t.seasonal => " (fixed, seasonal a/b)",
                 ReservoirTable::Fixed(_) => "",
+                ReservoirTable::Learned(_) if rule_curve => {
+                    " (learned release, dam features, rule curve on inflow_mean_m3s)"
+                }
                 ReservoirTable::Learned(_) => " (learned release, dam features)",
             };
             let _ = writeln!(

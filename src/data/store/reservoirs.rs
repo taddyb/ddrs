@@ -23,6 +23,13 @@
 //! of that year; before, its reach is an ordinary channel
 //! ([`ReservoirRows::active_on`], applied when the rows are armed). An empty
 //! year, or a table without the column, is always active.
+//!
+//! The harmonic rule curve (`release_head.rule_curve`, 2026-09-27): a raw
+//! `inflow_mean_m3s` column (`Ibar_d`, the training-period mean of the
+//! upstream-summed Q', `build_dam_inflow_clim.py`) scales each dam's flux.
+//! Both kinds may carry it; a `fixed` table may also carry all four
+//! coefficient columns `c1s, c1c, c2s, c2c` (a resolved learned rule curve),
+//! which then require `inflow_mean_m3s`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -116,6 +123,12 @@ pub struct FixedDam {
 pub struct FixedTable {
     pub dams: Vec<FixedDam>,
     pub seasonal: bool,
+    /// Per-dam rule-curve coefficients `(c1s, c1c, c2s, c2c)`, aligned with
+    /// `dams`, when the table carries them (a resolved learned rule curve).
+    pub rule_curve: Option<Vec<[f32; 4]>>,
+    /// Per-dam `Ibar` (m³/s, `inflow_mean_m3s`), aligned with `dams`, when
+    /// the table carries it. Required with `rule_curve`.
+    pub inflow_mean: Option<Vec<f32>>,
 }
 
 /// A `reservoir_release: learned` table: the release head's per-dam inputs,
@@ -128,6 +141,9 @@ pub struct DamFeatures {
     pub values: ndarray::Array2<f32>,
     /// NID completion year per row (`year_completed`); `None` is always active.
     pub years: Vec<Option<i32>>,
+    /// `Ibar` per row (m³/s, the raw `inflow_mean_m3s` column) when the table
+    /// carries it; the rule curve's flux scale.
+    pub inflow_mean: Option<Vec<f32>>,
 }
 
 /// The reservoir table a dataset carries, by `params.reservoir_release`.
@@ -221,6 +237,85 @@ fn open_csv(path: &Path) -> Result<(csv::Reader<std::fs::File>, csv::StringRecor
 /// `a` and `b` must both be present or both absent, and finite.
 pub fn read_fixed_release_table(path: impl AsRef<Path>) -> Result<FixedTable> {
     let path = path.as_ref();
+    let mut table = read_fixed_release_table_core(path)?;
+    let (rule_curve, inflow_mean) = read_rule_curve_columns(path, table.dams.len())?;
+    table.rule_curve = rule_curve;
+    table.inflow_mean = inflow_mean;
+    Ok(table)
+}
+
+/// Parse a finite `f32` field for [`read_rule_curve_columns`] /
+/// [`read_dam_features`], naming the row, column and file on failure.
+fn parse_finite(path: &Path, row: usize, name: &str, s: &str) -> Result<f32> {
+    let malformed = |message: String| DataError::Malformed { path: path.to_path_buf(), message };
+    let v = s
+        .parse::<f32>()
+        .map_err(|e| malformed(format!("row {row}: {name} {s:?} is not a number ({e})")))?;
+    if !v.is_finite() {
+        return Err(malformed(format!("row {row}: {name} = {v} is not finite")));
+    }
+    Ok(v)
+}
+
+/// The optional rule-curve columns of a fixed table: all four of
+/// `c1s, c1c, c2s, c2c` or none, and `inflow_mean_m3s` (finite, `>= 0`),
+/// which the coefficients require. `n` is the table's row count.
+fn read_rule_curve_columns(
+    path: &Path,
+    n: usize,
+) -> Result<(Option<Vec<[f32; 4]>>, Option<Vec<f32>>)> {
+    let malformed = |message: String| DataError::Malformed { path: path.to_path_buf(), message };
+    let (mut rdr, headers) = open_csv(path)?;
+    let col = |name: &str| headers.iter().position(|h| h == name);
+    let names = ["c1s", "c1c", "c2s", "c2c"];
+    let coef_cols: Vec<Option<usize>> = names.iter().map(|n| col(n)).collect();
+    let inflow_col = col(INFLOW_MEAN_COLUMN);
+    let coefs = match coef_cols.iter().filter(|c| c.is_some()).count() {
+        0 => None,
+        4 => Some(coef_cols.iter().map(|c| c.unwrap()).collect::<Vec<_>>()),
+        _ => {
+            return Err(malformed(
+                "a rule-curve table needs all four of `c1s`, `c1c`, `c2s`, `c2c` (or none)".into(),
+            ))
+        }
+    };
+    if coefs.is_some() && inflow_col.is_none() {
+        return Err(malformed(format!(
+            "rule-curve coefficients need the `{INFLOW_MEAN_COLUMN}` column (Ibar, m3/s)"
+        )));
+    }
+    if coefs.is_none() && inflow_col.is_none() {
+        return Ok((None, None));
+    }
+    let mut rule = Vec::with_capacity(n);
+    let mut inflow = Vec::with_capacity(n);
+    for (i, record) in rdr.records().enumerate() {
+        let row = i + 1;
+        let record = record.map_err(|source| DataError::Csv { path: path.to_path_buf(), source })?;
+        if let Some(cols) = coefs.as_ref() {
+            let mut c = [0.0_f32; 4];
+            for (k, (&ci, name)) in cols.iter().zip(names).enumerate() {
+                c[k] = parse_finite(path, row, name, record.get(ci).unwrap_or(""))?;
+            }
+            rule.push(c);
+        }
+        if let Some(ci) = inflow_col {
+            let v = parse_finite(path, row, INFLOW_MEAN_COLUMN, record.get(ci).unwrap_or(""))?;
+            if v < 0.0 {
+                return Err(malformed(format!("row {row}: {INFLOW_MEAN_COLUMN} = {v} is negative")));
+            }
+            inflow.push(v);
+        }
+    }
+    Ok((coefs.map(|_| rule), inflow_col.map(|_| inflow)))
+}
+
+/// The raw column of the dam tables carrying `Ibar_d` (m³/s), the rule
+/// curve's flux scale (`experiments/reservoir/release_head/build_dam_inflow_clim.py`).
+pub const INFLOW_MEAN_COLUMN: &str = "inflow_mean_m3s";
+
+/// [`read_fixed_release_table`] without the rule-curve columns.
+fn read_fixed_release_table_core(path: &Path) -> Result<FixedTable> {
     let base = read_reservoir_table(path)?;
     let malformed = |message: String| DataError::Malformed { path: path.to_path_buf(), message };
 
@@ -255,6 +350,8 @@ pub fn read_fixed_release_table(path: impl AsRef<Path>) -> Result<FixedTable> {
                     })
                     .collect(),
                 seasonal: false,
+                rule_curve: None,
+                inflow_mean: None,
             })
         }
         _ => {
@@ -290,7 +387,7 @@ pub fn read_fixed_release_table(path: impl AsRef<Path>) -> Result<FixedTable> {
             year_completed,
         });
     }
-    Ok(FixedTable { dams, seasonal: true })
+    Ok(FixedTable { dams, seasonal: true, rule_curve: None, inflow_mean: None })
 }
 
 /// Read a `reservoir_release: learned` feature table: a `COMID` column plus
@@ -318,9 +415,11 @@ pub fn read_dam_features(path: impl AsRef<Path>, names: &[String]) -> Result<Dam
     let comid_col = column("COMID")?;
     let cols: Vec<usize> = names.iter().map(|n| column(n)).collect::<Result<_>>()?;
     let year_col = headers.iter().position(|h| h == "year_completed");
+    let inflow_col = headers.iter().position(|h| h == INFLOW_MEAN_COLUMN);
 
     let mut comids = Vec::new();
     let mut years = Vec::new();
+    let mut inflow = Vec::new();
     let mut flat: Vec<f32> = Vec::new();
     let mut first_row: HashMap<Comid, usize> = HashMap::new();
     for (i, record) in rdr.records().enumerate() {
@@ -353,6 +452,16 @@ pub fn read_dam_features(path: impl AsRef<Path>, names: &[String]) -> Result<Dam
             None => None,
         };
         years.push(year);
+        if let Some(c) = inflow_col {
+            let v = parse_finite(path, row, INFLOW_MEAN_COLUMN, field(c))?;
+            if v < 0.0 {
+                return Err(malformed(format!(
+                    "row {row}: COMID {} has {INFLOW_MEAN_COLUMN} = {v}; it must be >= 0",
+                    comid.0
+                )));
+            }
+            inflow.push(v);
+        }
         comids.push(comid);
     }
     if comids.is_empty() {
@@ -360,7 +469,13 @@ pub fn read_dam_features(path: impl AsRef<Path>, names: &[String]) -> Result<Dam
     }
     let values = ndarray::Array2::from_shape_vec((comids.len(), names.len()), flat)
         .expect("one value per (row, feature)");
-    Ok(DamFeatures { comids, names: names.to_vec(), values, years })
+    Ok(DamFeatures {
+        comids,
+        names: names.to_vec(),
+        values,
+        years,
+        inflow_mean: inflow_col.map(|_| inflow),
+    })
 }
 
 /// The dam rows of one routed network, ready for
@@ -380,6 +495,16 @@ pub struct ReservoirRows {
     /// Completion year per row, aligned with `rows`, when the table carries
     /// any; EMPTY when it carries none (every dam always active).
     pub years: Vec<Option<i32>>,
+    /// Row of each dam in the LEARNED feature table, aligned with `rows`: the
+    /// index into the per-dam parameters (`crate::nn::dam_params`). Empty for
+    /// a fixed table.
+    pub table_index: Vec<usize>,
+    /// `Ibar` (m³/s) per row, aligned with `rows`, when the table carries
+    /// `inflow_mean_m3s`; empty otherwise.
+    pub inflow_mean: Vec<f32>,
+    /// Rule-curve coefficients `(c1s, c1c, c2s, c2c)` per row, for a fixed
+    /// table that carries them (a resolved learned rule curve).
+    pub rule_curve: Option<Vec<[f32; 4]>>,
 }
 
 impl ReservoirRows {
@@ -403,6 +528,13 @@ impl ReservoirRows {
             seasonal: self.seasonal.as_ref().map(|(a, b)| (pick(a), pick(b))),
             features: self.features.as_ref().map(|f| f.select(ndarray::Axis(0), &keep)),
             years: keep.iter().map(|&i| self.years[i]).collect(),
+            table_index: if self.table_index.is_empty() {
+                Vec::new()
+            } else {
+                keep.iter().map(|&i| self.table_index[i]).collect()
+            },
+            inflow_mean: pick(&self.inflow_mean),
+            rule_curve: self.rule_curve.as_ref().map(|c| keep.iter().map(|&i| c[i]).collect()),
         }
     }
 
@@ -421,16 +553,25 @@ impl ReservoirRows {
 pub fn map_reservoir_rows(table: &ReservoirTable, network: &[Comid]) -> ReservoirRows {
     match table {
         ReservoirTable::Fixed(t) => {
-            let by_comid: HashMap<Comid, FixedDam> = t.dams.iter().map(|d| (d.comid, *d)).collect();
+            let by_comid: HashMap<Comid, usize> =
+                t.dams.iter().enumerate().map(|(i, d)| (d.comid, i)).collect();
             let mut out = ReservoirRows::default();
             let (mut a, mut b, mut years) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut rule, mut inflow) = (Vec::new(), Vec::new());
             for (row, comid) in network.iter().enumerate() {
-                if let Some(d) = by_comid.get(comid) {
+                if let Some(&i) = by_comid.get(comid) {
+                    let d = &t.dams[i];
                     out.rows.push(row);
                     out.t_days.push(d.t_days);
                     a.push(d.a);
                     b.push(d.b);
                     years.push(d.year_completed);
+                    if let Some(c) = t.rule_curve.as_ref() {
+                        rule.push(c[i]);
+                    }
+                    if let Some(q) = t.inflow_mean.as_ref() {
+                        inflow.push(q[i]);
+                    }
                 }
             }
             if t.seasonal {
@@ -439,6 +580,8 @@ pub fn map_reservoir_rows(table: &ReservoirTable, network: &[Comid]) -> Reservoi
             if t.dams.iter().any(|d| d.year_completed.is_some()) {
                 out.years = years;
             }
+            out.rule_curve = t.rule_curve.as_ref().map(|_| rule);
+            out.inflow_mean = inflow;
             out
         }
         ReservoirTable::Learned(f) => {
@@ -458,7 +601,20 @@ pub fn map_reservoir_rows(table: &ReservoirTable, network: &[Comid]) -> Reservoi
             } else {
                 Vec::new()
             };
-            ReservoirRows { rows, t_days: Vec::new(), seasonal: None, features: Some(features), years }
+            let inflow_mean = match f.inflow_mean.as_ref() {
+                Some(q) => src.iter().map(|&i| q[i]).collect(),
+                None => Vec::new(),
+            };
+            ReservoirRows {
+                rows,
+                t_days: Vec::new(),
+                seasonal: None,
+                features: Some(features),
+                years,
+                table_index: src,
+                inflow_mean,
+                rule_curve: None,
+            }
         }
     }
 }
@@ -719,6 +875,8 @@ mod tests {
                 FixedDam { comid: Comid(99), t_days: 3.0, a: 0.0, b: 0.0, year_completed: None },
             ],
             seasonal: true,
+            rule_curve: None,
+            inflow_mean: None,
         });
         let network = [Comid(10), Comid(20), Comid(30)];
         let rows = map_reservoir_rows(&table, &network);
@@ -737,6 +895,8 @@ mod tests {
                 .map(|&(comid, t_days)| FixedDam { comid, t_days, a: 0.0, b: 0.0, year_completed: None })
                 .collect(),
             seasonal: false,
+            rule_curve: None,
+            inflow_mean: None,
         });
         let network = [Comid(10), Comid(20), Comid(30)];
         assert_eq!(map_reservoir_rows(&table, &network), reservoir_rows(&plain, &network));
@@ -749,6 +909,7 @@ mod tests {
             names: vec!["f".into(), "g".into()],
             values: ndarray::array![[3.0_f32, 30.0], [1.0, 10.0]],
             years: vec![None, None],
+            inflow_mean: None,
         });
         let network = [Comid(10), Comid(20), Comid(30)];
         let rows = map_reservoir_rows(&table, &network);
@@ -801,6 +962,7 @@ mod tests {
             names: vec!["f".into()],
             values: ndarray::array![[1.0_f32], [2.0], [3.0]],
             years: vec![Some(1990), None, Some(1985)],
+            inflow_mean: None,
         });
         let network = [Comid(10), Comid(15), Comid(20), Comid(30)];
         let rows = map_reservoir_rows(&table, &network);
@@ -820,6 +982,8 @@ mod tests {
                 FixedDam { comid: Comid(30), t_days: 3.0, a: 0.3, b: 0.4, year_completed: Some(1970) },
             ],
             seasonal: true,
+            rule_curve: None,
+            inflow_mean: None,
         });
         let f = map_reservoir_rows(&fixed, &network).active_on(day(1995, 3, 1));
         assert_eq!((f.rows, f.t_days), (vec![3], vec![3.0]));
@@ -833,5 +997,69 @@ mod tests {
         assert!(rows.years.is_empty());
         assert_eq!(rows.active_on(day(1800, 1, 1)), rows);
         assert_eq!(rows.n_active_on(day(1800, 1, 1)), 2);
+    }
+
+    // ---- rule curve (`inflow_mean_m3s`, `c1s, c1c, c2s, c2c`) ----
+
+    #[test]
+    fn fixed_table_reads_optional_rule_curve_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_csv(
+            &dir,
+            "COMID,T_days,a,b,c1s,c1c,c2s,c2c,inflow_mean_m3s\n10,1.0,0,0,0.1,-0.2,0.3,-0.4,12.5\n\
+             20,2.0,0.5,0,0,0,0,0,0.0\n",
+        );
+        let t = read_fixed_release_table(&path).expect("rule-curve table");
+        assert_eq!(t.rule_curve, Some(vec![[0.1, -0.2, 0.3, -0.4], [0.0; 4]]));
+        assert_eq!(t.inflow_mean, Some(vec![12.5, 0.0]));
+        // Ibar alone is allowed; no coefficient columns is no rule curve.
+        let path = write_csv(&dir, "COMID,T_days,inflow_mean_m3s\n10,1.0,3.0\n");
+        let t = read_fixed_release_table(&path).unwrap();
+        assert_eq!((t.rule_curve, t.inflow_mean), (None, Some(vec![3.0])));
+        let path = write_csv(&dir, "COMID,T_days\n10,1.0\n");
+        let t = read_fixed_release_table(&path).unwrap();
+        assert_eq!((t.rule_curve, t.inflow_mean), (None, None));
+    }
+
+    #[test]
+    fn fixed_table_rule_curve_rejections() {
+        fixed_rejected("COMID,T_days,c1s,c1c,inflow_mean_m3s\n10,1.0,0.1,0.2,3.0\n", "all four");
+        fixed_rejected("COMID,T_days,c1s,c1c,c2s,c2c\n10,1.0,0.1,0.2,0,0\n", "inflow_mean_m3s");
+        fixed_rejected("COMID,T_days,inflow_mean_m3s\n10,1.0,-1.0\n", "negative");
+        fixed_rejected("COMID,T_days,c1s,c1c,c2s,c2c,inflow_mean_m3s\n10,1.0,x,0,0,0,1\n", "c1s");
+    }
+
+    #[test]
+    fn feature_table_reads_inflow_mean_and_rows_carry_it_with_the_table_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_csv(&dir, "COMID,f1,inflow_mean_m3s\n30,1.0,7.5\n10,2.0,0.25\n");
+        let f = read_dam_features(&path, &["f1".to_string()]).unwrap();
+        assert_eq!(f.inflow_mean, Some(vec![7.5, 0.25]));
+        let rows = map_reservoir_rows(&ReservoirTable::Learned(f), &[Comid(10), Comid(20), Comid(30)]);
+        assert_eq!(rows.rows, vec![0, 2]);
+        assert_eq!(rows.table_index, vec![1, 0], "row of each dam in the feature table");
+        assert_eq!(rows.inflow_mean, vec![0.25, 7.5]);
+        let no_col = write_csv(&dir, "COMID,f1\n10,1.0\n");
+        assert_eq!(read_dam_features(&no_col, &["f1".to_string()]).unwrap().inflow_mean, None);
+        features_rejected("COMID,f1,inflow_mean_m3s\n10,1.0,-2\n", &["f1"], "inflow_mean_m3s");
+    }
+
+    #[test]
+    fn active_on_subsets_the_rule_curve_fields() {
+        let table = ReservoirTable::Fixed(FixedTable {
+            dams: vec![
+                FixedDam { comid: Comid(10), t_days: 1.0, a: 0.0, b: 0.0, year_completed: Some(2000) },
+                FixedDam { comid: Comid(30), t_days: 3.0, a: 0.0, b: 0.0, year_completed: Some(1970) },
+            ],
+            seasonal: false,
+            rule_curve: Some(vec![[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]),
+            inflow_mean: Some(vec![1.0, 3.0]),
+        });
+        let rows = map_reservoir_rows(&table, &[Comid(10), Comid(30)]);
+        assert_eq!(rows.rule_curve, Some(vec![[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]));
+        let f = rows.active_on(day(1995, 3, 1));
+        assert_eq!(f.rows, vec![1]);
+        assert_eq!(f.rule_curve, Some(vec![[0.5, 0.6, 0.7, 0.8]]));
+        assert_eq!(f.inflow_mean, vec![3.0]);
     }
 }

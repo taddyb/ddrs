@@ -23,7 +23,9 @@
 //! ├── state.json    [`TrainCkptState`]: epoch, next mini-batch, serialized
 //! │                 rng, sampler permutation + cursor
 //! ├── release_head.mpk   learned dam release head  (only with
-//! └── release_optim.mpk  its optimizer moments      `reservoir_release: learned`)
+//! ├── release_optim.mpk  its optimizer moments      `reservoir_release: learned`)
+//! ├── release_dams.mpk        per-dam parameters (full precision; only with
+//! └── release_dams_optim.mpk  their optimizer   `rule_curve` / `per_dam_t0`)
 //! ```
 //!
 //! `experiment.checkpoint:` points at the directory; the inner filenames are
@@ -201,6 +203,53 @@ pub fn release_head_base(ckpt_dir: &Path) -> PathBuf {
 /// `dir/release_optim` (→ `dir/release_optim.mpk`).
 pub fn release_optim_base(ckpt_dir: &Path) -> PathBuf {
     ckpt_dir.join("release_optim")
+}
+
+/// Recorder base for the learned release's per-dam parameters
+/// (`crate::nn::dam_params::DamParams`: rule-curve logits, per-dam `T0`
+/// multipliers): `dir/release_dams` (→ `dir/release_dams.mpk`). Written only
+/// with `release_head.rule_curve` or `per_dam_t0`.
+pub fn release_dams_base(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("release_dams")
+}
+
+/// Recorder base for the per-dam parameters' optimizer moments:
+/// `dir/release_dams_optim` (→ `dir/release_dams_optim.mpk`).
+pub fn release_dams_optim_base(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("release_dams_optim")
+}
+
+/// Save the per-dam parameters at FULL precision (unlike the heads'
+/// `CompactRecorder`): they are the run's calibrated per-dam output, a few
+/// thousand floats, and the test phase resolves them from this file.
+pub fn save_dam_params<B: Backend>(
+    base: &Path,
+    params: &crate::nn::dam_params::DamParams<B>,
+) -> Result<()> {
+    use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+    NamedMpkFileRecorder::<FullPrecisionSettings>::new()
+        .record(params.clone().into_record(), base.to_path_buf())
+        .map_err(|e| DataError::Io {
+            path: base.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
+        })
+}
+
+/// Load per-dam parameters saved by [`save_dam_params`] into `template`
+/// (whose options and dam count must match).
+pub fn load_dam_params<B: Backend>(
+    base: &Path,
+    template: crate::nn::dam_params::DamParams<B>,
+    device: &B::Device,
+) -> Result<crate::nn::dam_params::DamParams<B>> {
+    use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+    let record = NamedMpkFileRecorder::<FullPrecisionSettings>::new()
+        .load(base.to_path_buf(), device)
+        .map_err(|e| DataError::Io {
+            path: base.to_path_buf(),
+            source: std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
+        })?;
+    Ok(template.load_record(record))
 }
 
 /// Train-loop state path inside a checkpoint dir: `dir/state.json`.
