@@ -524,6 +524,27 @@ where
                     }
                 }
 
+                // Dam rows: the per-dam S28 clamp account over the test
+                // period (water the discharge floor created vs the dam's
+                // inflow) -> <run_dir>/release_clamp.csv.
+                let release_clamp = output.dam_clamp.as_ref().map(|records| {
+                    let csv = run_dir.join("release_clamp.csv");
+                    match crate::training::release_eval::write_release_clamp_csv(&csv, records) {
+                        Ok(()) => eprintln!("release clamp -> {}", csv.display()),
+                        Err(e) => eprintln!("warning: release_clamp.csv write failed: {e}"),
+                    }
+                    let (created, inflow, clamp, steps) =
+                        crate::training::release_eval::pooled_clamp(records);
+                    serde_json::json!({
+                        "n_dams": records.len(),
+                        "created_m3": created,
+                        "inflow_m3": inflow,
+                        "created_share": created / inflow.max(f64::MIN_POSITIVE),
+                        "clamp_steps": clamp,
+                        "steps": steps,
+                    })
+                });
+
                 let median = |xs: &[f32]| -> f32 {
                     let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
                     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -566,6 +587,9 @@ where
                 });
                 if let Some(v) = release_training_record(&train_cfg) {
                     metrics["release_training"] = v;
+                }
+                if let Some(v) = release_clamp {
+                    metrics["release_clamp"] = v;
                 }
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),

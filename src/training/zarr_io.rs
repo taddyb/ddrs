@@ -316,6 +316,7 @@ mod tests {
             zeta_area_z_mean: None,
             zeta_q_mean: None,
             zeta_comids: None,
+            dam_clamp: None,
         };
 
         let mut zpath = std::env::temp_dir();

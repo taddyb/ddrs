@@ -17,6 +17,11 @@
 //!    route bitwise identically, and `release_params.csv` carries them.
 //! 5. `rule_curve: true` on a table without `inflow_mean_m3s` fails at
 //!    dataset open.
+//! 6. The engine's per-dam clamp account (`MuskingumCunge::dam_account`):
+//!    a flux that stores more than the dam's inflow forces the S28 clamp, and
+//!    the created volume `Σ max(lb − x, 0)·dt` matches a hand-rolled f64
+//!    recurrence of the dam row; with no rule curve it is exactly zero; the
+//!    inflow is the routed upstream inflow plus the reach's own `q'`.
 
 use burn::backend::{Autodiff, NdArray};
 use burn::module::Param;
@@ -517,4 +522,138 @@ fn rule_curve_without_inflow_column_fails_at_dataset_open() {
         Err(e) => e.to_string(),
     };
     assert!(err.contains("inflow_mean_m3s") && err.contains("rule_curve"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// 6. Clamp accounting.
+// ---------------------------------------------------------------------------
+
+/// A headwater dam (row 0 of `0 → 1 → 2`) on the replace row at constant `T`,
+/// constant `q'`, and a rule curve `c = (1, 0, 0, 0)` with `Ibar = 3·q'` in
+/// spring (`sin ω ≈ 1`): the flux stores ~3× the inflow, `q'_eff < 0`, and
+/// the dam row's solve goes below the floor. Returns the engine (after
+/// `forward`) and the routed output `[3, steps + 1]`.
+fn headwater_clamp_case(rule: bool, steps: usize) -> (MuskingumCunge<I>, Vec<f32>) {
+    let device = Device::default();
+    let q_dam = 5.0_f32;
+    let q: Vec<f32> = (0..=steps).flat_map(|_| [q_dam, 0.0, 0.0]).collect();
+    let mut mc = engine(&Config::default(), chain3(), &q);
+    let t = |v: &[f32]| Tensor::<AB, 1>::from_floats(v, &device);
+    let start = NaiveDate::from_ymd_opt(2001, 3, 20).unwrap();
+    mc.set_dam_release(DamRelease {
+        rows: vec![0],
+        t0_days: t(&[0.1]),
+        seasonal: None,
+        phase: seasonal_phase(start, steps + 1),
+        dam_row: DamRow::Replace,
+        rule_curve: rule.then(|| RuleCurve {
+            coeffs: Tensor::<AB, 1>::from_floats([1.0_f32, 0.0, 0.0, 0.0], &device).reshape([1, 4]),
+            inflow_mean: t(&[3.0 * q_dam]),
+            phase0: rule_curve_phase_start(start),
+        }),
+    })
+    .unwrap();
+    let out = host2(mc.forward());
+    (mc, out)
+}
+
+#[test]
+fn clamp_account_matches_a_hand_computation_when_the_flux_forces_the_clamp() {
+    let steps = 72;
+    let (mc, out) = headwater_clamp_case(true, steps);
+    let acc = mc.dam_account().expect("dam rows are armed");
+    assert_eq!(acc.rows, vec![0]);
+    assert_eq!(acc.steps, steps as u64);
+
+    // Hand computation of the dam row (headwater: I = 0), replace row at
+    // constant T = 0.1 d: x = c3·Q_t + c4·(q' − r_s), Q_{t+1} = max(x, lb),
+    // c3 = (2T − dt)/(2T + dt), c4 = 2dt/(2T + dt); r_s = Ibar/dt·(c·ΔH_s)
+    // with ΔH_s the exact one-hour difference of H at the continuous phase.
+    let (dt, lb) = (DT_SECONDS as f64, 1e-4_f64);
+    let t_sec = 0.1 * 86_400.0;
+    let (c3, c4) = ((2.0 * t_sec - dt) / (2.0 * t_sec + dt), 2.0 * dt / (2.0 * t_sec + dt));
+    let (q_dam, ibar) = (5.0_f64, 15.0_f64);
+    let w0 = rule_curve_phase_start(NaiveDate::from_ymd_opt(2001, 3, 20).unwrap());
+    let dw = OMEGA_RAD_PER_S * dt;
+    let mut q_t = out[0] as f64; // the engine's cold start, Q_0 = q'_0
+    let (mut created, mut clamp_steps) = (0.0_f64, 0u64);
+    for s in 0..steps {
+        let dh = rule_curve_h(w0 + dw * (s + 1) as f64)[0] - rule_curve_h(w0 + dw * s as f64)[0];
+        let r = ibar / dt * dh;
+        let x = c3 * q_t + c4 * (q_dam - r);
+        if x < lb {
+            clamp_steps += 1;
+            created += (lb - x) * dt;
+        }
+        q_t = x.max(lb);
+        // The engine's routed dam outflow follows the same recurrence.
+        let engine_q = out[s + 1] as f64;
+        assert!((engine_q - q_t).abs() <= 1e-3 * q_t.abs().max(1.0), "step {s}: engine {engine_q} vs hand {q_t}");
+    }
+    let inflow = steps as f64 * q_dam * dt;
+    println!(
+        "clamp account: created {:.6e} m3 (hand {created:.6e}), inflow {:.6e} m3 (hand {inflow:.6e}), \
+         clamp steps {} (hand {clamp_steps}) of {steps}",
+        acc.created_m3[0], acc.inflow_m3[0], acc.clamp_steps[0]
+    );
+    assert!(clamp_steps > steps as u64 / 2, "the case must actually force the clamp ({clamp_steps} steps)");
+    assert_eq!(acc.clamp_steps[0], clamp_steps, "clamp steps");
+    assert!((acc.created_m3[0] - created).abs() <= 1e-4 * created, "created {} vs hand {created}", acc.created_m3[0]);
+    assert!((acc.inflow_m3[0] - inflow).abs() <= 1e-5 * inflow, "inflow {} vs hand {inflow}", acc.inflow_m3[0]);
+    assert_eq!(acc.pooled(), (acc.created_m3[0], acc.inflow_m3[0]));
+    assert_eq!(acc.clamp_share(), (clamp_steps, steps as u64));
+    // The penalty's inflow record: Qin = I_t + q' = q' on a headwater dam.
+    let qin: Vec<f32> = mc.dam_inflow_record().expect("rule curve armed").into_data().to_vec().unwrap();
+    assert_eq!(qin.len(), steps);
+    assert!(qin.iter().all(|&v| v == q_dam as f32), "Qin on a headwater dam is its own q'");
+}
+
+#[test]
+fn clamp_account_is_zero_without_a_rule_curve() {
+    let steps = 72;
+    let (mc, _) = headwater_clamp_case(false, steps);
+    let acc = mc.dam_account().expect("dam rows are armed");
+    assert_eq!(acc.created_m3, vec![0.0], "no rule curve: the clamp creates nothing");
+    assert_eq!(acc.clamp_steps, vec![0]);
+    let inflow = steps as f64 * 5.0 * DT_SECONDS as f64;
+    assert!((acc.inflow_m3[0] - inflow).abs() <= 1e-5 * inflow);
+    assert!(mc.dam_inflow_record().is_none(), "no rule curve: no penalty record");
+}
+
+/// An interior dam (row 1 of `0 → 1 → 2`): the account's inflow is the routed
+/// upstream discharge at the step start plus the dam reach's own `q'`, and
+/// option C rows (`set_reservoir_rows_as`) are accounted too.
+#[test]
+fn clamp_account_inflow_is_routed_upstream_plus_own_lateral() {
+    let device = Device::default();
+    let steps = 48;
+    let q: Vec<f32> = (0..=steps)
+        .flat_map(|t| [6.0 + 2.0 * (t as f32 / 7.0).sin(), 2.0, 1.0])
+        .collect();
+    for option_c in [false, true] {
+        let mut mc = engine(&Config::default(), chain3(), &q);
+        if option_c {
+            mc.set_reservoir_rows_as(&[1], &[0.5], DamRow::Additive).unwrap();
+        } else {
+            let t = |v: &[f32]| Tensor::<AB, 1>::from_floats(v, &device);
+            mc.set_dam_release(DamRelease {
+                rows: vec![1],
+                t0_days: t(&[0.5]),
+                seasonal: None,
+                phase: seasonal_phase(NaiveDate::from_ymd_opt(2001, 7, 1).unwrap(), steps + 1),
+                dam_row: DamRow::Additive,
+                rule_curve: None,
+            })
+            .unwrap();
+        }
+        let out = host2(mc.forward());
+        let acc = mc.dam_account().expect("dam rows are armed");
+        // Row 0 of [3, steps + 1] is the upstream reach's routed outflow.
+        let expected: f64 = (0..steps)
+            .map(|s| (out[s] as f64 + 2.0) * DT_SECONDS as f64)
+            .sum();
+        let rel = (acc.inflow_m3[0] - expected).abs() / expected;
+        assert!(rel < 1e-5, "option C {option_c}: inflow {} vs {expected} (rel {rel:.2e})", acc.inflow_m3[0]);
+        assert_eq!(acc.created_m3, vec![0.0]);
+    }
 }

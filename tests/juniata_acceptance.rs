@@ -216,6 +216,20 @@ fn juniata_learned_release_trains_t0_and_writes_release_params() {
     let kge = json_f64(&manifest["metrics"], "median_kge_finite");
     eprintln!("juniata learned release: routed NSE {nse:.4} / KGE {kge:.4}");
     assert!(gauge_predictions(&run_dir).iter().all(|v| v.is_finite()));
+
+    // The test phase's per-dam clamp account, and its pooled manifest record.
+    let clamp = std::fs::read_to_string(run_dir.join("release_clamp.csv"))
+        .expect("the test phase writes release_clamp.csv");
+    let lines: Vec<&str> = clamp.lines().collect();
+    assert_eq!(lines[0], "COMID,created_m3,inflow_m3,clamp_steps,steps");
+    assert_eq!(lines.len(), 2, "one dam: {clamp}");
+    let f: Vec<&str> = lines[1].split(',').collect();
+    assert_eq!(f[0], "73005301");
+    let (inflow, steps): (f64, u64) = (f[2].parse().unwrap(), f[4].parse().unwrap());
+    assert!(inflow > 0.0 && steps > 0, "{clamp}");
+    let rc = &manifest["metrics"]["release_clamp"];
+    assert_eq!(rc["n_dams"].as_u64(), Some(1), "manifest release_clamp: {rc}");
+    eprintln!("juniata learned release: release_clamp.csv {}", lines[1]);
 }
 
 /// Daily routed predictions at the gauge, `eval/predictions.zarr` `/predictions`.
@@ -278,6 +292,10 @@ fn juniata_reservoir_is_matched_logged_and_changes_the_gauge_series() {
         "manifest sources lack `reservoirs`: {}",
         manifest["sources"]
     );
+
+    // Dam rows write the test phase's clamp account; the control has none.
+    assert!(res_dir.join("release_clamp.csv").is_file(), "reservoir run lacks release_clamp.csv");
+    assert!(!plain_dir.join("release_clamp.csv").exists(), "control run wrote release_clamp.csv");
 
     let plain = gauge_predictions(&plain_dir);
     let res = gauge_predictions(&res_dir);

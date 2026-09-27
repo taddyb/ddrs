@@ -499,7 +499,15 @@ fails at dataset open. The resolved test-phase table carries `c1s, c1c, c2s, c2c
 `T0` and `inflow_mean_m3s` per dam (also in `release_params.csv`), and a `fixed` table may carry
 the same optional columns (all four `c` or none; `c` requires `inflow_mean_m3s`). Training logs
 `rule_curve_|c|_median=<v> (<k> dams with gradient)` per optimizer step and, whenever dams are
-armed, `dam-row steps at the discharge clamp: <k>/<m>` per forward. Tests:
+armed, `dam-row steps at the discharge clamp: <k>/<m> (<p>%); clamp-created volume <c> of <v> m3
+dam inflow (<s>%)` per forward (training). The created volume is `Σ max(lb − x, 0)·dt` over the
+dam rows' pre-clamp solves, the inflow `Σ (I_t + q')·dt` (routed upstream inflow plus the reach's
+own `q'`, before the flux); the engine keeps both per dam (`MuskingumCunge::dam_account`). The
+test phase sums them over every chunk and writes `<run>/release_clamp.csv`
+(`COMID,created_m3,inflow_m3,clamp_steps,steps`, every dam armed at least once, any dam table),
+logs the pooled `release clamp (test phase, <n> dams): ...` line and records it as
+`metrics.release_clamp` in the manifest. Read an S3/S4-type arm only when the created share is
+negligible. Tests:
 `tests/reservoir_rule_curve.rs`, `tests/release_freeze_routing.rs` (frozen + rule curve),
 `src/nn/dam_params.rs`, `src/data/store/reservoirs.rs`, `src/config.rs` (`rule_curve_*`,
 `*_per_dam_*`).

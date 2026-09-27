@@ -20,7 +20,7 @@ use crate::data::error::{DataError, Result};
 use crate::data::TestWindow;
 use crate::nn::kan_head::KanHead;
 use crate::training::{
-    forward_eval_reaches, forward_with_frozen_params, scatter_add_by_group,
+    forward_with_frozen_params, scatter_add_by_group,
     tau_trim_and_downsample, FrozenParams, Metrics, ZetaSums,
 };
 
@@ -49,6 +49,9 @@ pub struct EvalOutput {
     pub zeta_q_mean: Option<Vec<f32>>,
     /// COMIDs aligned to the zeta vectors (eval-network topological order).
     pub zeta_comids: Option<Vec<i64>>,
+    /// Per-dam S28 clamp account over the test period (`release_clamp.csv`),
+    /// one record per dam armed at least once. `None` without dam rows.
+    pub dam_clamp: Option<Vec<crate::training::release_eval::DamClampRecord>>,
 }
 
 /// Returns a diagnostic reason when a chunk's predictions are provably wrong
@@ -131,6 +134,9 @@ pub fn evaluate<I: Backend>(
     let n_all_gauges = probe_batch.gauge_staids.len();
     let gauge_staids = probe_batch.gauge_staids.clone();
     let reach_comids: Vec<i64> = probe_batch.divide_comids.iter().map(|c| c.0).collect();
+    // The same COMIDs name the dam rows of the clamp account (the eval
+    // network is static across chunks).
+    let dam_comids = reach_comids.clone();
     let n_hours_full = n_days_total * 24;
 
     // Accumulator: (n_all_gauges, n_hours_full) — written per chunk.
@@ -139,6 +145,8 @@ pub fn evaluate<I: Backend>(
     // Leakance diagnostic: accumulate per-reach zeta sums across chunks.
     // Stays empty (steps == 0) when leakance is off or params are Frozen.
     let mut zeta_sums: ZetaSums<I> = ZetaSums::new();
+    // Per-dam clamp account across chunks (empty without dam rows).
+    let mut dam_clamp = crate::training::release_eval::DamClampSums::default();
 
     // Helper: dispatch the forward based on EvalParams.
     //
@@ -194,15 +202,14 @@ pub fn evaluate<I: Backend>(
                 // forward_eval_reaches returns per-reach (n_reaches, chunk_hours).
                 // Capture the final column for cross-chunk state injection before
                 // scatter-adding to gauge predictions.
-                let runoff_reaches = forward_eval_reaches::<I>(
+                let runoff_reaches = crate::training::forward::forward_eval_reaches_with_dams::<I>(
                     cfg,
                     &tensors,
                     head,
                     device,
                     false,
                     Some(&mut zeta_sums),
-                    None,
-                    None,
+                    &mut dam_clamp,
                 );
                 let [n_reaches, chunk_hours] = runoff_reaches.dims();
                 let final_col: Vec<f32> = runoff_reaches
@@ -392,6 +399,19 @@ pub fn evaluate<I: Backend>(
             _ => (None, None, None, None, None, None),
         };
 
+    // Dam rows: the clamp account over the whole test period, named by COMID.
+    let dam_clamp = (!dam_clamp.by_row.is_empty()).then(|| dam_clamp.records(&dam_comids));
+    if let Some(records) = dam_clamp.as_ref() {
+        let (created, inflow, clamp, steps) = crate::training::release_eval::pooled_clamp(records);
+        eprintln!(
+            "release clamp (test phase, {} dams): dam-row steps at the discharge clamp {clamp}/{steps} \
+             ({:.3}%); clamp-created volume {created:.4e} of {inflow:.4e} m3 dam inflow ({:.4}%)",
+            records.len(),
+            100.0 * clamp as f64 / (steps as f64).max(1.0),
+            100.0 * created / inflow.max(f64::MIN_POSITIVE),
+        );
+    }
+
     // Final gate: the tau-trim/downsample and zeta-mean readbacks above also
     // run on the device, after the last per-chunk check — a worker panic
     // there would otherwise slip through as a clean `Ok`.
@@ -416,6 +436,7 @@ pub fn evaluate<I: Backend>(
         zeta_area_z_mean,
         zeta_q_mean,
         zeta_comids,
+        dam_clamp,
     })
 }
 

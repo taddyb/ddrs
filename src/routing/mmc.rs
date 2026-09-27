@@ -228,6 +228,95 @@ impl<I: Backend> ArmedRelease<I> {
     }
 }
 
+/// Per-dam accounting of the S28 discharge clamp on the dam rows, kept on the
+/// inner backend (no tape, no host sync per step) over every step `forward`
+/// routes while dam rows are armed (option C rows or a release).
+///
+/// Per step and dam row `d`, with `x` the pre-clamp solve, `lb` the
+/// `discharge` floor, `I_t = (N·Q_t)_d` the routed inflow at the step start
+/// and `q'_d` the dam reach's lateral inflow after the floor (and the
+/// sub-reach divisor) but BEFORE the rule-curve flux:
+///
+/// ```text
+/// created_d     += max(lb − x_d, 0)·dt       m³  (water the clamp creates)
+/// inflow_d      += (I_t,d + q'_d)·dt         m³  (the dam's inflow)
+/// clamp_steps_d += 1[x_d < lb]
+/// ```
+///
+/// With a rule curve armed it also keeps each step's `Qin_d = I_t,d + q'_d`
+/// (m³/s), the detached inflow the rule-curve feasibility penalty compares
+/// the flux against.
+struct DamAccount<I: Backend> {
+    /// Dam rows, in the order the dams were armed.
+    rows: Vec<usize>,
+    rows_t: Tensor<I, 1, Int>,
+    created: Tensor<I, 1>,
+    inflow: Tensor<I, 1>,
+    clamp_steps: Tensor<I, 1>,
+    steps: usize,
+    /// `Some` with a rule curve: `Qin` per routed step, `[n_dams]` each.
+    qin: Option<Vec<Tensor<I, 1>>>,
+}
+
+impl<I: Backend> DamAccount<I> {
+    fn new(rows: &[usize], record_qin: bool, device: &I::Device) -> Self {
+        let n = rows.len();
+        let rows_i: Vec<i64> = rows.iter().map(|&r| r as i64).collect();
+        Self {
+            rows: rows.to_vec(),
+            rows_t: Tensor::from_data(TensorData::new(rows_i, [n]), device),
+            created: Tensor::zeros([n], device),
+            inflow: Tensor::zeros([n], device),
+            clamp_steps: Tensor::zeros([n], device),
+            steps: 0,
+            qin: record_qin.then(Vec::new),
+        }
+    }
+
+    /// Add one routed step (see the struct docs).
+    fn record(&mut self, diag: crate::routing::mmc_op::DamStepDiag<I>, q_prime: Tensor<I, 1>, lb: f32, dt: f32) {
+        let x = diag.x_sol.select(0, self.rows_t.clone());
+        let qin = diag.i_t.select(0, self.rows_t.clone()) + q_prime.select(0, self.rows_t.clone());
+        self.created = self.created.clone() + (-x.clone() + lb).clamp_min(0.0) * dt;
+        self.clamp_steps = self.clamp_steps.clone() + x.lower_elem(lb).float();
+        self.inflow = self.inflow.clone() + qin.clone() * dt;
+        self.steps += 1;
+        if let Some(q) = self.qin.as_mut() {
+            q.push(qin);
+        }
+    }
+}
+
+/// Host copy of the engine's per-dam clamp account
+/// ([`MuskingumCunge::dam_account`]), summed over the routed steps.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DamClampAccount {
+    /// Dam rows of the network, in the order they were armed.
+    pub rows: Vec<usize>,
+    /// Water the S28 clamp created on each dam row, `Σ max(lb − x, 0)·dt`, m³.
+    pub created_m3: Vec<f64>,
+    /// The dam's inflow, `Σ (I_t + q')·dt` (routed upstream inflow plus the
+    /// reach's own lateral inflow, before any rule-curve flux), m³.
+    pub inflow_m3: Vec<f64>,
+    /// Steps at which the dam row's solve fell below the floor.
+    pub clamp_steps: Vec<u64>,
+    /// Routed steps (the same for every dam).
+    pub steps: u64,
+}
+
+impl DamClampAccount {
+    /// `(Σ created, Σ inflow)` over the dams, m³: the pooled created share is
+    /// their ratio.
+    pub fn pooled(&self) -> (f64, f64) {
+        (self.created_m3.iter().sum(), self.inflow_m3.iter().sum())
+    }
+
+    /// `(Σ clamp steps, dam-row steps)` over the dams.
+    pub fn clamp_share(&self) -> (u64, u64) {
+        (self.clamp_steps.iter().sum(), self.steps * self.rows.len() as u64)
+    }
+}
+
 /// Differentiable Muskingum-Cunge routing engine.
 pub struct MuskingumCunge<I: Backend> {
     cfg: Config,
@@ -256,6 +345,12 @@ pub struct MuskingumCunge<I: Backend> {
     /// Seasonal or learned dam release (`set_dam_release`). Exclusive with
     /// `reservoir`. `None` keeps the timestep op byte-identical.
     release: Option<ArmedRelease<I>>,
+    /// Per-dam clamp account, `Some` whenever dam rows are armed
+    /// (`set_reservoir_rows_as` / `set_dam_release`). Reads only.
+    dam_account: Option<DamAccount<I>>,
+    /// The last routed step's pre-clamp solve and routed inflow, handed from
+    /// `route_timestep` to `forward`'s accounting.
+    last_dam_diag: Option<crate::routing::mmc_op::DamStepDiag<I>>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -357,6 +452,8 @@ impl<I: Backend> MuskingumCunge<I> {
             impervious_mask: None,
             reservoir: None,
             release: None,
+            dam_account: None,
+            last_dam_diag: None,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -475,6 +572,7 @@ impl<I: Backend> MuskingumCunge<I> {
         // a new one: re-arm with `set_reservoir_rows` after this call.
         self.reservoir = None;
         self.release = None;
+        self.dam_account = None;
 
         match initial_state {
             Some(q0_ext) => {
@@ -667,6 +765,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 additive,
             }
         });
+        self.dam_account = (!rows.is_empty()).then(|| DamAccount::new(rows, false, &self.device));
         Ok(())
     }
 
@@ -743,6 +842,7 @@ impl<I: Backend> MuskingumCunge<I> {
         }
         if n_dams == 0 {
             self.release = None;
+            self.dam_account = None;
             return Ok(());
         }
 
@@ -782,6 +882,8 @@ impl<I: Backend> MuskingumCunge<I> {
             t_step: None,
             rule_curve,
         });
+        let record_qin = self.release.as_ref().is_some_and(|r| r.rule_curve.is_some());
+        self.dam_account = Some(DamAccount::new(&release.rows, record_qin, &self.device));
         Ok(())
     }
 
@@ -911,6 +1013,7 @@ impl<I: Backend> MuskingumCunge<I> {
                         additive: r.dam_row == DamRow::Additive,
                     }
                 }),
+                self.dam_account.is_some().then_some(&mut self.last_dam_diag),
             )
         }
     }
@@ -979,12 +1082,18 @@ impl<I: Backend> MuskingumCunge<I> {
         columns.push(initial.unsqueeze_dim::<2>(1));
 
         crate::routing::mmc_op::reset_negative_solve_stats();
+        // The dam-row clamp account's totals before this call (it accumulates
+        // across calls), for this forward's log line.
+        let account_before = self.dam_account().map(|a| (a.pooled(), a.clamp_share()));
 
         for t in 1..num_timesteps {
             let q_prime_t: Tensor<Autodiff<I>, 1> = q_prime_clamped
                 .clone()
                 .slice([(t - 1)..t, 0..num_segments])
                 .reshape([num_segments]);
+            // The dam's own lateral inflow for the clamp account, before the
+            // rule-curve flux below.
+            let q_prime_pre = self.dam_account.is_some().then(|| q_prime_t.clone().inner());
             // Dam release: T at this step's end (hour t) and start (hour
             // t − 1), for the storage-conserving dam row
             // (`crate::routing::release`, S19''' in `mmc_op`).
@@ -999,6 +1108,13 @@ impl<I: Backend> MuskingumCunge<I> {
                 None => q_prime_t,
             };
             let q_next = self.route_timestep(q_prime_t);
+            if let (Some(acc), Some(q_pre)) = (self.dam_account.as_mut(), q_prime_pre) {
+                let diag = self
+                    .last_dam_diag
+                    .take()
+                    .expect("dam rows are armed, so the plain timestep op returned its diagnostics");
+                acc.record(diag, q_pre, discharge_lb, self.dt);
+            }
             columns.push(q_next.clone().unsqueeze_dim::<2>(1));
             self.discharge_t = Some(q_next);
         }
@@ -1040,13 +1156,24 @@ impl<I: Backend> MuskingumCunge<I> {
                 );
             }
             // Dam rows at the S28 discharge floor, whenever dams are armed
-            // (the rule curve can ask a dam to store more than it holds).
-            let (dam_hit, dam_total) = crate::routing::mmc_op::dam_clamp_stats();
-            if dam_total > 0 {
-                eprintln!(
-                    "  dam-row steps at the discharge clamp: {dam_hit}/{dam_total} ({:.3}%)",
-                    100.0 * dam_hit as f64 / dam_total as f64
-                );
+            // (the rule curve can ask a dam to store more than it holds), and
+            // the water that clamp created as a share of the dams' inflow,
+            // pooled over this forward's dams and steps. Training only
+            // (`track_negative_discharge`); the test phase writes the
+            // per-dam account to `release_clamp.csv` instead.
+            if let (true, Some(((c0, i0), (h0, n0))), Some(a)) =
+                (self.track_negative_discharge, account_before, self.dam_account())
+            {
+                let ((c1, i1), (h1, n1)) = (a.pooled(), a.clamp_share());
+                let (created, inflow, hit, total) = (c1 - c0, i1 - i0, h1 - h0, n1 - n0);
+                if total > 0 {
+                    eprintln!(
+                        "  dam-row steps at the discharge clamp: {hit}/{total} ({:.3}%); \
+                         clamp-created volume {created:.4e} of {inflow:.4e} m3 dam inflow ({:.4}%)",
+                        100.0 * hit as f64 / total as f64,
+                        100.0 * created / inflow.max(f64::MIN_POSITIVE),
+                    );
+                }
             }
         }
 
@@ -1070,6 +1197,43 @@ impl<I: Backend> MuskingumCunge<I> {
     /// path never enables this.
     pub fn enable_negative_discharge_tracking(&mut self) {
         self.track_negative_discharge = true;
+    }
+
+    /// The per-dam clamp account ([`DamClampAccount`]) accumulated over every
+    /// step `forward` has routed since the dam rows were armed; `None` when
+    /// no dam rows are armed. Reads the device sums to the host (a few
+    /// floats per dam).
+    pub fn dam_account(&self) -> Option<DamClampAccount> {
+        let a = self.dam_account.as_ref()?;
+        let host = |t: &Tensor<I, 1>| -> Vec<f32> { t.clone().into_data().convert::<f32>().to_vec().expect("f32") };
+        Some(DamClampAccount {
+            rows: a.rows.clone(),
+            created_m3: host(&a.created).into_iter().map(f64::from).collect(),
+            inflow_m3: host(&a.inflow).into_iter().map(f64::from).collect(),
+            clamp_steps: host(&a.clamp_steps).into_iter().map(|v| v.round() as u64).collect(),
+            steps: a.steps as u64,
+        })
+    }
+
+    /// The dams' per-step inflow `Qin = I_t + q'` (m³/s, routed upstream
+    /// inflow plus the reach's own lateral inflow, before the flux),
+    /// `[n_steps, n_dams]` on the inner backend, detached: the rule-curve
+    /// feasibility penalty's reference. `None` without a rule curve or before
+    /// `forward`.
+    pub fn dam_inflow_record(&self) -> Option<Tensor<I, 2>> {
+        let q = self.dam_account.as_ref()?.qin.as_ref()?;
+        if q.is_empty() {
+            return None;
+        }
+        Some(Tensor::stack(q.clone(), 0))
+    }
+
+    /// The armed rule curve's per-step phase increments `ΔH_s` (seconds),
+    /// row `s` for the step producing routed column `s + 1`; `None` without
+    /// a rule curve. With `Ibar` and `c` they give the flux
+    /// `(Ibar/dt)·(c·ΔH_s)` the engine took off the dam rows.
+    pub fn rule_curve_increments(&self) -> Option<&[[f32; 4]]> {
+        self.release.as_ref()?.rule_curve.as_ref().map(|rc| rc.dh.as_slice())
     }
 
     /// Eval-time leakance diagnostic sums accumulated across `route_timestep`

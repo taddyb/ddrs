@@ -195,3 +195,119 @@ pub fn write_release_params_csv(path: &Path, table: &FixedTable, dam_row: DamRow
     }
     std::fs::write(path, out).map_err(|source| DataError::Io { path: path.to_path_buf(), source })
 }
+
+/// The S28 clamp account of the test phase's dam rows, summed over every
+/// chunk (`crate::routing::mmc::DamClampAccount`, one engine per chunk),
+/// keyed by network row. Built by `training::eval::evaluate`; written as
+/// `<run>/release_clamp.csv` by [`write_release_clamp_csv`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DamClampSums {
+    pub by_row: std::collections::BTreeMap<usize, DamClampRecord>,
+}
+
+/// One dam's clamp account over the routed test period.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DamClampRecord {
+    /// MERIT COMID of the dam reach (0 until [`DamClampSums::records`] names it).
+    pub comid: i64,
+    /// Water the S28 clamp created, `Σ max(lb − x, 0)·dt`, m³.
+    pub created_m3: f64,
+    /// The dam's inflow, `Σ (I_t + q')·dt`, m³ (before any rule-curve flux).
+    pub inflow_m3: f64,
+    /// Steps at which the dam row's pre-clamp solve fell below the floor.
+    pub clamp_steps: u64,
+    /// Steps the dam was armed (a dam completed inside the period counts
+    /// only its active chunks).
+    pub steps: u64,
+}
+
+impl DamClampSums {
+    /// Add one engine's account (one chunk).
+    pub fn merge(&mut self, a: &crate::routing::mmc::DamClampAccount) {
+        for (i, &row) in a.rows.iter().enumerate() {
+            let r = self.by_row.entry(row).or_default();
+            r.created_m3 += a.created_m3[i];
+            r.inflow_m3 += a.inflow_m3[i];
+            r.clamp_steps += a.clamp_steps[i];
+            r.steps += a.steps;
+        }
+    }
+
+    /// The records in row order, each named by `comids[row]` (the network's
+    /// COMID order).
+    pub fn records(&self, comids: &[i64]) -> Vec<DamClampRecord> {
+        self.by_row
+            .iter()
+            .map(|(&row, r)| DamClampRecord { comid: comids[row], ..*r })
+            .collect()
+    }
+}
+
+/// `(Σ created, Σ inflow, Σ clamp steps, Σ steps)` over `records`: the pooled
+/// created share is `created / inflow`, the clamp-step share `clamp / steps`.
+pub fn pooled_clamp(records: &[DamClampRecord]) -> (f64, f64, u64, u64) {
+    records.iter().fold((0.0, 0.0, 0, 0), |(c, i, k, s), r| {
+        (c + r.created_m3, i + r.inflow_m3, k + r.clamp_steps, s + r.steps)
+    })
+}
+
+/// Write the test phase's per-dam clamp account:
+/// `COMID,created_m3,inflow_m3,clamp_steps,steps`, one row per dam armed at
+/// least once, in network row order.
+pub fn write_release_clamp_csv(path: &Path, records: &[DamClampRecord]) -> Result<()> {
+    let mut out = String::from("COMID,created_m3,inflow_m3,clamp_steps,steps\n");
+    for r in records {
+        out.push_str(&format!(
+            "{},{:.6e},{:.6e},{},{}\n",
+            r.comid, r.created_m3, r.inflow_m3, r.clamp_steps, r.steps
+        ));
+    }
+    std::fs::write(path, out).map_err(|source| DataError::Io { path: path.to_path_buf(), source })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routing::mmc::DamClampAccount;
+
+    #[test]
+    fn clamp_sums_merge_chunks_by_row_and_name_them_by_comid() {
+        let mut sums = DamClampSums::default();
+        // Chunk 1: dams on rows 4 and 1; chunk 2: row 4 only (row 1 not yet built
+        // is the other way round, but the merge is order-free).
+        sums.merge(&DamClampAccount {
+            rows: vec![4, 1],
+            created_m3: vec![10.0, 0.0],
+            inflow_m3: vec![1000.0, 50.0],
+            clamp_steps: vec![2, 0],
+            steps: 360,
+        });
+        sums.merge(&DamClampAccount {
+            rows: vec![4],
+            created_m3: vec![5.0],
+            inflow_m3: vec![500.0],
+            clamp_steps: vec![1],
+            steps: 96,
+        });
+        let comids = [100, 101, 102, 103, 104];
+        let recs = sums.records(&comids);
+        assert_eq!(recs.len(), 2);
+        assert_eq!((recs[0].comid, recs[0].steps, recs[0].created_m3), (101, 360, 0.0));
+        assert_eq!(
+            (recs[1].comid, recs[1].created_m3, recs[1].inflow_m3, recs[1].clamp_steps, recs[1].steps),
+            (104, 15.0, 1500.0, 3, 456)
+        );
+        assert_eq!(pooled_clamp(&recs), (15.0, 1550.0, 3, 816));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("release_clamp.csv");
+        write_release_clamp_csv(&path, &recs).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "COMID,created_m3,inflow_m3,clamp_steps,steps\n\
+             101,0.000000e0,5.000000e1,0,360\n\
+             104,1.500000e1,1.500000e3,3,456\n"
+        );
+    }
+}

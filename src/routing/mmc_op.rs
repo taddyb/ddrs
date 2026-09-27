@@ -34,28 +34,26 @@ use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPatte
 /// identically in both `ddr_match` modes.
 static NEG_SOLVES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_SOLVES: AtomicU64 = AtomicU64::new(0);
-/// Dam-row solves that fell below `discharge_lb`, so the S28 floor rewrote
-/// them, and the dam-row solves counted (same gate as [`NEG_SOLVES`]). A rule
-/// curve that asks a dam to store more than it holds shows up here first.
-static DAM_CLAMPED: AtomicU64 = AtomicU64::new(0);
-static DAM_SOLVES: AtomicU64 = AtomicU64::new(0);
 
 /// `(negative_count, total_count)` accumulated since the last reset.
 pub fn negative_solve_stats() -> (u64, u64) {
     (NEG_SOLVES.load(Ordering::Relaxed), TOTAL_SOLVES.load(Ordering::Relaxed))
 }
 
-/// `(dam-row solves at the discharge floor, dam-row solves)` since the last reset.
-pub fn dam_clamp_stats() -> (u64, u64) {
-    (DAM_CLAMPED.load(Ordering::Relaxed), DAM_SOLVES.load(Ordering::Relaxed))
-}
-
 /// Zero the counters. Call at the start of each `forward`.
 pub fn reset_negative_solve_stats() {
     NEG_SOLVES.store(0, Ordering::Relaxed);
     TOTAL_SOLVES.store(0, Ordering::Relaxed);
-    DAM_CLAMPED.store(0, Ordering::Relaxed);
-    DAM_SOLVES.store(0, Ordering::Relaxed);
+}
+
+/// One step's pre-clamp solve `x_sol` and routed inflow `i_t = N·Q_t`, both
+/// full-length `[n]` on the inner backend (no tape), handed out by
+/// [`timestep_forward_with_reservoirs`] for the engine's per-dam clamp
+/// accounting (`MuskingumCunge::dam_account`). They are the op's own saved
+/// primitives, so the account reads exactly what the S28 clamp rewrote.
+pub(crate) struct DamStepDiag<I: Backend> {
+    pub x_sol: Tensor<I, 1>,
+    pub i_t: Tensor<I, 1>,
 }
 
 /// Safety margin pulling the S18'/S19' positivity clamp strictly INSIDE the
@@ -2223,19 +2221,6 @@ where
         let n_neg = x_host.iter().filter(|&&v| v < 0.0).count() as u64;
         NEG_SOLVES.fetch_add(n_neg, Ordering::Relaxed);
         TOTAL_SOLVES.fetch_add(x_host.len() as u64, Ordering::Relaxed);
-        // Dam rows hit by the S28 floor (x < discharge_lb).
-        if let Some(res) = reservoir {
-            let mask: Vec<bool> = res.mask.clone().into_data().to_vec().expect("bool mask");
-            let (mut hit, mut n) = (0u64, 0u64);
-            for (x, &m) in x_host.iter().zip(&mask) {
-                if m {
-                    n += 1;
-                    hit += (*x < discharge_lb) as u64;
-                }
-            }
-            DAM_CLAMPED.fetch_add(hit, Ordering::Relaxed);
-            DAM_SOLVES.fetch_add(n, Ordering::Relaxed);
-        }
     }
 
     // S28: q_next = max(x_sol, discharge_lb)
@@ -2670,6 +2655,7 @@ where
         gamma_at,
         None,
         None,
+        None,
     )
 }
 
@@ -2695,6 +2681,9 @@ pub(crate) fn timestep_forward_with_reservoirs<I: Backend + 'static>(
     gamma_at: Option<Tensor<Autodiff<I>, 1>>,
     reservoir: Option<&ReservoirTensors<I>>,
     release: Option<ReleaseParent<I>>,
+    // Receives this step's pre-clamp solve and routed inflow when `Some`
+    // (the engine's dam-row clamp accounting). Reads only; no numerics change.
+    dam_diag: Option<&mut Option<DamStepDiag<I>>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -2806,6 +2795,9 @@ where
     // Compile-time sanity: confirm the index constants are aligned with the
     // destructure above (touch each so a future re-order is caught).
     let _ = (fsi::DEPTH, fsi::BW_RAW);
+    if let Some(sink) = dam_diag {
+        *sink = Some(DamStepDiag { x_sol: wrap(x_sol_prim.clone()), i_t: wrap(i_t_prim.clone()) });
+    }
 
     // Build TimestepState saving every intermediate the backward needs.
     let state = TimestepState::<I> {
@@ -3031,6 +3023,7 @@ where
         None,
         None,
         Some(release),
+        None,
     )
 }
 

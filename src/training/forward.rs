@@ -870,6 +870,7 @@ pub fn forward_eval<I: Backend>(
         zeta,
         overrides,
         param_overrides,
+        None,
     );
     scatter_add_by_group(
         runoff,
@@ -903,12 +904,31 @@ pub fn forward_eval_reaches<I: Backend>(
         zeta,
         overrides,
         param_overrides,
+        None,
     )
+}
+
+/// [`forward_eval_reaches`] that also merges the chunk engine's per-dam S28
+/// clamp account into `dams` (`crate::routing::mmc::DamClampAccount`) when
+/// dam rows are armed. The test phase (`training::eval::evaluate`) uses it
+/// to write `release_clamp.csv`.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_eval_reaches_with_dams<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<I>,
+    head: &KanHead<I>,
+    device: &I::Device,
+    carry_state: bool,
+    zeta: Option<&mut ZetaSums<I>>,
+    dams: &mut crate::training::release_eval::DamClampSums,
+) -> Tensor<I, 2> {
+    forward_eval_core(cfg, tensors, head, device, carry_state, zeta, None, None, Some(dams))
 }
 
 /// Shared body of `forward_eval` and `forward_eval_reaches`. Returns
 /// per-reach `(n_reaches, T_hours)` on the inner backend before the
 /// `scatter_add_by_group` that produces gauge-aggregated output.
+#[allow(clippy::too_many_arguments)]
 fn forward_eval_core<I: Backend>(
     cfg: &Config,
     tensors: &RoutingTensors<I>,
@@ -918,6 +938,7 @@ fn forward_eval_core<I: Backend>(
     zeta: Option<&mut ZetaSums<I>>,
     overrides: Option<&LeakanceOverride>,
     param_overrides: Option<&RoutingParamOverride>,
+    dams: Option<&mut crate::training::release_eval::DamClampSums>,
 ) -> Tensor<I, 2> {
     let n_active = tensors.adjacency.n;
     // Parent → sub-reach gather, before the overrides below: `RoutingParamOverride`
@@ -1067,6 +1088,9 @@ fn forward_eval_core<I: Backend>(
         if let Some(sums) = engine.zeta_sums() {
             sink.merge(sums);
         }
+    }
+    if let (Some(sink), Some(account)) = (dams, engine.dam_account()) {
+        sink.merge(&account);
     }
 
     runoff
