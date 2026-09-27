@@ -1,0 +1,66 @@
+{
+ "training_2365": {
+  "reaches": 64892,
+  "length_km": 564346.4788668915,
+  "any dam": {
+   "dam_reaches": 4536,
+   "host_pct": 6.99,
+   "host_len_pct": 10.78,
+   "regulated_pct": 26.8,
+   "regulated_len_pct": 29.6
+  },
+  ">=1 MCM": {
+   "dam_reaches": 2194,
+   "host_pct": 3.38,
+   "host_len_pct": 5.27,
+   "regulated_pct": 18.8,
+   "regulated_len_pct": 20.1
+  },
+  ">=10 MCM": {
+   "dam_reaches": 1024,
+   "host_pct": 1.58,
+   "host_len_pct": 2.68,
+   "regulated_pct": 11.8,
+   "regulated_len_pct": 12.3
+  },
+  ">=100 MCM": {
+   "dam_reaches": 295,
+   "host_pct": 0.45,
+   "host_len_pct": 0.79,
+   "regulated_pct": 5.3,
+   "regulated_len_pct": 5.3
+  }
+ },
+ "gages_3000_all": {
+  "reaches": 80058,
+  "length_km": 697230.6903896022,
+  "any dam": {
+   "dam_reaches": 5384,
+   "host_pct": 6.73,
+   "host_len_pct": 10.39,
+   "regulated_pct": 26.8,
+   "regulated_len_pct": 29.2
+  },
+  ">=1 MCM": {
+   "dam_reaches": 2671,
+   "host_pct": 3.34,
+   "host_len_pct": 5.24,
+   "regulated_pct": 19.2,
+   "regulated_len_pct": 20.3
+  },
+  ">=10 MCM": {
+   "dam_reaches": 1231,
+   "host_pct": 1.54,
+   "host_len_pct": 2.6,
+   "regulated_pct": 12.2,
+   "regulated_len_pct": 12.7
+  },
+  ">=100 MCM": {
+   "dam_reaches": 340,
+   "host_pct": 0.42,
+   "host_len_pct": 0.73,
+   "regulated_pct": 5.5,
+   "regulated_len_pct": 5.4
+  }
+ }
+}
