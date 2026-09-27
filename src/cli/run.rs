@@ -364,11 +364,14 @@ where
                 drop(state);
                 drop(train_dataset);
 
-                let metrics = serde_json::json!({
+                let mut metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
                     "phase1_seconds": phase1_elapsed.as_secs_f32(),
                 });
+                if let Some(v) = release_training_record(&train_cfg) {
+                    metrics["release_training"] = v;
+                }
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
                     ..Default::default()
@@ -550,7 +553,7 @@ where
                 let (baseline_predictions, baseline_observations, baseline_manifest) =
                     copy_baseline_into_run_dir(&test_cfg, &input.workspace, run_dir);
 
-                let metrics = serde_json::json!({
+                let mut metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
                     "phase1_seconds": phase1_elapsed.as_secs_f32(),
@@ -561,6 +564,9 @@ where
                     "median_nse_finite": median_nse,
                     "median_kge_finite": median_kge,
                 });
+                if let Some(v) = release_training_record(&train_cfg) {
+                    metrics["release_training"] = v;
+                }
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
                     eval_zarr: Some(PathBuf::from("eval/predictions.zarr")),
@@ -589,6 +595,20 @@ where
             RunOutputs::default(),
         ),
     }
+}
+
+/// How the learned dam release trained, for the manifest's `metrics`:
+/// `routing_checkpoint` (the routing head's warm-start weights, or null) and
+/// `freeze_routing`. `None` for every config without the learned release, so
+/// their manifests are unchanged.
+fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
+    let learned = cfg.params.use_reservoirs
+        && cfg.params.reservoir_release == crate::config::ReservoirRelease::Learned;
+    let rh = cfg.release_head.as_ref().filter(|_| learned)?;
+    Some(serde_json::json!({
+        "routing_checkpoint": rh.routing_checkpoint.as_ref().map(|p| p.display().to_string()),
+        "freeze_routing": rh.freeze_routing,
+    }))
 }
 
 /// Load (or compute) the summed Q' baseline and copy its cache files into

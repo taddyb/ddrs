@@ -269,6 +269,8 @@ fn release_head_weight_gradcheck_end_to_end() {
         k: 3,
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal: true,
+        routing_checkpoint: None,
+        freeze_routing: false,
     };
     let features = || Tensor::<AB, 2>::from_floats([[0.8_f32, -1.2]], &device);
     // Move the read-out off its init so T0 is a few days and a, b are nonzero.

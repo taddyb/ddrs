@@ -916,6 +916,22 @@ pub struct ReleaseHeadSection {
     /// `true`: `T(t) = T0·exp(a·sin ω_t + b·cos ω_t)`. `false`: constant `T0`.
     #[serde(default = "default_true")]
     pub seasonal: bool,
+    /// A checkpoint DIRECTORY (`.../checkpoints/epoch_E_mb_M/`) whose
+    /// `head.mpk` initialises the ROUTING head. Only those weights are read:
+    /// not its `optim.mpk` (the routing optimizer starts cold), not its
+    /// `state.json` (the run starts at epoch 1), not any release head in it.
+    /// The architecture in `kan_head:` must match the checkpoint.
+    /// `experiment.checkpoint` (a full resume) is applied after it and wins.
+    #[serde(default)]
+    pub routing_checkpoint: Option<std::path::PathBuf>,
+    /// Freeze the routing head at `routing_checkpoint`: its parameters are
+    /// detached (`Module::no_grad`), so the backward spends nothing on them
+    /// and the routing optimizer never steps; only the release head trains,
+    /// with the gradient still flowing through the routing solve into `T`.
+    /// The test phase routes with the same frozen weights. Requires
+    /// `routing_checkpoint` (checked at load). Default false.
+    #[serde(default)]
+    pub freeze_routing: bool,
 }
 
 fn default_release_hidden_size() -> usize {
@@ -926,6 +942,16 @@ fn default_release_num_hidden_layers() -> usize {
 }
 fn default_true() -> bool {
     true
+}
+
+impl Config {
+    /// True when the routing head is frozen for release-only training
+    /// (`release_head.freeze_routing` under `reservoir_release: learned`).
+    pub fn routing_frozen(&self) -> bool {
+        self.params.use_reservoirs
+            && self.params.reservoir_release == ReservoirRelease::Learned
+            && self.release_head.as_ref().is_some_and(|r| r.freeze_routing)
+    }
 }
 
 impl Params {
@@ -1504,6 +1530,14 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
             return Err(
                 "`release_head.input_var_names` is empty: list the dam feature-table columns \
                  the release head reads."
+                    .to_string(),
+            );
+        }
+        if rh.freeze_routing && rh.routing_checkpoint.is_none() {
+            return Err(
+                "release_head: `freeze_routing: true` requires `routing_checkpoint` (a \
+                 checkpoint directory holding head.mpk) — freezing a randomly-initialized \
+                 routing head would route every reach with untrained parameters."
                     .to_string(),
             );
         }
@@ -3338,6 +3372,58 @@ data_sources:
             &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  use_ressops: true\n"),
         );
         learned_rejection(path, &["use_ressops"]);
+    }
+
+    #[test]
+    fn freeze_routing_without_routing_checkpoint_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_freeze_no_ckpt.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  freeze_routing: true\n"),
+        );
+        learned_rejection(path, &["freeze_routing", "routing_checkpoint"]);
+    }
+
+    #[test]
+    fn routing_checkpoint_and_freeze_parse_and_default_off() {
+        // Absent keys: no checkpoint, not frozen (every config before 2026-09-27).
+        let path = learned_yaml(
+            "ddrs_rel_freeze_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert!(rh.routing_checkpoint.is_none() && !rh.freeze_routing);
+        assert!(!cfg.routing_frozen());
+
+        // Frozen at a checkpoint.
+        let path = learned_yaml(
+            "ddrs_rel_freeze_on.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  routing_checkpoint: /tmp/ckpt/epoch_3_mb_1\n  \
+                 freeze_routing: true\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a frozen config with a checkpoint loads");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!(
+            rh.routing_checkpoint.as_deref(),
+            Some(std::path::Path::new("/tmp/ckpt/epoch_3_mb_1"))
+        );
+        assert!(rh.freeze_routing && cfg.routing_frozen());
+
+        // Warm start without freezing: the checkpoint alone is allowed.
+        let path = learned_yaml(
+            "ddrs_rel_warm_only.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  routing_checkpoint: /tmp/ckpt/epoch_3_mb_1\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("warm start without freeze loads");
+        assert!(!cfg.routing_frozen());
     }
 
     #[test]

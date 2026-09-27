@@ -123,6 +123,7 @@ If you touched the learned or seasonal dam release (`src/routing/release.rs`,
 
 ```bash
 cargo test --test reservoir_release --test reservoir_release_gradcheck --test reservoir_release_training
+cargo test --test release_freeze_routing   # routing_checkpoint / freeze_routing, via the real driver on Juniata
 cargo test --lib -- reservoir release_head
 cargo test --release --test juniata_acceptance   # holds juniata_learned_release_trains_t0_and_writes_release_params
 ```

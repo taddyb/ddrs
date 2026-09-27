@@ -469,7 +469,24 @@ release_head:            # top-level block, deny_unknown_fields
   k: 3                   # default 3
   seasonal: true         # default true; false = constant T0 per dam (one output)
   input_var_names: [log10_storage, ..., purpose_other]   # feature-table columns, required
+  routing_checkpoint: /abs/.ddrs/runs/<id>/checkpoints/epoch_E_mb_M   # default absent
+  freeze_routing: false  # default false; true requires routing_checkpoint
 ```
+
+**Release-only training (added 2026-09-27).** `routing_checkpoint` is a checkpoint DIRECTORY
+whose `head.mpk` initialises the ROUTING head: weights only, never its `optim.mpk` or
+`state.json` (the routing optimizer starts cold, the run at epoch 1). `freeze_routing: true`
+detaches the routing head (`Module::no_grad`, like the disaggregation freeze): the backward
+spends nothing on its parameters, the driver takes no routing optimizer step, and only the
+release head trains, its gradient still flowing through the routing solve into `T`. The saved
+`head.mpk` of every checkpoint is then the frozen weights, which the test phase loads. A batch
+with no active dam has a constant loss and takes no step. `freeze_routing: true` without
+`routing_checkpoint` is rejected at load (`validate_reservoirs`). `run.log` carries
+`routing warm start: ... FROZEN` and `routing head frozen: training the release head only`;
+the manifest's `metrics.release_training` records `routing_checkpoint` and `freeze_routing`.
+`experiment.checkpoint` (a full resume) is applied after `routing_checkpoint` and wins; a frozen
+head stays frozen across it. Tests: `tests/release_freeze_routing.rs`,
+`src/config.rs` (`freeze_routing_*`, `routing_checkpoint_*`).
 
 The table is `experiments/reservoir/release_head/dam_features.csv` (1,024 COMIDs, NID >= 10 MCM,
 19 normalised features), rebuilt by `build_dam_features.py` under the DDR venv. Dataset open logs

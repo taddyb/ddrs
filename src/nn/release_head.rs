@@ -163,6 +163,8 @@ mod tests {
             k: 3,
             input_var_names: vec!["f1".into(), "f2".into(), "f3".into()],
             seasonal,
+            routing_checkpoint: None,
+            freeze_routing: false,
         }
     }
 

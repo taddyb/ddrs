@@ -88,7 +88,9 @@ pub struct TrainState<I: Backend> {
 /// backward pass. Its gradient is clipped on its own norm
 /// (`grad_clip_max_norm`), not jointly with the routing head's: a joint norm
 /// would let the release head's gradient, which is large while `T0` is far
-/// from the data, throttle the routing head's steps.
+/// from the data, throttle the routing head's steps. With
+/// `release_head.freeze_routing` the routing head takes no step at all and
+/// this head trains alone (`Config::routing_frozen`).
 pub struct ReleaseTrainer<I: Backend> {
     pub head: KanHead<Autodiff<I>>,
     pub optimizer: HeadOptimizer<KanHead<Autodiff<I>>, Autodiff<I>>,
@@ -244,6 +246,18 @@ fn run_micro_batch<I: Backend>(
     }))
 }
 
+/// True when `loss` has an autodiff tape behind it (its node's requirement is
+/// not `None`). Burn's `Tensor::is_require_grad` answers only for LEAVES, and
+/// `backward()` on an untracked tensor panics. With the routing head frozen
+/// (`release_head.freeze_routing`), a batch with no active dam never touches
+/// a tracked parameter, so its loss is a constant with nothing to train.
+fn loss_is_tracked<I: Backend>(loss: &Tensor<Autodiff<I>, 1>) -> bool {
+    match loss.clone().into_primitive() {
+        burn::tensor::TensorPrimitive::Float(p) => !p.node.requirement.is_none(),
+        _ => unreachable!("a loss is a float tensor"),
+    }
+}
+
 /// ` release_T0_median=<d>d (<k> dams)` for the mini-batch log line, or empty.
 fn release_log(release_t0: Option<(f32, usize)>) -> String {
     match release_t0 {
@@ -311,6 +325,13 @@ pub fn train<I: Backend>(
     let rho = exp.rho.expect("training requires rho");
     let grad_clip = exp.grad_clip_max_norm.unwrap_or(1.0);
     let accum_steps = exp.effective_grad_accum_steps();
+    // Release-only training: the routing head was loaded from
+    // `release_head.routing_checkpoint` and detached by the bootstrap; here
+    // it takes no optimizer step, so it stays bitwise at the checkpoint.
+    let frozen = cfg.routing_frozen();
+    if frozen {
+        eprintln!("routing head frozen: training the release head only");
+    }
 
     let mut sampler = batch_source.unwrap_or_else(|| {
         // Accumulation keeps the partial tail batch (drop_last = false):
@@ -382,17 +403,22 @@ pub fn train<I: Backend>(
 
                 // One backward, split between the two heads. Without the
                 // learned release this is the historical single-head step.
+                // With the routing head frozen only the release head takes
+                // a step, and a batch with no active dam takes none.
                 let (grads, release_grads) = match state.release.as_ref() {
-                    None => (GradientsParams::from_grads(loss.backward(), &state.head), None),
+                    None => (Some(GradientsParams::from_grads(loss.backward(), &state.head)), None),
+                    Some(_) if frozen && !loss_is_tracked::<I>(&loss) => (None, None),
                     Some(r) => {
                         let mut raw = loss.backward();
-                        let g = GradientsParams::from_module(&mut raw, &state.head);
+                        let g = (!frozen).then(|| GradientsParams::from_module(&mut raw, &state.head));
                         let rg = GradientsParams::from_module(&mut raw, &r.head);
                         (g, Some(rg))
                     }
                 };
-                let grads = clip_grad_norm(grads, &state.head, grad_clip);
-                state.head = optimizer.step(lr as f64, state.head.clone(), grads);
+                if let Some(grads) = grads {
+                    let grads = clip_grad_norm(grads, &state.head, grad_clip);
+                    state.head = optimizer.step(lr as f64, state.head.clone(), grads);
+                }
                 if let (Some(r), Some(rg)) = (state.release.as_mut(), release_grads) {
                     let rg = clip_grad_norm(rg, &r.head, grad_clip);
                     r.head = r.optimizer.step(lr as f64, r.head.clone(), rg);
@@ -475,11 +501,17 @@ pub fn train<I: Backend>(
                                     GradientsParams::from_grads(scaled.backward(), &state.head);
                                 accumulator.accumulate(&state.head, grads);
                             }
+                            // Frozen routing, no active dam: a constant loss.
+                            // It still counts in `total_n` (its gradient is 0).
+                            Some(_) if frozen && !loss_is_tracked::<I>(&scaled) => {}
                             Some(r) => {
                                 let mut raw = scaled.backward();
-                                let grads = GradientsParams::from_module(&mut raw, &state.head);
+                                if !frozen {
+                                    let grads =
+                                        GradientsParams::from_module(&mut raw, &state.head);
+                                    accumulator.accumulate(&state.head, grads);
+                                }
                                 let rgrads = GradientsParams::from_module(&mut raw, &r.head);
-                                accumulator.accumulate(&state.head, grads);
                                 release_accumulator.accumulate(&r.head, rgrads);
                             }
                         }
@@ -511,10 +543,12 @@ pub fn train<I: Backend>(
                         state.mini_batch
                     );
                 } else {
-                    let grads =
-                        scale_grads(accumulator.grads(), &state.head, 1.0 / total_n as f32);
-                    let grads = clip_grad_norm(grads, &state.head, grad_clip);
-                    state.head = optimizer.step(lr as f64, state.head.clone(), grads);
+                    if !frozen {
+                        let grads =
+                            scale_grads(accumulator.grads(), &state.head, 1.0 / total_n as f32);
+                        let grads = clip_grad_norm(grads, &state.head, grad_clip);
+                        state.head = optimizer.step(lr as f64, state.head.clone(), grads);
+                    }
                     if let Some(r) = state.release.as_mut() {
                         let rg = scale_grads(
                             release_accumulator.grads(),

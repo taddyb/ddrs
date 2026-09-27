@@ -119,6 +119,12 @@ change.
   0.138 at init.
 - **Joint optimizer.** Same kind and lr as the routing head, separate moments, each head clipped
   on its own gradient norm.
+- **Release-only training (2026-09-27).** `release_head.routing_checkpoint` loads the routing
+  head's weights (only `head.mpk`) from another run's checkpoint directory, and
+  `release_head.freeze_routing: true` detaches it: the routing head stays bitwise at the
+  checkpoint (training and test phase), and only the release head trains, through the solve.
+  This removes the co-training confound (undammed gauges are then unchanged by construction).
+  `tests/release_freeze_routing.rs`; config contract in `skills/ddrs-dev/references/config.md`.
 - **Off is identical.** `use_reservoirs: false`, or a `fixed` table without `a`/`b`, runs the
   historical ops and nodes; `a = b = 0` is bitwise option C (`tests/reservoir_release.rs`).
 - **Refusals.** A learned table reaching a forward with no release head panics (probe and frozen

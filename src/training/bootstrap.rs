@@ -99,6 +99,33 @@ where
     // untouched. See `nn::release_head` for the pass-through init.
     let learned_release = cfg.params.use_reservoirs
         && cfg.params.reservoir_release == crate::config::ReservoirRelease::Learned;
+
+    // Release-only training (`release_head.routing_checkpoint` /
+    // `freeze_routing`): the routing head's WEIGHTS come from another run's
+    // checkpoint directory; its optimizer and train-loop state do not (the
+    // routing optimizer starts cold and the run at epoch 1). Frozen, the
+    // head is detached with `no_grad`, like the disaggregation freeze above:
+    // its parameters are not autodiff leaves, so the backward spends nothing
+    // on them and the driver takes no routing step (`Config::routing_frozen`).
+    // `load_record` keeps the template's `require_grad`, so a frozen head
+    // stays frozen across the `experiment.checkpoint` resume below.
+    if let Some(rh) = cfg.release_head.as_ref().filter(|_| learned_release) {
+        if let Some(dir) = rh.routing_checkpoint.as_ref() {
+            head = load_kan_head::<Autodiff<I>>(&head_base(dir), head, device)?;
+            println!(
+                "routing warm start: loaded routing head weights from {}.mpk \
+                 (weights only: optimizer and state.json not read)",
+                head_base(dir).display()
+            );
+            if rh.freeze_routing {
+                head = head.no_grad();
+                println!(
+                    "routing warm start: routing head FROZEN (release_head.freeze_routing); \
+                     only the release head trains"
+                );
+            }
+        }
+    }
     let release = if learned_release {
         let section = cfg
             .release_head
