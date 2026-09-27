@@ -616,6 +616,21 @@ impl MeritGagesDataset {
                 path.display(),
                 table.len()
             );
+            // Completion years: how many dams exist over this dataset's axis.
+            // A dam is a reservoir only in windows / chunks starting on or
+            // after 1 January of its completion year.
+            let (active, switch_on, later, no_year) =
+                table.activation_counts(time_axis.start, time_axis.end);
+            if active != table.len() || no_year != table.len() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "reservoirs: {active} of {} dams active on {} ({switch_on} switch on by {}, \
+                     {later} completed later, {no_year} without a year, always active)",
+                    table.len(),
+                    time_axis.start,
+                    time_axis.end,
+                );
+            }
             Some(table)
         } else {
             None

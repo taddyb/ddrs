@@ -33,6 +33,19 @@
   "purpose_navigation",
   "purpose_other"
  ],
+ "year_completed": {
+  "source": "/mnt/ssd1/data/nid/nation.csv",
+  "n_comids_without_year": 32,
+  "n_comids_after_1981": 77,
+  "n_comids_after_1995": 20,
+  "join": {
+   "not_in_export": 0,
+   "repeated_id": 122,
+   "repeated_storage_match": 122,
+   "repeated_first_row": 0,
+   "repeated_years_disagree": 37
+  }
+ },
  "continuous": {
   "log10_storage": {
    "median_fill": 1.6494884223570319,

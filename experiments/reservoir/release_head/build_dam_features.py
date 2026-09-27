@@ -26,6 +26,13 @@ dam_features_stats.json.
 
 No observed release, schedule or cap enters: these are static structural attributes of the dam.
 
+Activation year (not a feature): `year_completed`, the NID "Year Completed" of the COMID's largest-storage dam, from the
+national export /mnt/ssd1/data/nid/nation.csv joined on NID ID, empty when unknown. ddrs routes a dam as a reservoir
+only in windows starting on or after 1 January of that year (before, the reach is an ordinary channel); an empty
+year is always active. NID IDs repeat in the export (saddle dikes, spillways of one reservoir): the row whose NID
+storage matches this table's `storage_nid_mcm` (within 1 %) is used, else the first row. The `year` feature is
+untouched (it comes from the eval-network table and is normalised with the others).
+
 Outputs (next to this script): dam_features.csv, dam_features_stats.json. Also
 examples/juniata/data/juniata_dam_features.csv, the rows inside the committed Juniata network.
 
@@ -43,6 +50,8 @@ import zarr
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 NID = HERE.parent / "nid" / "nid_dams_in_eval_network.csv"
+NATION = Path("/mnt/ssd1/data/nid/nation.csv")
+ACRE_FT_TO_MCM = 1233.48183754752 / 1e6
 JUNIATA_ADJ = ROOT / "examples" / "juniata" / "data" / "juniata_conus_adjacency.zarr"
 
 MIN_STORAGE_MCM = 10.0
@@ -71,6 +80,35 @@ def nansum_or_nan(x: pd.Series) -> float:
     return float(x.sum()) if x.notna().any() else float("nan")
 
 
+def completion_years(keep: pd.DataFrame) -> tuple[pd.Series, dict]:
+    """NID "Year Completed" per NID ID of `keep`, from the national export (see the module docs)."""
+    nation = pd.read_csv(NATION, skiprows=1, low_memory=False,
+                         usecols=["NID ID", "Year Completed", "NID Storage (Acre-Ft)"])
+    nation["year"] = pd.to_numeric(nation["Year Completed"], errors="coerce")
+    nation["nid_mcm"] = pd.to_numeric(nation["NID Storage (Acre-Ft)"], errors="coerce") * ACRE_FT_TO_MCM
+    by_id = {k: g for k, g in nation[nation["NID ID"].isin(set(keep.nid_id))].groupby("NID ID", sort=False)}
+    years, stats = {}, dict(not_in_export=0, repeated_id=0, repeated_storage_match=0, repeated_first_row=0,
+                            repeated_years_disagree=0)
+    for _, r in keep.iterrows():
+        g = by_id.get(r.nid_id)
+        if g is None:
+            stats["not_in_export"] += 1
+            years[r.nid_id] = float("nan")
+            continue
+        row = g.iloc[0]
+        if len(g) > 1:
+            stats["repeated_id"] += 1
+            stats["repeated_years_disagree"] += int(g.year.nunique(dropna=False) > 1)
+            match = g[np.isclose(g.nid_mcm, r.storage_nid_mcm, rtol=0.01)]
+            if len(match):
+                row = match.iloc[0]
+                stats["repeated_storage_match"] += 1
+            else:
+                stats["repeated_first_row"] += 1
+        years[r.nid_id] = row.year
+    return pd.Series(years), stats
+
+
 def aggregate(d: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for comid, g in d.groupby("COMID", sort=True):
@@ -89,6 +127,7 @@ def aggregate(d: pd.DataFrame) -> pd.DataFrame:
                 da_km2=big.da_km2,
                 reach_uparea_km2=big.reach_uparea_km2,
                 year=big.year,
+                year_completed=big.year_completed,
                 primary_purpose=big.primary_purpose,
             )
         )
@@ -103,6 +142,8 @@ def safe_log10(x: pd.Series) -> pd.Series:
 def main() -> None:
     nid = pd.read_csv(NID)
     keep = nid[(nid.storage_mcm >= MIN_STORAGE_MCM) & nid.snap_class.isin(SNAP_CLASSES)].copy()
+    year_by_id, year_stats = completion_years(keep)
+    keep["year_completed"] = keep.nid_id.map(year_by_id)
     agg = aggregate(keep)
 
     f = pd.DataFrame({"COMID": agg.COMID})
@@ -138,6 +179,8 @@ def main() -> None:
     feature_cols = [c for c in f.columns if c != "COMID"]
     assert not f[feature_cols].isna().any().any(), "a feature column still has NaN"
     out = f.merge(agg[["COMID", "n_dams", "largest_nid_id", "largest_name", "storage_mcm"]], on="COMID")
+    # Activation year: integer, empty when unknown (pandas writes a nullable Int64 NA as an empty field).
+    out["year_completed"] = agg.set_index("COMID").year_completed.reindex(out.COMID).round().astype("Int64").to_numpy()
     out.to_csv(HERE / "dam_features.csv", index=False, float_format="%.6g")
 
     meta = dict(
@@ -147,6 +190,9 @@ def main() -> None:
         n_comids=int(len(out)),
         n_comids_with_several_dams=int((agg.n_dams > 1).sum()),
         feature_columns=feature_cols,
+        year_completed=dict(source=str(NATION), n_comids_without_year=int(out.year_completed.isna().sum()),
+                            n_comids_after_1981=int((out.year_completed > 1981).sum()),
+                            n_comids_after_1995=int((out.year_completed > 1995).sum()), join=year_stats),
         continuous=stats,
         purposes={k: v for k, v in PURPOSES.items()},
     )

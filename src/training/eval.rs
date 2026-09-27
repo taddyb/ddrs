@@ -150,8 +150,25 @@ pub fn evaluate<I: Backend>(
     //
     // `initial_state`: when `Some`, sets `tensors.initial_state` before the forward so
     // the engine starts from the previous chunk's final discharge instead of hotstarting.
+    // Completion years: the dams active in a chunk are those built by its
+    // start date (`training::forward::apply_reservoir_rows`). Logged whenever
+    // the count changes, so a run.log shows when each group of dams switched on.
+    let mut last_active_dams: Option<usize> = None;
     let mut run_chunk = |window: &TestWindow, initial_state: Option<Vec<f32>>| -> Result<(Array2<f32>, Option<Vec<f32>>)> {
         let batch = dataset.collate_window(window)?;
+        if let Some(rows) = batch.reservoir_rows.as_ref() {
+            let n_active = rows.n_active_on(window.window_start);
+            if last_active_dams != Some(n_active) {
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "reservoirs: {n_active} of {} network dams active from {}",
+                    rows.rows.len(),
+                    window.window_start
+                );
+                last_active_dams = Some(n_active);
+            }
+        }
         let mut tensors = batch.to_tensors::<I>(device);
         // Inject cross-chunk state into tensors before the forward pass. This
         // takes priority over both the state cache and the hotstart heuristic.

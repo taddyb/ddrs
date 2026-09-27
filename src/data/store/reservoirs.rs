@@ -16,6 +16,13 @@
 //! - `reservoir_release: learned` reads a dam feature table
 //!   ([`read_dam_features`]), the release head's inputs, built by
 //!   `experiments/reservoir/release_head/build_dam_features.py`.
+//!
+//! Both kinds may carry an optional `year_completed` column (NID "Year
+//! Completed", empty when unknown). A dam is routed as a reservoir only in a
+//! window (training) or chunk (test phase) that starts on or after 1 January
+//! of that year; before, its reach is an ordinary channel
+//! ([`ReservoirRows::active_on`], applied when the rows are armed). An empty
+//! year, or a table without the column, is always active.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -97,6 +104,9 @@ pub struct FixedDam {
     pub t_days: f32,
     pub a: f32,
     pub b: f32,
+    /// NID completion year; `None` (unknown, or no `year_completed` column)
+    /// is always active. See [`dam_is_active`].
+    pub year_completed: Option<i32>,
 }
 
 /// A `reservoir_release: fixed` table. `seasonal` is true exactly when the CSV
@@ -116,6 +126,8 @@ pub struct DamFeatures {
     pub names: Vec<String>,
     /// `[n_dams, n_features]`, row `i` belongs to `comids[i]`.
     pub values: ndarray::Array2<f32>,
+    /// NID completion year per row (`year_completed`); `None` is always active.
+    pub years: Vec<Option<i32>>,
 }
 
 /// The reservoir table a dataset carries, by `params.reservoir_release`.
@@ -136,6 +148,51 @@ impl ReservoirTable {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Completion year per table dam (`None` when unknown or no column).
+    pub fn years(&self) -> Vec<Option<i32>> {
+        match self {
+            Self::Fixed(t) => t.dams.iter().map(|d| d.year_completed).collect(),
+            Self::Learned(f) => f.years.clone(),
+        }
+    }
+
+    /// `(active on start, completed after start and on or before end, completed
+    /// after end, no year)`: how the table's dams split over a time axis, for
+    /// the dataset-open log line.
+    pub fn activation_counts(
+        &self,
+        start: chrono::NaiveDate,
+        end: chrono::NaiveDate,
+    ) -> (usize, usize, usize, usize) {
+        let years = self.years();
+        let active = years.iter().filter(|&&y| dam_is_active(y, start)).count();
+        let later = years.iter().filter(|&&y| !dam_is_active(y, end)).count();
+        let no_year = years.iter().filter(|y| y.is_none()).count();
+        (active, years.len() - active - later, later, no_year)
+    }
+}
+
+/// Whether a dam completed in `year_completed` is routed as a reservoir in a
+/// window or chunk starting on `window_start`: active from 1 January of the
+/// completion year (NID gives a year, not a date), always active when the year
+/// is unknown. The decision is per window because windows (90 d) and test
+/// chunks (15 d) are far shorter than the year the NID resolves.
+pub fn dam_is_active(year_completed: Option<i32>, window_start: chrono::NaiveDate) -> bool {
+    use chrono::Datelike;
+    year_completed.is_none_or(|y| window_start.year() >= y)
+}
+
+/// Parse an optional `year_completed` field: empty ⇒ `None`; an integer or an
+/// integral float (`1960.0`) ⇒ the year.
+fn parse_year(field: &str) -> std::result::Result<Option<i32>, String> {
+    if field.is_empty() {
+        return Ok(None);
+    }
+    match field.parse::<f64>() {
+        Ok(v) if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e5 => Ok(Some(v as i32)),
+        _ => Err(format!("year_completed {field:?} is not a year (integer, or empty for unknown)")),
     }
 }
 
@@ -169,13 +226,33 @@ pub fn read_fixed_release_table(path: impl AsRef<Path>) -> Result<FixedTable> {
 
     let (mut rdr, headers) = open_csv(path)?;
     let col = |name: &str| headers.iter().position(|h| h == name);
+    let years: Vec<Option<i32>> = match col("year_completed") {
+        None => vec![None; base.len()],
+        Some(c) => {
+            let (mut yr, _) = open_csv(path)?;
+            yr.records()
+                .enumerate()
+                .map(|(i, rec)| {
+                    let rec = rec.map_err(|source| DataError::Csv { path: path.to_path_buf(), source })?;
+                    parse_year(rec.get(c).unwrap_or("")).map_err(|e| malformed(format!("row {}: {e}", i + 1)))
+                })
+                .collect::<Result<_>>()?
+        }
+    };
     let (a_col, b_col) = match (col("a"), col("b")) {
         (Some(a), Some(b)) => (a, b),
         (None, None) => {
             return Ok(FixedTable {
                 dams: base
                     .into_iter()
-                    .map(|(comid, t_days)| FixedDam { comid, t_days, a: 0.0, b: 0.0 })
+                    .zip(years)
+                    .map(|((comid, t_days), year_completed)| FixedDam {
+                        comid,
+                        t_days,
+                        a: 0.0,
+                        b: 0.0,
+                        year_completed,
+                    })
                     .collect(),
                 seasonal: false,
             })
@@ -190,7 +267,9 @@ pub fn read_fixed_release_table(path: impl AsRef<Path>) -> Result<FixedTable> {
     };
 
     let mut dams = Vec::with_capacity(base.len());
-    for (i, (record, (comid, t_days))) in rdr.records().zip(base).enumerate() {
+    for (i, ((record, (comid, t_days)), year_completed)) in
+        rdr.records().zip(base).zip(years).enumerate()
+    {
         let row = i + 1;
         let record = record.map_err(|source| DataError::Csv { path: path.to_path_buf(), source })?;
         let coef = |c: usize, name: &str| -> Result<f32> {
@@ -203,7 +282,13 @@ pub fn read_fixed_release_table(path: impl AsRef<Path>) -> Result<FixedTable> {
             }
             Ok(v)
         };
-        dams.push(FixedDam { comid, t_days, a: coef(a_col, "a")?, b: coef(b_col, "b")? });
+        dams.push(FixedDam {
+            comid,
+            t_days,
+            a: coef(a_col, "a")?,
+            b: coef(b_col, "b")?,
+            year_completed,
+        });
     }
     Ok(FixedTable { dams, seasonal: true })
 }
@@ -232,8 +317,10 @@ pub fn read_dam_features(path: impl AsRef<Path>, names: &[String]) -> Result<Dam
     };
     let comid_col = column("COMID")?;
     let cols: Vec<usize> = names.iter().map(|n| column(n)).collect::<Result<_>>()?;
+    let year_col = headers.iter().position(|h| h == "year_completed");
 
     let mut comids = Vec::new();
+    let mut years = Vec::new();
     let mut flat: Vec<f32> = Vec::new();
     let mut first_row: HashMap<Comid, usize> = HashMap::new();
     for (i, record) in rdr.records().enumerate() {
@@ -261,6 +348,11 @@ pub fn read_dam_features(path: impl AsRef<Path>, names: &[String]) -> Result<Dam
             }
             flat.push(v);
         }
+        let year = match year_col {
+            Some(c) => parse_year(field(c)).map_err(|e| malformed(format!("row {row}: {e}")))?,
+            None => None,
+        };
+        years.push(year);
         comids.push(comid);
     }
     if comids.is_empty() {
@@ -268,7 +360,7 @@ pub fn read_dam_features(path: impl AsRef<Path>, names: &[String]) -> Result<Dam
     }
     let values = ndarray::Array2::from_shape_vec((comids.len(), names.len()), flat)
         .expect("one value per (row, feature)");
-    Ok(DamFeatures { comids, names: names.to_vec(), values })
+    Ok(DamFeatures { comids, names: names.to_vec(), values, years })
 }
 
 /// The dam rows of one routed network, ready for
@@ -285,6 +377,42 @@ pub struct ReservoirRows {
     pub seasonal: Option<(Vec<f32>, Vec<f32>)>,
     /// Release-head inputs `[rows.len(), n_features]`, for a learned table.
     pub features: Option<ndarray::Array2<f32>>,
+    /// Completion year per row, aligned with `rows`, when the table carries
+    /// any; EMPTY when it carries none (every dam always active).
+    pub years: Vec<Option<i32>>,
+}
+
+impl ReservoirRows {
+    /// The dams built by `window_start` ([`dam_is_active`]), every field
+    /// subset consistently. A dam left out is not a dam row for that window:
+    /// its reach routes as an ordinary channel. When every dam is active the
+    /// result equals `self`, so arming it is exactly the pre-year behaviour.
+    pub fn active_on(&self, window_start: chrono::NaiveDate) -> ReservoirRows {
+        if self.years.is_empty() || self.years.iter().all(|&y| dam_is_active(y, window_start)) {
+            return self.clone();
+        }
+        let keep: Vec<usize> = (0..self.rows.len())
+            .filter(|&i| dam_is_active(self.years[i], window_start))
+            .collect();
+        let pick = |v: &Vec<f32>| -> Vec<f32> {
+            if v.is_empty() { Vec::new() } else { keep.iter().map(|&i| v[i]).collect() }
+        };
+        ReservoirRows {
+            rows: keep.iter().map(|&i| self.rows[i]).collect(),
+            t_days: pick(&self.t_days),
+            seasonal: self.seasonal.as_ref().map(|(a, b)| (pick(a), pick(b))),
+            features: self.features.as_ref().map(|f| f.select(ndarray::Axis(0), &keep)),
+            years: keep.iter().map(|&i| self.years[i]).collect(),
+        }
+    }
+
+    /// How many of the rows are active on `window_start`.
+    pub fn n_active_on(&self, window_start: chrono::NaiveDate) -> usize {
+        if self.years.is_empty() {
+            return self.rows.len();
+        }
+        self.years.iter().filter(|&&y| dam_is_active(y, window_start)).count()
+    }
 }
 
 /// Map a [`ReservoirTable`] onto a network's COMID order. Table COMIDs absent
@@ -295,17 +423,21 @@ pub fn map_reservoir_rows(table: &ReservoirTable, network: &[Comid]) -> Reservoi
         ReservoirTable::Fixed(t) => {
             let by_comid: HashMap<Comid, FixedDam> = t.dams.iter().map(|d| (d.comid, *d)).collect();
             let mut out = ReservoirRows::default();
-            let (mut a, mut b) = (Vec::new(), Vec::new());
+            let (mut a, mut b, mut years) = (Vec::new(), Vec::new(), Vec::new());
             for (row, comid) in network.iter().enumerate() {
                 if let Some(d) = by_comid.get(comid) {
                     out.rows.push(row);
                     out.t_days.push(d.t_days);
                     a.push(d.a);
                     b.push(d.b);
+                    years.push(d.year_completed);
                 }
             }
             if t.seasonal {
                 out.seasonal = Some((a, b));
+            }
+            if t.dams.iter().any(|d| d.year_completed.is_some()) {
+                out.years = years;
             }
             out
         }
@@ -321,7 +453,12 @@ pub fn map_reservoir_rows(table: &ReservoirTable, network: &[Comid]) -> Reservoi
                 }
             }
             let features = f.values.select(ndarray::Axis(0), &src);
-            ReservoirRows { rows, t_days: Vec::new(), seasonal: None, features: Some(features) }
+            let years = if f.years.iter().any(Option::is_some) {
+                src.iter().map(|&i| f.years[i]).collect()
+            } else {
+                Vec::new()
+            };
+            ReservoirRows { rows, t_days: Vec::new(), seasonal: None, features: Some(features), years }
         }
     }
 }
@@ -492,7 +629,7 @@ mod tests {
         assert!(t.seasonal);
         assert_eq!(
             t.dams,
-            vec![FixedDam { comid: Comid(73005301), t_days: 1.23, a: 0.5, b: -1.25 }]
+            vec![FixedDam { comid: Comid(73005301), t_days: 1.23, a: 0.5, b: -1.25, year_completed: None }]
         );
     }
 
@@ -577,9 +714,9 @@ mod tests {
     fn map_rows_carries_seasonal_a_b_in_network_order() {
         let table = ReservoirTable::Fixed(FixedTable {
             dams: vec![
-                FixedDam { comid: Comid(30), t_days: 2.0, a: 0.3, b: -0.3 },
-                FixedDam { comid: Comid(10), t_days: 1.5, a: 0.1, b: 0.2 },
-                FixedDam { comid: Comid(99), t_days: 3.0, a: 0.0, b: 0.0 },
+                FixedDam { comid: Comid(30), t_days: 2.0, a: 0.3, b: -0.3, year_completed: None },
+                FixedDam { comid: Comid(10), t_days: 1.5, a: 0.1, b: 0.2, year_completed: None },
+                FixedDam { comid: Comid(99), t_days: 3.0, a: 0.0, b: 0.0, year_completed: None },
             ],
             seasonal: true,
         });
@@ -597,7 +734,7 @@ mod tests {
         let table = ReservoirTable::Fixed(FixedTable {
             dams: plain
                 .iter()
-                .map(|&(comid, t_days)| FixedDam { comid, t_days, a: 0.0, b: 0.0 })
+                .map(|&(comid, t_days)| FixedDam { comid, t_days, a: 0.0, b: 0.0, year_completed: None })
                 .collect(),
             seasonal: false,
         });
@@ -611,11 +748,90 @@ mod tests {
             comids: vec![Comid(30), Comid(10)],
             names: vec!["f".into(), "g".into()],
             values: ndarray::array![[3.0_f32, 30.0], [1.0, 10.0]],
+            years: vec![None, None],
         });
         let network = [Comid(10), Comid(20), Comid(30)];
         let rows = map_reservoir_rows(&table, &network);
         assert_eq!(rows.rows, vec![0, 2]);
         assert!(rows.t_days.is_empty() && rows.seasonal.is_none());
         assert_eq!(rows.features, Some(ndarray::array![[1.0_f32, 10.0], [3.0, 30.0]]));
+    }
+
+    // ---- activation year (`year_completed`) ----
+
+    fn day(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn feature_table_reads_optional_year_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_csv(&dir, "COMID,f1,year_completed\n10,1.0,1987\n30,2.0,\n40,3.0,1960.0\n");
+        let f = read_dam_features(&path, &["f1".to_string()]).expect("table with years");
+        assert_eq!(f.years, vec![Some(1987), None, Some(1960)]);
+        let no_col = write_csv(&dir, "COMID,f1\n10,1.0\n");
+        assert_eq!(read_dam_features(&no_col, &["f1".to_string()]).unwrap().years, vec![None]);
+        features_rejected("COMID,f1,year_completed\n10,1.0,soon\n", &["f1"], "year_completed");
+    }
+
+    #[test]
+    fn fixed_table_reads_optional_year_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_csv(&dir, "COMID,T_days,a,b,year_completed\n10,1.0,0,0,2001\n20,2.0,0.5,0,\n");
+        let t = read_fixed_release_table(&path).expect("fixed table with years");
+        assert_eq!(t.dams.iter().map(|d| d.year_completed).collect::<Vec<_>>(), vec![Some(2001), None]);
+        let plain = write_csv(&dir, "COMID,T_days,year_completed\n10,1.0,1999\n");
+        let t = read_fixed_release_table(&plain).expect("plain table with years");
+        assert!(!t.seasonal);
+        assert_eq!(t.dams[0].year_completed, Some(1999));
+    }
+
+    #[test]
+    fn a_dam_is_active_from_january_first_of_its_completion_year() {
+        assert!(!dam_is_active(Some(1990), day(1989, 12, 31)));
+        assert!(dam_is_active(Some(1990), day(1990, 1, 1)));
+        assert!(dam_is_active(Some(1990), day(2005, 6, 1)));
+        assert!(dam_is_active(None, day(1900, 1, 1)), "a dam without a year is always active");
+    }
+
+    #[test]
+    fn active_on_keeps_only_built_dams_in_every_field() {
+        let table = ReservoirTable::Learned(DamFeatures {
+            comids: vec![Comid(10), Comid(20), Comid(30)],
+            names: vec!["f".into()],
+            values: ndarray::array![[1.0_f32], [2.0], [3.0]],
+            years: vec![Some(1990), None, Some(1985)],
+        });
+        let network = [Comid(10), Comid(15), Comid(20), Comid(30)];
+        let rows = map_reservoir_rows(&table, &network);
+        assert_eq!(rows.years, vec![Some(1990), None, Some(1985)]);
+
+        let before = rows.active_on(day(1989, 12, 31));
+        assert_eq!(before.rows, vec![2, 3], "the 1990 dam (row 0) is not built yet");
+        assert_eq!(before.features, Some(ndarray::array![[2.0_f32], [3.0]]));
+        assert_eq!(before.years, vec![None, Some(1985)]);
+        assert_eq!(rows.n_active_on(day(1989, 12, 31)), 2);
+        assert_eq!(rows.active_on(day(1990, 1, 1)), rows, "every dam built: the rows unchanged");
+        assert_eq!(rows.active_on(day(1984, 1, 1)).rows, vec![2], "only the undated dam");
+
+        let fixed = ReservoirTable::Fixed(FixedTable {
+            dams: vec![
+                FixedDam { comid: Comid(10), t_days: 1.0, a: 0.1, b: 0.2, year_completed: Some(2000) },
+                FixedDam { comid: Comid(30), t_days: 3.0, a: 0.3, b: 0.4, year_completed: Some(1970) },
+            ],
+            seasonal: true,
+        });
+        let f = map_reservoir_rows(&fixed, &network).active_on(day(1995, 3, 1));
+        assert_eq!((f.rows, f.t_days), (vec![3], vec![3.0]));
+        assert_eq!(f.seasonal, Some((vec![0.3], vec![0.4])));
+    }
+
+    #[test]
+    fn a_table_without_years_is_always_fully_active() {
+        let table = [(Comid(30), 2.0), (Comid(10), 1.5)];
+        let rows = reservoir_rows(&table, &[Comid(10), Comid(30)]);
+        assert!(rows.years.is_empty());
+        assert_eq!(rows.active_on(day(1800, 1, 1)), rows);
+        assert_eq!(rows.n_active_on(day(1800, 1, 1)), 2);
     }
 }

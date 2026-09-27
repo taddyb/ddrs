@@ -57,6 +57,9 @@ pub fn resolve_release_table<B: Backend>(
             t_days: if seasonal { t0[i] } else { t0[i].max(MIN_T_DAYS) },
             a: a[i],
             b: b[i],
+            // The activation year travels with the dam, so the test phase
+            // switches it on in the same chunk training would have.
+            year_completed: features.years.get(i).copied().flatten(),
         })
         .collect();
     FixedTable { dams, seasonal }

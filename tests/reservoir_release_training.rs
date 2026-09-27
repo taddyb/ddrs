@@ -8,6 +8,11 @@
 //!    test-phase resolution may differ from per-batch training at the ulp level.)
 //! 2. A learned table reaching a forward that has no release head is refused
 //!    instead of silently routing the dams as channels.
+//! 4. Activation year: a table whose dams were all completed by the window
+//!    start routes bitwise like a table without years; a dam completed after
+//!    the window start is not a dam row (its reach is a channel), for the
+//!    training path and for the resolved test-phase table, which carries the
+//!    years.
 //! 3. Bootstrap builds the release head and its optimizer for a learned
 //!    config, restores both from `release_head.mpk` / `release_optim.mpk`,
 //!    and starts the head cold (logged) from a checkpoint that has none.
@@ -73,10 +78,16 @@ fn learned_cfg(seasonal: bool) -> Config {
 
 /// Dams on reaches 3 and 4 (COMIDs 103, 104) plus one outside the network.
 fn features() -> DamFeatures {
+    features_with_years(vec![None, None, None])
+}
+
+/// `features()` with completion years (rows: COMID 104, 999, 103).
+fn features_with_years(years: Vec<Option<i32>>) -> DamFeatures {
     DamFeatures {
         comids: vec![Comid(104), Comid(999), Comid(103)],
         names: vec!["f1".into(), "f2".into()],
         values: ndarray::array![[0.8_f32, -1.2], [0.0, 0.0], [-0.5, 1.7]],
+        years,
     }
 }
 
@@ -167,6 +178,65 @@ fn training_and_resolved_release_route_identically_seasonal() {
 #[test]
 fn training_and_resolved_release_route_identically_constant() {
     training_vs_resolved(false);
+}
+
+/// Route the sandbox with the learned release on `table` through the training
+/// path, window starting at `window_start()` (1990-04-20).
+fn route_learned(table: DamFeatures) -> Vec<f32> {
+    let cfg = learned_cfg(true);
+    let head = trained_head(true);
+    let rows = map_reservoir_rows(&ReservoirTable::Learned(table), &network());
+    let mut e = engine(&cfg);
+    apply_reservoir_rows(&cfg, &mut e, Some(&rows), window_start(), STEPS + 1, Some(&head));
+    e.forward().into_data().to_vec().unwrap()
+}
+
+#[test]
+fn dams_completed_by_the_window_start_route_bitwise_like_a_table_without_years() {
+    let no_years = route_learned(features());
+    // 1990 is the window's own year: active from 1990-01-01.
+    let built = route_learned(features_with_years(vec![Some(1990), Some(2020), Some(1937)]));
+    assert_bitwise(&no_years, &built);
+}
+
+#[test]
+fn a_dam_completed_after_the_window_start_routes_as_a_channel() {
+    // Dam 104 (row 4) completed 1991: not yet built in a window starting 1990-04-20.
+    let partial = route_learned(features_with_years(vec![Some(1991), None, Some(1970)]));
+    let only_103 = route_learned(DamFeatures {
+        comids: vec![Comid(103)],
+        names: vec!["f1".into(), "f2".into()],
+        values: ndarray::array![[-0.5_f32, 1.7]],
+        years: vec![None],
+    });
+    assert_bitwise(&partial, &only_103);
+
+    // No dam built yet: exactly the engine with no dams at all.
+    let none_built = route_learned(features_with_years(vec![Some(1991), Some(1991), Some(2001)]));
+    let mut plain = engine(&Config::default());
+    let no_dams: Vec<f32> = plain.forward().into_data().to_vec().unwrap();
+    assert_bitwise(&none_built, &no_dams);
+    assert!(partial != no_dams, "the built dam must still act");
+}
+
+#[test]
+fn the_resolved_test_phase_table_carries_the_years_and_filters_the_same_way() {
+    let cfg = learned_cfg(true);
+    let head = trained_head(true);
+    let table = resolve_release_table::<I>(
+        &head.valid(),
+        &features_with_years(vec![Some(1991), None, Some(1970)]),
+        &cfg,
+    );
+    assert_eq!(
+        table.dams.iter().map(|d| d.year_completed).collect::<Vec<_>>(),
+        vec![Some(1991), None, Some(1970)]
+    );
+    let rows = map_reservoir_rows(&ReservoirTable::Fixed(table), &network());
+    let mut e = engine(&cfg);
+    apply_reservoir_rows(&cfg, &mut e, Some(&rows), window_start(), STEPS + 1, None);
+    let resolved: Vec<f32> = e.forward().into_data().to_vec().unwrap();
+    assert_bitwise(&resolved, &route_learned(features_with_years(vec![Some(1991), None, Some(1970)])));
 }
 
 #[test]

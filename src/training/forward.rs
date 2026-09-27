@@ -199,6 +199,10 @@ pub fn fixed_output_normalized<B: Backend>(
 ///
 /// `window_start` / `n_hours` place the batch's lateral-inflow rows in the
 /// year for the seasonal phase (`routing::release::seasonal_phase`).
+/// `window_start` also decides which dams exist: a dam is armed only when the
+/// window starts on or after 1 January of its completion year
+/// (`data::store::reservoirs::dam_is_active`); an unbuilt dam's reach routes
+/// as a channel.
 pub fn apply_reservoir_rows<I: Backend>(
     cfg: &Config,
     engine: &mut MuskingumCunge<I>,
@@ -214,6 +218,13 @@ pub fn apply_reservoir_rows<I: Backend>(
         "params.use_reservoirs is true but the batch carries no reservoir rows; \
          build it with a MeritGagesDataset opened from the same config",
     );
+    // Completion year: only the dams built by the window's start are dam rows
+    // for this window; the others route as ordinary channels. Equal to `rows`
+    // when every dam is built (or the table has no years), so the pre-year
+    // behaviour is unchanged. Decided per window (90 d) / test chunk (15 d)
+    // from its start date: NID resolves a year, not a day.
+    let active = rows.active_on(window_start);
+    let rows = &active;
     let device = engine_device(engine);
     let release = if let Some(features) = rows.features.as_ref() {
         let head = release_head.expect(
@@ -269,7 +280,8 @@ pub fn release_t0_stats<I: Backend>(
     release_head: &KanHead<Autodiff<I>>,
     device: &I::Device,
 ) -> Option<(f32, usize)> {
-    let features = tensors.reservoir_rows.as_ref()?.features.as_ref()?;
+    let active = tensors.reservoir_rows.as_ref()?.active_on(tensors.window.window_start);
+    let features = active.features.as_ref()?;
     let (n, f) = features.dim();
     if n == 0 {
         return None;
