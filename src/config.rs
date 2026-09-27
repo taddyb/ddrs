@@ -881,6 +881,15 @@ pub struct Params {
     /// `(T0, a, b)` per dam from the `release_head:` block, trained jointly
     /// with the routing head. See `.claude/RESERVOIRS.md`.
     pub reservoir_release: ReservoirRelease,
+    /// The dam-row form ([`DamRow`]) of a `reservoir_release: fixed` table:
+    /// `replace` (absent, the default: every earlier config) or `additive`.
+    /// A learned release chooses its row with `release_head.dam_row`
+    /// instead; setting this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load (two sources of truth, or a
+    /// silent no-op). With `additive`, a fixed table may also carry the
+    /// rule-curve columns and route them on the additive row, which is how
+    /// an offline fit is replayed in the engine. [`Config::dam_row`] reads it.
+    pub reservoir_dam_row: Option<DamRow>,
 }
 
 /// `params.reservoir_release`. See [`Params::reservoir_release`].
@@ -1033,11 +1042,16 @@ fn default_true() -> bool {
 }
 
 impl Config {
-    /// The dam-row form of the learned release (`release_head.dam_row`);
-    /// [`DamRow::Replace`] for every config without a `release_head:` block,
-    /// which includes every `fixed` table (the block is rejected there).
+    /// The dam-row form: `release_head.dam_row` for a learned release (and
+    /// its resolved test-phase table), `params.reservoir_dam_row` for a
+    /// `fixed` table, [`DamRow::Replace`] when neither is set. The two keys
+    /// never both apply: the block is rejected with `fixed` and the params key
+    /// with `learned` (`validate_reservoirs`).
     pub fn dam_row(&self) -> DamRow {
-        self.release_head.as_ref().map(|r| r.dam_row).unwrap_or_default()
+        match self.release_head.as_ref() {
+            Some(r) => r.dam_row,
+            None => self.params.reservoir_dam_row.unwrap_or_default(),
+        }
     }
 
     /// True when the routing head is frozen for release-only training
@@ -1092,6 +1106,7 @@ impl Default for Params {
             leakance_gate: None,
             use_reservoirs: false,
             reservoir_release: ReservoirRelease::Fixed,
+            reservoir_dam_row: None,
         }
     }
 }
@@ -1126,6 +1141,7 @@ struct ParamsRaw {
     leakance_gate: Option<LeakanceGate>,
     use_reservoirs: Option<bool>,
     reservoir_release: Option<ReservoirRelease>,
+    reservoir_dam_row: Option<DamRow>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -1246,6 +1262,7 @@ impl From<ParamsRaw> for Params {
         if let Some(m) = r.reservoir_release {
             p.reservoir_release = m;
         }
+        p.reservoir_dam_row = r.reservoir_dam_row;
         p
     }
 }
@@ -1600,6 +1617,20 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
              block would be ignored. Set `params.reservoir_release: learned` or remove it."
                 .to_string(),
         );
+    }
+    if let Some(row) = p.reservoir_dam_row {
+        if learned {
+            return Err(format!(
+                "params.reservoir_dam_row = {row:?} is for `reservoir_release: fixed` tables; a \
+                 learned release sets its row with `release_head.dam_row`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_dam_row = {row:?} is set but `use_reservoirs` is false; no dam \
+                 row would be routed"
+            ));
+        }
     }
     if learned {
         if !p.use_reservoirs {
@@ -3424,6 +3455,33 @@ data_sources:
     }
 
     const LEARNED_PARAMS: &str = "  use_reservoirs: true\n  reservoir_release: learned\n";
+
+    #[test]
+    fn reservoir_dam_row_selects_the_fixed_tables_row() {
+        // Absent: replace, as every earlier config.
+        let path = reservoir_yaml("ddrs_rdr_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!((cfg.params.reservoir_dam_row, cfg.dam_row()), (None, DamRow::Replace));
+        // A fixed table on the additive row.
+        let path = reservoir_yaml(
+            "ddrs_rdr_additive.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed additive table loads");
+        assert_eq!(cfg.dam_row(), DamRow::Additive);
+        // Rejected with a learned release (release_head.dam_row owns that) and
+        // without use_reservoirs (a silent no-op).
+        let path = learned_yaml(
+            "ddrs_rdr_learned.yaml",
+            "  use_reservoirs: true\n  reservoir_release: learned\n  reservoir_dam_row: additive\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_dam_row", "release_head.dam_row"]);
+        let path = reservoir_yaml("ddrs_rdr_off.yaml", EXPLICIT_ADJ, true, "  reservoir_dam_row: additive\n");
+        reservoir_rejection(path, "reservoir_dam_row");
+    }
 
     #[test]
     fn reservoir_release_defaults_fixed() {

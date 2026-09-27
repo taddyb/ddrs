@@ -448,7 +448,9 @@ Tests: `src/config.rs` (`use_reservoirs_*`), `src/data/store/reservoirs.rs`,
 A `fixed` table may add BOTH `a` and `b` columns (`COMID,T_days,a,b`): each dam is then a
 prescribed seasonal bucket `T(t) = max(T_days·exp(a·sin ω_t + b·cos ω_t), 1 h)`, routed through
 `MuskingumCunge::set_dam_release` with constant tensors. `a = b = 0` is bitwise option C. Dataset
-open logs `reservoirs: table <path> has <m> COMIDs (fixed, seasonal a/b)`.
+open logs `reservoirs: table <path> has <m> COMIDs (fixed, seasonal a/b)`. A fixed table may also
+carry a rule curve (`c1s, c1c, c2s, c2c` + `inflow_mean_m3s`) and route on the additive row with
+`params.reservoir_dam_row: additive` (see `dam_row` below).
 
 ### Learned release (`reservoir_release: learned`, added 2026-09-26)
 
@@ -540,9 +542,14 @@ own Muskingum `K_r`, `X_r` and adds the reservoir: `S = K_r[X_r I + (1 − X_r) 
 for bit, `T` has no floor, and `reservoir_T0` needs only `0 < lo` (log space); the dam reach's
 `n`/`q_spatial`/`p_spatial` keep their gradient through `K_r`, `X_r`. `c3 >= 0` needs
 `K_r(1 − X_r) + T_t >= dt/2`, met wherever the channel's own `c3 >= 0`. The test phase routes the
-resolved table through the same row. Only a learned config can select it: a `fixed` table has
-no `release_head:` block (rejected at load), so fixed tables always route `replace`; the engine
-API (`MuskingumCunge::set_reservoir_rows_as`, `DamRelease::dam_row`) supports both.
+resolved table through the same row. A `fixed` table has no `release_head:` block (rejected at
+load); it selects its row with `params.reservoir_dam_row: replace | additive` (added 2026-09-27,
+v3; absent = `replace`, every earlier config). That key is rejected with `reservoir_release:
+learned` (the block's `dam_row` owns it) and without `use_reservoirs`. `Config::dam_row` reads
+the block for a learned release, the params key otherwise. A fixed additive table may carry the
+rule-curve columns (`c1s, c1c, c2s, c2c` + `inflow_mean_m3s`), so an offline fit replays in the
+engine. The engine API
+(`MuskingumCunge::set_reservoir_rows_as`, `DamRelease::dam_row`) supports both.
 Tests: `tests/reservoir_additive.rs` (T = 0 and K_r = 0 identities, per-step storage balance,
 gradchecks in both `c1` regimes, opt-out on Juniata), the additive cases of
 `tests/reservoir_release_training.rs`, `src/config.rs` (`dam_row_*`).

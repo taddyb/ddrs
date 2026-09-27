@@ -22,6 +22,11 @@
 //!    the created volume `Σ max(lb − x, 0)·dt` matches a hand-rolled f64
 //!    recurrence of the dam row; with no rule curve it is exactly zero; the
 //!    inflow is the routed upstream inflow plus the reach's own `q'`.
+//! 7. `params.reservoir_dam_row: additive` puts a `fixed` table on the
+//!    additive row: a fixed CSV carrying the learned path's resolved table
+//!    (`T0`, `c = 0`, `Ibar`) routes bitwise like that resolved table under
+//!    the learned config, and a plain fixed table routes like
+//!    `set_reservoir_rows_as(.., Additive)`.
 
 use burn::backend::{Autodiff, NdArray};
 use burn::module::Param;
@@ -30,7 +35,7 @@ use chrono::NaiveDate;
 
 use ddrs::config::{Config, DamRow, ReleaseHeadSection, ReservoirRelease};
 use ddrs::data::ids::Comid;
-use ddrs::data::store::{map_reservoir_rows, DamFeatures, ReservoirTable};
+use ddrs::data::store::{map_reservoir_rows, read_fixed_release_table, DamFeatures, ReservoirTable};
 use ddrs::nn::dam_params::DamParams;
 use ddrs::nn::release_head::init_release_head;
 use ddrs::routing::mmc::{DamRelease, RuleCurve, DT_SECONDS};
@@ -658,4 +663,83 @@ fn clamp_account_inflow_is_routed_upstream_plus_own_lateral() {
         assert!(rel < 1e-5, "option C {option_c}: inflow {} vs {expected} (rel {rel:.2e})", acc.inflow_m3[0]);
         assert_eq!(acc.created_m3, vec![0.0]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Fixed tables on the additive row (`params.reservoir_dam_row`).
+// ---------------------------------------------------------------------------
+
+/// A `reservoir_release: fixed` config with `params.reservoir_dam_row`.
+fn fixed_cfg(row: Option<DamRow>) -> Config {
+    let mut cfg = Config::default();
+    cfg.params.use_reservoirs = true;
+    cfg.params.reservoir_release = ReservoirRelease::Fixed;
+    cfg.params.reservoir_dam_row = row;
+    cfg
+}
+
+#[test]
+fn fixed_additive_table_with_zero_rule_curve_routes_like_the_resolved_learned_table() {
+    use burn::module::AutodiffModule;
+    let steps = 96;
+    let start = NaiveDate::from_ymd_opt(1990, 4, 20).unwrap();
+    let network: Vec<Comid> = (0..5).map(|i| Comid(100 + i)).collect();
+    let device = Device::default();
+
+    // The learned path's resolved test-phase table at theta = 0 (c = 0) and
+    // delta = 0: the head's init T0 (4.5 h), a = b = 0, Ibar per dam.
+    let learned = learned_cfg(DamRow::Additive);
+    let head = init_release_head::<AB>(&section(DamRow::Additive), &learned.params.parameter_ranges, 42, &device);
+    let zeros = DamParams::<AB>::zeros(3, true, true, &device);
+    let table = resolve_release_table_with::<I>(&head.valid(), Some(&zeros.valid()), &features(), &learned);
+    assert!(table.rule_curve.as_ref().unwrap().iter().all(|c| *c == [0.0; 4]), "theta = 0 is c = 0");
+    let rows_a = map_reservoir_rows(&ReservoirTable::Fixed(table.clone()), &network);
+    let mut a = sandbox_engine(&learned, steps);
+    apply_reservoir_rows_with(&learned, &mut a, Some(&rows_a), start, steps + 1, None, None);
+    let resolved = host2(a.forward());
+
+    // The same table as a fixed CSV (the reader's own columns), routed under a
+    // fixed config with params.reservoir_dam_row: additive.
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("fixed.csv");
+    let (rc, ibar) = (table.rule_curve.as_ref().unwrap(), table.inflow_mean.as_ref().unwrap());
+    let mut text = String::from("COMID,T_days,a,b,c1s,c1c,c2s,c2c,inflow_mean_m3s\n");
+    for (i, d) in table.dams.iter().enumerate() {
+        let [c1s, c1c, c2s, c2c] = rc[i];
+        text.push_str(&format!("{},{},{},{},{c1s},{c1c},{c2s},{c2c},{}\n", d.comid.0, d.t_days, d.a, d.b, ibar[i]));
+    }
+    std::fs::write(&csv, text).unwrap();
+    let fixed = read_fixed_release_table(&csv).unwrap();
+    assert_eq!(fixed, table, "the CSV round-trips the resolved table exactly");
+    let rows_b = map_reservoir_rows(&ReservoirTable::Fixed(fixed.clone()), &network);
+    let cfg_b = fixed_cfg(Some(DamRow::Additive));
+    assert_eq!(cfg_b.dam_row(), DamRow::Additive);
+    let mut b = sandbox_engine(&cfg_b, steps);
+    apply_reservoir_rows_with(&cfg_b, &mut b, Some(&rows_b), start, steps + 1, None, None);
+    assert_bitwise(&host2(b.forward()), &resolved, "fixed additive vs resolved learned (c = 0)");
+
+    // The key is live: the default (replace) routes differently.
+    let cfg_c = fixed_cfg(None);
+    let mut c = sandbox_engine(&cfg_c, steps);
+    apply_reservoir_rows_with(&cfg_c, &mut c, Some(&rows_b), start, steps + 1, None, None);
+    assert!(host2(c.forward()) != resolved, "replace must differ from additive");
+}
+
+#[test]
+fn plain_fixed_table_on_the_additive_row_is_the_engines_additive_option_c() {
+    let steps = 48;
+    let start = NaiveDate::from_ymd_opt(1990, 7, 1).unwrap();
+    let network: Vec<Comid> = (0..5).map(|i| Comid(100 + i)).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("plain.csv");
+    std::fs::write(&csv, "COMID,T_days,year_completed\n103,0.8,1970\n104,2.5,\n").unwrap();
+    let table = read_fixed_release_table(&csv).unwrap();
+    let rows = map_reservoir_rows(&ReservoirTable::Fixed(table), &network);
+    let cfg = fixed_cfg(Some(DamRow::Additive));
+    let mut a = sandbox_engine(&cfg, steps);
+    apply_reservoir_rows_with(&cfg, &mut a, Some(&rows), start, steps + 1, None, None);
+    let via_config = host2(a.forward());
+    let mut b = sandbox_engine(&cfg, steps);
+    b.set_reservoir_rows_as(&[3, 4], &[0.8, 2.5], DamRow::Additive).unwrap();
+    assert_bitwise(&via_config, &host2(b.forward()), "fixed additive table vs engine option C additive");
 }
