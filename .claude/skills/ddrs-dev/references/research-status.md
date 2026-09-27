@@ -715,9 +715,15 @@ was reverted in #143 and never evaluated at gauges.
   ΔNSE −0.143, 53 of 77 down. No runtime cost (461 s off and on, CPU, 11,522 reaches). Reservoir
   attributes: `T` at 44, reconstructable at 33 more, no source at 44; not predictable from published
   attributes. Findings `2026-09-26-option-c-dam-benchmark-findings.md`.
+- **Release tuned on routed inflow, no dam data (2026-09-26, offline stage 1):** linear law fitted
+  to the gauge on WY1997-2001, scored WY2002-2010, benchmark run's routed flow as inflow. ΔNSE
+  +0.027 [+0.010, +0.045], 89 of 121 up; seasonal `T` +0.040; area-matched undammed controls +0.000
+  (65 / 56). Fitted `T0` 2.1 d at dams vs pass-through at controls. Cap overfits; KGE flat. This is the
+  user's chosen direction: learn release parameters, tune against gauges, no schedules. Findings §9.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
-  (option A); an observed-release boundary condition (option B, up to 216 of the 347); a head
-  trained with option C on (the fair test of C); operating rules from ISTARF-CONUS (option E).
+  (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
+  routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release
+  head from GRanD attributes and lagged forcings (stage 2); operating rules from ISTARF-CONUS (option E).
 
 ## Open, not closed
 

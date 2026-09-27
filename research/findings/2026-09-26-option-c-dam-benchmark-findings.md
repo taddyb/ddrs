@@ -208,3 +208,33 @@ and stays self-consistent; a subset eval must be compared only with the same sub
    `FLOW_SCALE` to the gauge output instead of the reach inflow (a DDR-parity question).
 4. Option D at the 44: `Q_max` from ISTARF `Release_max` (fitted rules) or the observed 99th-percentile
    release.
+
+## 9. Addendum: release tuned on routed inflow only (stage 1, offline)
+
+The design the user asked for (2026-09-26): no dam data as input. The release law is driven by the trained
+model's routed flow, its parameters are tuned against the gauge below on training years only, and test years
+score it. `experiments/reservoir/benchmark/release_fit_routed.py`, run `2026-09-17T16-38-16Z` (the benchmark's
+own model, full-population eval, so no T19 issue), daily implicit Euler
+`Q = min((S + I)/(T + 1), Q_max)`, `T_t = T0 exp(a sin w + b cos w)`, grid search on WY1997-2001 NSE, scored
+WY2002-2010. The law acts on the gauge's routed series, which equals a dam row inside ddrs at the 80 dams on the
+gauge reach. Controls: 121 undammed gauges (no NWM reservoir, no peak code 6 in WY1996-2010, no major GAGES-II
+dam), area-matched one to one.
+
+| Law | Free numbers | Dams: median ΔNSE [95 % CI], up / down | Controls: median ΔNSE, up / down |
+|---|---:|---|---|
+| linear `T0` | 1 | +0.027 [+0.010, +0.045], 89 / 32 (p = 2e-7) | +0.000, 65 / 56 |
+| + season `a, b` | 3 | +0.040 [+0.019, +0.066], 86 / 35 | −0.001, 55 / 66 |
+| + cap `Q_max` | 2 | +0.023 [+0.004, +0.060], 80 / 41 | −0.004, 49 / 72 |
+| + cap + season | 4 | +0.034 [+0.007, +0.078], 79 / 42 | −0.006, 42 / 79 |
+
+- Dam-specific: the controls do not move, and the fitted `T0` is a median 2.1 d at dams against 0.08 d at controls
+  (0.05 d is the grid floor, pass-through). Median test NSE at dams 0.420 → 0.507 (linear), 0.516 (seasonal).
+- On the dam reach (80): +0.033 linear, +0.055 seasonal; further down (41): +0.015.
+- The cap overfits with routed inflow (hurts controls), as §2.7 of the options doc found at Raystown.
+- KGE is flat (median −0.001, dams and controls); the fit optimises NSE.
+- The fitted `T0` (2.1 d) is far shorter than the ResOpsUS dam-record `T` (22.6 d): the routed inflow is
+  already attenuated by the trained channels, so the tuned law supplies only the residual storage. This is
+  the opposite failure to §3, where a record-based `T` added the full dam on top and over-attenuated.
+- Four laws on the same test years; the one-parameter law clears its interval alone.
+- Explainer page (function, inputs, parameters, tuning, interactive toy):
+  https://claude.ai/artifact/KSP5GLgFfW44SmZUFyZgeZ
