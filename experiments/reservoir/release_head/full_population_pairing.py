@@ -43,11 +43,13 @@ def manifest_metrics(run: Path) -> dict:
                                   "phase1_seconds", "phase2_seconds"]}
 
 
-def baseline(run: Path) -> dict:
+def baseline(run: Path, gauges: pd.Index) -> dict:
+    """Summed-Q' medians on `gauges` only: the cached baseline may cover a larger population (2,698 gauges for
+    gages_3000 against the 2,365 the run evaluates), and a baseline on other gauges is not a bar for this run."""
     b = json.loads((run / "baseline" / "manifest.json").read_text())
-    nse = np.array([x for x in b["metrics"]["nse"] if x is not None], float)
-    kge = np.array([x for x in b["metrics"]["kge"] if x is not None], float)
-    return dict(n=int(len(nse)), median_nse=float(np.nanmedian(nse)), median_kge=float(np.nanmedian(kge)))
+    df = pd.DataFrame({"nse": b["metrics"]["nse"], "kge": b["metrics"]["kge"]}, index=b["gage_ids"], dtype=float)
+    df = df[df.index.isin(gauges)]
+    return dict(n=int(len(df)), median_nse=float(df.nse.median()), median_kge=float(df.kge.median()))
 
 
 def dist(x: pd.Series) -> dict:
@@ -75,7 +77,7 @@ def main() -> None:
     res = dict(
         runs=dict(off=off.name, learned=lrn.name),
         manifest=dict(off=manifest_metrics(off), learned=manifest_metrics(lrn)),
-        summed_q_prime_baseline=baseline(off),
+        summed_q_prime_baseline=baseline(off, df.index),
         n_gauges=dict({k: int(len(v)) for k, v in grp.items()}),
         median_test_nse={k: dict(off=float(v.nse_off.median()), learned=float(v.nse_learned.median()))
                          for k, v in grp.items()},

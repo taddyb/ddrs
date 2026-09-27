@@ -477,6 +477,17 @@ The table is `experiments/reservoir/release_head/dam_features.csv` (1,024 COMIDs
 mini-batch; the test phase logs `release head: resolved <m> dams from <ckpt>/release_head.mpk` and
 writes `<run>/release_params.csv` (the eval binary writes `<output>.release_params.csv`).
 Checkpoints carry `release_head.mpk` + `release_optim.mpk`; resuming a learned config from a
-checkpoint without them starts the release head cold (logged). Two arms of record:
-`config/experiments/dam_release_smoke_{off,learned}.yaml`. Not for the probe binaries or the
-paper studies (both refuse it).
+checkpoint without them starts the release head cold (logged). Arms of record:
+`config/experiments/dam_release_smoke_{off,learned}.yaml`,
+`config/experiments/dam_release_full_{off,learned}.yaml`.
+
+**Head-less forwards panic, by design.** `training::forward::apply_reservoir_rows` panics when a
+learned table's feature rows reach a forward that has no release head: `probe_forward` (the probe
+binaries), the `Frozen` test-phase path (`eval --frozen`), and any caller of plain
+`forward_eval*` before `training::release_eval::resolve_learned_release` has turned the table into
+a fixed seasonal one. The alternative, routing the dams as channels, would silently score a
+different model. The paper studies refuse `use_reservoirs` arms at load.
+
+**Untyped ranges.** `params.parameter_ranges` is a map; a misspelt `reservoir_T0` /
+`reservoir_a` / `reservoir_b` key is ignored and the default box is used (the pre-existing
+pattern for every range key). Check the spelling against this file.

@@ -741,8 +741,16 @@ was reverted in #143 and never evaluated at gauges.
   `S = T·Q` (spurious source `Q·dT/dt`; mass ratio up to 2.49 at `T0` ~ 800 d with amplitude 2); the dam row
   is now the storage-conserving trapezoid, `c3 = (2T_t − dt)/(2T_{t+1} + dt)`. Check 1b's "one-hour bucket is
   pass-through" premise is wrong: a dam row replaces its reach's channel routing (median `K` ~4 h); the
-  adopted criterion is the bucket recurrence plus the median and the length dependence. Findings
-  `2026-09-27-learned-dam-release-findings.md` (post-fix numbers and the full-population arms there).
+  adopted criterion is the bucket recurrence plus the median and the length dependence. After the fix, smoke
+  re-run `2026-09-27T07-30-13Z`: dam gauges ΔNSE +0.0056 [+0.0021, +0.0095], controls −0.0011, dam minus control
+  +0.0072 [+0.0044, +0.0108]. **Full population (2,365 gauges, seed 42, `0ac6f2e`):** off
+  `2026-09-27T07-29-47Z` (reproduces `2026-09-12T23-39-03Z` exactly), learned `2026-09-27T07-29-55Z`. Median NSE
+  0.7391 off, 0.7378 learned (summed Q' 0.6785). Paired ΔNSE: 917 gauges with a NID dam >= 10 MCM upstream
+  +0.0014 [+0.0007, +0.0020] (532 / 385); 1,448 without −0.0007 [−0.0009, −0.0004] (573 / 875); dam on the gauge
+  reach +0.0027. Learned `T0` median 0.35 d, amplitude median 0.13. Helps below dams, costs undammed gauges a little
+  through the co-trained routing head; seed-43 replicates `2026-09-27T10-31-30Z` / `10-31-50Z`. Findings
+  `2026-09-27-learned-dam-release-findings.md`; paired analysis
+  `experiments/reservoir/full_run/paired_full_run.json` (branch `reservoir-options`). <!-- verify-doc-paths: ignore -->
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
   routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release

@@ -139,7 +139,9 @@ balance of the dam row under a violent seasonal swing. At `T0 = 20` d it
 uses a 0.1 step on `a`, `b` (the module docs record the step sweep).
 `reservoir_release_training` pins that the training path (head on the feature
 rows) and the test-phase path (head resolved into a fixed seasonal table) route
-bitwise identically.
+bitwise identically on the deterministic NdArray backend. On CUDA expect ulp-level
+`T0` differences: the test phase runs the head on every table dam in one matmul,
+training on each batch's subset, so the reductions need not associate the same way.
 
 `reservoir_override` pins a dam row to the linear-reservoir recurrence and
 checks bit-identity with the override off, mass balance, gradcheck, zero
@@ -212,7 +214,7 @@ line citation outright rather than trusting it to stay pinned.
 | Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting), `leakance_gate` (tau = 1 bit-exact identity through all three readers, gate gradcheck, saturation) |
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Reservoirs (option C) | `reservoir_override` (linear-reservoir recurrence, off is bit-identical, mass balance, gradcheck, zero dam-row gradient, row validation), `cargo test --lib reservoir` (table reader, COMID mapping, `use_reservoirs` load guards), `juniata_acceptance`'s `juniata_reservoir_is_matched_logged_and_changes_the_gauge_series` (release-only end-to-end); `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
-| Learned / seasonal dam release | `reservoir_release` (a = b = 0 is bitwise option C, seasonal recurrence at the end-hour phase, clamp, phase table, untouched upstream rows, validation), `reservoir_release_gradcheck` (T0, a, b, head weight, gamma op, clamp), `reservoir_release_training` (training = resolved test path bitwise, no-head refusal, checkpoint + optimizer restore), `cargo test --lib release_head` (init, log-space T0), `juniata_acceptance`'s learned run |
+| Learned / seasonal dam release | `reservoir_release` (a = b = 0 is bitwise option C, seasonal recurrence at the end-hour phase, clamp, phase table, untouched upstream rows, validation), `reservoir_release_gradcheck` (T0, a, b, head weight, gamma op, clamp), `reservoir_release_training` (training = resolved test path bitwise on NdArray, no-head refusal, checkpoint + optimizer restore), `cargo test --lib release_head` (init, log-space T0), `juniata_acceptance`'s learned run |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
 | Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |

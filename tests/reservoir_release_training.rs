@@ -3,8 +3,9 @@
 //! 1. The training path (`apply_reservoir_rows` with the release head on the
 //!    feature rows) and the test-phase path (the head resolved once into a
 //!    fixed seasonal table, `release_eval::resolve_release_table`, routed
-//!    through the ordinary `fixed` path) give bitwise identical routing, for a
-//!    seasonal and a non-seasonal head.
+//!    through the ordinary `fixed` path) give bitwise identical routing on
+//!    NdArray, for a seasonal and a non-seasonal head. (On CUDA the one-matmul
+//!    test-phase resolution may differ from per-batch training at the ulp level.)
 //! 2. A learned table reaching a forward that has no release head is refused
 //!    instead of silently routing the dams as channels.
 //! 3. Bootstrap builds the release head and its optimizer for a learned

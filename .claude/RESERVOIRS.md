@@ -15,7 +15,9 @@
 > `research/findings/2026-09-27-learned-dam-release-findings.md` (dam gauges ΔNSE +0.0049
 > [+0.0027, +0.0072], controls −0.0001, dam minus control +0.0058, first build). The dam row is the
 > storage-conserving trapezoid on `S = T·Q` since 2026-09-27 (the first build's `K := T(t)` alone did
-> not conserve storage; Traps below).
+> not conserve storage; Traps below). Full population (2,365 gauges, one seed): ΔNSE +0.0014
+> [+0.0007, +0.0020] at the 917 gauges below a NID dam >= 10 MCM, −0.0007 at the 1,448 without;
+> median NSE 0.7378 learned vs 0.7391 off.
 >
 > `params.use_reservoirs: true` + `data_sources.reservoirs: <csv>` (header `COMID,T_days`) routes
 > each listed dam reach as a linear reservoir `S = T·Q` through
@@ -102,7 +104,9 @@ change.
   checkpoint files `release_head.mpk` / `release_optim.mpk`. Test phase:
   `src/training/release_eval.rs` resolves the head ONCE into a fixed seasonal table
   (`MeritGagesDataset::resolve_learned_release`) and writes `<run>/release_params.csv`
-  (`COMID, T0_days, a, b, T_min_days, T_max_days`).
+  (`COMID, T0_days, a, b, T_min_days, T_max_days`). That path routes bitwise like training on
+  NdArray; on CUDA ulp-level `T0` differences are plausible (one matmul over all table dams vs
+  per-batch subsets).
 - **Phase convention.** `doy` is 1-based like pandas `dayofyear` (the offline fit's). The step
   producing routed column `t` reads `T` at phase rows `t − 1` (start) and `t` (end), both from the
   closed form, so a window or test-phase chunk start needs no carried state.
