@@ -306,7 +306,7 @@ fn frozen_routing_with_rule_curve_trains_the_per_dam_parameters() {
         std::fs::read_dir(&run_ckpts).unwrap().map(|e| e.unwrap().path()).collect();
     saved.sort();
     let last = saved.last().unwrap();
-    assert!(last.join("release_dams.mpk").is_file() && last.join("release_dams_optim.mpk").is_file());
+    assert!(last.join("release_dams.mpk").is_file() && last.join("release_dams_optim.json").is_file());
     let mut resume: serde_yaml::Value =
         serde_yaml::from_str(&std::fs::read_to_string(tmp.path().join("rc.yaml")).unwrap()).unwrap();
     resume["experiment"]["checkpoint"] = last.display().to_string().into();

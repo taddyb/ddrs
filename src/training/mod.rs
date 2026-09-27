@@ -16,6 +16,7 @@ pub mod driver;
 pub mod eval;
 pub mod forward;
 pub mod gate;
+pub mod lazy_adam;
 pub mod loss;
 pub mod metrics;
 pub mod optimizer;

@@ -489,10 +489,15 @@ the Dec 31 → Jan 1 step carries one hour of phase (the first build's day-of-ye
 step +7 h, or −17 h in a leap year, of flux). The coefficients are per-dam FREE parameters
 (`src/nn/dam_params.rs`, one row per feature-table dam, init 0 = no rule curve bit for bit),
 not head outputs: offline they are not predictable from the NID features. `per_dam_t0` adds a
-per-dam `exp(δ)` on the head's `T0`. Both train with their own Adam at the constant
+per-dam `exp(δ)` on the head's `T0`. Both train with their own ROW-SPARSE Adam
+(`src/training/lazy_adam.rs`, since the v3 fixes: only rows with a nonzero gradient in a step
+update, each with its own bias-correction counter, so a dam never in a batch stays exactly at
+its init; the first build's dense Adam kept drifting rows on stale moments) at the constant
 `per_dam_lr` (a dam gets a gradient only when a gauge below it is in the batch), clipped on
-their own norm, saved as `release_dams.mpk` (FULL precision) + `release_dams_optim.mpk` in each
-checkpoint and restored on resume. The gradient reaches `θ` through the timestep op's `q'`
+their own norm, saved as `release_dams.mpk` (FULL precision) + `release_dams_optim.json` (f32
+bit patterns, bitwise resume) in each checkpoint and restored on resume. A checkpoint from the
+first build carries a dense `release_dams_optim.mpk` instead; its per-dam optimizer restarts
+cold (logged). The gradient reaches `θ` through the timestep op's `q'`
 parent (no op change). `Ibar_d` is the table's raw `inflow_mean_m3s` column
 (`experiments/reservoir/release_head/build_dam_inflow_clim.py`); `rule_curve: true` without it
 fails at dataset open. The resolved test-phase table carries `c1s, c1c, c2s, c2c`, the effective

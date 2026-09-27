@@ -14,12 +14,14 @@
 //! - `delta` `[n_dams]`: a per-dam log multiplier on the head's `T0`,
 //!   `T0_d = T0_head,d · exp(δ_d)`. `δ = 0` is the head's `T0`.
 //!
-//! Both start at zero. They have their own optimizer and constant learning
-//! rate (`release_head.per_dam_lr`): a dam's parameters get a gradient only
-//! when a gauge below it is in the batch, so the heads' schedule would barely
-//! move them. Saved as `release_dams.mpk` (+ `release_dams_optim.mpk`) next to
-//! `release_head.mpk`, so the release head's own record and every older
-//! checkpoint are unchanged.
+//! Both start at zero. They have their own optimizer, a row-sparse Adam
+//! (`crate::training::lazy_adam`: only rows with a nonzero gradient in a step
+//! move, so a dam never in a batch stays exactly at zero), and a constant
+//! learning rate (`release_head.per_dam_lr`): a dam's parameters get a
+//! gradient only when a gauge below it is in the batch, so the heads'
+//! schedule would barely move them. Saved as `release_dams.mpk` (+
+//! `release_dams_optim.json`) next to `release_head.mpk`, so the release
+//! head's own record and every older checkpoint are unchanged.
 
 use burn::module::{Module, Param};
 use burn::tensor::{backend::Backend, Int, Tensor};

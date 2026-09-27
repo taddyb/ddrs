@@ -25,7 +25,7 @@
 //! ├── release_head.mpk   learned dam release head  (only with
 //! ├── release_optim.mpk  its optimizer moments      `reservoir_release: learned`)
 //! ├── release_dams.mpk        per-dam parameters (full precision; only with
-//! └── release_dams_optim.mpk  their optimizer   `rule_curve` / `per_dam_t0`)
+//! └── release_dams_optim.json their row-sparse Adam  `rule_curve` / `per_dam_t0`)
 //! ```
 //!
 //! `experiment.checkpoint:` points at the directory; the inner filenames are
@@ -213,10 +213,18 @@ pub fn release_dams_base(ckpt_dir: &Path) -> PathBuf {
     ckpt_dir.join("release_dams")
 }
 
-/// Recorder base for the per-dam parameters' optimizer moments:
-/// `dir/release_dams_optim` (→ `dir/release_dams_optim.mpk`).
+/// Recorder base of the per-dam parameters' optimizer as the first build
+/// wrote it (a dense Adam record, `dir/release_dams_optim.mpk`). Read only to
+/// say that such a checkpoint's per-dam optimizer restarts cold.
 pub fn release_dams_optim_base(ckpt_dir: &Path) -> PathBuf {
     ckpt_dir.join("release_dams_optim")
+}
+
+/// The per-dam parameters' row-sparse Adam state
+/// (`crate::training::lazy_adam::LazyAdam`), JSON with f32 bit patterns:
+/// `dir/release_dams_optim.json`.
+pub fn release_dams_optim_path(ckpt_dir: &Path) -> PathBuf {
+    ckpt_dir.join("release_dams_optim.json")
 }
 
 /// Save the per-dam parameters at FULL precision (unlike the heads'

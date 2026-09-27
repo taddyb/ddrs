@@ -127,7 +127,7 @@ cargo test --test release_freeze_routing   # routing_checkpoint / freeze_routing
 cargo test --test reservoir_additive       # release_head.dam_row: additive (S19''''/B19''''), gradchecks + opt-out
 cargo test --test reservoir_rule_curve     # rule curve: θ = 0 identity, one-period volume, continuous phase across
                                            # year boundaries, θ/δ gradcheck, resolved table, clamp account (hand-computed)
-cargo test --lib -- reservoir release_head
+cargo test --lib -- reservoir release_head lazy_adam release_eval dam_params   # incl. the row-sparse Adam (untouched rows bitwise at init, bitwise = dense Adam on an always-touched row, bitwise save/restore)
 cargo test --release --test juniata_acceptance   # holds juniata_learned_release_trains_t0_and_writes_release_params
 ```
 

@@ -19,7 +19,7 @@ use crate::data::error::Result;
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
     head_base, load_dam_params, load_disagg_head, load_kan_head, load_optimizer, load_train_state,
-    optim_base, release_dams_base, release_dams_optim_base,
+    optim_base, release_dams_base, release_dams_optim_base, release_dams_optim_path,
     release_head_base, release_optim_base, state_path,
 };
 use crate::training::driver::{DamTrainer, ReleaseTrainer, TrainState};
@@ -165,12 +165,8 @@ where
                  lr {} constant, l2 {})",
                 section.rule_curve, section.per_dam_t0, section.per_dam_lr, section.per_dam_l2
             );
-            Some(DamTrainer::<I> {
-                params,
-                optimizer: build_head_optimizer::<crate::nn::dam_params::DamParams<Autodiff<I>>, Autodiff<I>>(
-                    crate::config::OptimizerKind::Adam,
-                ),
-            })
+            let optimizer = crate::training::lazy_adam::LazyAdam::new(&params);
+            Some(DamTrainer::<I> { params, optimizer })
         } else {
             None
         };
@@ -238,10 +234,16 @@ where
                 if dbase.with_extension("mpk").is_file() {
                     d.params = load_dam_params::<Autodiff<I>>(&dbase, d.params.clone(), device)?;
                     println!("warm start: loaded per-dam parameters from {}.mpk", dbase.display());
-                    let doptim = release_dams_optim_base(ckpt_dir);
-                    if doptim.with_extension("mpk").is_file() {
-                        d.optimizer = load_optimizer(&doptim, d.optimizer.clone(), device)?;
-                        println!("warm start: restored per-dam optimizer from {}.mpk", doptim.display());
+                    let doptim = release_dams_optim_path(ckpt_dir);
+                    if doptim.is_file() {
+                        d.optimizer = d.optimizer.clone().load(&doptim)?;
+                        println!("warm start: restored per-dam row-sparse Adam from {}", doptim.display());
+                    } else if release_dams_optim_base(ckpt_dir).with_extension("mpk").is_file() {
+                        println!(
+                            "warm start: {}.mpk is a dense-Adam record from an older build; the \
+                             per-dam row-sparse Adam starts cold",
+                            release_dams_optim_base(ckpt_dir).display()
+                        );
                     }
                 } else {
                     println!("warm start: no {}.mpk; per-dam parameters start at zero", dbase.display());

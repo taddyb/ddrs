@@ -52,7 +52,7 @@ use crate::data::ids::Staid;
 use crate::data::sampler::{BatchSource, RandomSampler};
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    head_base, optim_base, release_dams_base, release_dams_optim_base, release_head_base,
+    head_base, optim_base, release_dams_base, release_dams_optim_path, release_head_base,
     release_optim_base, save_dam_params, save_optimizer,
     save_train_state, state_path, TrainCkptState,
 };
@@ -100,13 +100,15 @@ pub struct ReleaseTrainer<I: Backend> {
     pub dams: Option<DamTrainer<I>>,
 }
 
-/// Per-dam free parameters (`crate::nn::dam_params`) with their own Adam,
-/// stepped at the constant `release_head.per_dam_lr` (a dam's parameters get
-/// a gradient only when a gauge below it is in the batch, so the heads'
-/// schedule would barely move them), clipped on their own norm.
+/// Per-dam free parameters (`crate::nn::dam_params`) with their own
+/// row-sparse Adam (`crate::training::lazy_adam`), stepped at the constant
+/// `release_head.per_dam_lr` (a dam's parameters get a gradient only when a
+/// gauge below it is in the batch, so the heads' schedule would barely move
+/// them), clipped on their own norm. Only rows with a nonzero gradient in a
+/// step update; a dam never in a batch stays exactly at its init.
 pub struct DamTrainer<I: Backend> {
     pub params: crate::nn::dam_params::DamParams<Autodiff<I>>,
-    pub optimizer: HeadOptimizer<crate::nn::dam_params::DamParams<Autodiff<I>>, Autodiff<I>>,
+    pub optimizer: crate::training::lazy_adam::LazyAdam,
 }
 
 /// `median |c|` over the rule-curve coefficients of the dams whose logits
@@ -321,9 +323,11 @@ fn loss_is_tracked<I: Backend>(loss: &Tensor<Autodiff<I>, 1>) -> bool {
 }
 
 /// Step the per-dam parameters on `dam_grads` (clipped on their own norm) at
-/// the constant `release_head.per_dam_lr`, returning the rule-curve
-/// diagnostic ([`rule_curve_c_stats`], read before the step). A no-op
-/// without per-dam parameters or gradients.
+/// the constant `release_head.per_dam_lr` with the row-sparse Adam (only
+/// rows with a nonzero gradient move), returning the rule-curve diagnostic
+/// ([`rule_curve_c_stats`], read AFTER the step, so a dam's first gradient
+/// already shows its moved `c`). A no-op without per-dam parameters or
+/// gradients.
 fn step_dams<I: Backend>(
     cfg: &Config,
     release: Option<&mut ReleaseTrainer<I>>,
@@ -333,10 +337,10 @@ fn step_dams<I: Backend>(
     let d = release?.dams.as_mut()?;
     let dg = dam_grads?;
     let rh = cfg.release_head.as_ref().expect("per-dam parameters come from the release_head block");
-    let stats = rule_curve_c_stats(d, &dg, rh.rule_curve_max);
     let dg = clip_grad_norm(dg, &d.params, grad_clip);
-    d.params = d.optimizer.step(rh.per_dam_lr as f64, d.params.clone(), dg);
-    stats
+    let (params, _touched) = d.optimizer.step(rh.per_dam_lr, d.params.clone(), &dg);
+    d.params = params;
+    rule_curve_c_stats(d, &dg, rh.rule_curve_max)
 }
 
 /// ` rule_curve_|c|_median=<v> (<k> dams with gradient)`, or empty.
@@ -383,7 +387,7 @@ fn save_step_checkpoint<I: Backend>(
         // The per-dam parameters (full precision) and their optimizer.
         if let Some(d) = r.dams.as_ref() {
             save_dam_params(&release_dams_base(&ckpt_dir), &d.params.clone().valid())?;
-            save_optimizer(&release_dams_optim_base(&ckpt_dir), &d.optimizer)?;
+            d.optimizer.save(&release_dams_optim_path(&ckpt_dir))?;
         }
     }
     if let Some((sampler_indices, sampler_cursor)) = sampler.snapshot() {
