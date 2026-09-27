@@ -155,10 +155,40 @@ struct ArmedRelease<I: Backend> {
     /// This step's `(T_{t+1}, T_t)` (seconds), set by `forward` before
     /// `route_timestep`: the residence time at the step's end and start.
     t_step: Option<(Tensor<Autodiff<I>, 1>, Tensor<Autodiff<I>, 1>)>,
-    /// Rule curve: `(S0_{t+1} − S0_t)/dt` per step and dam, m³/s,
-    /// `[n_rows − 1, n_dams]` (row `t − 1` for the step producing column `t`),
-    /// and the dam rows as an autodiff index for the scatter onto `q'`.
-    rule_flux: Option<(Tensor<Autodiff<I>, 2>, Tensor<Autodiff<I>, 1, Int>)>,
+    /// Rule curve, armed: the per-step flux `(S0_{t+1} − S0_t)/dt` is built
+    /// one step at a time ([`ArmedRuleCurve::flux_at`]).
+    rule_curve: Option<ArmedRuleCurve<I>>,
+}
+
+/// The harmonic rule curve armed on an engine (`crate::routing::release`).
+///
+/// The step producing routed column `t` takes
+/// `(S0_{t+1} − S0_t)/dt = (Ibar/dt) ⊙ (c · ΔH_{t−1})` off the dam rows' `q'`,
+/// with `ΔH_s` a constant `[4]` vector of phase increments (seconds) and `c`
+/// the `[n_dams, 4]` coefficients. Built per step from `c` directly, so each
+/// step's autodiff nodes are `[n_dams]`-sized and the backward is
+/// `O(n_steps · n_dams)`. (The first build formed the whole
+/// `[n_steps, n_dams]` flux once and sliced a row per step; every slice's
+/// backward materialised a full-size gradient, `O(n_steps² · n_dams)`.)
+struct ArmedRuleCurve<I: Backend> {
+    /// `[n_dams, 4]` coefficients `(c1s, c1c, c2s, c2c)`, autodiff.
+    coeffs: Tensor<Autodiff<I>, 2>,
+    /// `[n_dams]` `Ibar / dt`, 1/s·m³/s.
+    scale: Tensor<Autodiff<I>, 1>,
+    /// `ΔH_s` per step `s` (row `s` → `s + 1`), seconds.
+    dh: Vec<[f32; 4]>,
+    /// The dam rows as an autodiff index, for the scatter onto `q'`.
+    rows: Tensor<Autodiff<I>, 1, Int>,
+}
+
+impl<I: Backend> ArmedRuleCurve<I> {
+    /// `(S0_{s+1} − S0_s)/dt` per dam, m³/s, `[n_dams]`: the flux of step `s`
+    /// (the step producing routed column `s + 1`). Positive is storing.
+    fn flux_at(&self, s: usize) -> Tensor<Autodiff<I>, 1> {
+        let n_dams = self.scale.dims()[0];
+        let dh = Tensor::<Autodiff<I>, 1>::from_floats(self.dh[s], &self.scale.device()).reshape([4, 1]);
+        self.coeffs.clone().matmul(dh).reshape([n_dams]) * self.scale.clone()
+    }
 }
 
 impl<I: Backend> ArmedRelease<I> {
@@ -718,24 +748,24 @@ impl<I: Backend> MuskingumCunge<I> {
             DamRow::Replace => release.t0_days.clone().clamp_min(MIN_T_DAYS) * SECONDS_PER_DAY,
             DamRow::Additive => release.t0_days.clone() * SECONDS_PER_DAY,
         });
-        // Rule curve: every step's (S0_{t+1} − S0_t)/dt per dam, once, in
-        // autodiff: ΔH [n_rows − 1, 4] (host f64, `rule_curve_increments`)
-        // times cᵀ [4, n_dams], times Ibar/dt. Taken off the dam rows' q' in
-        // `forward`, after the discharge floor on q' (a negative effective
-        // lateral inflow is the reservoir storing more than its reach adds).
-        let rule_flux = release.rule_curve.as_ref().map(|rc| {
-            let n_steps = n_rows - 1;
+        // Rule curve: the per-step phase increments ΔH [n_rows − 1][4] (host
+        // f64, `rule_curve_increments`) and Ibar/dt, once; `forward` builds
+        // each step's (S0_{t+1} − S0_t)/dt = (Ibar/dt)·(c·ΔH) and takes it off
+        // the dam rows' q', after the discharge floor on q' (a negative
+        // effective lateral inflow is the reservoir storing more than its
+        // reach adds).
+        let rule_curve = release.rule_curve.as_ref().map(|rc| {
             let dh = crate::routing::release::rule_curve_increments(&release.phase, n_rows);
-            let dh = Tensor::<Autodiff<I>, 1>::from_floats(dh.as_slice(), &self.device)
-                .reshape([n_steps, 4]);
-            let scale = (rc.inflow_mean.clone() / self.dt).unsqueeze_dim::<2>(0);
-            let flux = dh.matmul(rc.coeffs.clone().transpose()) * scale;
             let rows_i64: Vec<i64> = release.rows.iter().map(|&r| r as i64).collect();
-            let rows_ad = Tensor::<Autodiff<I>, 1, Int>::from_data(
-                TensorData::new(rows_i64, [n_dams]),
-                &self.device,
-            );
-            (flux, rows_ad)
+            ArmedRuleCurve {
+                coeffs: rc.coeffs.clone(),
+                scale: rc.inflow_mean.clone() / self.dt,
+                dh: dh.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect(),
+                rows: Tensor::<Autodiff<I>, 1, Int>::from_data(
+                    TensorData::new(rows_i64, [n_dams]),
+                    &self.device,
+                ),
+            }
         });
         self.release = Some(ArmedRelease {
             rows: Tensor::from_data(TensorData::new(rows_i32, [n_dams]), &self.device),
@@ -746,7 +776,7 @@ impl<I: Backend> MuskingumCunge<I> {
             dam_row,
             t_constant,
             t_step: None,
-            rule_flux,
+            rule_curve,
         });
         Ok(())
     }
@@ -960,12 +990,8 @@ impl<I: Backend> MuskingumCunge<I> {
             // Rule curve: q'_eff = q' − (S0_{t+1} − S0_t)/dt on the dam rows
             // (`crate::routing::release`). A scatter-add of −flux onto the
             // dam rows only; every other entry is copied bit for bit.
-            let q_prime_t = match self.release.as_ref().and_then(|r| r.rule_flux.as_ref()) {
-                Some((flux, rows)) => {
-                    let n_dams = rows.dims()[0];
-                    let step = flux.clone().slice([(t - 1)..t, 0..n_dams]).reshape([n_dams]);
-                    q_prime_t.select_assign(0, rows.clone(), -step, IndexingUpdateOp::Add)
-                }
+            let q_prime_t = match self.release.as_ref().and_then(|r| r.rule_curve.as_ref()) {
+                Some(rc) => q_prime_t.select_assign(0, rc.rows.clone(), -rc.flux_at(t - 1), IndexingUpdateOp::Add),
                 None => q_prime_t,
             };
             let q_next = self.route_timestep(q_prime_t);
