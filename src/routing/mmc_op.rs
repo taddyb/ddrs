@@ -1451,11 +1451,22 @@ where
 
 /// Eight-parent sibling for the learned dam release with a learned
 /// stage-roughness exponent: `[n, q_spatial, p_spatial, q_t, q_prime_t,
-/// gamma, T_{t+1}, T_t]`. Gamma and the release touch disjoint rows: on a dam row the
-/// channel geometry (and so gamma) reaches the loss only through K and X,
-/// which B19'' cuts off, and on a channel row `T` is absent. The core
-/// therefore composes them without a cross-term;
-/// `tests/reservoir_release_gradcheck.rs` checks both parents.
+/// gamma, T_{t+1}, T_t]`. Where gamma reaches a dam row depends on the row:
+///
+/// - **replace** (S19''' / B19'''): on a dam row the channel geometry, and so
+///   gamma, reaches the loss only through K and X, which B19'' cuts off; on a
+///   channel row `T` is absent. Gamma and `T` touch disjoint rows.
+/// - **additive** (S19'''' / B19''''): the dam row keeps the reach's own
+///   `K_r`, `X_r`, and B19'''' passes their gradient through unmasked, so
+///   gamma DOES reach the dam row, through `K_r` and `X_r`, on the same row
+///   whose denominator and c3 numerator also carry `T_{t+1}` and `T_t`.
+///
+/// In both cases [`timestep_backward_core`] returns the two parents' partial
+/// derivatives of the same row function (the dam row's `∂L/∂K` chain feeds
+/// gamma, `∂L/∂D` and `∂L/∂c3` feed `T`), and a gradient is the sum of its
+/// partials, so no cross-term is needed. `tests/reservoir_release_gradcheck.rs`
+/// checks both parents on the replace row and `tests/reservoir_additive.rs`
+/// (the learned-gamma case) on the additive row.
 #[derive(Debug)]
 pub(crate) struct TimestepReleaseGammaOp;
 
