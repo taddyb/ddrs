@@ -56,7 +56,7 @@ use crate::training::checkpoint::{
     release_optim_base, save_dam_params, save_optimizer,
     save_train_state, state_path, TrainCkptState,
 };
-use crate::training::forward::{forward_with_release_dams, release_t0_stats};
+use crate::training::forward::{forward_with_release_dams_record, release_t0_stats};
 use crate::training::loss::loss_denominator;
 use crate::training::optimizer::{scale_grads, HeadOptimizer};
 use crate::training::{clip_grad_norm, resolve_lr, save_kan_head, tau_trim_and_downsample};
@@ -200,8 +200,12 @@ fn run_micro_batch<I: Backend>(
     let dams = release.and_then(|r| r.dams.as_ref()).map(|d| &d.params);
     let release_t0 =
         release_head.and_then(|r| release_t0_stats::<I>(cfg, &tensors, r, dams, device));
-    let pred_hourly = forward_with_release_dams::<I>(
-        cfg, &tensors, head, release_head, dams, device, false, gate_tau,
+    // With the rule curve's feasibility penalty on, the forward also hands
+    // back its inputs (phase increments, Ibar, the dams' detached inflow).
+    let want_rc = dams.is_some()
+        && cfg.release_head.as_ref().is_some_and(|rh| rh.rule_curve && rh.rule_curve_penalty > 0.0);
+    let (pred_hourly, rc_record) = forward_with_release_dams_record::<I>(
+        cfg, &tensors, head, release_head, dams, device, false, gate_tau, want_rc,
     );
     // This batch's dams (their table rows), for the per-dam terms the driver
     // adds ONCE per optimizer step (`crate::training::dam_terms`), not here.
@@ -210,6 +214,7 @@ fn run_micro_batch<I: Backend>(
         (!active.table_index.is_empty()).then(|| crate::training::dam_terms::DamBatchRecord {
             window_start: tensors.window.window_start,
             table_index: active.table_index,
+            rule_curve: rc_record,
         })
     });
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
@@ -350,7 +355,7 @@ fn add_dam_step_terms<I: Backend>(
     release: Option<&ReleaseTrainer<I>>,
     terms: &crate::training::dam_terms::DamStepTerms,
     dam_grads: Option<GradientsParams>,
-) -> (Option<GradientsParams>, Option<f32>) {
+) -> (Option<GradientsParams>, Option<DamTermValues>) {
     let Some((d, rh)) = release.and_then(|r| r.dams.as_ref()).zip(cfg.release_head.as_ref()) else {
         return (dam_grads, None);
     };
@@ -367,15 +372,30 @@ fn add_dam_step_terms<I: Backend>(
         }
         None => tg,
     };
-    (Some(grads), Some(out.l2))
+    (Some(grads), Some(DamTermValues { l2: out.l2, penalty: out.penalty }))
 }
 
-/// ` per_dam_l2_term=<v>` for the step's log line, or empty.
-fn dam_terms_log(l2: Option<f32>) -> String {
-    match l2 {
-        Some(v) => format!(" per_dam_l2_term={v:.4e}"),
-        None => String::new(),
+/// The step's per-dam term values, for the log line.
+struct DamTermValues {
+    l2: Option<f32>,
+    penalty: Option<crate::training::dam_terms::PenaltyValue>,
+}
+
+/// ` per_dam_l2_term=<v> rule_curve_penalty=<P> (hinge active on k/m dam-steps)`
+/// for the step's log line, each part only when its term is on; or empty.
+fn dam_terms_log(v: Option<DamTermValues>) -> String {
+    let Some(v) = v else { return String::new() };
+    let mut out = String::new();
+    if let Some(l2) = v.l2 {
+        out.push_str(&format!(" per_dam_l2_term={l2:.4e}"));
     }
+    if let Some(p) = v.penalty {
+        out.push_str(&format!(
+            " rule_curve_penalty={:.4e} (hinge active on {}/{} dam-steps)",
+            p.value, p.active, p.total
+        ));
+    }
+    out
 }
 
 /// ` rule_curve_|c|_median=<v> (<k> dams with gradient)`, or empty.

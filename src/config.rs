@@ -985,6 +985,23 @@ pub struct ReleaseHeadSection {
     /// Default 0; rejected < 0.
     #[serde(default)]
     pub per_dam_l2: f32,
+    /// Weight of the rule curve's feasibility penalty (`rule_curve: true`
+    /// only; `crate::training::dam_terms`):
+    /// `P = rule_curve_penalty · Σ_{d,t} relu(r_d(t) − α·Qin_d(t))² / Σ_{d,t} Qin_d(t)²`,
+    /// with `r_d(t) = (S0_{t+1} − S0_t)/dt` the flux (positive = storing) and
+    /// `Qin_d(t)` the dam's inflow at that step from the model's own forward
+    /// (routed upstream inflow plus the reach's own `q'`), DETACHED, so `P`
+    /// is differentiable in the rule-curve coefficients only. It is the
+    /// restoring gradient against storing more than the dam receives, which
+    /// the S28 clamp removes. Added once per optimizer step over the step's
+    /// (dam, window) pairs. Default 0 (off); must be finite and >= 0; > 0
+    /// requires `rule_curve: true`.
+    #[serde(default)]
+    pub rule_curve_penalty: f32,
+    /// The penalty's `α`: the share of the dam's inflow the rule curve may
+    /// store at a step before it is penalised. Default 0.9; must be in (0, 1].
+    #[serde(default = "default_rule_curve_alpha")]
+    pub rule_curve_alpha: f32,
 }
 
 impl ReleaseHeadSection {
@@ -1000,6 +1017,9 @@ fn default_rule_curve_max() -> f32 {
 }
 fn default_per_dam_lr() -> f32 {
     0.05
+}
+fn default_rule_curve_alpha() -> f32 {
+    0.9
 }
 
 fn default_release_hidden_size() -> usize {
@@ -1624,6 +1644,25 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
             return Err(format!(
                 "release_head.per_dam_l2 = {} must be finite and >= 0",
                 rh.per_dam_l2
+            ));
+        }
+        if !(rh.rule_curve_penalty.is_finite() && rh.rule_curve_penalty >= 0.0) {
+            return Err(format!(
+                "release_head.rule_curve_penalty = {} must be finite and >= 0",
+                rh.rule_curve_penalty
+            ));
+        }
+        if rh.rule_curve_penalty > 0.0 && !rh.rule_curve {
+            return Err(format!(
+                "release_head.rule_curve_penalty = {} needs `rule_curve: true` (it penalises the \
+                 rule curve's flux; without one it would silently do nothing)",
+                rh.rule_curve_penalty
+            ));
+        }
+        if !(rh.rule_curve_alpha.is_finite() && rh.rule_curve_alpha > 0.0 && rh.rule_curve_alpha <= 1.0) {
+            return Err(format!(
+                "release_head.rule_curve_alpha = {} must be in (0, 1]",
+                rh.rule_curve_alpha
             ));
         }
         if rh.freeze_routing && rh.routing_checkpoint.is_none() {
@@ -3558,6 +3597,40 @@ data_sources:
         let rh = cfg.release_head.as_ref().unwrap();
         assert!(rh.rule_curve && rh.per_dam_t0 && rh.has_per_dam());
         assert_eq!((rh.rule_curve_max, rh.per_dam_lr, rh.per_dam_l2), (0.5, 0.01, 0.001));
+    }
+
+    #[test]
+    fn rule_curve_penalty_keys_default_parse_and_guard() {
+        let path = learned_yaml(
+            "ddrs_rel_rcp_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!((rh.rule_curve_penalty, rh.rule_curve_alpha), (0.0, 0.9));
+
+        let path = learned_yaml(
+            "ddrs_rel_rcp_on.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  rule_curve_penalty: 2.5\n  \
+                 rule_curve_alpha: 1.0\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a penalised rule curve loads");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!((rh.rule_curve_penalty, rh.rule_curve_alpha), (2.5, 1.0));
+
+        for (name, extra, needle) in [
+            ("ddrs_rel_rcp_neg.yaml", "  rule_curve: true\n  rule_curve_penalty: -1.0\n", "rule_curve_penalty"),
+            ("ddrs_rel_rcp_norc.yaml", "  rule_curve_penalty: 1.0\n", "rule_curve: true"),
+            ("ddrs_rel_rcp_a0.yaml", "  rule_curve: true\n  rule_curve_alpha: 0.0\n", "rule_curve_alpha"),
+            ("ddrs_rel_rcp_a2.yaml", "  rule_curve: true\n  rule_curve_alpha: 1.5\n", "rule_curve_alpha"),
+        ] {
+            let path = learned_yaml(name, LEARNED_PARAMS, &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}{extra}"));
+            learned_rejection(path, &[needle]);
+        }
     }
 
     #[test]

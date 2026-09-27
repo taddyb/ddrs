@@ -73,6 +73,8 @@ fn section(seasonal: bool) -> ReleaseHeadSection {
         per_dam_t0: false,
         per_dam_lr: 0.05,
         per_dam_l2: 0.0,
+        rule_curve_penalty: 0.0,
+        rule_curve_alpha: 0.9,
     }
 }
 

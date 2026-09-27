@@ -585,6 +585,27 @@ pub fn forward_with_release_dams<I: Backend>(
     carry_state: bool,
     gate_tau: Option<f32>,
 ) -> Tensor<Autodiff<I>, 2> {
+    forward_with_release_dams_record(cfg, tensors, head, release_head, dams, device, carry_state, gate_tau, false).0
+}
+
+/// [`forward_with_release_dams`] that, with `rule_curve_record`, also returns
+/// the armed rule curve's inputs to the feasibility penalty
+/// (`crate::training::dam_terms::RuleCurveRecord`): the window's phase
+/// increments, each dam's `Ibar`, and each step's detached dam inflow
+/// `Qin = I_t + q'` from this forward, dams in the engine's (active rows')
+/// order. `None` without a rule curve or without the flag.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_with_release_dams_record<I: Backend>(
+    cfg: &Config,
+    tensors: &RoutingTensors<Autodiff<I>>,
+    head: &KanHead<Autodiff<I>>,
+    release_head: Option<&KanHead<Autodiff<I>>>,
+    dams: Option<&crate::nn::dam_params::DamParams<Autodiff<I>>>,
+    device: &I::Device,
+    carry_state: bool,
+    gate_tau: Option<f32>,
+    rule_curve_record: bool,
+) -> (Tensor<Autodiff<I>, 2>, Option<crate::training::dam_terms::RuleCurveRecord>) {
     assert_eq!(
         gate_tau.is_some(),
         cfg.params.leakance_gate.is_some(),
@@ -697,13 +718,24 @@ pub fn forward_with_release_dams<I: Backend>(
 
     let runoff = engine.forward(); // (N, T_hours)
 
+    // The rule curve's penalty inputs, read off the engine (host, detached).
+    let record = rule_curve_record
+        .then(|| {
+            let dh = engine.rule_curve_increments()?.to_vec();
+            let qin: Vec<f32> = engine.dam_inflow_record()?.into_data().convert::<f32>().to_vec().ok()?;
+            let active = tensors.reservoir_rows.as_ref()?.active_on(tensors.window.window_start);
+            Some(crate::training::dam_terms::RuleCurveRecord { inflow_mean: active.inflow_mean, dh, qin })
+        })
+        .flatten();
+
     // Scatter-add (N, T_hours) → (G, T_hours) with autograd alive.
-    scatter_add_by_group(
+    let pred = scatter_add_by_group(
         runoff,
         tensors.flat_indices.clone(),
         tensors.group_ids.clone(),
         tensors.num_gauges,
-    )
+    );
+    (pred, record)
 }
 
 /// Running zeta accumulation across chunked `forward_eval` calls (eval builds

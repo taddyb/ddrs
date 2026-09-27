@@ -478,6 +478,8 @@ release_head:            # top-level block, deny_unknown_fields
   per_dam_lr: 0.05       # constant lr of the per-dam parameters' own Adam; > 0
   per_dam_l2: 0.0        # per_dam_l2·Σ(θ² + δ²) over the optimizer step's dams (union over its
                          # micro-batches), added ONCE per step; >= 0
+  rule_curve_penalty: 0.0  # feasibility penalty weight (off at 0); >= 0; > 0 needs rule_curve
+  rule_curve_alpha: 0.9    # share of the dam's inflow the flux may store before the hinge; (0, 1]
 ```
 
 **Rule curve and per-dam parameters (added 2026-09-27).** `rule_curve: true` makes the storage
@@ -517,6 +519,18 @@ negligible. Tests:
 `tests/reservoir_rule_curve.rs`, `tests/release_freeze_routing.rs` (frozen + rule curve),
 `src/nn/dam_params.rs`, `src/data/store/reservoirs.rs`, `src/config.rs` (`rule_curve_*`,
 `*_per_dam_*`).
+
+**Rule-curve feasibility penalty (added 2026-09-27, v3).** The flux can store more than the dam
+receives; the S28 clamp then creates water and zeroes the dam row's gradient, so nothing pushes
+back (review v2). `rule_curve_penalty: λ > 0` adds, ONCE per optimizer step,
+`P = λ·Σ relu(r_d(t) − α·Qin_d(t))² / Σ Qin_d(t)²` over the step's distinct (dam, window) pairs,
+`r = (S0_{t+1} − S0_t)/dt` the flux (positive = storing), `Qin = I_t + q'` the dam's inflow from
+the forward itself, DETACHED (`src/training/dam_terms.rs`). Differentiable in `θ` only. It is a
+hinge: exactly 0 while the flux stays below `α·Qin`, so it is 0 at `θ = 0` (the start of every
+run). Training logs `rule_curve_penalty=<P> (hinge active on <k>/<m> dam-steps)` and
+`per_dam_l2_term=<v>` on each step's `mb=` line. The hinge does not cover every clamp: an
+additive row with the channel's negative `c1` can clamp with the flux below `α·Qin` (seen on
+the Juniata test fixture), so read the created share, not only the hinge count.
 
 **`dam_row` (added 2026-09-27).** `replace` (default, every earlier run) makes the dam row the
 reservoir alone (`K := T`, `X := 0`, S19''/S19'''), so `T = 1 h` is faster than no dam on a reach

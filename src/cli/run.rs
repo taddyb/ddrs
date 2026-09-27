@@ -635,6 +635,11 @@ fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
         "dam_row": format!("{:?}", rh.dam_row).to_lowercase(),
         "rule_curve": rh.rule_curve,
         "per_dam_t0": rh.per_dam_t0,
+        "rule_curve_max": rh.rule_curve_max,
+        "per_dam_lr": rh.per_dam_lr,
+        "per_dam_l2": rh.per_dam_l2,
+        "rule_curve_penalty": rh.rule_curve_penalty,
+        "rule_curve_alpha": rh.rule_curve_alpha,
     }))
 }
 

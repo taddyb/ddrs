@@ -136,6 +136,15 @@ change.
   within ±0.75 d of day-of-year), unlike the `T` law's calendar day of year: the first build
   used the latter, whose restart at 1 January gave the year-boundary step +7 h (−17 h in a leap
   year) of flux. `tests/reservoir_rule_curve.rs`.
+- **Rule-curve feasibility (v3, 2026-09-27).** The flux is not bounded by the water the dam has;
+  where it stores more, the S28 clamp creates water and zeroes the gradient that would push back
+  (v2 smoke: 8 % of dam-row steps clamped by the end of training). Three pieces: the clamp is
+  accounted (`MuskingumCunge::dam_account`, per-forward `clamp-created volume` log line, test
+  phase `release_clamp.csv` + `metrics.release_clamp`); `release_head.rule_curve_penalty` adds the
+  hinge `λ·Σ relu(r − α·Qin)²/Σ Qin²` (detached `Qin`, `src/training/dam_terms.rs`) once per
+  optimizer step; the per-dam parameters step with a row-sparse Adam
+  (`src/training/lazy_adam.rs`) and `per_dam_l2` applies once per step. Gate on the created
+  share before reading a rule-curve arm.
 - **Release-only training (2026-09-27).** `release_head.routing_checkpoint` loads the routing
   head's weights (only `head.mpk`) from another run's checkpoint directory, and
   `release_head.freeze_routing: true` detaches it: the routing head stays bitwise at the

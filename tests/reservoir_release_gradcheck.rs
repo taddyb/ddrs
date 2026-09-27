@@ -279,6 +279,8 @@ fn release_head_weight_gradcheck_end_to_end() {
         per_dam_t0: false,
         per_dam_lr: 0.05,
         per_dam_l2: 0.0,
+        rule_curve_penalty: 0.0,
+        rule_curve_alpha: 0.9,
     };
     let features = || Tensor::<AB, 2>::from_floats([[0.8_f32, -1.2]], &device);
     // Move the read-out off its init so T0 is a few days and a, b are nonzero.
