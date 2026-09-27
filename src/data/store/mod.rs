@@ -27,7 +27,10 @@ pub use zarr_aorc::AorcPrecipStore;
 pub use icechunk::{StreamflowStore, UsgsObservationsStore};
 pub use netcdf::AttributesStore;
 pub use param_dump::load_comid_field;
-pub use reservoirs::{read_reservoir_table, reservoir_rows, ReservoirRows};
+pub use reservoirs::{
+    map_reservoir_rows, read_dam_features, read_fixed_release_table, read_reservoir_table,
+    reservoir_rows, DamFeatures, FixedDam, FixedTable, ReservoirRows, ReservoirTable,
+};
 pub use state_cache::StateCache;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
 pub use zarr_obs::GlobalObservationsStore;
