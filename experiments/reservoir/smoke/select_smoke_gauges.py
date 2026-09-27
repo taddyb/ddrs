@@ -5,15 +5,17 @@ undammed control per dam gauge.
 Built before any release code exists, so the implementation has a set with known expected results. From the 2,365
 training / eval gauges (HUC2 = GAGES-II HUC02 of the gauge):
   dam gauges   at least one NID dam >= 10 MCM upstream; the NEAREST of them (upstream area closest to the gauge's)
-               has gauge drainage area <= 1.5x its reach's upstream area, so the gauge sees that dam's release (other
+               has gauge drainage area <= 3x its reach's upstream area (2026-09-26, user: 3x, up from 1.5x), so the gauge
+               sees that dam's release (other
                large dams further up are allowed: the release law puts a bucket on every one of them); that dam was
                completed by 1980 (it exists through the 1981-1995 training window) and snapped by drainage-area match
                (class A, B or D); gauge area <= 25,000 km2 (keeps the network small); >= 80 % daily observations in
                both WY1982-1995 and WY1996-2010.
   relaxed      a region with no such gauge gets the one with the smallest area ratio up to 10 (flagged).
   controls     one per dam gauge: no NID dam upstream, no NWIS peak code 6 in WY1996-2010, same coverage rule, same
-               HUC2, drainage area closest in log, drawn without replacement. When a region runs out, the closest
-               area from any region (flagged `control_cross_huc`). Joint training can shift roughness everywhere, and
+               HUC2, drainage area closest in log, drawn without replacement. When a region runs out, the unused
+               gauge minimising |log area ratio| + distance / 1,000 km, from any region (flagged `control_cross_huc`).
+               Joint training can shift roughness everywhere, and
                a release law fitted anywhere can smooth a flashy model, so dam gauges are judged against controls.
 Writes, next to this script: smoke_gauges.csv (one row per gauge; dam columns describe the nearest large dam),
 gages_smoke.csv (gages_3000.csv format, for data_sources.gages), smoke_dams.csv (every NID dam >= 10 MCM in the smoke
@@ -42,7 +44,7 @@ GII = pyogrio.read_dataframe("/mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_
                              columns=["STAID", "HUC02"], read_geometry=False)
 GII["STAID"] = GII.STAID.astype(str).str.zfill(8)
 HUC = GII.set_index("STAID").HUC02.astype(str).str[:2]
-MIN_COVER, MAX_AREA, MAX_RATIO, RELAXED_RATIO = 0.8, 25000.0, 1.5, 10.0
+MIN_COVER, MAX_AREA, MAX_RATIO, RELAXED_RATIO = 0.8, 25000.0, 3.0, 10.0
 
 bygauge = pd.read_csv(NIDDIR / "nid_dams_by_gauge.csv", dtype={"STAID": str}).set_index("STAID")
 dams = pd.read_csv(NIDDIR / "nid_dams_in_eval_network.csv", low_memory=False)
@@ -82,13 +84,25 @@ dam_set["cascade"] = dam_set.n_big > 1
 
 pool = cand[(cand.n_nid == 0) & ~cand.code6 & covered].copy()
 pool["la"] = np.log(pool.area_km2)
+ll = G3.set_index("STAID")[["LAT_GAGE", "LNG_GAGE"]]
+pool["lat"], pool["lon"] = np.radians(pool.index.map(ll.LAT_GAGE)), np.radians(pool.index.map(ll.LNG_GAGE))
+
+
+def km(lat1, lon1, lat2, lon2):
+    return 6371.0 * 2 * np.arcsin(np.sqrt(np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2))
+
+
 ctrl_rows, used = [], set()
 for s, d in dam_set.sort_values("area_km2", ascending=False).iterrows():  # big basins first: fewer large controls
     la = np.log(d.area_km2)
     p = pool[~pool.index.isin(used)]
     same = p[p.huc2 == d.huc2]
     cross = len(same) == 0
-    pick = ((same if not cross else p).la - la).abs().idxmin()
+    if not cross:
+        pick = (same.la - la).abs().idxmin()
+    else:  # a region ran out: trade area mismatch against distance, so borrowed controls stay nearby
+        lat0, lon0 = np.radians(ll.LAT_GAGE[s]), np.radians(ll.LNG_GAGE[s])
+        pick = ((p.la - la).abs() + km(lat0, lon0, p.lat, p.lon) / 1000.0).idxmin()
     used.add(pick)
     ctrl_rows.append(dict(STAID=pick, control_for=s, control_cross_huc=cross))
 ctrl = pd.DataFrame(ctrl_rows).set_index("STAID")
