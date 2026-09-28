@@ -272,6 +272,7 @@ fn release_head_weight_gradcheck_end_to_end() {
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal: true,
         dam_row: ddrs::config::DamRow::Replace,
+        dam_floor: ddrs::config::DamFloor::Forgive,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: false,

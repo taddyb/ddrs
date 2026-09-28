@@ -590,6 +590,7 @@ fn additive_release_head_weight_gradcheck_end_to_end() {
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal: true,
         dam_row: DamRow::Additive,
+        dam_floor: ddrs::config::DamFloor::Forgive,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: false,

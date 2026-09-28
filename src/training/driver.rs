@@ -418,13 +418,15 @@ fn rule_curve_log(stats: Option<(f32, usize)>) -> String {
 
 /// One line per optimizer step whose forwards armed dam rows: the S28 clamp
 /// account of the step's dam-windows (every micro-batch's dams, each over its
-/// own window), `crate::training::release_eval::ClampSummary::describe`.
+/// own window), `crate::training::release_eval::ClampSummary::describe`:
+/// created, clamp steps, inflow, and with `dam_floor: carry` the repaid and
+/// still-owed volumes (owed at each window's end; every window starts at 0).
 /// Nothing when no dam was armed.
-fn log_dam_clamp(mini_batch: usize, records: &[crate::training::release_eval::DamClampRecord]) {
+fn log_dam_clamp(cfg: &Config, mini_batch: usize, records: &[crate::training::release_eval::DamClampRecord]) {
     if records.is_empty() {
         return;
     }
-    let summary = crate::training::release_eval::clamp_summary(records);
+    let summary = crate::training::release_eval::clamp_summary(records, cfg.dam_floor());
     eprintln!("  dam clamp, step {mini_batch}: {}", summary.describe("dam-window"));
 }
 
@@ -637,7 +639,7 @@ pub fn train<I: Backend>(
                     rule_curve_log(rc_stats),
                     dam_terms_log(term_values),
                 );
-                log_dam_clamp(state.mini_batch, &dam_clamp);
+                log_dam_clamp(cfg, state.mini_batch, &dam_clamp);
                 state.mini_batch += 1;
                 mb_done += 1;
                 if let Some(limit) = max_mini_batches {
@@ -792,7 +794,7 @@ pub fn train<I: Backend>(
                         rule_curve_log(rc_stats),
                         dam_terms_log(term_values),
                     );
-                    log_dam_clamp(state.mini_batch, &step_dam_clamp);
+                    log_dam_clamp(cfg, state.mini_batch, &step_dam_clamp);
                 }
 
                 state.mini_batch += 1;

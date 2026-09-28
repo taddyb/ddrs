@@ -142,7 +142,10 @@ change.
   accounted (`MuskingumCunge::dam_account`, per-step `dam clamp` log line, test
   phase `release_clamp.csv` + `metrics.release_clamp`; corrected in v4 to `Σ max(lb − x, 0)·dt/c4`,
   the forgiven storage plus the below-floor outflow, which closes the dam row's volume balance;
-  v3 logged `Σ max(lb − x, 0)·dt`, 3-8x too small); `release_head.rule_curve_penalty` adds the
+  v3 logged `Σ max(lb − x, 0)·dt`, 3-8x too small); `release_head.dam_floor: carry` (or
+  `params.reservoir_dam_floor` for a fixed table, v4) makes the floor mass-conserving: the created
+  volume is owed and repaid out of the dam's later inflow (detached state; `tests/reservoir_dam_floor.rs`);
+  `release_head.rule_curve_penalty` adds the
   hinge `λ·Σ relu(r − α·Qin)²/Σ Qin²` (detached `Qin`, `src/training/dam_terms.rs`) once per
   optimizer step; the per-dam parameters step with a row-sparse Adam
   (`src/training/lazy_adam.rs`) and `per_dam_l2` applies once per step. Gate on the created

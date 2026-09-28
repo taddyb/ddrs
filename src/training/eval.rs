@@ -402,7 +402,7 @@ pub fn evaluate<I: Backend>(
     // Dam rows: the clamp account over the whole test period, named by COMID.
     let dam_clamp = (!dam_clamp.by_row.is_empty()).then(|| dam_clamp.records(&dam_comids));
     if let Some(records) = dam_clamp.as_ref() {
-        let summary = crate::training::release_eval::clamp_summary(records);
+        let summary = crate::training::release_eval::clamp_summary(records, cfg.dam_floor());
         eprintln!("release clamp (test phase, {} dams): {}", records.len(), summary.describe("dam"));
     }
 

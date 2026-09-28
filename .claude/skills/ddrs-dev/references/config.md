@@ -474,6 +474,7 @@ release_head:            # top-level block, deny_unknown_fields
   routing_checkpoint: /abs/.ddrs/runs/<id>/checkpoints/epoch_E_mb_M   # default absent
   freeze_routing: false  # default false; true requires routing_checkpoint
   dam_row: replace       # default replace; additive adds T·Q to the reach's channel storage
+  dam_floor: forgive     # default forgive; carry makes the dam-row clamp mass-conserving (owed volume)
   rule_curve: false      # per-dam harmonic rule curve S0_d(t); needs inflow_mean_m3s in the table
   rule_curve_max: 1.0    # c = rule_curve_max·tanh(θ); > 0
   per_dam_t0: false      # T0_d = T0_head,d·exp(δ_d)
@@ -568,6 +569,43 @@ smoke off arm's head, zero training steps, traps.md T10). The engine API
 Tests: `tests/reservoir_additive.rs` (T = 0 and K_r = 0 identities, per-step storage balance,
 gradchecks in both `c1` regimes, opt-out on Juniata), the additive cases of
 `tests/reservoir_release_training.rs`, `src/config.rs` (`dam_row_*`).
+
+**`dam_floor` (added 2026-09-28, v4).** What the S28 clamp does with the water it creates on a
+dam row. `forgive` (default; every earlier run, bitwise) leaves it in the river. `carry` keeps
+the floor mass-conserving: each armed dam carries an owed volume (m³, >= 0); after a solve whose
+dam row clamped, `owed += Σ max(lb − x, 0)·dt/c4` (the created volume above); before every solve
+the dam repays `r = min(owed/dt, max(Qin_t − lb, 0))` m³/s out of its effective lateral inflow,
+`Qin_t = (N·Q_t)_d + q'_d` (step-start routed inflow plus its own `q'`, before the rule-curve
+flux, the penalty's `Qin`), and `owed −= r·dt`. `created − repaid − owed = 0` at every step, so
+the dam row's routed series passes on its inflow less its storage change, plus only what is still
+owed (`tests/reservoir_dam_floor.rs`: one year, outflow = inflow to 1.3e-4 where `forgive` creates
+6-11 %). It covers every dam-row clamp, the additive row's negative `c1` at low flow included.
+What it conserves is the dam row's ROUTED series (what an on-reach gauge reads): the rows below
+read the pre-clamp `x` in a clamped step, so over a period they receive the dam's inflow less `ΔS`
+less the below-floor part `created_m3 − storage_m3`, which is owed and repaid too (in the one-year
+replace-row test that is 7 % of the inflow; roughly `dt/D` of the in-debt flux per step). Owing
+only `storage_m3` would conserve their receipt instead; holding the dam's in-step outflow at `lb`
+would conserve both (not built).
+The owed state is DETACHED (inner backend, a constant cut to `q'`): training sees neither the
+debt a flux incurs nor its repayment as a function of `θ`, `T0` or the routing parameters; the
+gradient through a clamped step is still zero, the repayment acts like a change to the forcing,
+and the feasibility penalty stays the only restoring gradient. It restarts at 0 every training
+window and runs across the test phase's chunks (`training::forward::carry_dam_owed`,
+`DamClampSums::merge` keeps each dam's closing owed; a 15-day-chunked year matches one engine
+bitwise). A dam not yet completed has no owed state and starts at 0 when it switches on. With
+`carry`, `created` counts every step at the floor, including those spent repaying (the law still
+asks for more than the dam has), so it is several times the `forgive` figure; read `owed_m3`
+for what the floor finally adds. Logs: the training `dam clamp` line and the test phase's line
+gain `dam_floor carry: repaid <R> m3, owed at end <O> m3 (max <p>% of a dam's inflow)`;
+`release_clamp.csv` has `repaid_m3`, `owed_m3` (0 with `forgive`); `metrics.release_clamp` has
+`dam_floor`, `repaid_m3`, `owed_m3`, `owed_share_max`; `metrics.release_training.dam_floor`.
+A `fixed` table sets it with `params.reservoir_dam_floor: forgive | carry` (absent = forgive),
+rejected with `reservoir_release: learned` (the block's `dam_floor` owns it) and without
+`use_reservoirs`, exactly like `reservoir_dam_row`. `Config::dam_floor` reads the block for a
+learned release, the params key otherwise; the engine takes it at construction
+(`MuskingumCunge::set_dam_floor` / `set_dam_owed` / `dam_rows` for tests and chunk threading).
+Tests: `tests/reservoir_dam_floor.rs`, `src/config.rs` (`*dam_floor*`),
+`src/training/release_eval.rs`.
 
 **Release-only training (added 2026-09-27).** `routing_checkpoint` is a checkpoint DIRECTORY
 whose `head.mpk` initialises the ROUTING head: weights only, never its `optim.mpk` or

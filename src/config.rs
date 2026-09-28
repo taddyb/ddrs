@@ -890,6 +890,13 @@ pub struct Params {
     /// rule-curve columns and route them on the additive row, which is how
     /// an offline fit is replayed in the engine. [`Config::dam_row`] reads it.
     pub reservoir_dam_row: Option<DamRow>,
+    /// What the S28 discharge clamp does with the water it creates on a dam
+    /// row ([`DamFloor`]) for a `reservoir_release: fixed` table: `forgive`
+    /// (absent, the default: every earlier config) or `carry`. Mirrors
+    /// `reservoir_dam_row`: a learned release sets it with
+    /// `release_head.dam_floor`; this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load. [`Config::dam_floor`] reads it.
+    pub reservoir_dam_floor: Option<DamFloor>,
 }
 
 /// `params.reservoir_release`. See [`Params::reservoir_release`].
@@ -922,6 +929,29 @@ pub enum DamRow {
     Additive,
 }
 
+/// `release_head.dam_floor` / `params.reservoir_dam_floor`: what happens to
+/// the water the S28 discharge clamp creates on a dam row, when the dam's law
+/// (a rule curve storing more than the dam receives, or the channel's
+/// negative `c1` at low flow on the additive row) drives the pre-clamp solve
+/// below the floor `lb`. The created volume is `Σ max(lb − x, 0)·dt/c4`
+/// (`crate::routing::mmc`'s dam account).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DamFloor {
+    /// The clamp forgives the deficit: the created water stays in the river.
+    /// Every config before 2026-09-28; bitwise the historical routing.
+    #[default]
+    Forgive,
+    /// Mass-conserving floor: each dam carries an owed volume (m³, >= 0).
+    /// After a solve whose dam row clamped, `owed += created`; before every
+    /// solve the dam repays `r = min(owed/dt, max(Qin_t − lb, 0))` m³/s out of
+    /// its effective lateral inflow (`Qin_t` = routed upstream inflow plus the
+    /// reach's own `q'`, before the rule-curve flux) and `owed −= r·dt`. The
+    /// owed state is DETACHED (no gradient). It restarts at 0 at every training
+    /// window and runs across the test phase's chunks.
+    Carry,
+}
+
 /// YAML `release_head:` block: the learned dam release head
 /// (`params.reservoir_release: learned`). A second `KanHead` instance,
 /// `Linear(F, H) -> KanLayer(H, H) x num_hidden_layers -> Linear(H, P) -> Sigmoid`
@@ -949,6 +979,12 @@ pub struct ReleaseHeadSection {
     /// `reservoir_T0` box may start below one hour (any `lo > 0`).
     #[serde(default)]
     pub dam_row: DamRow,
+    /// `forgive` (default) or `carry`; see [`DamFloor`]. The test phase
+    /// routes the resolved table with the same floor. `carry`'s owed state
+    /// is detached: training sees each repayment as a fixed cut to the dam's
+    /// inflow, with no gradient back to the release that caused the debt.
+    #[serde(default)]
+    pub dam_floor: DamFloor,
     /// A checkpoint DIRECTORY (`.../checkpoints/epoch_E_mb_M/`) whose
     /// `head.mpk` initialises the ROUTING head. Only those weights are read:
     /// not its `optim.mpk` (the routing optimizer starts cold), not its
@@ -1054,6 +1090,18 @@ impl Config {
         }
     }
 
+    /// The dam floor ([`DamFloor`]): `release_head.dam_floor` for a learned
+    /// release (and its resolved test-phase table), `params.reservoir_dam_floor`
+    /// for a `fixed` table, [`DamFloor::Forgive`] when neither is set. Like
+    /// [`Config::dam_row`], the two keys never both apply
+    /// (`validate_reservoirs`).
+    pub fn dam_floor(&self) -> DamFloor {
+        match self.release_head.as_ref() {
+            Some(r) => r.dam_floor,
+            None => self.params.reservoir_dam_floor.unwrap_or_default(),
+        }
+    }
+
     /// True when the routing head is frozen for release-only training
     /// (`release_head.freeze_routing` under `reservoir_release: learned`).
     pub fn routing_frozen(&self) -> bool {
@@ -1107,6 +1155,7 @@ impl Default for Params {
             use_reservoirs: false,
             reservoir_release: ReservoirRelease::Fixed,
             reservoir_dam_row: None,
+            reservoir_dam_floor: None,
         }
     }
 }
@@ -1142,6 +1191,7 @@ struct ParamsRaw {
     use_reservoirs: Option<bool>,
     reservoir_release: Option<ReservoirRelease>,
     reservoir_dam_row: Option<DamRow>,
+    reservoir_dam_floor: Option<DamFloor>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -1263,6 +1313,7 @@ impl From<ParamsRaw> for Params {
             p.reservoir_release = m;
         }
         p.reservoir_dam_row = r.reservoir_dam_row;
+        p.reservoir_dam_floor = r.reservoir_dam_floor;
         p
     }
 }
@@ -1628,6 +1679,20 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
         if !p.use_reservoirs {
             return Err(format!(
                 "params.reservoir_dam_row = {row:?} is set but `use_reservoirs` is false; no dam \
+                 row would be routed"
+            ));
+        }
+    }
+    if let Some(floor) = p.reservoir_dam_floor {
+        if learned {
+            return Err(format!(
+                "params.reservoir_dam_floor = {floor:?} is for `reservoir_release: fixed` tables; a \
+                 learned release sets its floor with `release_head.dam_floor`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_dam_floor = {floor:?} is set but `use_reservoirs` is false; no dam \
                  row would be routed"
             ));
         }
@@ -3484,6 +3549,41 @@ data_sources:
     }
 
     #[test]
+    fn reservoir_dam_floor_selects_the_fixed_tables_floor() {
+        // Absent: forgive, as every earlier config.
+        let path = reservoir_yaml("ddrs_rdf_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!((cfg.params.reservoir_dam_floor, cfg.dam_floor()), (None, DamFloor::Forgive));
+        assert_eq!(Config::default().dam_floor(), DamFloor::Forgive);
+        // A fixed table with the carried floor.
+        let path = reservoir_yaml(
+            "ddrs_rdf_carry.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n  reservoir_dam_floor: carry\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed carried table loads");
+        assert_eq!(cfg.dam_floor(), DamFloor::Carry);
+        // Rejected with a learned release (release_head.dam_floor owns that) and
+        // without use_reservoirs (a silent no-op); an unknown value is refused.
+        let path = learned_yaml(
+            "ddrs_rdf_learned.yaml",
+            "  use_reservoirs: true\n  reservoir_release: learned\n  reservoir_dam_floor: carry\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_dam_floor", "release_head.dam_floor"]);
+        let path = reservoir_yaml("ddrs_rdf_off.yaml", EXPLICIT_ADJ, true, "  reservoir_dam_floor: carry\n");
+        reservoir_rejection(path, "reservoir_dam_floor");
+        let path = reservoir_yaml(
+            "ddrs_rdf_bogus.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_floor: repay\n",
+        );
+        assert!(Config::from_yaml_file(&path).is_err(), "unknown dam floor must be refused");
+    }
+
+    #[test]
     fn reservoir_release_defaults_fixed() {
         assert_eq!(Params::default().reservoir_release, ReservoirRelease::Fixed);
         let path = reservoir_yaml("ddrs_rel_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
@@ -3738,6 +3838,31 @@ data_sources:
         let cfg = Config::from_yaml_file(&path).expect("additive with a sub-hour T0 floor loads");
         assert_eq!(cfg.dam_row(), DamRow::Additive);
         assert_eq!(cfg.params.parameter_ranges.reservoir_t0, [0.0001, 365.0]);
+    }
+
+    #[test]
+    fn release_head_dam_floor_defaults_forgive_and_parses_carry() {
+        let path = learned_yaml(
+            "ddrs_rel_dam_floor_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!(cfg.release_head.as_ref().unwrap().dam_floor, DamFloor::Forgive);
+        assert_eq!(cfg.dam_floor(), DamFloor::Forgive);
+        let path = learned_yaml(
+            "ddrs_rel_dam_floor_carry.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_floor: carry\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("carry loads");
+        assert_eq!(cfg.dam_floor(), DamFloor::Carry);
+        let path = learned_yaml(
+            "ddrs_rel_dam_floor_bogus.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_floor: repay\n"),
+        );
+        assert!(Config::from_yaml_file(&path).is_err(), "unknown dam floor must be refused");
     }
 
     #[test]

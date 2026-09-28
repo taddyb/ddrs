@@ -554,7 +554,7 @@ where
                     }
                     // Per-dam created shares, no pooled ratio (cascaded dams
                     // count the same inflow twice; review v3, finding 6).
-                    crate::training::release_eval::clamp_summary(records).to_json()
+                    crate::training::release_eval::clamp_summary(records, test_cfg.dam_floor()).to_json()
                 });
 
                 let median = |xs: &[f32]| -> f32 {
@@ -645,6 +645,7 @@ fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
         "routing_checkpoint": rh.routing_checkpoint.as_ref().map(|p| p.display().to_string()),
         "freeze_routing": rh.freeze_routing,
         "dam_row": format!("{:?}", rh.dam_row).to_lowercase(),
+        "dam_floor": format!("{:?}", rh.dam_floor).to_lowercase(),
         "rule_curve": rh.rule_curve,
         "per_dam_t0": rh.per_dam_t0,
         "rule_curve_max": rh.rule_curve_max,

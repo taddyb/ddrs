@@ -164,6 +164,7 @@ mod tests {
             input_var_names: vec!["f1".into(), "f2".into(), "f3".into()],
             seasonal,
             dam_row: crate::config::DamRow::Replace,
+            dam_floor: crate::config::DamFloor::Forgive,
             routing_checkpoint: None,
             freeze_routing: false,
             rule_curve: false,

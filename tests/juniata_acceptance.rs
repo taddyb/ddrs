@@ -221,11 +221,16 @@ fn juniata_learned_release_trains_t0_and_writes_release_params() {
     let clamp = std::fs::read_to_string(run_dir.join("release_clamp.csv"))
         .expect("the test phase writes release_clamp.csv");
     let lines: Vec<&str> = clamp.lines().collect();
-    assert_eq!(lines[0], "COMID,created_m3,storage_m3,inflow_m3,created_share,clamp_steps,steps");
+    assert_eq!(
+        lines[0],
+        "COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps"
+    );
     assert_eq!(lines.len(), 2, "one dam: {clamp}");
     let f: Vec<&str> = lines[1].split(',').collect();
     assert_eq!(f[0], "73005301");
-    let (inflow, steps): (f64, u64) = (f[3].parse().unwrap(), f[6].parse().unwrap());
+    let (inflow, steps): (f64, u64) = (f[5].parse().unwrap(), f[8].parse().unwrap());
+    // `forgive` (the default): nothing is repaid or owed.
+    assert_eq!((f[3], f[4]), ("0.000000e0", "0.000000e0"), "{clamp}");
     assert!(inflow > 0.0 && steps > 0, "{clamp}");
     let rc = &manifest["metrics"]["release_clamp"];
     assert_eq!(rc["n_dams"].as_u64(), Some(1), "manifest release_clamp: {rc}");

@@ -66,6 +66,7 @@ fn section(seasonal: bool) -> ReleaseHeadSection {
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal,
         dam_row: ddrs::config::DamRow::Replace,
+        dam_floor: ddrs::config::DamFloor::Forgive,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: false,

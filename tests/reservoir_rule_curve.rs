@@ -403,6 +403,7 @@ fn section(dam_row: DamRow) -> ReleaseHeadSection {
         input_var_names: vec!["f1".into(), "f2".into()],
         seasonal: true,
         dam_row,
+        dam_floor: ddrs::config::DamFloor::Forgive,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: true,

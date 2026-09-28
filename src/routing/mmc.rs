@@ -25,7 +25,7 @@ use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, Tensor
 
 use burn::tensor::TensorPrimitive;
 
-use crate::config::{Config, DamRow, SparseSolver};
+use crate::config::{Config, DamFloor, DamRow, SparseSolver};
 use crate::routing::mmc_op::{ReleaseParent, ReservoirTensors};
 use crate::routing::release::{MIN_T_DAYS, SECONDS_PER_DAY};
 use crate::routing::utils::denormalize;
@@ -289,6 +289,49 @@ impl<I: Backend> ArmedRelease<I> {
 /// With a rule curve armed it also keeps each step's `Qin_d = I_t,d + q'_d`
 /// (m³/s), the detached inflow the rule-curve feasibility penalty compares
 /// the flux against.
+///
+/// # The carried floor (`DamFloor::Carry`)
+///
+/// With `dam_floor: carry` each dam also carries an owed volume `owed_d`
+/// (m³, >= 0), which makes the floor mass-conserving: the clamp still holds
+/// the step at `lb`, but the water it created is paid back out of the dam's
+/// own later inflow instead of staying in the river.
+///
+/// ```text
+/// before the solve:  paid_d = min(owed_d, max(I_t,d + q'_d − lb, 0)·dt)     m³
+///                    q'_eff,d −= paid_d/dt;  owed_d −= paid_d;  repaid_d += paid_d
+/// after the solve:   owed_d += max(lb − x_d, 0)·dt/c4_d                     (= created this step)
+/// ```
+///
+/// `owed_0 + created − repaid − owed = 0` at every step (`owed_0` the volume
+/// carried in with `set_dam_owed`, 0 at a window start), so the dam row's
+/// balance with its routed series as the outflow reads
+/// `inflow + lateral − flux-stored − outflow − ΔS = owed_0 − owed`: the dam passes
+/// on its inflow less its storage change, and only the still-unpaid volume
+/// is extra. A repayment can itself take the next solve below the floor
+/// (where `c3 < 0`, or when the inflow falls within the step); that clamp is
+/// owed like any other. While a dam is in debt it passes all its inflow to
+/// the repayment, so its law's flux drives the solve well below `lb` every
+/// step, and `created` counts each of those steps.
+///
+/// What carry conserves is the dam row's ROUTED series. The rows below read
+/// the pre-clamp `x` in a clamped step (their solve uses `N·x`), i.e. the
+/// series less `(dt/2)·δ`; that below-floor part, `created − storage`, is
+/// owed and repaid as well, so over a period the rows below receive the
+/// dam's inflow less `ΔS` less `created − storage` (about `dt/D` of the
+/// in-debt flux per step, `D/2 = K(1 − X) + T + dt/2`). Owing only the
+/// storage part would conserve what the rows below receive instead, and
+/// leave the dam's own series `created − storage` high; holding the dam's
+/// in-step outflow at `lb` (a second solve with the lateral increment
+/// `δ/c4`) would conserve both.
+///
+/// The owed state is on the inner backend, outside the autodiff tape: the
+/// repayment is a constant cut to `q'`. Training therefore sees neither the
+/// debt a flux incurs nor the later repayment as a consequence of `θ`, `T0`
+/// or the routing parameters; the gradient through a clamped step stays
+/// zero, as with `forgive`, and the repayment acts like a change to the
+/// forcing. The feasibility penalty remains the only restoring gradient
+/// against storing more than the dam receives.
 struct DamAccount<I: Backend> {
     /// Dam rows, in the order the dams were armed.
     rows: Vec<usize>,
@@ -300,6 +343,11 @@ struct DamAccount<I: Backend> {
     steps: usize,
     /// `Some` with a rule curve: `Qin` per routed step, `[n_dams]` each.
     qin: Option<Vec<Tensor<I, 1>>>,
+    /// Carried floor: the volume each dam still owes, m³ (stays 0 with
+    /// `forgive`).
+    owed: Tensor<I, 1>,
+    /// Carried floor: the volume each dam has paid back, m³.
+    repaid: Tensor<I, 1>,
 }
 
 impl<I: Backend> DamAccount<I> {
@@ -315,18 +363,45 @@ impl<I: Backend> DamAccount<I> {
             clamp_steps: Tensor::zeros([n], device),
             steps: 0,
             qin: record_qin.then(Vec::new),
+            owed: Tensor::zeros([n], device),
+            repaid: Tensor::zeros([n], device),
         }
     }
 
-    /// Add one routed step (see the struct docs).
-    fn record(&mut self, diag: crate::routing::mmc_op::DamStepDiag<I>, q_prime: Tensor<I, 1>, lb: f32, dt: f32) {
+    /// Carried floor, before a solve: the repayment rate `paid/dt` per dam
+    /// (m³/s, `[n_dams]`), taken out of the owed volume. `i_t` is the full
+    /// `N·Q_t` (`[n]`), `q_prime` the lateral inflow after the floor and
+    /// before the rule-curve flux, as [`Self::record`] reads them.
+    fn repay(&mut self, i_t: Tensor<I, 1>, q_prime: Tensor<I, 1>, lb: f32, dt: f32) -> Tensor<I, 1> {
+        let qin = i_t.select(0, self.rows_t.clone()) + q_prime.select(0, self.rows_t.clone());
+        // In m³: `owed − paid` is exactly 0 where the whole debt is paid.
+        let paid = self.owed.clone().min_pair((qin - lb).clamp_min(0.0) * dt);
+        self.owed = self.owed.clone() - paid.clone();
+        self.repaid = self.repaid.clone() + paid.clone();
+        paid / dt
+    }
+
+    /// Add one routed step (see the struct docs). `carry`: the created volume
+    /// is also owed.
+    fn record(
+        &mut self,
+        diag: crate::routing::mmc_op::DamStepDiag<I>,
+        q_prime: Tensor<I, 1>,
+        lb: f32,
+        dt: f32,
+        carry: bool,
+    ) {
         let x = diag.x_sol.select(0, self.rows_t.clone());
         let c4 = diag.c4.select(0, self.rows_t.clone());
         let qin = diag.i_t.select(0, self.rows_t.clone()) + q_prime.select(0, self.rows_t.clone());
         // δ = max(lb − x, 0) (m³/s) and dt/c4 = D/2 (s).
         let deficit = (-x.clone() + lb).clamp_min(0.0);
         let held = c4.recip() * dt;
-        self.created = self.created.clone() + deficit.clone() * held.clone();
+        let created = deficit.clone() * held.clone();
+        if carry {
+            self.owed = self.owed.clone() + created.clone();
+        }
+        self.created = self.created.clone() + created;
         self.storage = self.storage.clone() + deficit * (held - 0.5 * dt);
         self.clamp_steps = self.clamp_steps.clone() + x.lower_elem(lb).float();
         self.inflow = self.inflow.clone() + qin.clone() * dt;
@@ -358,6 +433,13 @@ pub struct DamClampAccount {
     pub clamp_steps: Vec<u64>,
     /// Routed steps (the same for every dam).
     pub steps: u64,
+    /// Carried floor (`DamFloor::Carry`): the volume each dam paid back out
+    /// of its inflow, m³. 0 with `forgive`.
+    pub repaid_m3: Vec<f64>,
+    /// Carried floor: the volume each dam still owes after the last routed
+    /// step, m³ (including any owed carried in with
+    /// [`MuskingumCunge::set_dam_owed`]). 0 with `forgive`.
+    pub owed_m3: Vec<f64>,
 }
 
 impl DamClampAccount {
@@ -401,6 +483,10 @@ pub struct MuskingumCunge<I: Backend> {
     /// The last routed step's pre-clamp solve and routed inflow, handed from
     /// `route_timestep` to `forward`'s accounting.
     last_dam_diag: Option<crate::routing::mmc_op::DamStepDiag<I>>,
+    /// What the S28 clamp does with the water it creates on a dam row
+    /// ([`DamFloor`]; `Config::dam_floor` at construction). `Forgive` routes
+    /// bitwise as before the option existed.
+    dam_floor: DamFloor,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -487,6 +573,7 @@ impl<I: Backend> MuskingumCunge<I> {
             .get("p_spatial")
             .expect("cfg.params.defaults must contain p_spatial");
         let p_spatial = Tensor::<Autodiff<I>, 1>::from_floats([p_default], &device);
+        let dam_floor = cfg.dam_floor();
         Self {
             cfg,
             n: None,
@@ -504,6 +591,7 @@ impl<I: Backend> MuskingumCunge<I> {
             release: None,
             dam_account: None,
             last_dam_diag: None,
+            dam_floor,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -1132,6 +1220,8 @@ impl<I: Backend> MuskingumCunge<I> {
         columns.push(initial.unsqueeze_dim::<2>(1));
 
         crate::routing::mmc_op::reset_negative_solve_stats();
+        // The carried dam floor needs dam rows; without them it is a no-op.
+        let carry = self.dam_floor == DamFloor::Carry && self.dam_account.is_some();
 
         for t in 1..num_timesteps {
             let q_prime_t: Tensor<Autodiff<I>, 1> = q_prime_clamped
@@ -1154,13 +1244,38 @@ impl<I: Backend> MuskingumCunge<I> {
                 Some(rc) => q_prime_t.select_assign(0, rc.rows.clone(), -rc.flux_at(t - 1), IndexingUpdateOp::Add),
                 None => q_prime_t,
             };
+            // Carried floor (`DamFloor::Carry`): the dams repay what they owe
+            // out of their inflow at the step start, `I_t + q'` (the `Qin` the
+            // feasibility penalty reads; `I_t = N·Q_t` by the op's own SpMV),
+            // before the solve. A detached constant on the dam rows' `q'`
+            // (`DamAccount`); `forgive` skips this block.
+            let q_prime_t = match (carry, self.dam_account.as_mut(), q_prime_pre.as_ref()) {
+                (true, Some(acc), Some(q_pre)) => {
+                    let q_t = match self.discharge_t.as_ref().expect("setup_inputs ran").clone().inner().into_primitive() {
+                        TensorPrimitive::Float(p) => p,
+                        _ => unreachable!("discharge is a float tensor"),
+                    };
+                    let pattern = self.pattern.as_ref().expect("setup_inputs ran");
+                    let i_t = Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(crate::sparse::spmv_primitive::<I>(
+                        pattern,
+                        q_t,
+                        &self.device,
+                        self.sparse_solver == SparseSolver::Cuda,
+                        None,
+                    )));
+                    let rate = acc.repay(i_t, q_pre.clone(), discharge_lb, self.dt);
+                    let rows = Tensor::<Autodiff<I>, 1, Int>::from_inner(acc.rows_t.clone());
+                    q_prime_t.select_assign(0, rows, -Tensor::<Autodiff<I>, 1>::from_inner(rate), IndexingUpdateOp::Add)
+                }
+                _ => q_prime_t,
+            };
             let q_next = self.route_timestep(q_prime_t);
             if let (Some(acc), Some(q_pre)) = (self.dam_account.as_mut(), q_prime_pre) {
                 let diag = self
                     .last_dam_diag
                     .take()
                     .expect("dam rows are armed, so the plain timestep op returned its diagnostics");
-                acc.record(diag, q_pre, discharge_lb, self.dt);
+                acc.record(diag, q_pre, discharge_lb, self.dt, carry);
             }
             columns.push(q_next.clone().unsqueeze_dim::<2>(1));
             self.discharge_t = Some(q_next);
@@ -1243,7 +1358,55 @@ impl<I: Backend> MuskingumCunge<I> {
             inflow_m3: host(&a.inflow).into_iter().map(f64::from).collect(),
             clamp_steps: host(&a.clamp_steps).into_iter().map(|v| v.round() as u64).collect(),
             steps: a.steps as u64,
+            repaid_m3: host(&a.repaid).into_iter().map(f64::from).collect(),
+            owed_m3: host(&a.owed).into_iter().map(f64::from).collect(),
         })
+    }
+
+    /// The armed dam rows, in the order they were armed (the order of
+    /// [`DamClampAccount`]'s vectors and of [`Self::set_dam_owed`]); `None`
+    /// when no dam rows are armed.
+    pub fn dam_rows(&self) -> Option<&[usize]> {
+        self.dam_account.as_ref().map(|a| a.rows.as_slice())
+    }
+
+    /// The dam floor this engine routes with ([`DamFloor`]); from the config
+    /// ([`Config::dam_floor`](crate::config::Config::dam_floor)) unless
+    /// [`Self::set_dam_floor`] changed it.
+    pub fn dam_floor(&self) -> DamFloor {
+        self.dam_floor
+    }
+
+    /// Route with `floor` instead of the config's dam floor. Takes effect from
+    /// the next [`Self::forward`]; any owed volume already carried is kept.
+    pub fn set_dam_floor(&mut self, floor: DamFloor) {
+        self.dam_floor = floor;
+    }
+
+    /// Carried floor: start the armed dams with `owed_m3` (m³, one per dam in
+    /// the armed order, [`DamClampAccount::rows`]) instead of 0, e.g. the owed
+    /// volume at the end of the previous test-phase chunk. Call after arming
+    /// the dams (`set_reservoir_rows_as` / `set_dam_release`) and before
+    /// `forward`. `Err`, changing nothing, without armed dams, on a length
+    /// mismatch, or on a value that is negative or not finite.
+    pub fn set_dam_owed(&mut self, owed_m3: &[f64]) -> Result<(), String> {
+        let a = self
+            .dam_account
+            .as_mut()
+            .ok_or("set_dam_owed: no dam rows are armed")?;
+        if owed_m3.len() != a.rows.len() {
+            return Err(format!(
+                "set_dam_owed: {} owed volumes for {} armed dams",
+                owed_m3.len(),
+                a.rows.len()
+            ));
+        }
+        if let Some(v) = owed_m3.iter().find(|v| !(v.is_finite() && **v >= 0.0)) {
+            return Err(format!("set_dam_owed: owed volume {v} must be finite and >= 0"));
+        }
+        let v: Vec<f32> = owed_m3.iter().map(|&v| v as f32).collect();
+        a.owed = Tensor::from_floats(v.as_slice(), &self.device);
+        Ok(())
     }
 
     /// The dams' per-step inflow `Qin = I_t + q'` (m³/s, routed upstream

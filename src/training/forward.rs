@@ -952,6 +952,27 @@ pub fn forward_eval_reaches<I: Backend>(
     )
 }
 
+/// Carried dam floor (`DamFloor::Carry`) across test-phase chunks: start the
+/// engine's armed dams from the volume each still owed at the end of the
+/// previous chunk (`DamClampSums::owed_for`; 0 for a dam armed for the first
+/// time, which includes one completed since). A no-op with `forgive` or
+/// without armed dams. Call after [`apply_reservoir_rows`], before `forward`;
+/// merge the engine's account back into `sums` afterwards
+/// (`DamClampSums::merge` keeps each dam's closing owed volume).
+pub fn carry_dam_owed<I: Backend>(
+    engine: &mut MuskingumCunge<I>,
+    sums: &crate::training::release_eval::DamClampSums,
+) {
+    if engine.dam_floor() != crate::config::DamFloor::Carry {
+        return;
+    }
+    let Some(rows) = engine.dam_rows() else { return };
+    let owed = sums.owed_for(rows);
+    engine
+        .set_dam_owed(&owed)
+        .expect("carried owed volumes are finite, >= 0, one per armed dam");
+}
+
 /// [`forward_eval_reaches`] that also merges the chunk engine's per-dam S28
 /// clamp account into `dams` (`crate::routing::mmc::DamClampAccount`) when
 /// dam rows are armed. The test phase (`training::eval::evaluate`) uses it
@@ -1123,6 +1144,11 @@ fn forward_eval_core<I: Backend>(
         n_hourly,
         None,
     );
+    // Carried dam floor: each armed dam starts this chunk owing what it owed
+    // at the end of the previous one (the test period is continuous).
+    if let Some(sink) = dams.as_deref() {
+        carry_dam_owed(&mut engine, sink);
+    }
     if zeta.is_some() {
         engine.enable_zeta_accumulation();
     }
