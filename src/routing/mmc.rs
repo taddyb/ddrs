@@ -333,6 +333,10 @@ impl<I: Backend> ArmedRelease<I> {
 /// steps (`x > lb`) passes downstream instead of repaying. The debt pumps
 /// itself up (replay L2: a dam owing 3.7x its 15-year inflow).
 /// `.claude/skills/ddrs-dev/references/config.md` §Reservoirs, `dam_floor`.
+/// `dam_row_positivity` (S19p in `mmc_op`) caps the dam row's wedge so
+/// `c1 > 0`: in debt at the floor the solve then sits at `lb + c1·ΔI` with a
+/// `c1` of order `δ·dt/D`, and the synthetic pump's new debt goes from
+/// 1.95e7 m³ to 0 (`tests/reservoir_dam_positivity.rs`).
 ///
 /// The owed state is on the inner backend, outside the autodiff tape: the
 /// repayment is a constant cut to `q'`. Training therefore sees neither the
@@ -357,6 +361,10 @@ struct DamAccount<I: Backend> {
     owed: Tensor<I, 1>,
     /// Carried floor: the volume each dam has paid back, m³.
     repaid: Tensor<I, 1>,
+    /// The smallest `c1` the dam row routed with (`+∞` before any step).
+    c1_min: Tensor<I, 1>,
+    /// Steps at which the dam row's `c1` was negative.
+    neg_c1_steps: Tensor<I, 1>,
 }
 
 impl<I: Backend> DamAccount<I> {
@@ -374,6 +382,8 @@ impl<I: Backend> DamAccount<I> {
             qin: record_qin.then(Vec::new),
             owed: Tensor::zeros([n], device),
             repaid: Tensor::zeros([n], device),
+            c1_min: Tensor::full([n], f32::INFINITY, device),
+            neg_c1_steps: Tensor::zeros([n], device),
         }
     }
 
@@ -402,6 +412,9 @@ impl<I: Backend> DamAccount<I> {
     ) {
         let x = diag.x_sol.select(0, self.rows_t.clone());
         let c4 = diag.c4.select(0, self.rows_t.clone());
+        let c1 = diag.c1.select(0, self.rows_t.clone());
+        self.c1_min = self.c1_min.clone().min_pair(c1.clone());
+        self.neg_c1_steps = self.neg_c1_steps.clone() + c1.lower_elem(0.0).float();
         let qin = diag.i_t.select(0, self.rows_t.clone()) + q_prime.select(0, self.rows_t.clone());
         // δ = max(lb − x, 0) (m³/s) and dt/c4 = D/2 (s).
         let deficit = (-x.clone() + lb).clamp_min(0.0);
@@ -449,6 +462,12 @@ pub struct DamClampAccount {
     /// step, m³ (including any owed carried in with
     /// [`MuskingumCunge::set_dam_owed`]). 0 with `forgive`.
     pub owed_m3: Vec<f64>,
+    /// The smallest `c1` each dam row routed with (`+∞` before any step).
+    /// Negative on the additive row wherever the channel wedge
+    /// `K_r·X_r > dt/2`; `dam_row_positivity` keeps it `> 0`.
+    pub c1_min: Vec<f64>,
+    /// Steps at which each dam row's `c1` was negative.
+    pub neg_c1_steps: Vec<u64>,
 }
 
 impl DamClampAccount {
@@ -496,6 +515,10 @@ pub struct MuskingumCunge<I: Backend> {
     /// ([`DamFloor`]; `Config::dam_floor` at construction). `Forgive` routes
     /// bitwise as before the option existed.
     dam_floor: DamFloor,
+    /// Dam-row positivity on the additive row (S19p in `mmc_op`;
+    /// `Config::dam_row_positivity` at construction). `false` routes bitwise
+    /// as before the option existed.
+    dam_row_positivity: bool,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -583,6 +606,7 @@ impl<I: Backend> MuskingumCunge<I> {
             .expect("cfg.params.defaults must contain p_spatial");
         let p_spatial = Tensor::<Autodiff<I>, 1>::from_floats([p_default], &device);
         let dam_floor = cfg.dam_floor();
+        let dam_row_positivity = cfg.dam_row_positivity();
         Self {
             cfg,
             n: None,
@@ -601,6 +625,7 @@ impl<I: Backend> MuskingumCunge<I> {
             dam_account: None,
             last_dam_diag: None,
             dam_floor,
+            dam_row_positivity,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -910,6 +935,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 t_prev_seconds: additive.then(|| t_seconds.clone()),
                 t_seconds,
                 additive,
+                positivity: self.dam_row_positivity,
             }
         });
         self.dam_account = (!rows.is_empty()).then(|| DamAccount::new(rows, false, &self.device));
@@ -1158,6 +1184,7 @@ impl<I: Backend> MuskingumCunge<I> {
                         rows: r.rows.clone(),
                         mask: r.mask.clone(),
                         additive: r.dam_row == DamRow::Additive,
+                        positivity: self.dam_row_positivity,
                     }
                 }),
                 self.dam_account.is_some().then_some(&mut self.last_dam_diag),
@@ -1369,6 +1396,8 @@ impl<I: Backend> MuskingumCunge<I> {
             steps: a.steps as u64,
             repaid_m3: host(&a.repaid).into_iter().map(f64::from).collect(),
             owed_m3: host(&a.owed).into_iter().map(f64::from).collect(),
+            c1_min: host(&a.c1_min).into_iter().map(f64::from).collect(),
+            neg_c1_steps: host(&a.neg_c1_steps).into_iter().map(|v| v.round() as u64).collect(),
         })
     }
 
@@ -1390,6 +1419,24 @@ impl<I: Backend> MuskingumCunge<I> {
     /// the next [`Self::forward`]; any owed volume already carried is kept.
     pub fn set_dam_floor(&mut self, floor: DamFloor) {
         self.dam_floor = floor;
+    }
+
+    /// Whether the additive dam rows keep `c1 >= 0` (S19p in `mmc_op`); from
+    /// the config ([`Config::dam_row_positivity`](crate::config::Config::dam_row_positivity))
+    /// unless [`Self::set_dam_row_positivity`] changed it. Acts on the
+    /// additive row only.
+    pub fn dam_row_positivity(&self) -> bool {
+        self.dam_row_positivity
+    }
+
+    /// Route the additive dam rows with (`true`) or without the positivity
+    /// cap, instead of the config's setting. Takes effect from the next step,
+    /// including on rows already armed.
+    pub fn set_dam_row_positivity(&mut self, on: bool) {
+        self.dam_row_positivity = on;
+        if let Some(r) = self.reservoir.as_mut() {
+            r.positivity = on;
+        }
     }
 
     /// Carried floor: start the armed dams with `owed_m3` (m³, one per dam in

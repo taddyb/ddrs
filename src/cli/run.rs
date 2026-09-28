@@ -646,6 +646,7 @@ fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
         "freeze_routing": rh.freeze_routing,
         "dam_row": format!("{:?}", rh.dam_row).to_lowercase(),
         "dam_floor": format!("{:?}", rh.dam_floor).to_lowercase(),
+        "dam_row_positivity": rh.dam_row_positivity,
         "rule_curve": rh.rule_curve,
         "per_dam_t0": rh.per_dam_t0,
         "rule_curve_max": rh.rule_curve_max,

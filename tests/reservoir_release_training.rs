@@ -67,6 +67,7 @@ fn section(seasonal: bool) -> ReleaseHeadSection {
         seasonal,
         dam_row: ddrs::config::DamRow::Replace,
         dam_floor: ddrs::config::DamFloor::Forgive,
+        dam_row_positivity: false,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: false,

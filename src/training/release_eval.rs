@@ -231,6 +231,10 @@ pub struct DamClampRecord {
     /// Steps the dam was armed (a dam completed inside the period counts
     /// only its active chunks).
     pub steps: u64,
+    /// Steps at which the dam row's inflow coefficient `c1` was negative (the
+    /// additive row's channel wedge `K_r·X_r > dt/2`); 0 with
+    /// `dam_row_positivity`.
+    pub neg_c1_steps: u64,
 }
 
 impl DamClampRecord {
@@ -259,6 +263,7 @@ impl DamClampSums {
             r.inflow_m3 += a.inflow_m3[i];
             r.clamp_steps += a.clamp_steps[i];
             r.steps += a.steps;
+            r.neg_c1_steps += a.neg_c1_steps[i];
         }
     }
 
@@ -294,6 +299,7 @@ pub fn account_records(a: &crate::routing::mmc::DamClampAccount) -> Vec<DamClamp
             inflow_m3: a.inflow_m3[i],
             clamp_steps: a.clamp_steps[i],
             steps: a.steps,
+            neg_c1_steps: a.neg_c1_steps[i],
         })
         .collect()
 }
@@ -336,6 +342,10 @@ pub struct ClampSummary {
     /// Records whose created share is at least 0.5 % / 5 %.
     pub n_over_half_pct: usize,
     pub n_over_5_pct: usize,
+    /// Dam-row steps with a negative `c1`, `Σ neg_c1_steps`, and the records
+    /// with at least one.
+    pub neg_c1_steps: u64,
+    pub n_neg_c1: usize,
 }
 
 /// [`ClampSummary`] of `records`, routed with `floor`.
@@ -368,6 +378,8 @@ pub fn clamp_summary(records: &[DamClampRecord], floor: DamFloor) -> ClampSummar
         share_max: shares.last().copied().unwrap_or(0.0),
         n_over_half_pct: shares.iter().filter(|&&s| s >= 0.005).count(),
         n_over_5_pct: shares.iter().filter(|&&s| s >= 0.05).count(),
+        neg_c1_steps: records.iter().map(|r| r.neg_c1_steps).sum(),
+        n_neg_c1: records.iter().filter(|r| r.neg_c1_steps > 0).count(),
     }
 }
 
@@ -389,7 +401,8 @@ impl ClampSummary {
         format!(
             "dam-row steps at the discharge clamp {}/{} ({:.3}%); clamp-created volume {:.4e} m3 \
              (storage {:.4e}); dam inflow {:.4e} m3 (summed per dam); created share per {unit}: \
-             median {:.4}%, p90 {:.4}%, max {:.4}%, {} of {} >= 0.5%, {} >= 5%{carry}",
+             median {:.4}%, p90 {:.4}%, max {:.4}%, {} of {} >= 0.5%, {} >= 5%; dam-row steps with \
+             c1 < 0 {}/{} ({} {unit}s){carry}",
             self.clamp_steps,
             self.steps,
             100.0 * self.clamp_steps as f64 / (self.steps as f64).max(1.0),
@@ -402,6 +415,9 @@ impl ClampSummary {
             self.n_over_half_pct,
             self.n,
             self.n_over_5_pct,
+            self.neg_c1_steps,
+            self.steps,
+            self.n_neg_c1,
         )
     }
 
@@ -424,6 +440,8 @@ impl ClampSummary {
             "created_share_max": finite(self.share_max),
             "n_dams_created_share_ge_0p5pct": self.n_over_half_pct,
             "n_dams_created_share_ge_5pct": self.n_over_5_pct,
+            "neg_c1_steps": self.neg_c1_steps,
+            "n_dams_neg_c1": self.n_neg_c1,
         })
     }
 }
@@ -434,10 +452,10 @@ impl ClampSummary {
 /// `owed_m3`: the carried floor; 0 with `forgive`).
 pub fn write_release_clamp_csv(path: &Path, records: &[DamClampRecord]) -> Result<()> {
     let mut out =
-        String::from("COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps\n");
+        String::from("COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps,neg_c1_steps\n");
     for r in records {
         out.push_str(&format!(
-            "{},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{},{}\n",
+            "{},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{},{},{}\n",
             r.comid,
             r.created_m3,
             r.storage_m3,
@@ -446,7 +464,8 @@ pub fn write_release_clamp_csv(path: &Path, records: &[DamClampRecord]) -> Resul
             r.inflow_m3,
             r.created_share(),
             r.clamp_steps,
-            r.steps
+            r.steps,
+            r.neg_c1_steps
         ));
     }
     std::fs::write(path, out).map_err(|source| DataError::Io { path: path.to_path_buf(), source })
@@ -471,6 +490,8 @@ mod tests {
             steps: 360,
             repaid_m3: vec![6.0, 0.0],
             owed_m3: vec![4.0, 0.0],
+            c1_min: vec![-0.2, 0.1],
+            neg_c1_steps: vec![7, 0],
         });
         // The next chunk starts row 4 from the 4 m3 it still owes; row 7 (a
         // dam completed since) and row 1 (not armed in chunk 2) from their own.
@@ -484,6 +505,8 @@ mod tests {
             steps: 96,
             repaid_m3: vec![9.0],
             owed_m3: vec![0.0],
+            c1_min: vec![-0.1],
+            neg_c1_steps: vec![2],
         });
         let comids = [100, 101, 102, 103, 104];
         let recs = sums.records(&comids);
@@ -504,9 +527,9 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             text,
-            "COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps\n\
-             101,0.000000e0,0.000000e0,0.000000e0,0.000000e0,5.000000e1,0.000000e0,0,360\n\
-             104,1.500000e1,1.200000e1,1.500000e1,0.000000e0,1.500000e3,1.000000e-2,3,456\n"
+            "COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps,neg_c1_steps\n\
+             101,0.000000e0,0.000000e0,0.000000e0,0.000000e0,5.000000e1,0.000000e0,0,360,0\n\
+             104,1.500000e1,1.200000e1,1.500000e1,0.000000e0,1.500000e3,1.000000e-2,3,456,9\n"
         );
     }
 
@@ -524,6 +547,7 @@ mod tests {
             inflow_m3: inflow,
             clamp_steps: clamp,
             steps: 100,
+            neg_c1_steps: clamp,
         };
         let recs = [rec(20.0, 1000.0, 3), rec(10.0, 2000.0, 1), rec(0.0, 0.0, 0)];
         let s = clamp_summary(&recs, DamFloor::Carry);
@@ -533,8 +557,11 @@ mod tests {
         // Sorted shares [0, 0.005, 0.02]: nearest rank.
         assert_eq!((s.share_median, s.share_p90, s.share_max), (0.005, 0.02, 0.02));
         assert_eq!((s.n_over_half_pct, s.n_over_5_pct), (2, 0));
+        assert_eq!((s.neg_c1_steps, s.n_neg_c1), (4, 2));
+        assert!(s.describe("dam").contains("dam-row steps with c1 < 0 4/300 (2 dams)"));
         let j = s.to_json();
         assert_eq!(j["n_dams_created_share_ge_0p5pct"], 2);
+        assert_eq!((j["neg_c1_steps"].as_u64(), j["n_dams_neg_c1"].as_u64()), (Some(4), Some(2)));
         assert_eq!(j["dam_floor"], "carry");
         assert!(j.get("created_share").is_none(), "no pooled share in the manifest");
         assert!(s.describe("dam").contains("dam_floor carry: repaid 2.2500e1 m3, owed at end 7.5000e0 m3 (max 0.5000% of a dam's inflow)"));

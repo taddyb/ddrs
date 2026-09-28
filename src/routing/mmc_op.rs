@@ -59,6 +59,9 @@ pub(crate) struct DamStepDiag<I: Backend> {
     pub x_sol: Tensor<I, 1>,
     pub i_t: Tensor<I, 1>,
     pub c4: Tensor<I, 1>,
+    /// The step's inflow coefficient `c1` (after S19p on dam rows), for the
+    /// account's per-dam `c1` minimum and negative-`c1` step count.
+    pub c1: Tensor<I, 1>,
 }
 
 /// Safety margin pulling the S18'/S19' positivity clamp strictly INSIDE the
@@ -70,6 +73,16 @@ pub(crate) struct DamStepDiag<I: Backend> {
 /// +1.8e−4 / +5.0e−5 and costs only a 1% tightening of the X ceiling and a
 /// 1% rise in the K floor.
 pub const POSITIVITY_DELTA: f32 = 1e-2;
+
+/// The dam-row positivity cap on the Muskingum X (S19p, `dam_row_positivity`):
+/// `0.5·Cr·(1 − δ)` with `Cr = dt/K`, i.e. S19''s `hi_a` op for op, so that
+/// `2·K·X_eff <= (1 − δ)·dt` and the dam row's `c1 >= δ·dt/D > 0`. The
+/// backward (B19p) recomputes it from the saved K with these same ops, which
+/// reproduces the forward's value bit for bit.
+fn dam_row_x_cap<I: Backend>(k_muskingum: Tensor<I, 1>, dt: f32) -> Tensor<I, 1> {
+    let cr = k_muskingum.recip() * dt;
+    cr * (0.5 * (1.0 - POSITIVITY_DELTA))
+}
 
 /// Inner-backend leakance inputs threaded into `forward_chain_inner`.
 #[derive(Clone)]
@@ -104,6 +117,12 @@ pub(crate) struct ReservoirTensors<I: Backend> {
     pub t_prev_seconds: Option<Tensor<I, 1>>,
     /// The additive dam row (`DamRow::Additive`) instead of the replace row.
     pub additive: bool,
+    /// Dam-row positivity (`dam_row_positivity`, S19p): on the additive dam
+    /// rows, cap the reach's X at `0.5·(1 − δ)·dt/K` so `c1 >= 0`. Read only
+    /// with `additive` (the replace row's `c1 = dt/D > 0` already), and a
+    /// no-op under `enforce_positivity` (S19' caps every row at the same
+    /// bound).
+    pub positivity: bool,
 }
 
 /// The learned (or seasonal) dam release: this step's residence time per dam,
@@ -127,6 +146,9 @@ pub(crate) struct ReleaseParent<I: Backend> {
     pub mask: Tensor<I, 1, Bool>,
     /// The additive dam row (S19'''' / B19'''') instead of the replace row.
     pub additive: bool,
+    /// Dam-row positivity on the additive row (S19p / B19p); see
+    /// [`ReservoirTensors::positivity`].
+    pub positivity: bool,
 }
 
 /// Per-step eval-time leakance diagnostics captured by the zeta sink: this
@@ -265,6 +287,12 @@ pub(crate) struct TimestepState<B: Backend> {
     /// passes K and X through and returns `∂L/∂T` from the denominator and
     /// c3's numerator. `false` ⇒ the replace row (or no dams).
     pub reservoir_additive: bool,
+    /// S19p ran: on the additive dam rows the saved `x_effective` is
+    /// `min(X_r, 0.5·(1 − δ)·dt/K)` ([`dam_row_x_cap`]). B19p recomputes the
+    /// cap from the saved K, sends `∂L/∂X` on the rows where it bound into K
+    /// (`∂cap/∂K = −cap/K`) instead of into the Cunge chain. Already the
+    /// combined `additive && positivity && !enforce_pos`; `false` ⇒ no op.
+    pub reservoir_positivity: bool,
 }
 
 #[derive(Debug)]
@@ -717,6 +745,42 @@ where
         //     while `x_cunge` is saturated, and vice versa.
         // ===========================================================
         //
+        // ---------------------------------------------------------------
+        // B19p. Dam-row positivity cap (`dam_row_positivity`, S19p):
+        //
+        //   x_eff = min(X_r, cap)  on the additive dam rows,
+        //   cap   = 0.5·(1−δ)·Δt/K       ∂cap/∂K = −0.5·(1−δ)·Δt/K² = −cap/K
+        //
+        // The same `min` rule as B19': ∂L/∂x_eff goes to exactly one branch.
+        // Where the cap bound (`x_eff == cap`, recomputed from the saved K by
+        // the forward's own ops, so the comparison reproduces its choice; a
+        // tie counts as the cap, a measure-zero subgradient choice) it goes
+        // into K, and the Cunge chain (`∂X_r/∂Q`, `∂X_r/∂B`, `∂X_r/∂c`) gets
+        // nothing; elsewhere it goes on to X_r as before. With the cap bound,
+        // `2K·x_eff = (1−δ)Δt` is constant and `2K(1 − x_eff) = 2K − (1−δ)Δt`,
+        // so K's total is `2·g_2k1mx` exactly: the c1..c4 chain below
+        // (`2·(g_2kx·x + g_2k1mx·(1 − x))`) plus this term
+        // (`gx·(−cap/K) = −2·x·(g_2kx − g_2k1mx)`). The two T gradients are
+        // untouched in form: `x_eff` does not depend on T. It runs under
+        // `ddr_match` too, where X is the constant `x_storage` and this is
+        // its only path. Folded into `gk_muskingum` at the same point as
+        // B19''s `gk_from_x_cap` (the two never both act: S19p is skipped
+        // under `enforce_pos`). The mask is applied AFTER the product, so a
+        // zero-length reach (K = 0, cap = ∞) gets 0, not 0·∞.
+        // ---------------------------------------------------------------
+        let dam_cap = if state.reservoir_positivity {
+            let m = reservoir_mask
+                .as_ref()
+                .expect("dam-row positivity needs the dam-row mask in the saved state");
+            let cap = dam_row_x_cap(k_muskingum.clone(), dt);
+            let bound = m.clone().bool_and(x_eff.clone().equal(cap.clone()));
+            let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
+            let gk = (gx * -(cap / k_muskingum.clone())).mask_fill(bound.clone().bool_not(), 0.0);
+            Some((bound, gk))
+        } else {
+            None
+        };
+
         // `hi_a`/`hi_b` → `k_muskingum`. `None` unless `enforce_pos`.
         let mut gk_from_x_cap: Option<Tensor<I, 1>> = None;
         let x_grads = if state.ddr_match {
@@ -730,6 +794,12 @@ where
             // reach's X, so its gradient flows on like any channel row's.
             let gx = match replace_mask.as_ref() {
                 Some(m) => gx.mask_fill(m.clone(), 0.0),
+                None => gx,
+            };
+            // B19p: where the dam-row cap bound, x_eff is the cap, not X_r,
+            // so the Cunge chain gets nothing (the cap's K term is above).
+            let gx = match dam_cap.as_ref() {
+                Some((bound, _)) => gx.mask_fill(bound.clone(), 0.0),
                 None => gx,
             };
             // Same expression as the forward's S19 (including the +1e-12).
@@ -806,6 +876,11 @@ where
         // reaches where the floor binds.
         let gk_muskingum = match gk_from_x_cap {
             Some(g) => gk_muskingum + g,
+            None => gk_muskingum,
+        };
+        // B19p's `x_eff → cap → k_musk` term, at the same point.
+        let gk_muskingum = match dam_cap {
+            Some((_, g)) => gk_muskingum + g,
             None => gk_muskingum,
         };
         // B19''' (learned release). When `T` is a parent ([`ReleaseParent`]),
@@ -2042,6 +2117,33 @@ where
         ),
         _ => (k_muskingum, x_eff),
     };
+    // S19p: dam-row positivity (`dam_row_positivity`, the ADDITIVE dam rows
+    // only). The additive row keeps the reach's channel wedge `K_r·X_r·I` in
+    // its storage, so `c1 = (dt − 2·K_r·X_r)/D` goes negative wherever
+    // `K_r·X_r > dt/2`: at low outflow the Cunge K is days and X is 0.5, and
+    // rising inflow then drives the pre-clamp solve below the floor (the
+    // "debt pump" of the carried floor). A dam reach is a pool, so its wedge
+    // is capped instead: `X_eff = min(X_r, 0.5·Cr·(1 − δ))`, which is S19''s
+    // `hi_a` branch alone ([`dam_row_x_cap`]), giving `c1 >= δ·dt/D > 0`.
+    // `δ` is S19''s margin, for S19''s reason: at `δ = 0` the cap lands on
+    // `c1 = 0` and f32 roundoff crosses it. S19''s other two clamps are not
+    // needed here: c3's numerator on the additive row carries `2·T_t`, and
+    // capping X only raises `2K(1 − X)`, so c3 cannot turn negative through
+    // the cap; and the cap `0.5·(1 − δ)·dt/K` is positive for any `K > 0`,
+    // so no K floor is required (K → 0 makes it infinite: inactive). Placed
+    // after S19'' and before `x_eff_out`, so the saved X, c1..c4 and D all
+    // read `X_eff`. Skipped under `enforce_pos`, where S19' already capped
+    // every row at `hi_a` (the key is rejected there at load). `mask_where`
+    // and `min_pair` return the operand unchanged wherever the cap does not
+    // bind, so those rows (and every channel row) are bitwise the additive
+    // row. See B19p for the backward.
+    let x_eff = match reservoir {
+        Some(res) if res.additive && res.positivity && !enforce_pos => {
+            let capped = x_eff.clone().min_pair(dam_row_x_cap(k_muskingum.clone(), dt));
+            x_eff.mask_where(res.mask.clone(), capped)
+        }
+        _ => x_eff,
+    };
     *x_eff_out = Some(unwrap(x_eff.clone()));
 
     let one_minus_x = -x_eff.clone() + 1.0;
@@ -2761,6 +2863,7 @@ where
             t_seconds: scatter(t_aut.as_ref().expect("set above").primitive.clone()),
             t_prev_seconds: Some(scatter(t_prev_aut.as_ref().expect("set above").primitive.clone())),
             additive: r.additive,
+            positivity: r.positivity,
         }
     });
     let reservoir = reservoir.or(release_res.as_ref());
@@ -2805,6 +2908,7 @@ where
             x_sol: wrap(x_sol_prim.clone()),
             i_t: wrap(i_t_prim.clone()),
             c4: wrap(c4_p.clone()),
+            c1: wrap(c1_prim.clone()),
         });
     }
 
@@ -2862,6 +2966,8 @@ where
                 _ => unreachable!(),
             }),
         reservoir_additive: reservoir.is_some_and(|r| r.additive),
+        // Mirrors S19p's gate in `forward_chain_inner` exactly.
+        reservoir_positivity: reservoir.is_some_and(|r| r.additive && r.positivity) && !enforce_pos,
     };
     debug_assert!(
         !state.reservoir_additive || state.reservoir_t_prev.is_some(),
@@ -2985,7 +3091,8 @@ where
 }
 
 /// [`timestep_forward_release`] with the dam-row form chosen: `Replace`
-/// (S19''' / B19''') or `Additive` (S19'''' / B19'''').
+/// (S19''' / B19''') or `Additive` (S19'''' / B19''''). The additive row's
+/// positivity cap (S19p / B19p) follows `cfg.dam_row_positivity()`.
 #[allow(clippy::too_many_arguments)]
 pub fn timestep_forward_release_as<I: Backend + 'static>(
     cfg: &Config,
@@ -3022,6 +3129,8 @@ where
         rows: Tensor::from_data(burn::tensor::TensorData::new(rows_i, [n_dams]), &device),
         mask: Tensor::from_data(burn::tensor::TensorData::from(mask.as_slice()), &device),
         additive: dam_row == crate::config::DamRow::Additive,
+        // From the config, as the engine takes it at construction.
+        positivity: cfg.dam_row_positivity(),
     };
     timestep_forward_with_reservoirs::<I>(
         cfg, pattern, assembler,
@@ -3247,6 +3356,7 @@ where
         reservoir_mask: None,
         reservoir_t_prev: None,
         reservoir_additive: false,
+        reservoir_positivity: false,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -3591,6 +3701,7 @@ where
         reservoir_mask: None,
         reservoir_t_prev: None,
         reservoir_additive: false,
+        reservoir_positivity: false,
     };
 
     let result_prim = match TimestepOp

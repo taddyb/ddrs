@@ -897,6 +897,18 @@ pub struct Params {
     /// `release_head.dam_floor`; this key with `learned`, or without
     /// `use_reservoirs`, is rejected at load. [`Config::dam_floor`] reads it.
     pub reservoir_dam_floor: Option<DamFloor>,
+    /// Keep the additive dam row's inflow coefficient `c1 >= 0` for a
+    /// `reservoir_release: fixed` table: on the dam rows only, the channel
+    /// wedge `K_r·X_r` is capped at `(1 − δ)·dt/2`
+    /// (`X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)`, S19p in `mmc_op`). Absent (the
+    /// default) or `false` is bitwise today's routing. Mirrors
+    /// `reservoir_dam_floor`: a learned release sets it with
+    /// `release_head.dam_row_positivity`; this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load, and so is `true` without
+    /// `reservoir_dam_row: additive` (the replace row's `c1 = dt/D > 0`
+    /// already) or with `enforce_positivity` (S19' caps every row at the same
+    /// bound). [`Config::dam_row_positivity`] reads it.
+    pub reservoir_dam_row_positivity: Option<bool>,
 }
 
 /// `params.reservoir_release`. See [`Params::reservoir_release`].
@@ -948,7 +960,9 @@ pub enum DamFloor {
     /// its effective lateral inflow (`Qin_t` = routed upstream inflow plus the
     /// reach's own `q'`, before the rule-curve flux) and `owed −= r·dt`. The
     /// owed state is DETACHED (no gradient). It restarts at 0 at every training
-    /// window and runs across the test phase's chunks.
+    /// window and runs across the test phase's chunks. On the additive row it
+    /// pumps debt wherever the channel's `c1 < 0`; pair it with
+    /// `dam_row_positivity` there.
     Carry,
 }
 
@@ -985,6 +999,14 @@ pub struct ReleaseHeadSection {
     /// inflow, with no gradient back to the release that caused the debt.
     #[serde(default)]
     pub dam_floor: DamFloor,
+    /// Keep the additive dam row's inflow coefficient `c1 >= 0`: on the dam
+    /// rows only, `X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)`, so the channel
+    /// wedge `K_r·X_r` never exceeds `(1 − δ)·dt/2` (S19p / B19p in `mmc_op`).
+    /// Default false: bitwise today's routing. Requires `dam_row: additive`
+    /// and `params.enforce_positivity: false` (checked at load). The test
+    /// phase routes the resolved table with the same setting.
+    #[serde(default)]
+    pub dam_row_positivity: bool,
     /// A checkpoint DIRECTORY (`.../checkpoints/epoch_E_mb_M/`) whose
     /// `head.mpk` initialises the ROUTING head. Only those weights are read:
     /// not its `optim.mpk` (the routing optimizer starts cold), not its
@@ -1102,6 +1124,18 @@ impl Config {
         }
     }
 
+    /// Whether the additive dam rows keep `c1 >= 0` (S19p in `mmc_op`):
+    /// `release_head.dam_row_positivity` for a learned release (and its
+    /// resolved test-phase table), `params.reservoir_dam_row_positivity` for a
+    /// `fixed` table, `false` when neither is set. Like [`Config::dam_floor`],
+    /// the two keys never both apply (`validate_reservoirs`).
+    pub fn dam_row_positivity(&self) -> bool {
+        match self.release_head.as_ref() {
+            Some(r) => r.dam_row_positivity,
+            None => self.params.reservoir_dam_row_positivity.unwrap_or(false),
+        }
+    }
+
     /// True when the routing head is frozen for release-only training
     /// (`release_head.freeze_routing` under `reservoir_release: learned`).
     pub fn routing_frozen(&self) -> bool {
@@ -1156,6 +1190,7 @@ impl Default for Params {
             reservoir_release: ReservoirRelease::Fixed,
             reservoir_dam_row: None,
             reservoir_dam_floor: None,
+            reservoir_dam_row_positivity: None,
         }
     }
 }
@@ -1192,6 +1227,7 @@ struct ParamsRaw {
     reservoir_release: Option<ReservoirRelease>,
     reservoir_dam_row: Option<DamRow>,
     reservoir_dam_floor: Option<DamFloor>,
+    reservoir_dam_row_positivity: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -1314,6 +1350,7 @@ impl From<ParamsRaw> for Params {
         }
         p.reservoir_dam_row = r.reservoir_dam_row;
         p.reservoir_dam_floor = r.reservoir_dam_floor;
+        p.reservoir_dam_row_positivity = r.reservoir_dam_row_positivity;
         p
     }
 }
@@ -1697,6 +1734,28 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
             ));
         }
     }
+    if let Some(pos) = p.reservoir_dam_row_positivity {
+        if learned {
+            return Err(format!(
+                "params.reservoir_dam_row_positivity = {pos} is for `reservoir_release: fixed` \
+                 tables; a learned release sets it with `release_head.dam_row_positivity`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_dam_row_positivity = {pos} is set but `use_reservoirs` is false; \
+                 no dam row would be routed"
+            ));
+        }
+        if pos {
+            validate_dam_row_positivity(
+                p.reservoir_dam_row.unwrap_or_default(),
+                p.enforce_positivity,
+                "params.reservoir_dam_row_positivity",
+                "params.reservoir_dam_row",
+            )?;
+        }
+    }
     if learned {
         if !p.use_reservoirs {
             return Err(
@@ -1760,6 +1819,14 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
                 "release_head.rule_curve_alpha = {} must be in (0, 1]",
                 rh.rule_curve_alpha
             ));
+        }
+        if rh.dam_row_positivity {
+            validate_dam_row_positivity(
+                rh.dam_row,
+                p.enforce_positivity,
+                "release_head.dam_row_positivity",
+                "release_head.dam_row",
+            )?;
         }
         if rh.freeze_routing && rh.routing_checkpoint.is_none() {
             return Err(
@@ -1848,6 +1915,32 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
              DDM30 cell sub-reaches."
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// `dam_row_positivity: true` (either key) acts only on the additive dam row,
+/// and only when S19' is not already capping every row: on the replace row
+/// `X = 0`, so `c1 = dt/D > 0` already, and `enforce_positivity` caps `X` at
+/// the same `0.5·Cr·(1 − δ)` on every row, dam rows included. Either would
+/// make the key a silent no-op.
+fn validate_dam_row_positivity(
+    row: DamRow,
+    enforce_positivity: bool,
+    key: &str,
+    row_key: &str,
+) -> std::result::Result<(), String> {
+    if row != DamRow::Additive {
+        return Err(format!(
+            "{key}: true needs `{row_key}: additive`; the replace row's c1 = dt/(2T + dt) is \
+             already > 0, so the key would do nothing"
+        ));
+    }
+    if enforce_positivity {
+        return Err(format!(
+            "{key}: true is redundant with `params.enforce_positivity: true`, which already \
+             caps X at 0.5·Cr·(1 − δ) on every row, dam rows included; set one of the two"
+        ));
     }
     Ok(())
 }
@@ -3863,6 +3956,85 @@ data_sources:
             &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_floor: repay\n"),
         );
         assert!(Config::from_yaml_file(&path).is_err(), "unknown dam floor must be refused");
+    }
+
+    #[test]
+    fn release_head_dam_row_positivity_defaults_off_and_needs_the_additive_row() {
+        let path = learned_yaml(
+            "ddrs_rel_pos_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert!(!cfg.release_head.as_ref().unwrap().dam_row_positivity);
+        assert!(!cfg.dam_row_positivity());
+        assert!(!Config::default().dam_row_positivity());
+        let path = learned_yaml(
+            "ddrs_rel_pos_on.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n  dam_row_positivity: true\n"),
+        );
+        assert!(Config::from_yaml_file(&path).expect("additive + positivity loads").dam_row_positivity());
+        // The replace row's c1 is already > 0: a silent no-op, refused.
+        let path = learned_yaml(
+            "ddrs_rel_pos_replace.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row_positivity: true\n"),
+        );
+        learned_rejection(path, &["release_head.dam_row_positivity", "release_head.dam_row: additive"]);
+        // S19' already caps every row at the same bound.
+        let path = learned_yaml(
+            "ddrs_rel_pos_enforce.yaml",
+            &format!("{LEARNED_PARAMS}  enforce_positivity: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n  dam_row_positivity: true\n"),
+        );
+        learned_rejection(path, &["release_head.dam_row_positivity", "enforce_positivity"]);
+    }
+
+    #[test]
+    fn reservoir_dam_row_positivity_selects_the_fixed_tables_setting() {
+        let path = reservoir_yaml(
+            "ddrs_rdp_on.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n  reservoir_dam_row_positivity: true\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed additive table with positivity loads");
+        assert_eq!(cfg.params.reservoir_dam_row_positivity, Some(true));
+        assert!(cfg.dam_row_positivity());
+        // `false` is allowed on either row; absent is false.
+        let path = reservoir_yaml(
+            "ddrs_rdp_off.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row_positivity: false\n",
+        );
+        assert!(!Config::from_yaml_file(&path).expect("false loads").dam_row_positivity());
+        // Rejected: with a learned release, without use_reservoirs, on the
+        // replace row, and with enforce_positivity.
+        let path = learned_yaml(
+            "ddrs_rdp_learned.yaml",
+            &format!("{LEARNED_PARAMS}  reservoir_dam_row_positivity: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_dam_row_positivity", "release_head.dam_row_positivity"]);
+        let path = reservoir_yaml("ddrs_rdp_nores.yaml", EXPLICIT_ADJ, true, "  reservoir_dam_row_positivity: true\n");
+        reservoir_rejection(path, "reservoir_dam_row_positivity");
+        let path = reservoir_yaml(
+            "ddrs_rdp_replace.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row_positivity: true\n",
+        );
+        learned_rejection(path, &["params.reservoir_dam_row_positivity", "params.reservoir_dam_row: additive"]);
+        let path = reservoir_yaml(
+            "ddrs_rdp_enforce.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  enforce_positivity: true\n  reservoir_dam_row: additive\n  \
+             reservoir_dam_row_positivity: true\n",
+        );
+        learned_rejection(path, &["params.reservoir_dam_row_positivity", "enforce_positivity"]);
     }
 
     #[test]

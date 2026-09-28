@@ -60,7 +60,27 @@
 //! helps. Where it fails, the dam row does what the channel row does (no
 //! extra clamp: with `enforce_positivity` the S18'/S19' clamps already hold
 //! the channel part's `c1, c3 >= 0`; without it the S28 discharge clamp is
-//! the only guard, as on every reach).
+//! the only guard, as on every reach), unless `dam_row_positivity` is set.
+//!
+//! **Dam-row positivity** (`release_head.dam_row_positivity` /
+//! `params.reservoir_dam_row_positivity`, S19p / B19p in `mmc_op`, added
+//! 2026-09-28). At low outflow the Cunge `K_r` is days and `X_r` is 0.5, so
+//! `c1` above is about −0.5 and rising inflow drives the pre-clamp solve below
+//! the floor (with `dam_floor: carry`, a self-feeding debt). A dam reach is a
+//! pool, so on the dam rows only the wedge is capped:
+//!
+//! ```text
+//! X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)        δ = mmc_op::POSITIVITY_DELTA
+//! ```
+//!
+//! and `D`, `c1..c4` above read `X_eff`: `K_r·X_eff <= (1 − δ)·dt/2`, so
+//! `c1 >= δ·dt/(2D) > 0`. It is S19''s `hi_a` branch alone (S19''s other
+//! clamps are not needed: `T_t` keeps c3's numerator up, and the cap only
+//! raises `K_r(1 − X_eff)`). Where it binds, `S` keeps the wedge
+//! `(1 − δ)·(dt/2)·I` and the gradient reaches `K_r` through the cap
+//! (`∂X_eff/∂K_r = −X_eff/K_r`) instead of reaching `X_r`. Where it does not
+//! bind the row is bitwise the additive row. With it, `T = 0` is the channel
+//! row only where the channel's own `K_r·X_r <= (1 − δ)·dt/2`.
 //!
 //! Where the replace row's one-hour clamp binds, the gradient into `T0`, `a`
 //! and `b` is exactly zero for that step (Burn's `clamp_min` backward), which

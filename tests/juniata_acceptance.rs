@@ -223,7 +223,7 @@ fn juniata_learned_release_trains_t0_and_writes_release_params() {
     let lines: Vec<&str> = clamp.lines().collect();
     assert_eq!(
         lines[0],
-        "COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps"
+        "COMID,created_m3,storage_m3,repaid_m3,owed_m3,inflow_m3,created_share,clamp_steps,steps,neg_c1_steps"
     );
     assert_eq!(lines.len(), 2, "one dam: {clamp}");
     let f: Vec<&str> = lines[1].split(',').collect();

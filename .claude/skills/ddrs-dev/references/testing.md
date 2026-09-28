@@ -129,6 +129,8 @@ cargo test --test reservoir_rule_curve     # rule curve: θ = 0 identity, one-pe
                                            # year boundaries, θ/δ gradcheck, resolved table, clamp account (dam-row volume balance, both rows)
 cargo test --test reservoir_dam_floor      # dam_floor: carry == forgive bitwise without a clamp, one-year mass balance (both rows),
                                            # owed carried across 15-day test-phase chunks, set_dam_owed checks
+cargo test --test reservoir_dam_positivity # dam_row_positivity (S19p/B19p): bitwise where the cap does not bind, c1 >= 0 at low flow,
+                                           # gradchecks with the cap inactive/active (+ ddr_match, T_t/T_t+1), the debt pump stopped, carried balance
 cargo test --lib -- reservoir release_head lazy_adam release_eval dam_params dam_terms   # incl. the row-sparse Adam (untouched rows bitwise at init, bitwise = dense Adam on an always-touched row, bitwise save/restore) and the per-step terms (L2 and feasibility penalty bitwise independent of the micro-batch split; penalty = hand value, gradient = central differences)
 cargo test --release --test juniata_acceptance   # holds juniata_learned_release_trains_t0_and_writes_release_params
 ```

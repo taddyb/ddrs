@@ -165,6 +165,7 @@ mod tests {
             seasonal,
             dam_row: crate::config::DamRow::Replace,
             dam_floor: crate::config::DamFloor::Forgive,
+            dam_row_positivity: false,
             routing_checkpoint: None,
             freeze_routing: false,
             rule_curve: false,

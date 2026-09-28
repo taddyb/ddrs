@@ -591,6 +591,7 @@ fn additive_release_head_weight_gradcheck_end_to_end() {
         seasonal: true,
         dam_row: DamRow::Additive,
         dam_floor: ddrs::config::DamFloor::Forgive,
+        dam_row_positivity: false,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: false,

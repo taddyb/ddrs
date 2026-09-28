@@ -147,7 +147,10 @@ change.
   volume is owed and repaid out of the dam's later inflow (detached state; `tests/reservoir_dam_floor.rs`),
   BUT on the additive row it pumps debt once a dam is pinned at the floor (Cunge `K` at `Q = lb`,
   `c1 ≈ −0.5`; see skills/ddrs-dev/references/config.md `dam_floor`), so carry runs on that row
-  are not readable yet;
+  without the next item are not readable; `release_head.dam_row_positivity` (or
+  `params.reservoir_dam_row_positivity`, v5) caps the additive dam row's wedge,
+  `X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)` on the dam rows only (S19p / B19p), so `c1 > 0` and the
+  pump stops (synthetic: new debt 1.95e7 m³ -> 0; `tests/reservoir_dam_positivity.rs`);
   `release_head.rule_curve_penalty` adds the
   hinge `λ·Σ relu(r − α·Qin)²/Σ Qin²` (detached `Qin`, `src/training/dam_terms.rs`) once per
   optimizer step; the per-dam parameters step with a row-sparse Adam

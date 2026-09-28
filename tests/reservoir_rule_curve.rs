@@ -404,6 +404,7 @@ fn section(dam_row: DamRow) -> ReleaseHeadSection {
         seasonal: true,
         dam_row,
         dam_floor: ddrs::config::DamFloor::Forgive,
+        dam_row_positivity: false,
         routing_checkpoint: None,
         freeze_routing: false,
         rule_curve: true,

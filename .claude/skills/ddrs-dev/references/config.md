@@ -475,6 +475,7 @@ release_head:            # top-level block, deny_unknown_fields
   freeze_routing: false  # default false; true requires routing_checkpoint
   dam_row: replace       # default replace; additive adds T·Q to the reach's channel storage
   dam_floor: forgive     # default forgive; carry makes the dam-row clamp mass-conserving (owed volume)
+  dam_row_positivity: false  # default false; true caps the additive dam row's wedge so c1 > 0 (needs dam_row: additive)
   rule_curve: false      # per-dam harmonic rule curve S0_d(t); needs inflow_mean_m3s in the table
   rule_curve_max: 1.0    # c = rule_curve_max·tanh(θ); > 0
   per_dam_t0: false      # T0_d = T0_head,d·exp(δ_d)
@@ -601,8 +602,9 @@ and repays all of it, i.e. passes nothing downstream for the whole period. S3v3 
 initial debt at T 0.05 d: 232 clamp steps, 1.95e7 m³ new debt, the whole inflow repaid);
 without the diurnal swing, or with a debt smaller than the storage, there is none. The replace
 row (`K = T`, `X = 0`, `c1 = dt/D > 0`) and the unit tests' constant-`K` additive row do not
-pump. A fix has to reclaim the wedge's release while in debt (retain `x − lb` after the solve,
-or re-solve with the dam's in-step outflow held at `lb`), not only cap the pre-solve repayment.
+pump. The fix built (v5) is `dam_row_positivity` (below), which removes the negative `c1`
+itself; reclaiming the wedge's release while in debt (retain `x − lb` after the solve, or re-solve
+with the dam's in-step outflow held at `lb`) was the alternative and is not built.
 The owed state is DETACHED (inner backend, a constant cut to `q'`): training sees neither the
 debt a flux incurs nor its repayment as a function of `θ`, `T0` or the routing parameters; the
 gradient through a clamped step is still zero, the repayment acts like a change to the forcing,
@@ -623,6 +625,35 @@ learned release, the params key otherwise; the engine takes it at construction
 (`MuskingumCunge::set_dam_floor` / `set_dam_owed` / `dam_rows` for tests and chunk threading).
 Tests: `tests/reservoir_dam_floor.rs`, `src/config.rs` (`*dam_floor*`),
 `src/training/release_eval.rs`.
+
+**`dam_row_positivity` (added 2026-09-28, v5).** Keeps the additive dam row's inflow coefficient
+`c1 >= 0`. The additive row keeps the reach's channel wedge `K_r·X_r·I` in its storage, so
+`c1 = (dt/2 − K_r X_r)/D` is negative wherever `K_r·X_r > dt/2`; at low outflow the Cunge `K_r`
+is days and `X_r` is 0.5, rising inflow then drives the pre-clamp solve below the floor, `forgive`
+creates water and `carry` pumps debt (above). With `true`, on the dam rows only (channel rows are
+untouched), `X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)`, `δ = mmc_op::POSITIVITY_DELTA = 1e-2`, and
+`D`, `c1..c4` all read `X_eff` (S19p / B19p in `mmc_op`), so `c1 >= δ·dt/D > 0`. It is S19''s
+`hi_a` branch on the dam rows alone: `δ` because at `δ = 0` the cap lands on `c1 = 0` and f32
+roundoff crosses it; no K floor or `hi_b` cap, because `T_t` keeps c3's numerator up and the cap
+only raises `2K(1 − X)`. Backward: where the cap binds (`x_eff == cap`, recomputed from the
+saved K), `∂L/∂x_eff` goes into K through `∂cap/∂K = −cap/K` and nothing reaches the Cunge `X_r`
+chain; elsewhere the row is bitwise the additive row, outputs and gradients. Consequence: with
+it, `T = 0` is the channel row only where the channel's own `K_r·X_r <= (1 − δ)·dt/2`. Measured
+on the v4 synthetic pump (30 days, diurnal upstream swing, 1e7 m³ opening debt, T 0.05 d, carry):
+new debt 1.95e7 m³ -> 0, cleared on day 11, and the carried balance closes; with the cap binding
+on every step and `K`, `X` constant the dam row's routed-series balance over a rule-curve year
+closes to 3e-7 of the created volume. `release_head.dam_row_positivity` for a learned release;
+`params.reservoir_dam_row_positivity: true | false` for a `fixed` table (absent = false),
+rejected with `reservoir_release: learned` and without `use_reservoirs` (like
+`reservoir_dam_floor`); `true` is also rejected without `dam_row: additive` (the replace row's
+`c1 = dt/D > 0` already) and with `params.enforce_positivity` (S19' caps every row at the same
+bound). `Config::dam_row_positivity` reads the block or the key; the engine takes it at
+construction (`MuskingumCunge::set_dam_row_positivity` for tests). The engine's account and the
+test phase count negative-`c1` dam-row steps: `DamClampAccount::{c1_min, neg_c1_steps}`,
+`release_clamp.csv` column `neg_c1_steps`, `metrics.release_clamp.{neg_c1_steps, n_dams_neg_c1}`,
+and `dam-row steps with c1 < 0 <k>/<m> (<j> dams)` in the clamp log lines;
+`metrics.release_training.dam_row_positivity`. Tests: `tests/reservoir_dam_positivity.rs`,
+`src/config.rs` (`*dam_row_positivity*`).
 
 **Release-only training (added 2026-09-27).** `routing_checkpoint` is a checkpoint DIRECTORY
 whose `head.mpk` initialises the ROUTING head: weights only, never its `optim.mpk` or
