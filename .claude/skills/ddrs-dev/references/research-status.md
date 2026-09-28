@@ -751,6 +751,20 @@ was reverted in #143 and never evaluated at gauges.
   through the co-trained routing head; seed-43 replicates `2026-09-27T10-31-30Z` / `10-31-50Z`. Findings
   `2026-09-27-learned-dam-release-findings.md`; paired analysis
   `experiments/reservoir/full_run/paired_full_run.json` (branch `reservoir-options`). <!-- verify-doc-paths: ignore -->
+- **Per-dam release calibration (2026-09-27/28, branch `dam-release-v2`, smoke set, one seed):** the dam deficit is
+  real and in the forcing already: at DOR > 0.5 dam gauges trail matched undammed controls by -0.229 median NSE
+  routed and -0.274 on summed Q', mostly correlation at 30-400 d periods. New machinery (all default-off, gated):
+  completion years, `release_head.freeze_routing` (controls bitwise unchanged), `dam_row: additive`,
+  `dam_row_positivity` (c1 >= 0 on dam rows; alone it changes nothing, +0.0000), per-dam `rule_curve` and
+  `per_dam_t0` with row-sparse Adam and a feasibility penalty, corrected created-water account
+  (`release_clamp.csv`), `dam_floor: carry` (only safe with the positivity cap). Target set = 117 on-reach smoke
+  gauges with DOR > 0.5. **Best trained: rule curve + per-dam T0 (`2026-09-27T23-36-04Z`) +0.0168
+  [+0.0074, +0.0256], +0.020 on gauges whose dam creates < 0.5 % water, dKGE +0.006.** In-engine ceiling with
+  offline per-dam fits (replays): per-dam T0 +0.0186 on the capped row (+0.009 uncapped), + rule curve +0.0244; the
+  rule curve adds only about +0.001 paired over a fitted per-dam T0 (offline audit agrees: +0.004). Flood-control
+  dams gain about four times any other purpose. +0.03 not reached; the per-dam coefficients are not predictable from
+  NID features (RF R2 <= 0.15), so the gain needs gauged calibration. Results page
+  https://claude.ai/artifact/YELrGtjwb5qjhq9JEjLs2u; findings `2026-09-28-per-dam-release-calibration-findings.md`.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
   routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release

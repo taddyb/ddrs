@@ -1,0 +1,492 @@
+<title>Per-Dam Release Calibration</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --bg: #f3f5f4; --surface: #ffffff; --ink: #1b2528; --muted: #56666a; --rule: #d3dbd9; --soft: #e6ecea;
+  --land: #e4eae8; --coast: #9aaaa8;
+  --nodam: #0080a8; --dam: #b0651c; --base: #7d7b75; --obs: #1b2528; --good: #2f7a4a; --bad: #a3432b; --target: #a3432b;
+  --dv0: #006484; --dv1: #2287ad; --dv2: #5aaacd; --dv3: #d9dcd8; --dv4: #d08d57; --dv5: #af6827; --dv6: #874903;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111719; --surface: #182023; --ink: #e1e8e6; --muted: #9babaa; --rule: #2b3639; --soft: #1e292c;
+    --land: #223034; --coast: #4a5c60;
+    --nodam: #1ea2b8; --dam: #c27a26; --base: #a3a29b; --obs: #e1e8e6; --good: #6cc08a; --bad: #e0826a; --target: #e0826a;
+    --dv0: #4dc3da; --dv1: #2ca1b6; --dv2: #117f91; --dv3: #3a4446; --dv4: #9d621e; --dv5: #c47f34; --dv6: #e99f50;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111719; --surface: #182023; --ink: #e1e8e6; --muted: #9babaa; --rule: #2b3639; --soft: #1e292c;
+  --land: #223034; --coast: #4a5c60;
+  --nodam: #1ea2b8; --dam: #c27a26; --base: #a3a29b; --obs: #e1e8e6; --good: #6cc08a; --bad: #e0826a; --target: #e0826a;
+  --dv0: #4dc3da; --dv1: #2ca1b6; --dv2: #117f91; --dv3: #3a4446; --dv4: #9d621e; --dv5: #c47f34; --dv6: #e99f50;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); padding-inline: 16px; padding-block: 28px 56px; }
+.wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 52px; }
+.prose { max-width: 70ch; }
+h1, h2 { font-family: var(--display); font-weight: 700; letter-spacing: 0.01em; text-wrap: balance; margin: 0; line-height: 1.1; }
+h1 { font-size: clamp(36px, 6vw, 54px); }
+h2 { font-size: 29px; }
+h3 { font-size: 15px; font-weight: 600; margin: 0; }
+p { margin: 0; }
+section { display: grid; gap: 16px; }
+.eyebrow { font: 500 12px/1.4 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 17px; max-width: 70ch; }
+.muted { color: var(--muted); }
+.m { font-family: var(--mono); font-size: 0.92em; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.tile .lab { font-size: 13px; color: var(--muted); }
+.tile .val { font: 600 32px/1.1 var(--body); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.tile .val.tgt { color: var(--target); }
+.tile .note { font-size: 13px; color: var(--muted); }
+.brief { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px 24px; }
+.brief div { display: grid; gap: 4px; align-content: start; }
+.brief b { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 10px; position: relative; min-width: 0; }
+.figbox { position: relative; overflow-x: auto; overflow-y: hidden; }
+.figbox svg { display: block; width: 100%; height: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.sw { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+.sw.dash { background: repeating-linear-gradient(90deg, var(--target) 0 5px, transparent 5px 8px) !important; height: 2px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 6px; }
+.gridline { stroke: var(--rule); stroke-width: 1; }
+.zero { stroke: var(--muted); stroke-width: 1.2; }
+.axis { fill: var(--muted); font: 400 11px var(--mono); }
+.axlab { fill: var(--muted); font: 500 11.5px var(--body); }
+.dl { font: 500 12px var(--body); fill: var(--ink); }
+.dls { font: 400 11px var(--mono); fill: var(--muted); }
+.tip { position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 6px 9px; font: 12px/1.5 var(--mono); color: var(--ink); max-width: 320px; box-shadow: 0 2px 8px rgba(0,0,0,.16); z-index: 5; }
+.tip b { font-family: var(--body); font-weight: 600; }
+.stats { width: 100%; border-collapse: collapse; font-size: 14px; }
+.stats th, .stats td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.stats th { font: 500 12px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.stats tr.hl td { background: var(--soft); }
+.stats td.grp { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-top: 14px; }
+.num { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pos { color: var(--good); }
+.neg { color: var(--bad); }
+.table-wrap { overflow-x: auto; }
+.note { font-size: 13.5px; color: var(--muted); }
+.claims { display: grid; gap: 10px; counter-reset: c; }
+.claim { display: grid; grid-template-columns: 26px 1fr; gap: 2px 10px; align-items: start; }
+.claim::before { counter-increment: c; content: counter(c); font: 600 13px/22px var(--mono); color: var(--muted); border: 1px solid var(--rule); border-radius: 50%; width: 22px; height: 22px; text-align: center; }
+.claim p { grid-column: 2; max-width: 80ch; }
+.timeline { display: grid; grid-template-columns: 14fr 15fr; gap: 4px; font: 500 12px var(--mono); }
+.timeline div { padding: 8px 10px; border-radius: 4px; }
+.timeline .tr { background: var(--soft); border: 1px solid var(--rule); color: var(--muted); }
+.timeline .te { background: var(--surface); border: 1px solid var(--ink); color: var(--ink); }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.card ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.pickers { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: end; }
+.pickers label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+select, button.pick { font: 14px var(--body); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 6px 8px; max-width: 100%; }
+button.pick { cursor: pointer; background: var(--soft); font-size: 13px; }
+button.pick:hover { border-color: var(--muted); }
+select:focus-visible, button.pick:focus-visible { outline: 2px solid var(--nodam); outline-offset: 2px; }
+#gSel { max-width: min(560px, 100%); }
+.gmeta { font: 500 13.5px var(--mono); color: var(--muted); }
+/* dot-whisker rows */
+.dw { display: grid; gap: 2px; }
+.dw-group { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 10px 0 4px; }
+.dw-row { display: grid; grid-template-columns: minmax(0, 44%) 1fr; gap: 12px; align-items: center; min-height: 40px; }
+.dw-label { font-size: 14px; line-height: 1.3; }
+.dw-label .m { display: block; color: var(--muted); font-size: 12px; }
+.dw-track { position: relative; height: 32px; }
+.dw-whisk { position: absolute; top: 50%; height: 2px; transform: translateY(-50%); border-radius: 1px; }
+.dw-dot { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--surface); }
+.dw-dot.hollow { background: var(--surface) !important; border: 2px solid var(--muted); }
+.dw-line { position: absolute; top: 0; bottom: 0; width: 0; }
+.dw-axis { position: relative; height: 26px; margin-left: calc(44% + 12px); font: 400 11px var(--mono); color: var(--muted); }
+.dw-axis span { position: absolute; transform: translateX(-50%); top: 6px; white-space: nowrap; }
+.dw-cap { font-size: 12.5px; color: var(--muted); text-align: right; }
+@media (max-width: 640px) {
+  .dw-row { grid-template-columns: 1fr; gap: 0; }
+  .dw-axis { margin-left: 0; }
+}
+.reg { fill: var(--land); stroke: var(--surface); stroke-width: 1.4; }
+.nation { fill: none; stroke: var(--coast); stroke-width: 0.9; }
+.reglab { font: 500 11px var(--mono); fill: var(--muted); opacity: 0.85; pointer-events: none; }
+.l-obs { stroke: var(--obs); stroke-width: 1.3; fill: none; opacity: 0.75; stroke-linejoin: round; }
+.l-nodam { stroke: var(--nodam); stroke-width: 1.8; fill: none; stroke-linejoin: round; }
+.l-dam { stroke: var(--dam); stroke-width: 1.8; fill: none; stroke-linejoin: round; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+
+<div class="wrap">
+<header style="display:grid;gap:14px">
+  <div class="eyebrow">ddrs · learned dam release · overnight 27–28 September 2026 · smoke set, test water years 1996–2010</div>
+  <h1>Per-Dam Release Calibration</h1>
+  <p class="lede">The goal was a median NSE gain of +0.03 at gauges where dams matter. Overnight the channel routing was frozen, so only dam parameters train. Each dam got its own residence time and seasonal rule curve, the dam row stopped replacing the reach's channel routing, and the water the discharge floor creates is now measured. The best trained arm gains <b id="bestV"></b> at the 117 target gauges. Run through the engine, the best offline-fitted per-dam parameters reach about +0.02. The target was not reached.</p>
+  <div class="tiles" id="tiles"></div>
+</header>
+
+<section>
+  <div class="eyebrow">Setup</div>
+  <h2>What was compared, and on which years</h2>
+  <p class="prose">The smoke set has 916 gauges: 458 below an NID dam of at least 10 MCM, each paired with an undammed control in the same HUC2 region and closest in drainage area. The <b>target gauges</b> are the 117 dam gauges whose dam sits on the gauge's own reach and whose degree of regulation (DOR, upstream storage over one year of flow) is above 0.5. Every number below is the per-gauge change in test-year NSE against the same no-dam model at the same gauge, summarised as a median with a 95 % bootstrap interval.</p>
+  <div class="timeline"><div class="tr">Training: water years 1982–1995 (90-day windows)</div><div class="te">Test: water years 1996–2010, one continuous pass</div></div>
+  <p class="prose muted">Frozen routing: the channel network (Manning's n and γ per reach) is loaded from the smoke no-dam run and never trained again, so undammed gauges cannot change and every gain belongs to the dams. The jointly trained arm from the earlier session moved its controls by up to 0.345 NSE; the frozen arms move them by exactly 0.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Where the room is</div>
+  <h2>Dam gauges trail their matched controls, more so with more storage</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If dams are what hold these gauges back, the no-dam model should score worse at dam gauges than at their controls, by more as regulation grows, while the controls stay level.</p></div>
+    <div><b>Plain English</b><p>Each dot pair is one DOR bin: median NSE of the no-dam model at dam gauges and at their undammed twins. The gap is room a dam model could in principle recover.</p></div>
+    <div><b>Graph</b><p>Horizontal: DOR bin with the number of pairs. Vertical: median NSE. Orange dam gauges, blue controls; the number is the median of the per-pair differences.</p></div>
+  </div>
+  <div class="fig"><div class="legend"><span><i class="dot" style="background:var(--dam)"></i>Dam gauges</span><span><i class="dot" style="background:var(--nodam)"></i>Matched controls</span></div><div class="figbox" id="gapFig"></div></div>
+  <p class="prose"><b>Result.</b> Controls sit between 0.70 and 0.79 at every DOR; dam gauges fall from 0.77 to 0.28, a paired gap of −0.36 above DOR 2. <b>Conclusion.</b> The deficit is a dam effect and it grows with storage, so the target set is defined on DOR above 0.5, where the gap is largest.</p>
+</section>
+
+<section>
+  <div class="eyebrow">The main result</div>
+  <h2>Every arm against the +0.03 target</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If per-dam parameters are the missing physics and training can find them, trained arms should approach what the same laws reach with parameters fitted offline per dam and replayed through the engine.</p></div>
+    <div><b>Plain English</b><p>Trained arms learn dam parameters by gradient descent through the routing. Replays take parameters fitted offline from each gauge's own training years and route them with no training: the in-engine ceiling of each law. The control arms the dams with one hour of storage and nothing else.</p></div>
+    <div><b>Graph</b><p>One row per arm. The dot is the median change in NSE at the 117 target gauges; the whisker is its 95 % interval. The dashed line is the +0.03 target. Orange rows are trained, grey rows are replays, the hollow dot is the control.</p></div>
+  </div>
+  <div class="fig"><div class="legend"><span><i class="dot" style="background:var(--dam)"></i>Trained arm</span><span><i class="dot" style="background:var(--base)"></i>Replay of offline per-dam fits</span><span><i class="dot" style="background:var(--surface);border:2px solid var(--muted)"></i>Control</span><span><i class="sw dash"></i>Target +0.03</span></div><div id="armFig"></div></div>
+  <div class="table-wrap"><table class="stats" id="armTbl"></table></div>
+  <p class="prose"><b>Result.</b> The best trained arm (rule curve plus per-dam residence time, row-sparse Adam, feasibility penalty) gains <b id="bestV2"></b> with KGE up as well. The replays set the ceiling: <span id="ceil"></span>. No arm reaches +0.03. <b>Conclusion.</b> Training recovers most of what an offline-calibrated residence time gives, and the law family itself tops out near +0.02 to +0.025 at the median target gauge. The seasonal rule curve adds little once each dam has its own residence time.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Attribution</div>
+  <h2>What made the difference</h2>
+  <p class="prose">A review warned that the new cap on the dam row (which keeps its inflow coefficient c1 from going negative) changes routing at dam reaches on most steps, so the replay gains might belong to the cap. Paired controls answer it:</p>
+  <div class="table-wrap"><table class="stats" id="attrTbl"></table></div>
+  <p class="prose">The cap does nothing by itself. It doubles what a per-dam residence time gains, because the channel's negative c1 at low flow fought the reservoir storage and made the discharge floor create water. Gauge by gauge, the rule curve adds about +0.001 on top of the fitted residence time, as the offline audit found.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Water accounting</div>
+  <h2>How much water the discharge floor creates</h2>
+  <p class="prose">When a dam row's solution falls below the discharge floor, the post-solve clamp lifts it and forgives the deficit: water appears that no inflow supplied. The first account under-reported this by a factor of (K + T)/dt; the corrected one reads it off the dam's routed volume balance. Per dam, as a share of the dam's test-period inflow:</p>
+  <div class="table-wrap"><table class="stats" id="waterTbl"></table></div>
+  <p class="prose muted">"Clean gauges" are target gauges whose dam creates under 0.5 % of its inflow. On every arm the clean-gauge gain is at least as large as the full one, so created water is not what produces the gains. The capped arms create the least.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Where it helps</div>
+  <h2>The best arm by regulation, purpose and place</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>A per-dam storage law should help most where storage is large relative to flow and where operations look like storage and release, flood control above all.</p></div>
+    <div><b>Plain English</b><p>The best trained arm's per-gauge change in NSE, grouped by DOR and by the NID primary purpose of the dam nearest each gauge, and mapped.</p></div>
+    <div><b>Graph</b><p>Left: median change with 95 % interval by DOR bin, all dam gauges (filled) and on-reach only (hollow). Right: by purpose, all dam gauges and DOR above 0.5. Map: one dot per dam gauge, blue where NSE rose, brown where it fell, size by DOR.</p></div>
+  </div>
+  <div class="cols">
+    <div class="fig"><h3>By degree of regulation</h3><div id="binFig"></div></div>
+    <div class="fig"><h3>By dam purpose</h3><div id="purpFig"></div></div>
+  </div>
+  <div class="fig">
+    <div class="legend" id="mapLegend"></div>
+    <div class="figbox" id="mapFig"></div>
+  </div>
+  <p class="prose"><b>Result.</b> <span id="whereRes"></span> <b>Conclusion.</b> The gain rises with regulation up to DOR 2 and concentrates at flood-control dams, about four times any other purpose. Their operation, storing a flood and releasing it over the following days, is what a per-dam storage law describes. Water-supply dams gain least, and hydropower and irrigation dams, whose error is mostly seasonal shape and diverted volume, gain a few thousandths, as the earlier seasonal-error analysis predicted.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Hydrographs</div>
+  <h2>Look at any target gauge</h2>
+  <p class="prose">Weekly means over the test years for the 117 target gauges: observed flow, the no-dam model, and the best trained arm. Choose a gauge or one of the preset picks; the year menu zooms to one water year.</p>
+  <div class="fig">
+    <div class="pickers">
+      <label for="gSel">Gauge<select id="gSel"></select></label>
+      <label for="ySel">Water year<select id="ySel"></select></label>
+      <button class="pick" id="pBest" type="button">Largest gain</button>
+      <button class="pick" id="pMed" type="button">Median gain</button>
+      <button class="pick" id="pWorst" type="button">Largest loss</button>
+    </div>
+    <div class="gmeta" id="gMeta"></div>
+    <div class="legend"><span><i class="sw" style="background:var(--obs)"></i>Observed</span><span><i class="sw" style="background:var(--nodam)"></i>No-dam model</span><span><i class="sw" style="background:var(--dam)"></i>Best trained dam arm</span></div>
+    <div class="figbox" id="hydFig"></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">What changed in the code</div>
+  <h2>New machinery on dam-release-v2</h2>
+  <div class="claims">
+    <div class="claim"><p><b>Completion years.</b> A dam routes as an ordinary channel until 1 January of its NID completion year. At the 41 full-population gauges whose dams came online in the test years, the dam gain rose from +0.002 to +0.011.</p></div>
+    <div class="claim"><p><b>Frozen routing</b> (<span class="m">release_head.freeze_routing</span>). Only the dam parameters train. Controls are bitwise unchanged.</p></div>
+    <div class="claim"><p><b>Additive dam row</b> (<span class="m">dam_row: additive</span>). The reservoir's storage adds to the reach's channel storage, so a zero residence time is the channel again.</p></div>
+    <div class="claim"><p><b>Non-negative inflow coefficient on dam rows</b> (<span class="m">dam_row_positivity</span>). Caps the channel wedge so c1 stays above zero.</p></div>
+    <div class="claim"><p><b>Per-dam parameters.</b> A residence-time multiplier and a four-coefficient seasonal rule curve per dam, trained with row-sparse Adam, a feasibility penalty and continuous seasonal phase.</p></div>
+    <div class="claim"><p><b>Water accounting</b> in <span class="m">release_clamp.csv</span>: created, repaid and owed volume per dam, and an optional mass-conserving floor (<span class="m">dam_floor: carry</span>).</p></div>
+    <div class="claim"><p><b>Gates.</b> Every commit passed Tier A, including <span class="m">compare_ddr_sandbox</span> ABSOLUTE MATCH (max abs 1.5e-4 m³/s), and the full test suite (968 passed at the last commit).</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Reviews</div>
+  <h2>What the reviews caught</h2>
+  <div class="claims">
+    <div class="claim"><p>The first rule-curve arms let the flux store more water than a dam receives; the clamp created water and removed the gradient that should have stopped it. Fixed with a feasibility penalty and bounded amplitude.</p></div>
+    <div class="claim"><p>Per-dam parameters used dense Adam, so dams kept moving for about ten steps after each gradient. Fixed with row-sparse Adam.</p></div>
+    <div class="claim"><p>The created-water account under-reported by (K + T)/dt. Corrected and checked against a real mass balance; an earlier journal entry was corrected, not rewritten.</p></div>
+    <div class="claim"><p>The mass-conserving floor pumped debt on the additive row, because the channel's c1 went negative at the floor. The dam-row cap removed the pump.</p></div>
+    <div class="claim"><p>An independent re-implementation confirmed the offline rule-curve gain of +0.049 with no leakage, and showed most of it is the per-dam residence time.</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Limits</div>
+  <h2>What this does not show</h2>
+  <div class="cols">
+    <div class="card"><ul>
+      <li>One seed, the 916-gauge smoke set only. No full-population arm was run, because no trained arm cleared the bar.</li>
+      <li>Per-dam parameters exist only for dams with a gauge downstream; ungauged dams get the head's residence time, which alone gained about +0.007.</li>
+      <li>The S5 arms changed three settings at once, so their lower score is not attributed.</li>
+    </ul></div>
+    <div class="card"><ul>
+      <li>Controls are matched on region and area, not on irrigation intensity, so part of the dam gap may be withdrawals near dams.</li>
+      <li>The 30 to 120 day error band, flood storage released over weeks, is still the largest unexplained dam error.</li>
+      <li>The carry floor's debt is outside autograd, so training gets no signal about it.</li>
+    </ul></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Next</div>
+  <h2>Decisions for the morning</h2>
+  <div class="claims">
+    <div class="claim"><p>Accept per-dam calibrated parameters for gauged dams? They carry the gain; the feature head alone does not.</p></div>
+    <div class="claim"><p>Confirm the target: median NSE at on-reach gauges with DOR above 0.5. Over all dam gauges the best arm gains <span id="damAll"></span>.</p></div>
+    <div class="claim"><p>Run the best recipe on the full population at two seeds, to measure it where it counts, even though it is below +0.03.</p></div>
+    <div class="claim"><p>Next laws to try: flood-evacuation dynamics for the 30 to 120 day band, and a prescribed withdrawal term for irrigation dams, tested against a plain rescaling of runoff.</p></div>
+  </div>
+  <p class="note">Code: branch <span class="m">dam-release-v2</span>. Journal: <span class="m">research/journal/2026-09.md</span> on that branch. Analyses: <span class="m">experiments/reservoir/smoke_v2/</span>, <span class="m">experiments/reservoir/rulecurve_offline/</span>. Earlier pages: <a href="https://claude.ai/artifact/HhcubFbHpBdmpKykN7PeUT">full run</a>, <a href="https://claude.ai/artifact/Epafz7WFiUhxCtZ8MMdLoc">status</a>.</p>
+</section>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+(function () {
+  const D = JSON.parse(document.getElementById("data").textContent);
+  const NS = "http://www.w3.org/2000/svg";
+  const tip = document.getElementById("tip");
+  const A = Object.fromEntries(D.arms.map(a => [a.key, a]));
+  const F = A[D.featured];
+  const sg = (v, d = 4) => (v === null || v === undefined) ? "n/a" : (Math.abs(v) < 0.5 * Math.pow(10, -d) ? (0).toFixed(d) : (v < 0 ? "−" : "+") + Math.abs(v).toFixed(d));
+  const ci = p => p ? `${sg(p.m)} [${sg(p.lo)}, ${sg(p.hi)}]` : "n/a";
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    let style = "";
+    for (const k in attrs) { const v = String(attrs[k]); if (v.includes("var(")) style += `${k}:${v};`; else e.setAttribute(k, v); }
+    if (style) e.setAttribute("style", style);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function show(ev, html) {
+    tip.innerHTML = html; tip.hidden = false;
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    let x = ev.clientX + 14, y = ev.clientY + 14;
+    if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+    if (y + h > innerHeight - 8) y = ev.clientY - h - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  }
+  const hide = () => { tip.hidden = true; };
+  function bind(node, html) {
+    node.addEventListener("pointerenter", e => show(e, html));
+    node.addEventListener("pointermove", e => show(e, html));
+    node.addEventListener("pointerleave", hide);
+  }
+  addEventListener("scroll", hide, { passive: true });
+
+  // Header numbers and tiles.
+  document.getElementById("bestV").textContent = sg(F.target.m, 3);
+  document.getElementById("bestV2").textContent = ci(F.target);
+  document.getElementById("damAll").textContent = sg(F.dam_all.m, 4);
+  document.getElementById("ceil").textContent = `offline per-dam residence time ${sg(A.L2pos.target.m, 3)}, with the rule curve ${sg(A.L4pos.target.m, 3)}, both on the capped row`;
+  const tiles = [
+    ["Best trained arm, 117 target gauges", sg(F.target.m, 3), `${ci(F.target)}; KGE ${sg(F.target_kge.m, 3)}`],
+    ["Same arm, clean gauges only", sg(F.clean.m, 3), `n = ${F.clean.n}; dams creating under 0.5 % of inflow`],
+    ["In-engine ceiling, offline per-dam fits", sg(A.L4pos.target.m, 3), `rule curve replay; residence time alone ${sg(A.L2pos.target.m, 3)}`],
+    ["Target", "+0.030", "median NSE at the 117 target gauges"],
+    ["Matched controls", "0.0000", "max change under frozen routing"],
+  ];
+  document.getElementById("tiles").innerHTML = tiles.map(([l, v, n], i) =>
+    `<div class="tile"><div class="lab">${l}</div><div class="val${i === 3 ? " tgt" : ""}">${v}</div><div class="note">${n}</div></div>`).join("");
+
+  // Gap by DOR.
+  function drawGap() {
+    const host = document.getElementById("gapFig"); host.innerHTML = "";
+    const W = Math.max(host.clientWidth, 320), H = 260, m = { l: 42, r: 16, t: 14, b: 44 };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H }, host);
+    const y0 = 0.2, y1 = 0.9, Y = v => m.t + (1 - (v - y0) / (y1 - y0)) * (H - m.t - m.b);
+    const bw = (W - m.l - m.r) / D.gap.length, X = i => m.l + bw * (i + 0.5);
+    [0.2, 0.4, 0.6, 0.8].forEach(v => { el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), class: "gridline" }, svg); const t = el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", class: "axis" }, svg); t.textContent = v.toFixed(1); });
+    D.gap.forEach((g, i) => {
+      const x = X(i);
+      el("line", { x1: x, x2: x, y1: Y(g.ctl), y2: Y(g.dam), stroke: "var(--rule)", "stroke-width": 2 }, svg);
+      const lab = el("text", { x: x + 9, y: (Y(g.ctl) + Y(g.dam)) / 2 + 4, class: "dls" }, svg); lab.textContent = sg(g.gap, 3);
+      [["ctl", "var(--nodam)", "matched controls"], ["dam", "var(--dam)", "dam gauges"]].forEach(([k, c, n]) => {
+        el("circle", { cx: x, cy: Y(g[k]), r: 5.5, fill: c, stroke: "var(--surface)", "stroke-width": 2 }, svg);
+        const h = el("circle", { cx: x, cy: Y(g[k]), r: 13, fill: "transparent" }, svg);
+        bind(h, `<b>DOR ${g.lab}</b>, ${g.n} pairs<br>${n}: ${g[k].toFixed(3)}<br>paired gap ${sg(g.gap, 3)}`);
+      });
+      const b = el("text", { x, y: H - m.b + 18, "text-anchor": "middle", class: "axis" }, svg); b.textContent = g.lab;
+      const n = el("text", { x, y: H - m.b + 32, "text-anchor": "middle", class: "dls" }, svg); n.textContent = "n=" + g.n;
+    });
+    const yt = el("text", { x: m.l, y: 10, class: "axlab" }, svg); yt.textContent = "median NSE, no-dam model";
+  }
+
+  // Dot-whisker rows (shared by the arm figure and the bin/purpose figures).
+  function dotWhisker(host, rows, x0, x1, ticks, opts) {
+    host.innerHTML = "";
+    const P = v => (Math.min(Math.max(v, x0), x1) - x0) / (x1 - x0) * 100;
+    const wrap = document.createElement("div"); wrap.className = "dw";
+    rows.forEach(r => {
+      if (r.group) { const g = document.createElement("div"); g.className = "dw-group"; g.textContent = r.group; wrap.appendChild(g); return; }
+      if (!r.p) return;
+      const row = document.createElement("div"); row.className = "dw-row";
+      if (opts && opts.narrow) row.style.gridTemplateColumns = "minmax(0, 34%) 1fr";
+      const lab = document.createElement("div"); lab.className = "dw-label";
+      lab.innerHTML = `${r.label}<span class="m">${ci(r.p)}${r.extra || ""}</span>`;
+      const tr = document.createElement("div"); tr.className = "dw-track";
+      [[0, "1px solid var(--muted)"]].concat(opts && opts.target ? [[0.03, "2px dashed var(--target)"]] : []).forEach(([v, s]) => {
+        const l = document.createElement("div"); l.className = "dw-line"; l.style.left = P(v) + "%"; l.style.borderLeft = s; tr.appendChild(l);
+      });
+      const w = document.createElement("div"); w.className = "dw-whisk"; w.style.left = P(r.p.lo) + "%"; w.style.width = Math.max(P(r.p.hi) - P(r.p.lo), 0.5) + "%"; w.style.background = r.color;
+      const d = document.createElement("div"); d.className = "dw-dot" + (r.hollow ? " hollow" : ""); d.style.left = P(r.p.m) + "%"; d.style.background = r.color;
+      tr.append(w, d);
+      bind(tr, `<b>${r.label}</b><br>median ${sg(r.p.m)}<br>95 % interval ${sg(r.p.lo)} to ${sg(r.p.hi)}<br>up / down ${r.p.up} / ${r.p.down}, n = ${r.p.n}`);
+      row.append(lab, tr); wrap.appendChild(row);
+    });
+    host.appendChild(wrap);
+    const ax = document.createElement("div"); ax.className = "dw-axis";
+    if (opts && opts.narrow) ax.style.marginLeft = "calc(34% + 12px)";
+    ticks.forEach(v => { const s = document.createElement("span"); s.style.left = P(v) + "%"; s.textContent = v === 0 ? "0" : sg(v, 2); ax.appendChild(s); });
+    host.appendChild(ax);
+    const cap = document.createElement("div"); cap.className = "dw-cap"; cap.textContent = opts && opts.cap || "median change in NSE against the no-dam model"; host.appendChild(cap);
+  }
+
+  const colorOf = a => a.group === "trained" ? "var(--dam)" : a.group === "replay" ? "var(--base)" : "var(--muted)";
+  const armRows = [{ group: "Trained on the smoke set, frozen routing unless noted" }]
+    .concat(D.arms.filter(a => a.group === "trained").map(a => ({ label: a.label, p: a.target, color: colorOf(a) })))
+    .concat([{ group: "Replay: offline per-dam fits, no training" }])
+    .concat(D.arms.filter(a => a.group === "replay").map(a => ({ label: a.label, p: a.target, color: colorOf(a) })))
+    .concat([{ group: "Control" }])
+    .concat(D.arms.filter(a => a.group === "control").map(a => ({ label: a.label, p: a.target, color: colorOf(a), hollow: true })));
+  dotWhisker(document.getElementById("armFig"), armRows, -0.02, 0.06, [-0.02, 0, 0.02, 0.04, 0.06], { target: true, cap: "median change in NSE at the 117 target gauges" });
+
+  // Arm table.
+  const tbl = document.getElementById("armTbl");
+  let h = `<thead><tr><th>Arm</th><th class="num">Target gauges</th><th class="num">KGE there</th><th class="num">All ${D.n_dam} dam gauges</th><th class="num">Controls, max</th><th class="num">Median NSE</th></tr></thead><tbody>`;
+  ["trained", "replay", "control"].forEach(g => {
+    h += `<tr><td class="grp" colspan="6">${g === "trained" ? "Trained" : g === "replay" ? "Replay of offline fits" : "Control"}</td></tr>`;
+    D.arms.filter(a => a.group === g).forEach(a => {
+      h += `<tr${a.key === D.featured ? ' class="hl"' : ""}><td>${a.label}<div class="note m">${a.run.replace("-train-and-test", "")}</div></td><td class="num">${sg(a.target.m)}</td><td class="num">${sg(a.target_kge.m)}</td><td class="num">${a.group === "replay" ? "n/a" : sg(a.dam_all.m)}</td><td class="num">${a.ctl_max.toFixed(4)}</td><td class="num">${a.median_nse.toFixed(4)}</td></tr>`;
+    });
+  });
+  tbl.innerHTML = h + "</tbody>";
+  document.getElementById("armTbl").insertAdjacentHTML("afterend", `<p class="note">Replays arm only the 202 dams on the target gauges' reaches, so their all-dam-gauge change is not comparable and is left out. The first rule-curve arm (“+ rule curve, first try”) predates the water accounting fixes.</p>`);
+
+  // Attribution table.
+  const at = D.cap_attr;
+  const pick = (k) => Object.entries(at).find(([n]) => n.startsWith(k));
+  const attr = [
+    ["One hour of reservoir storage, cap off", "hour of storage"],
+    ["The cap by itself", "cap alone"],
+    ["Fitted per-dam residence time, without the cap", "fitted T0 | no cap"],
+    ["Fitted per-dam residence time, with the cap", "fitted T0 | cap"],
+    ["Rule curve on top of the fitted residence time, with the cap", "rule curve over T0 | cap"],
+  ];
+  let ah = `<thead><tr><th>Paired increment at the 117 target gauges</th><th class="num">Median change in NSE</th><th class="num">Up / down</th></tr></thead><tbody>`;
+  attr.forEach(([lab, key]) => { const e = pick(key); if (!e) return; const r = e[1];
+    ah += `<tr><td>${lab}</td><td class="num">${sg(r.median)} [${sg(r.ci[0])}, ${sg(r.ci[1])}]</td><td class="num">${r.up} / ${r.down}</td></tr>`; });
+  document.getElementById("attrTbl").innerHTML = ah + "</tbody>";
+
+  // Water table.
+  let wh = `<thead><tr><th>Arm</th><th class="num">Dams</th><th class="num">≥ 0.5 %</th><th class="num">≥ 5 %</th><th class="num">90th pct</th><th class="num">Target, all</th><th class="num">Target, clean</th></tr></thead><tbody>`;
+  D.arms.filter(a => a.dams !== undefined).forEach(a => {
+    wh += `<tr${a.key === D.featured ? ' class="hl"' : ""}><td>${a.label}</td><td class="num">${a.dams}</td><td class="num">${a.ge05}</td><td class="num">${a.ge5}</td><td class="num">${(a.p90 * 100).toFixed(2)} %</td><td class="num">${sg(a.target.m)}</td><td class="num">${sg(a.clean.m)} <span class="muted">(n=${a.clean.n})</span></td></tr>`;
+  });
+  document.getElementById("waterTbl").innerHTML = wh + "</tbody>";
+
+  // By DOR and purpose.
+  const binRows = [];
+  D.bins.forEach(b => { binRows.push({ label: `DOR ${b.lab}, all`, p: b.all, color: "var(--dam)" }); binRows.push({ label: `on-reach`, p: b.onr, color: "var(--dam)", hollow: true }); });
+  dotWhisker(document.getElementById("binFig"), binRows, -0.01, 0.05, [0, 0.02, 0.04], { narrow: true });
+  const pRows = [];
+  D.purposes.forEach(p => { pRows.push({ label: `${p.lab}`, p: p.all, color: "var(--dam)" }); pRows.push({ label: `DOR above 0.5`, p: p.hi, color: "var(--dam)", hollow: true }); });
+  dotWhisker(document.getElementById("purpFig"), pRows, -0.01, 0.05, [0, 0.02, 0.04], { narrow: true });
+  const fl = D.purposes.find(p => p.lab === "Flood Risk Reduction"), ir = D.purposes.find(p => p.lab === "Irrigation");
+  document.getElementById("whereRes").textContent = `Median change over all ${D.n_dam} dam gauges ${sg(F.dam_all.m)}; flood-control dams ${sg(fl.all.m)} (DOR above 0.5: ${sg(fl.hi.m)}); irrigation dams ${sg(ir.all.m)}.`;
+
+  // Map.
+  const cls = [[-1e9, -0.05, "--dv6"], [-0.05, -0.01, "--dv5"], [-0.01, -0.002, "--dv4"], [-0.002, 0.002, "--dv3"], [0.002, 0.01, "--dv2"], [0.01, 0.05, "--dv1"], [0.05, 1e9, "--dv0"]];
+  const labs = ["below −0.05", "−0.05 to −0.01", "−0.01 to −0.002", "about 0", "+0.002 to +0.01", "+0.01 to +0.05", "above +0.05"];
+  document.getElementById("mapLegend").innerHTML = "Change in NSE, best trained arm: " + cls.map((c, i) => `<span><i class="dot" style="background:var(${c[2]})"></i>${labs[i]}</span>`).join("");
+  (function drawMap() {
+    const host = document.getElementById("mapFig");
+    const svg = el("svg", { viewBox: `0 0 ${D.map.w} ${D.map.h}`, class: "map", role: "img", "aria-label": "Map of dam gauges coloured by change in NSE" }, host);
+    D.map.regions.forEach(r => { el("path", { d: r.d, class: "reg" }, svg); const t = el("text", { x: r.lx, y: r.ly, "text-anchor": "middle", class: "reglab" }, svg); t.textContent = r.huc; });
+    el("path", { d: D.map.outline, class: "nation" }, svg);
+    const dams = D.gauges.filter(g => g.role === "dam" && g.x !== null).sort((a, b) => Math.abs(a.d) - Math.abs(b.d));
+    dams.forEach(g => {
+      const c = cls.find(c => g.d > c[0] && g.d <= c[1]) || cls[3];
+      const r = 3 + 2.2 * Math.min(Math.log10(1 + (g.dor || 0) * 10), 2);
+      const pt = el("circle", { cx: g.x, cy: g.y, r: r.toFixed(2), fill: `var(${c[2]})`, stroke: "var(--surface)", "stroke-width": 0.9 }, svg);
+      bind(pt, `<b>${g.id}</b> ${g.name}<br>DOR ${g.dor}, ${g.purpose || "n/a"}${g.on_reach ? ", dam on reach" : ""}<br>no-dam NSE ${g.nse_off.toFixed(3)}<br>change ${sg(g.d)} (KGE ${sg(g.dk)})`);
+    });
+  })();
+
+  // Hydrographs.
+  const tg = Object.keys(D.hyd);
+  const gIdx = Object.fromEntries(D.gauges.map(g => [g.id, g]));
+  const byGain = tg.slice().sort((a, b) => gIdx[b].d - gIdx[a].d);
+  const gSel = document.getElementById("gSel"), ySel = document.getElementById("ySel");
+  byGain.forEach(s => { const g = gIdx[s]; const o = document.createElement("option"); o.value = s; o.textContent = `${s} ${g.name} (${sg(g.d, 3)})`; gSel.appendChild(o); });
+  const wys = []; for (let y = 1996; y <= 2010; y++) wys.push(y);
+  ySel.innerHTML = `<option value="all">All test years</option>` + wys.map(y => `<option value="${y}">WY${y}</option>`).join("");
+  function drawHyd() {
+    const s = gSel.value, g = gIdx[s], H = D.hyd[s], wy = ySel.value;
+    document.getElementById("gMeta").textContent = `${s} · DOR ${g.dor} · ${g.purpose} · no-dam NSE ${g.nse_off.toFixed(3)} · change ${sg(g.d)} · KGE change ${sg(g.dk)}`;
+    const idx = D.weeks.map((w, i) => i).filter(i => { if (wy === "all") return true; const d = new Date(D.weeks[i]); const y = d.getUTCMonth() >= 9 ? d.getUTCFullYear() + 1 : d.getUTCFullYear(); return String(y) === wy; });
+    const host = document.getElementById("hydFig"); host.innerHTML = "";
+    const W = Math.max(host.clientWidth, 320), Ht = 300, m = { l: 52, r: 12, t: 12, b: 30 };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${Ht}`, height: Ht }, host);
+    const vals = idx.flatMap(i => [H.o[i], H.n[i], H.f[i]]).filter(v => v !== null);
+    const ymax = Math.max(...vals) * 1.05 || 1;
+    const X = k => m.l + (k / Math.max(idx.length - 1, 1)) * (W - m.l - m.r), Y = v => m.t + (1 - v / ymax) * (Ht - m.t - m.b);
+    const tickStep = Math.pow(10, Math.floor(Math.log10(ymax))) * (ymax / Math.pow(10, Math.floor(Math.log10(ymax))) > 4 ? 1 : 0.5);
+    for (let v = 0; v <= ymax; v += tickStep) { el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), class: "gridline" }, svg); const t = el("text", { x: m.l - 6, y: Y(v) + 4, "text-anchor": "end", class: "axis" }, svg); t.textContent = v >= 100 ? v.toFixed(0) : v.toPrecision(2); }
+    const yl = el("text", { x: m.l, y: m.t - 2, class: "axlab" }, svg); yl.textContent = "m³/s, weekly mean";
+    [["o", "l-obs"], ["n", "l-nodam"], ["f", "l-dam"]].forEach(([k, c]) => {
+      let d = "", pen = false;
+      idx.forEach((i, j) => { const v = H[k][i]; if (v === null) { pen = false; return; } d += (pen ? "L" : "M") + X(j).toFixed(1) + " " + Y(v).toFixed(1); pen = true; });
+      el("path", { d, class: c }, svg);
+    });
+    const step = wy === "all" ? 52 : 4;
+    idx.forEach((i, j) => { if (j % step === 0) { const t = el("text", { x: X(j), y: Ht - 10, "text-anchor": "middle", class: "axis" }, svg); t.textContent = wy === "all" ? D.weeks[i].slice(0, 4) : D.weeks[i].slice(5, 10); } });
+    const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: Ht - m.t - m.b, fill: "transparent" }, svg);
+    hit.addEventListener("pointermove", e => { const r = svg.getBoundingClientRect(); const px = (e.clientX - r.left) * (W / r.width); const j = Math.round((px - m.l) / (W - m.l - m.r) * (idx.length - 1)); if (j < 0 || j >= idx.length) return hide(); const i = idx[j]; const f = v => v === null ? "n/a" : v.toFixed(2); show(e, `<b>week of ${D.weeks[i]}</b><br>observed ${f(H.o[i])}<br>no-dam ${f(H.n[i])}<br>dam arm ${f(H.f[i])}`); });
+    hit.addEventListener("pointerleave", hide);
+  }
+  gSel.addEventListener("change", drawHyd); ySel.addEventListener("change", drawHyd);
+  document.getElementById("pBest").onclick = () => { gSel.value = byGain[0]; drawHyd(); };
+  document.getElementById("pMed").onclick = () => { gSel.value = byGain[Math.floor(byGain.length / 2)]; drawHyd(); };
+  document.getElementById("pWorst").onclick = () => { gSel.value = byGain[byGain.length - 1]; drawHyd(); };
+  gSel.value = byGain[Math.floor(byGain.length / 4)];
+
+  function redraw() { drawGap(); drawHyd(); }
+  redraw();
+  let raf = 0;
+  new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(redraw); }).observe(document.querySelector(".wrap"));
+})();
+</script>
