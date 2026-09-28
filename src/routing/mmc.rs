@@ -325,6 +325,15 @@ impl<I: Backend> ArmedRelease<I> {
 /// in-step outflow at `lb` (a second solve with the lateral increment
 /// `δ/c4`) would conserve both.
 ///
+/// KNOWN FAILURE on the additive row (v4 re-evaluations, 2026-09-28): a debt
+/// larger than the dam's storage pins its outflow at `lb`, where the
+/// channel's Cunge `K`, `X` (evaluated at the dam's own `Q_t`) are days and
+/// 0.5, so `c1` is about −0.5; every rising step of the upstream inflow then
+/// clamps and owes about `K·X·ΔI`, while the wedge's release on falling
+/// steps (`x > lb`) passes downstream instead of repaying. The debt pumps
+/// itself up (replay L2: a dam owing 3.7x its 15-year inflow).
+/// `.claude/skills/ddrs-dev/references/config.md` §Reservoirs, `dam_floor`.
+///
 /// The owed state is on the inner backend, outside the autodiff tape: the
 /// repayment is a constant cut to `q'`. Training therefore sees neither the
 /// debt a flux incurs nor the later repayment as a consequence of `θ`, `T0`

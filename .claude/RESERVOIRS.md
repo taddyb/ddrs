@@ -144,7 +144,10 @@ change.
   the forgiven storage plus the below-floor outflow, which closes the dam row's volume balance;
   v3 logged `Σ max(lb − x, 0)·dt`, 3-8x too small); `release_head.dam_floor: carry` (or
   `params.reservoir_dam_floor` for a fixed table, v4) makes the floor mass-conserving: the created
-  volume is owed and repaid out of the dam's later inflow (detached state; `tests/reservoir_dam_floor.rs`);
+  volume is owed and repaid out of the dam's later inflow (detached state; `tests/reservoir_dam_floor.rs`),
+  BUT on the additive row it pumps debt once a dam is pinned at the floor (Cunge `K` at `Q = lb`,
+  `c1 ≈ −0.5`; see skills/ddrs-dev/references/config.md `dam_floor`), so carry runs on that row
+  are not readable yet;
   `release_head.rule_curve_penalty` adds the
   hinge `λ·Σ relu(r − α·Qin)²/Σ Qin²` (detached `Qin`, `src/training/dam_terms.rs`) once per
   optimizer step; the per-dam parameters step with a row-sparse Adam

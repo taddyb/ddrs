@@ -586,6 +586,23 @@ less the below-floor part `created_m3 − storage_m3`, which is owed and repaid 
 replace-row test that is 7 % of the inflow; roughly `dt/D` of the in-debt flux per step). Owing
 only `storage_m3` would conserve their receipt instead; holding the dam's in-step outflow at `lb`
 would conserve both (not built).
+**Known failure, do not read carry runs on the additive row (2026-09-28, v4 re-evaluations).**
+Once a dam owes more than its storage, the repayment (all of `Qin − lb`) pins its outflow at the
+floor, where the additive row's channel `K`, `X` (Cunge, evaluated at the dam's own `Q_t`) go to
+days and 0.5: `c1 ≈ −K·X/(K(1 − X) + T)`, about −0.5. Every rising step of the upstream inflow
+then clamps and owes about `K·X·ΔI`, while the wedge's release on falling steps (`x > lb`)
+passes downstream instead of repaying: a debt pump. Measured: replay L2 carry
+(`2026-09-28T01-11-35Z`), 21 of 202 dams end owing > 0.5 % of their inflow; COMID 74038104
+(T 1.67 d) clamps 25,813 of 131,130 test steps (forgive: 2,219), owes 3.7x its 15-year inflow
+and repays all of it, i.e. passes nothing downstream for the whole period. S3v3 carry
+(`2026-09-28T01-11-45Z`): 25 of 675 dams repay > 50 % of their inflow; COMID 74037973 goes from
+13 forgive clamps to 26,699. Median NSE falls (L2 0.7135 -> 0.7047, L4 0.7165 -> 0.7059, S3v3
+0.7184 -> 0.7047). A synthetic chain reproduces it (30 days, diurnal upstream inflow, 1e7 m³
+initial debt at T 0.05 d: 232 clamp steps, 1.95e7 m³ new debt, the whole inflow repaid);
+without the diurnal swing, or with a debt smaller than the storage, there is none. The replace
+row (`K = T`, `X = 0`, `c1 = dt/D > 0`) and the unit tests' constant-`K` additive row do not
+pump. A fix has to reclaim the wedge's release while in debt (retain `x − lb` after the solve,
+or re-solve with the dam's in-step outflow held at `lb`), not only cap the pre-solve repayment.
 The owed state is DETACHED (inner backend, a constant cut to `q'`): training sees neither the
 debt a flux incurs nor its repayment as a function of `θ`, `T0` or the routing parameters; the
 gradient through a clamped step is still zero, the repayment acts like a change to the forcing,
