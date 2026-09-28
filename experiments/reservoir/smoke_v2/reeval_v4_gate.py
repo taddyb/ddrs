@@ -13,7 +13,10 @@ W = "/home/tbindas/projects/ddrs/.claude/worktrees/agent-a92e512a7c47c97b4/"
 R = W + ".ddrs/runs/"
 SM = "/home/tbindas/projects/ddrs/.claude/worktrees/reservoir-options/experiments/reservoir/smoke/"
 OFF = "2026-09-27T04-29-33Z-train-and-test"
-status = [l.split() for l in open("/home/tbindas/.claude/jobs/dacd6d8c/tmp/reeval_v4.status") if l.strip()]
+import sys, os
+STATUS = sys.argv[1] if len(sys.argv) > 1 else "/home/tbindas/.claude/jobs/dacd6d8c/tmp/reeval_v4.status"
+OUTJ = sys.argv[2] if len(sys.argv) > 2 else W + "experiments/reservoir/smoke_v2/reeval_v4_gate.json"
+status = [l.split() for l in open(STATUS) if l.strip() and os.path.exists(R + l.split()[1] + "/eval/predictions.zarr")]
 
 
 def load(run):
@@ -59,4 +62,4 @@ for name, run, *_ in status:
     o = out[name]
     print(f"{name:12s} NSE {o['nse']:.4f} KGE {o['kge']:.4f} | dams {o['dams']}: created>=0.5% {o['ge_0p5']}, >=5% {o['ge_5']}, "
           f"p90 {o['p90']:.4%}, max {o['max']:.1%}\n              on-reach DOR>0.5 all: {o['all']}   clean(<0.5%): {o['clean']}")
-json.dump(out, open(W + "experiments/reservoir/smoke_v2/reeval_v4_gate.json", "w"), indent=1)
+json.dump(out, open(OUTJ, "w"), indent=1)
