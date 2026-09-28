@@ -139,8 +139,10 @@ change.
 - **Rule-curve feasibility (v3, 2026-09-27).** The flux is not bounded by the water the dam has;
   where it stores more, the S28 clamp creates water and zeroes the gradient that would push back
   (v2 smoke: 8 % of dam-row steps clamped by the end of training). Three pieces: the clamp is
-  accounted (`MuskingumCunge::dam_account`, per-forward `clamp-created volume` log line, test
-  phase `release_clamp.csv` + `metrics.release_clamp`); `release_head.rule_curve_penalty` adds the
+  accounted (`MuskingumCunge::dam_account`, per-step `dam clamp` log line, test
+  phase `release_clamp.csv` + `metrics.release_clamp`; corrected in v4 to `Σ max(lb − x, 0)·dt/c4`,
+  the forgiven storage plus the below-floor outflow, which closes the dam row's volume balance;
+  v3 logged `Σ max(lb − x, 0)·dt`, 3-8x too small); `release_head.rule_curve_penalty` adds the
   hinge `λ·Σ relu(r − α·Qin)²/Σ Qin²` (detached `Qin`, `src/training/dam_terms.rs`) once per
   optimizer step; the per-dam parameters step with a row-sparse Adam
   (`src/training/lazy_adam.rs`) and `per_dam_l2` applies once per step. Gate on the created

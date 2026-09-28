@@ -159,6 +159,9 @@ struct MicroBatchOutcome<I: Backend> {
     /// This micro-batch's dams for the per-step per-dam terms
     /// (`crate::training::dam_terms`), when the run has per-dam parameters.
     dam_record: Option<crate::training::dam_terms::DamBatchRecord>,
+    /// This forward's per-dam S28 clamp account, one record per dam of the
+    /// window (empty without dam rows), for the step's `dam clamp` log line.
+    dam_clamp: Vec<crate::training::release_eval::DamClampRecord>,
 }
 
 /// Steps 2–6 of the per-mini-batch flow (collate → forward → NaN filter →
@@ -204,9 +207,15 @@ fn run_micro_batch<I: Backend>(
     // back its inputs (phase increments, Ibar, the dams' detached inflow).
     let want_rc = dams.is_some()
         && cfg.release_head.as_ref().is_some_and(|rh| rh.rule_curve && rh.rule_curve_penalty > 0.0);
-    let (pred_hourly, rc_record) = forward_with_release_dams_record::<I>(
+    let (pred_hourly, fwd) = forward_with_release_dams_record::<I>(
         cfg, &tensors, head, release_head, dams, device, false, gate_tau, want_rc,
     );
+    let rc_record = fwd.rule_curve;
+    let dam_clamp = fwd
+        .dam_clamp
+        .as_ref()
+        .map(crate::training::release_eval::account_records)
+        .unwrap_or_default();
     // This batch's dams (their table rows), for the per-dam terms the driver
     // adds ONCE per optimizer step (`crate::training::dam_terms`), not here.
     let dam_record = dams.and_then(|_| {
@@ -308,6 +317,7 @@ fn run_micro_batch<I: Backend>(
         n_at_floor,
         release_t0,
         dam_record,
+        dam_clamp,
     }))
 }
 
@@ -404,6 +414,18 @@ fn rule_curve_log(stats: Option<(f32, usize)>) -> String {
         Some((c, k)) => format!(" rule_curve_|c|_median={c:.4} ({k} dams with gradient)"),
         None => String::new(),
     }
+}
+
+/// One line per optimizer step whose forwards armed dam rows: the S28 clamp
+/// account of the step's dam-windows (every micro-batch's dams, each over its
+/// own window), `crate::training::release_eval::ClampSummary::describe`.
+/// Nothing when no dam was armed.
+fn log_dam_clamp(mini_batch: usize, records: &[crate::training::release_eval::DamClampRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    let summary = crate::training::release_eval::clamp_summary(records);
+    eprintln!("  dam clamp, step {mini_batch}: {}", summary.describe("dam-window"));
 }
 
 /// ` release_T0_median=<d>d (<k> dams)` for the mini-batch log line, or empty.
@@ -542,6 +564,7 @@ pub fn train<I: Backend>(
                     n_at_floor,
                     release_t0,
                     dam_record,
+                    dam_clamp,
                     ..
                 }) = outcome
                 else {
@@ -614,6 +637,7 @@ pub fn train<I: Backend>(
                     rule_curve_log(rc_stats),
                     dam_terms_log(term_values),
                 );
+                log_dam_clamp(state.mini_batch, &dam_clamp);
                 state.mini_batch += 1;
                 mb_done += 1;
                 if let Some(limit) = max_mini_batches {
@@ -636,6 +660,8 @@ pub fn train<I: Backend>(
                 let mut micros_valid = 0usize;
                 // The step's dams, for the per-dam terms added once below.
                 let mut dam_terms = crate::training::dam_terms::DamStepTerms::default();
+                // The step's dam-window clamp accounts, for its log line.
+                let mut step_dam_clamp: Vec<crate::training::release_eval::DamClampRecord> = Vec::new();
 
                 while micros_drawn < accum_steps {
                     let Some(idx) = sampler.next_batch() else { break };
@@ -662,8 +688,10 @@ pub fn train<I: Backend>(
                         n_at_floor,
                         release_t0,
                         dam_record,
+                        dam_clamp,
                     }) = outcome
                     {
+                        step_dam_clamp.extend(dam_clamp);
                         // Scale the mean loss back to a SUM before backward;
                         // the group total is renormalized by 1/Σn below, so
                         // the accumulated gradient is exactly the pooled-mean
@@ -764,6 +792,7 @@ pub fn train<I: Backend>(
                         rule_curve_log(rc_stats),
                         dam_terms_log(term_values),
                     );
+                    log_dam_clamp(state.mini_batch, &step_dam_clamp);
                 }
 
                 state.mini_batch += 1;

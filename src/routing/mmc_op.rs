@@ -46,14 +46,19 @@ pub fn reset_negative_solve_stats() {
     TOTAL_SOLVES.store(0, Ordering::Relaxed);
 }
 
-/// One step's pre-clamp solve `x_sol` and routed inflow `i_t = N·Q_t`, both
-/// full-length `[n]` on the inner backend (no tape), handed out by
-/// [`timestep_forward_with_reservoirs`] for the engine's per-dam clamp
-/// accounting (`MuskingumCunge::dam_account`). They are the op's own saved
-/// primitives, so the account reads exactly what the S28 clamp rewrote.
+/// One step's pre-clamp solve `x_sol`, routed inflow `i_t = N·Q_t` and lateral
+/// coefficient `c4 = 2·dt/D`, all full-length `[n]` on the inner backend (no
+/// tape), handed out by [`timestep_forward_with_reservoirs`] for the engine's
+/// per-dam clamp accounting (`MuskingumCunge::dam_account`). They are the op's
+/// own saved primitives, so the account reads exactly what the S28 clamp
+/// rewrote. `c4` is the dam row's own (after the S19'' / S19'''' dam-row
+/// changes to `D`), so `dt/c4 = D/2` is the lateral volume per unit of `x` on
+/// that row: the account turns a deficit `lb − x` into the lateral inflow that
+/// would have held the row at `lb` (`mmc::DamAccount`).
 pub(crate) struct DamStepDiag<I: Backend> {
     pub x_sol: Tensor<I, 1>,
     pub i_t: Tensor<I, 1>,
+    pub c4: Tensor<I, 1>,
 }
 
 /// Safety margin pulling the S18'/S19' positivity clamp strictly INSIDE the
@@ -2796,7 +2801,11 @@ where
     // destructure above (touch each so a future re-order is caught).
     let _ = (fsi::DEPTH, fsi::BW_RAW);
     if let Some(sink) = dam_diag {
-        *sink = Some(DamStepDiag { x_sol: wrap(x_sol_prim.clone()), i_t: wrap(i_t_prim.clone()) });
+        *sink = Some(DamStepDiag {
+            x_sol: wrap(x_sol_prim.clone()),
+            i_t: wrap(i_t_prim.clone()),
+            c4: wrap(c4_p.clone()),
+        });
     }
 
     // Build TimestepState saving every intermediate the backward needs.

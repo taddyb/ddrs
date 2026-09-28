@@ -552,16 +552,9 @@ where
                         Ok(()) => eprintln!("release clamp -> {}", csv.display()),
                         Err(e) => eprintln!("warning: release_clamp.csv write failed: {e}"),
                     }
-                    let (created, inflow, clamp, steps) =
-                        crate::training::release_eval::pooled_clamp(records);
-                    serde_json::json!({
-                        "n_dams": records.len(),
-                        "created_m3": created,
-                        "inflow_m3": inflow,
-                        "created_share": created / inflow.max(f64::MIN_POSITIVE),
-                        "clamp_steps": clamp,
-                        "steps": steps,
-                    })
+                    // Per-dam created shares, no pooled ratio (cascaded dams
+                    // count the same inflow twice; review v3, finding 6).
+                    crate::training::release_eval::clamp_summary(records).to_json()
                 });
 
                 let median = |xs: &[f32]| -> f32 {

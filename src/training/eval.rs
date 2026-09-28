@@ -402,14 +402,8 @@ pub fn evaluate<I: Backend>(
     // Dam rows: the clamp account over the whole test period, named by COMID.
     let dam_clamp = (!dam_clamp.by_row.is_empty()).then(|| dam_clamp.records(&dam_comids));
     if let Some(records) = dam_clamp.as_ref() {
-        let (created, inflow, clamp, steps) = crate::training::release_eval::pooled_clamp(records);
-        eprintln!(
-            "release clamp (test phase, {} dams): dam-row steps at the discharge clamp {clamp}/{steps} \
-             ({:.3}%); clamp-created volume {created:.4e} of {inflow:.4e} m3 dam inflow ({:.4}%)",
-            records.len(),
-            100.0 * clamp as f64 / (steps as f64).max(1.0),
-            100.0 * created / inflow.max(f64::MIN_POSITIVE),
-        );
+        let summary = crate::training::release_eval::clamp_summary(records);
+        eprintln!("release clamp (test phase, {} dams): {}", records.len(), summary.describe("dam"));
     }
 
     // Final gate: the tau-trim/downsample and zeta-mean readbacks above also

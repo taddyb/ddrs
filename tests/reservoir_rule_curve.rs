@@ -19,9 +19,12 @@
 //!    dataset open.
 //! 6. The engine's per-dam clamp account (`MuskingumCunge::dam_account`):
 //!    a flux that stores more than the dam's inflow forces the S28 clamp, and
-//!    the created volume `Σ max(lb − x, 0)·dt` matches a hand-rolled f64
-//!    recurrence of the dam row; with no rule curve it is exactly zero; the
-//!    inflow is the routed upstream inflow plus the reach's own `q'`.
+//!    the created volume `Σ max(lb − x, 0)·dt/c4` is what the dam row's volume
+//!    balance lacks, read off the routed series alone (inflow + lateral −
+//!    flux-stored − outflow − ΔS), on the replace row and on the additive
+//!    row with its channel wedge; its storage part is `(K(1 − X) + T)/(… + dt/2)`
+//!    of it. With no rule curve it is exactly zero; the inflow is the routed
+//!    upstream inflow plus the reach's own `q'`.
 //! 7. `params.reservoir_dam_row: additive` puts a `fixed` table on the
 //!    additive row: a fixed CSV carrying the learned path's resolved table
 //!    (`T0`, `c = 0`, `Ibar`) routes bitwise like that resolved table under
@@ -535,18 +538,48 @@ fn rule_curve_without_inflow_column_fails_at_dataset_open() {
 // 6. Clamp accounting.
 // ---------------------------------------------------------------------------
 
-/// A headwater dam (row 0 of `0 → 1 → 2`) on the replace row at constant `T`,
-/// constant `q'`, and a rule curve `c = (1, 0, 0, 0)` with `Ibar = 3·q'` in
-/// spring (`sin ω ≈ 1`): the flux stores ~3× the inflow, `q'_eff < 0`, and
-/// the dam row's solve goes below the floor. Returns the engine (after
-/// `forward`) and the routed output `[3, steps + 1]`.
-fn headwater_clamp_case(rule: bool, steps: usize) -> (MuskingumCunge<I>, Vec<f32>) {
+/// `row` of a routed output `[n, steps + 1]`, f64.
+fn series(out: &[f32], steps: usize, row: usize) -> Vec<f64> {
+    out[row * (steps + 1)..(row + 1) * (steps + 1)].iter().map(|&v| v as f64).collect()
+}
+
+/// `Σ dt·(v_t + v_{t+1})/2`, m³ for a series in m³/s.
+fn trapezoid(v: &[f64]) -> f64 {
+    v.windows(2).map(|w| 0.5 * (w[0] + w[1]) * DT_SECONDS as f64).sum()
+}
+
+/// The rule curve's stored volume over the first `steps` steps from `start`
+/// for `c = (1, 0, 0, 0)`: `Σ r·dt = Ibar·(H(ω_steps) − H(ω_0))`, the change in
+/// `S0`, f64 (the increments telescope; `crate::routing::release`).
+fn stored_by_flux(start: NaiveDate, steps: usize, ibar: f64) -> f64 {
+    let w0 = rule_curve_phase_start(start);
+    let dw = OMEGA_RAD_PER_S * DT_SECONDS as f64;
+    ibar * (rule_curve_h(w0 + dw * steps as f64)[0] - rule_curve_h(w0)[0])
+}
+
+/// A diurnal lateral inflow `mean·(1 + amp·sin(2π·s/24))`, rows `0..=steps`.
+fn diurnal(steps: usize, mean: f32, amp: f32) -> Vec<f32> {
+    (0..=steps)
+        .map(|s| mean * (1.0 + amp * (2.0 * std::f32::consts::PI * s as f32 / 24.0).sin()))
+        .collect()
+}
+
+const CLAMP_START: (i32, u32, u32) = (2001, 3, 20);
+
+/// A headwater dam (row 0 of `0 → 1 → 2`) on the replace row at constant
+/// `T = 0.1 d`, a diurnal `q'` between 1 and 9 m³/s, and (with `rule`) a rule
+/// curve `c = (1, 0, 0, 0)` with `Ibar = 7` in spring (`sin ω ≈ 1`), which
+/// stores more than the dam receives for part of every day and forces the
+/// clamp there. Returns the engine (after `forward`), the routed output
+/// `[3, steps + 1]` and the dam's `q'`.
+fn headwater_clamp_case(rule: bool, steps: usize) -> (MuskingumCunge<I>, Vec<f32>, Vec<f32>) {
     let device = Device::default();
-    let q_dam = 5.0_f32;
-    let q: Vec<f32> = (0..=steps).flat_map(|_| [q_dam, 0.0, 0.0]).collect();
+    let q_dam = diurnal(steps, 5.0, 0.8);
+    let q: Vec<f32> = q_dam.iter().flat_map(|&v| [v, 0.0, 0.0]).collect();
     let mut mc = engine(&Config::default(), chain3(), &q);
     let t = |v: &[f32]| Tensor::<AB, 1>::from_floats(v, &device);
-    let start = NaiveDate::from_ymd_opt(2001, 3, 20).unwrap();
+    let (y, m, d) = CLAMP_START;
+    let start = NaiveDate::from_ymd_opt(y, m, d).unwrap();
     mc.set_dam_release(DamRelease {
         rows: vec![0],
         t0_days: t(&[0.1]),
@@ -555,74 +588,154 @@ fn headwater_clamp_case(rule: bool, steps: usize) -> (MuskingumCunge<I>, Vec<f32
         dam_row: DamRow::Replace,
         rule_curve: rule.then(|| RuleCurve {
             coeffs: Tensor::<AB, 1>::from_floats([1.0_f32, 0.0, 0.0, 0.0], &device).reshape([1, 4]),
-            inflow_mean: t(&[3.0 * q_dam]),
+            inflow_mean: t(&[7.0]),
             phase0: rule_curve_phase_start(start),
         }),
     })
     .unwrap();
     let out = host2(mc.forward());
-    (mc, out)
+    (mc, out, q_dam)
 }
 
+/// The created volume is what the dam row's volume balance lacks, read off
+/// the routed series alone. Replace row at constant `T`, headwater (`I = 0`),
+/// so `S = T·Q + S0` and, over the window,
+/// `created = Σ dt(Q_t + Q_{t+1})/2 + T·(Q_N − Q_0) + Σ r·dt − Σ q'·dt`.
+/// The first build logged `Σ max(lb − x, 0)·dt`, a rate deficit for one
+/// step; that is `dt/(T + dt/2)` = 0.35x of this at `T = 0.1 d`.
 #[test]
-fn clamp_account_matches_a_hand_computation_when_the_flux_forces_the_clamp() {
-    let steps = 72;
-    let (mc, out) = headwater_clamp_case(true, steps);
+fn clamp_account_closes_the_dam_row_volume_balance_on_the_replace_row() {
+    let steps = 240;
+    let (mc, out, q_dam) = headwater_clamp_case(true, steps);
     let acc = mc.dam_account().expect("dam rows are armed");
-    assert_eq!(acc.rows, vec![0]);
-    assert_eq!(acc.steps, steps as u64);
+    assert_eq!((acc.rows.clone(), acc.steps), (vec![0], steps as u64));
+    let (dt, lb) = (DT_SECONDS as f64, 1e-4_f32);
+    let t_s = 0.1_f32 as f64 * 86_400.0;
 
-    // Hand computation of the dam row (headwater: I = 0), replace row at
-    // constant T = 0.1 d: x = c3·Q_t + c4·(q' − r_s), Q_{t+1} = max(x, lb),
-    // c3 = (2T − dt)/(2T + dt), c4 = 2dt/(2T + dt); r_s = Ibar/dt·(c·ΔH_s)
-    // with ΔH_s the exact one-hour difference of H at the continuous phase.
-    let (dt, lb) = (DT_SECONDS as f64, 1e-4_f64);
-    let t_sec = 0.1 * 86_400.0;
-    let (c3, c4) = ((2.0 * t_sec - dt) / (2.0 * t_sec + dt), 2.0 * dt / (2.0 * t_sec + dt));
-    let (q_dam, ibar) = (5.0_f64, 15.0_f64);
-    let w0 = rule_curve_phase_start(NaiveDate::from_ymd_opt(2001, 3, 20).unwrap());
-    let dw = OMEGA_RAD_PER_S * dt;
-    let mut q_t = out[0] as f64; // the engine's cold start, Q_0 = q'_0
-    let (mut created, mut clamp_steps) = (0.0_f64, 0u64);
-    for s in 0..steps {
-        let dh = rule_curve_h(w0 + dw * (s + 1) as f64)[0] - rule_curve_h(w0 + dw * s as f64)[0];
-        let r = ibar / dt * dh;
-        let x = c3 * q_t + c4 * (q_dam - r);
-        if x < lb {
-            clamp_steps += 1;
-            created += (lb - x) * dt;
-        }
-        q_t = x.max(lb);
-        // The engine's routed dam outflow follows the same recurrence.
-        let engine_q = out[s + 1] as f64;
-        assert!((engine_q - q_t).abs() <= 1e-3 * q_t.abs().max(1.0), "step {s}: engine {engine_q} vs hand {q_t}");
-    }
-    let inflow = steps as f64 * q_dam * dt;
-    println!(
-        "clamp account: created {:.6e} m3 (hand {created:.6e}), inflow {:.6e} m3 (hand {inflow:.6e}), \
-         clamp steps {} (hand {clamp_steps}) of {steps}",
-        acc.created_m3[0], acc.inflow_m3[0], acc.clamp_steps[0]
+    // The case mixes clamped and free steps; a clamped step leaves Q = lb.
+    let dam = series(&out, steps, 0);
+    let at_floor = out[1..=steps].iter().filter(|&&v| v == lb).count() as u64;
+    assert_eq!(acc.clamp_steps[0], at_floor, "clamp steps = routed steps at the floor");
+    assert!(
+        at_floor > steps as u64 / 10 && at_floor < 9 * steps as u64 / 10,
+        "the case must clamp on some steps and not others ({at_floor} of {steps})"
     );
-    assert!(clamp_steps > steps as u64 / 2, "the case must actually force the clamp ({clamp_steps} steps)");
-    assert_eq!(acc.clamp_steps[0], clamp_steps, "clamp steps");
-    assert!((acc.created_m3[0] - created).abs() <= 1e-4 * created, "created {} vs hand {created}", acc.created_m3[0]);
-    assert!((acc.inflow_m3[0] - inflow).abs() <= 1e-5 * inflow, "inflow {} vs hand {inflow}", acc.inflow_m3[0]);
-    assert_eq!(acc.pooled(), (acc.created_m3[0], acc.inflow_m3[0]));
-    assert_eq!(acc.clamp_share(), (clamp_steps, steps as u64));
+
+    let (y, m, d) = CLAMP_START;
+    let v_lat: f64 = q_dam[..steps].iter().map(|&v| v as f64 * dt).sum();
+    let v_flux = stored_by_flux(NaiveDate::from_ymd_opt(y, m, d).unwrap(), steps, 7.0);
+    let outflow = trapezoid(&dam);
+    let d_storage = t_s * (dam[steps] - dam[0]);
+    let by_balance = outflow + d_storage + v_flux - v_lat;
+    let created = acc.created_m3[0];
+    println!(
+        "replace row: lateral {v_lat:.6e}, flux-stored {v_flux:.6e}, outflow {outflow:.6e}, dS {d_storage:.6e} m3; \
+         created {created:.6e} (balance {by_balance:.6e}), storage part {:.6e}, {at_floor}/{steps} steps clamped",
+        acc.storage_m3[0]
+    );
+    assert!(by_balance > 0.05 * v_lat, "the case must create a visible volume ({by_balance:.3e} of {v_lat:.3e})");
+    assert!(
+        (created - by_balance).abs() <= 1e-4 * by_balance,
+        "created {created:.6e} vs the volume balance {by_balance:.6e} (rel {:.2e})",
+        (created - by_balance).abs() / by_balance
+    );
+    // The split: storage (K(1 − X) + T)·δ = T·δ of the total (T + dt/2)·δ.
+    let ratio = acc.storage_m3[0] / created;
+    let want = t_s / (t_s + 0.5 * dt);
+    assert!((ratio - want).abs() <= 1e-5, "storage share {ratio} vs T/(T + dt/2) = {want}");
+
     // The penalty's inflow record: Qin = I_t + q' = q' on a headwater dam.
     let qin: Vec<f32> = mc.dam_inflow_record().expect("rule curve armed").into_data().to_vec().unwrap();
-    assert_eq!(qin.len(), steps);
-    assert!(qin.iter().all(|&v| v == q_dam as f32), "Qin on a headwater dam is its own q'");
+    assert_eq!(qin, q_dam[..steps].to_vec(), "Qin on a headwater dam is its own q'");
+}
+
+/// The same balance on the additive row, for an interior dam: `S` carries the
+/// reach's own wedge, `S = K·X·I + (K(1 − X) + T)·Q (+ S0)`, and the inflow is
+/// the routed upstream series. `K` and `X` are held constant so that `S` is a
+/// state function the balance can be read with: `ddr_match` takes `X` from the
+/// constant `x_storage` (0.3), and a velocity floor of 2 m/s, above every
+/// velocity this case reaches, fixes the celerity at `2·5/3` m/s.
+#[test]
+fn clamp_account_closes_the_dam_row_volume_balance_on_the_additive_row() {
+    let device = Device::default();
+    let steps = 240;
+    let mut cfg = Config::default();
+    cfg.params.ddr_match = true;
+    cfg.params.attribute_minimums.velocity = 2.0;
+    let length = 10_000.0_f32;
+    let mut dense = vec![0.0_f32; 9];
+    dense[3] = 1.0; // 0 -> 1
+    dense[3 + 4] = 1.0; // 1 -> 2
+    let adjacency = SparseAdjacency::from_dense(3, &dense, vec![length; 3], vec![0.001; 3]);
+    // Upstream reach: constant 4 m³/s (it never clamps, so the dam's solve and
+    // the next step read the same inflow). The dam's own q' is 1..3 m³/s.
+    let q_dam = diurnal(steps, 2.0, 0.5);
+    let q: Vec<f32> = q_dam.iter().flat_map(|&v| [4.0, v, 0.0]).collect();
+    let mut mc = engine(&cfg, adjacency, &q);
+    let t = |v: &[f32]| Tensor::<AB, 1>::from_floats(v, &device);
+    let (y, m, d) = CLAMP_START;
+    let start = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+    let (t_days, ibar) = (0.05_f32, 6.2_f32);
+    mc.set_dam_release(DamRelease {
+        rows: vec![1],
+        t0_days: t(&[t_days]),
+        seasonal: None,
+        phase: seasonal_phase(start, steps + 1),
+        dam_row: DamRow::Additive,
+        rule_curve: Some(RuleCurve {
+            coeffs: Tensor::<AB, 1>::from_floats([1.0_f32, 0.0, 0.0, 0.0], &device).reshape([1, 4]),
+            inflow_mean: t(&[ibar]),
+            phase0: rule_curve_phase_start(start),
+        }),
+    })
+    .unwrap();
+    let out = host2(mc.forward());
+    let acc = mc.dam_account().expect("dam rows are armed");
+    let dt = DT_SECONDS as f64;
+
+    // The engine's own f32 K and X.
+    let celerity = 2.0_f32 * (5.0_f32 / 3.0_f32);
+    let k = (length / celerity) as f64;
+    let x = 0.3_f32 as f64;
+    let t_s = t_days as f64 * 86_400.0;
+    let (up, dam) = (series(&out, steps, 0), series(&out, steps, 1));
+    assert!(up.iter().all(|&v| (v - 4.0).abs() < 1e-5), "the upstream reach holds its steady 4 m3/s");
+    let at_floor = out[steps + 2..2 * (steps + 1)].iter().filter(|&&v| v == 1e-4).count() as u64;
+    assert_eq!(acc.clamp_steps[0], at_floor);
+    assert!(at_floor > steps as u64 / 10 && at_floor < 9 * steps as u64 / 10, "{at_floor} of {steps} clamped");
+
+    let storage = |i: usize| k * x * up[i] + (k * (1.0 - x) + t_s) * dam[i];
+    let v_in = trapezoid(&up);
+    let v_lat: f64 = q_dam[..steps].iter().map(|&v| v as f64 * dt).sum();
+    let v_flux = stored_by_flux(start, steps, ibar as f64);
+    let outflow = trapezoid(&dam);
+    let d_storage = storage(steps) - storage(0);
+    let by_balance = outflow + d_storage + v_flux - v_lat - v_in;
+    let created = acc.created_m3[0];
+    println!(
+        "additive row: inflow {v_in:.6e}, lateral {v_lat:.6e}, flux-stored {v_flux:.6e}, outflow {outflow:.6e}, \
+         dS {d_storage:.6e} m3; created {created:.6e} (balance {by_balance:.6e}), {at_floor}/{steps} steps clamped"
+    );
+    assert!(by_balance > 0.01 * (v_in + v_lat), "the case must create a visible volume");
+    assert!(
+        (created - by_balance).abs() <= 1e-4 * by_balance,
+        "created {created:.6e} vs the volume balance {by_balance:.6e} (rel {:.2e})",
+        (created - by_balance).abs() / by_balance
+    );
+    let held = k * (1.0 - x) + t_s;
+    let (ratio, want) = (acc.storage_m3[0] / created, held / (held + 0.5 * dt));
+    assert!((ratio - want).abs() <= 1e-5, "storage share {ratio} vs (K(1 - X) + T)/(... + dt/2) = {want}");
 }
 
 #[test]
 fn clamp_account_is_zero_without_a_rule_curve() {
     let steps = 72;
-    let (mc, _) = headwater_clamp_case(false, steps);
+    let (mc, _, q_dam) = headwater_clamp_case(false, steps);
     let acc = mc.dam_account().expect("dam rows are armed");
     assert_eq!(acc.created_m3, vec![0.0], "no rule curve: the clamp creates nothing");
+    assert_eq!(acc.storage_m3, vec![0.0]);
     assert_eq!(acc.clamp_steps, vec![0]);
-    let inflow = steps as f64 * 5.0 * DT_SECONDS as f64;
+    let inflow: f64 = q_dam[..steps].iter().map(|&v| v as f64 * DT_SECONDS as f64).sum();
     assert!((acc.inflow_m3[0] - inflow).abs() <= 1e-5 * inflow);
     assert!(mc.dam_inflow_record().is_none(), "no rule curve: no penalty record");
 }
@@ -662,6 +775,7 @@ fn clamp_account_inflow_is_routed_upstream_plus_own_lateral() {
         let rel = (acc.inflow_m3[0] - expected).abs() / expected;
         assert!(rel < 1e-5, "option C {option_c}: inflow {} vs {expected} (rel {rel:.2e})", acc.inflow_m3[0]);
         assert_eq!(acc.created_m3, vec![0.0]);
+        assert_eq!(acc.storage_m3, vec![0.0]);
     }
 }
 

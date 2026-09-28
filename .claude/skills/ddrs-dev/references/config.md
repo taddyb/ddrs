@@ -509,15 +509,28 @@ fails at dataset open. The resolved test-phase table carries `c1s, c1c, c2s, c2c
 `T0` and `inflow_mean_m3s` per dam (also in `release_params.csv`), and a `fixed` table may carry
 the same optional columns (all four `c` or none; `c` requires `inflow_mean_m3s`). Training logs
 `rule_curve_|c|_median=<v> (<k> dams with gradient)` per optimizer step and, whenever dams are
-armed, `dam-row steps at the discharge clamp: <k>/<m> (<p>%); clamp-created volume <c> of <v> m3
-dam inflow (<s>%)` per forward (training). The created volume is `Σ max(lb − x, 0)·dt` over the
-dam rows' pre-clamp solves, the inflow `Σ (I_t + q')·dt` (routed upstream inflow plus the reach's
-own `q'`, before the flux); the engine keeps both per dam (`MuskingumCunge::dam_account`). The
-test phase sums them over every chunk and writes `<run>/release_clamp.csv`
-(`COMID,created_m3,inflow_m3,clamp_steps,steps`, every dam armed at least once, any dam table),
-logs the pooled `release clamp (test phase, <n> dams): ...` line and records it as
-`metrics.release_clamp` in the manifest. Read an S3/S4-type arm only when the created share is
-negligible. Tests:
+armed, one `dam clamp, step <N>: dam-row steps at the discharge clamp <k>/<m> (<p>%);
+clamp-created volume <c> m3 (storage <s>); dam inflow <v> m3 (summed per dam); created share per
+dam-window: median, p90, max, <j> of <n> >= 0.5%, <l> >= 5%` line per optimizer step (training;
+over every micro-batch's dams, each over its own window). The created volume (corrected in v4,
+review v3 finding 1) is `Σ max(lb − x, 0)·dt/c4` over the dam rows' pre-clamp solves `x`:
+`dt/c4 = D/2 = K(1 − X) + T_{t+1} + dt/2`, so it is the storage the clamp forgives
+(`(K(1 − X) + T)·δ`, the `storage` part) plus the below-floor outflow the solve passed down
+(`dt/2·δ`), and equals the lateral volume that would have held the row at `lb`. It is exactly
+what the dam row's volume balance lacks with its routed series as the outflow (derivation in
+`src/routing/mmc.rs` `DamAccount`; `tests/reservoir_rule_curve.rs` mass-balance tests). The v3
+build logged `Σ max(lb − x, 0)·dt`, a one-step rate deficit, too small by `D/(2·dt)` (3-8x at
+`T` of 0.1-0.3 d; more with the channel's `K`); v3 run logs and `release_clamp.csv` files carry
+that. The inflow is `Σ (I_t + q')·dt` (routed upstream inflow plus the reach's own `q'`, before
+the flux); the engine keeps all three per dam (`MuskingumCunge::dam_account`). There is no
+pooled share: a dam below another counts the upper dam's outflow in its own inflow (review v3,
+finding 6), so shares are per dam. The test phase sums the account over every chunk and writes
+`<run>/release_clamp.csv` (`COMID,created_m3,storage_m3,inflow_m3,created_share,clamp_steps,steps`,
+every dam armed at least once, any dam table), logs `release clamp (test phase, <n> dams): ...`
+and records `metrics.release_clamp` (`n_dams`, `clamp_steps`, `steps`, `created_m3`, `storage_m3`,
+`created_share_{median,p90,max}`, `n_dams_created_share_ge_{0p5,5}pct`). Read an S3/S4-type arm
+only after excluding or flagging every scored dam whose created share is above about 0.5 %.
+Tests:
 `tests/reservoir_rule_curve.rs`, `tests/release_freeze_routing.rs` (frozen + rule curve),
 `src/nn/dam_params.rs`, `src/data/store/reservoirs.rs`, `src/config.rs` (`rule_curve_*`,
 `*_per_dam_*`).

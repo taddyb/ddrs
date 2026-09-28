@@ -232,14 +232,57 @@ impl<I: Backend> ArmedRelease<I> {
 /// inner backend (no tape, no host sync per step) over every step `forward`
 /// routes while dam rows are armed (option C rows or a release).
 ///
-/// Per step and dam row `d`, with `x` the pre-clamp solve, `lb` the
-/// `discharge` floor, `I_t = (N·Q_t)_d` the routed inflow at the step start
-/// and `q'_d` the dam reach's lateral inflow after the floor (and the
-/// sub-reach divisor) but BEFORE the rule-curve flux:
+/// # The water the clamp creates
+///
+/// A dam row is the trapezoid on its storage
+/// `S = K·X·I + (K·(1 − X) + T)·Q (+ S0)`: on the additive row `K`, `X` are the
+/// reach's own at this step and `T` the reservoir's; on the replace row `K = T`,
+/// `X = 0`; with a rule curve `S0` moves by the flux, which is already off
+/// `q'_eff`. For the pre-clamp solve `x` the step is exact:
 ///
 /// ```text
-/// created_d     += max(lb − x_d, 0)·dt       m³  (water the clamp creates)
-/// inflow_d      += (I_t,d + q'_d)·dt         m³  (the dam's inflow)
+/// S(I*_{t+1}, x) − S(I_t, Q_t) = dt·[(I_t + I*_{t+1})/2 + q'_eff − (Q_t + x)/2]
+/// D = 2K(1 − X) + 2T_{t+1} + dt,   c4 = 2·dt/D
+/// ```
+///
+/// (`I*_{t+1} = (N·x)_d`, the upstream rows' pre-clamp solve.) S28 then sets
+/// `Q_{t+1} = max(x, lb)`. Where `x < lb`, with `δ = lb − x` and the dam row's
+/// routed series `Q` as its outflow, the step's balance gains two terms:
+///
+/// ```text
+/// storage  (K(1 − X) + T_{t+1})·δ = (dt/c4 − dt/2)·δ   S(·, lb) − S(·, x): forgiven storage
+/// outflow  (dt/2)·δ                                    the routed series reports lb at the
+///                                                      step end; the solve passed x < lb to
+///                                                      the rows below (a negative outflow
+///                                                      when x < 0)
+/// created  = δ·dt/c4 = δ·D/2
+/// ```
+///
+/// `δ·dt/c4` is also the lateral volume that would have held the row at `lb`:
+/// `A = I − c1·N` is unit lower triangular and `q'_d` enters only row `d`, so
+/// `∂x_d/∂q'_d = c4_d`, and `δ/c4` m³/s over `dt`. Summed over a window, the
+/// dam row's volume balance with its routed series as the outflow closes
+/// exactly (`tests/reservoir_rule_curve.rs`, the mass-balance tests):
+///
+/// ```text
+/// Σ dt·(I_t + I_{t+1})/2 + Σ q'·dt − Σ r·dt − Σ dt·(Q_t + Q_{t+1})/2 − ΔS + created = 0
+/// ```
+///
+/// with `r` the rule-curve flux and `ΔS` the change in `S` without `S0`.
+/// `storage` alone closes it against the outflow the rows below received
+/// (`(Q_t + x)/2` in the clamp step). Not counted here: a row below a clamped
+/// dam re-reads its inflow as `lb` at the next step start, so its own
+/// `K·X·I` wedge jumps by `K·X·δ`, and it may clamp itself (review v3,
+/// finding 4); both show only in the network-wide negative-solve count.
+///
+/// Per step and dam row `d`, with `I_t = (N·Q_t)_d` the routed inflow at the
+/// step start and `q'_d` the dam reach's lateral inflow after the floor (and
+/// the sub-reach divisor) but BEFORE the rule-curve flux:
+///
+/// ```text
+/// created_d     += max(lb − x_d, 0)·dt/c4_d                  m³
+/// storage_d     += max(lb − x_d, 0)·(dt/c4_d − dt/2)         m³
+/// inflow_d      += (I_t,d + q'_d)·dt                          m³  (the dam's inflow)
 /// clamp_steps_d += 1[x_d < lb]
 /// ```
 ///
@@ -251,6 +294,7 @@ struct DamAccount<I: Backend> {
     rows: Vec<usize>,
     rows_t: Tensor<I, 1, Int>,
     created: Tensor<I, 1>,
+    storage: Tensor<I, 1>,
     inflow: Tensor<I, 1>,
     clamp_steps: Tensor<I, 1>,
     steps: usize,
@@ -266,6 +310,7 @@ impl<I: Backend> DamAccount<I> {
             rows: rows.to_vec(),
             rows_t: Tensor::from_data(TensorData::new(rows_i, [n]), device),
             created: Tensor::zeros([n], device),
+            storage: Tensor::zeros([n], device),
             inflow: Tensor::zeros([n], device),
             clamp_steps: Tensor::zeros([n], device),
             steps: 0,
@@ -276,8 +321,13 @@ impl<I: Backend> DamAccount<I> {
     /// Add one routed step (see the struct docs).
     fn record(&mut self, diag: crate::routing::mmc_op::DamStepDiag<I>, q_prime: Tensor<I, 1>, lb: f32, dt: f32) {
         let x = diag.x_sol.select(0, self.rows_t.clone());
+        let c4 = diag.c4.select(0, self.rows_t.clone());
         let qin = diag.i_t.select(0, self.rows_t.clone()) + q_prime.select(0, self.rows_t.clone());
-        self.created = self.created.clone() + (-x.clone() + lb).clamp_min(0.0) * dt;
+        // δ = max(lb − x, 0) (m³/s) and dt/c4 = D/2 (s).
+        let deficit = (-x.clone() + lb).clamp_min(0.0);
+        let held = c4.recip() * dt;
+        self.created = self.created.clone() + deficit.clone() * held.clone();
+        self.storage = self.storage.clone() + deficit * (held - 0.5 * dt);
         self.clamp_steps = self.clamp_steps.clone() + x.lower_elem(lb).float();
         self.inflow = self.inflow.clone() + qin.clone() * dt;
         self.steps += 1;
@@ -293,10 +343,16 @@ impl<I: Backend> DamAccount<I> {
 pub struct DamClampAccount {
     /// Dam rows of the network, in the order they were armed.
     pub rows: Vec<usize>,
-    /// Water the S28 clamp created on each dam row, `Σ max(lb − x, 0)·dt`, m³.
+    /// Water the S28 clamp created on each dam row, `Σ max(lb − x, 0)·dt/c4`,
+    /// m³: the storage it forgave plus the below-floor outflow the pre-clamp
+    /// solve passed down (see `DamAccount`).
     pub created_m3: Vec<f64>,
+    /// The storage part of `created_m3`, `Σ max(lb − x, 0)·(dt/c4 − dt/2)`, m³.
+    pub storage_m3: Vec<f64>,
     /// The dam's inflow, `Σ (I_t + q')·dt` (routed upstream inflow plus the
-    /// reach's own lateral inflow, before any rule-curve flux), m³.
+    /// reach's own lateral inflow, before any rule-curve flux), m³. Per dam:
+    /// a dam below another counts the upper dam's outflow in its own inflow,
+    /// so these do not sum to a network inflow.
     pub inflow_m3: Vec<f64>,
     /// Steps at which the dam row's solve fell below the floor.
     pub clamp_steps: Vec<u64>,
@@ -305,12 +361,6 @@ pub struct DamClampAccount {
 }
 
 impl DamClampAccount {
-    /// `(Σ created, Σ inflow)` over the dams, m³: the pooled created share is
-    /// their ratio.
-    pub fn pooled(&self) -> (f64, f64) {
-        (self.created_m3.iter().sum(), self.inflow_m3.iter().sum())
-    }
-
     /// `(Σ clamp steps, dam-row steps)` over the dams.
     pub fn clamp_share(&self) -> (u64, u64) {
         (self.clamp_steps.iter().sum(), self.steps * self.rows.len() as u64)
@@ -1082,9 +1132,6 @@ impl<I: Backend> MuskingumCunge<I> {
         columns.push(initial.unsqueeze_dim::<2>(1));
 
         crate::routing::mmc_op::reset_negative_solve_stats();
-        // The dam-row clamp account's totals before this call (it accumulates
-        // across calls), for this forward's log line.
-        let account_before = self.dam_account().map(|a| (a.pooled(), a.clamp_share()));
 
         for t in 1..num_timesteps {
             let q_prime_t: Tensor<Autodiff<I>, 1> = q_prime_clamped
@@ -1155,26 +1202,9 @@ impl<I: Backend> MuskingumCunge<I> {
                     100.0 * neg as f64 / total as f64
                 );
             }
-            // Dam rows at the S28 discharge floor, whenever dams are armed
-            // (the rule curve can ask a dam to store more than it holds), and
-            // the water that clamp created as a share of the dams' inflow,
-            // pooled over this forward's dams and steps. Training only
-            // (`track_negative_discharge`); the test phase writes the
-            // per-dam account to `release_clamp.csv` instead.
-            if let (true, Some(((c0, i0), (h0, n0))), Some(a)) =
-                (self.track_negative_discharge, account_before, self.dam_account())
-            {
-                let ((c1, i1), (h1, n1)) = (a.pooled(), a.clamp_share());
-                let (created, inflow, hit, total) = (c1 - c0, i1 - i0, h1 - h0, n1 - n0);
-                if total > 0 {
-                    eprintln!(
-                        "  dam-row steps at the discharge clamp: {hit}/{total} ({:.3}%); \
-                         clamp-created volume {created:.4e} of {inflow:.4e} m3 dam inflow ({:.4}%)",
-                        100.0 * hit as f64 / total as f64,
-                        100.0 * created / inflow.max(f64::MIN_POSITIVE),
-                    );
-                }
-            }
+            // The dam rows' clamp account (`dam_account`) is not logged here:
+            // training logs it per mini-batch (`training::driver`), the test
+            // phase per dam in `release_clamp.csv`.
         }
 
         Tensor::cat(columns, 1)
@@ -1209,6 +1239,7 @@ impl<I: Backend> MuskingumCunge<I> {
         Some(DamClampAccount {
             rows: a.rows.clone(),
             created_m3: host(&a.created).into_iter().map(f64::from).collect(),
+            storage_m3: host(&a.storage).into_iter().map(f64::from).collect(),
             inflow_m3: host(&a.inflow).into_iter().map(f64::from).collect(),
             clamp_steps: host(&a.clamp_steps).into_iter().map(|v| v.round() as u64).collect(),
             steps: a.steps as u64,
