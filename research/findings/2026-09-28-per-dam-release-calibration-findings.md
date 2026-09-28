@@ -64,3 +64,16 @@ residence time. Not reached: +0.03 at the target set; the in-engine ceiling of t
 - Full-population arms of the best recipe at two seeds.
 - New laws: flood-evacuation dynamics; a prescribed withdrawal term tested against a plain Q' rescaling.
 - Data: Flaming Gorge (COMID 77013090) is mis-snapped; 17 near-dry dams hold > 100 years of modelled inflow.
+
+## Correction (2026-09-28, user): the target is the population median
+
+The user's +0.03 target is the median NSE over the full 2,365-gauge evaluation population (gages_3000 after
+filtering), not the 117 regulated smoke gauges used above; that choice was mine and wrong. On the seed-42 no-dam
+arm the population median is 0.7391, so the target is 0.7691. `experiments/reservoir/smoke_v2/population_ceiling.py`:
+transferring the best smoke arm's gains by DOR bin to the 917 dammed population gauges moves the population median by
++0.0017; a perfect dam model that closes every dammed gauge's gap to its matched control moves it by +0.0256. Dams
+alone cannot reach +0.03 at the population median; population-wide levers (runoff volume bias, routing-head
+convergence) are needed alongside. The user accepted per-dam calibrated parameters for gauged dams and asked for two
+new laws: flood-evacuation dynamics (30-120 d band) and a prescribed withdrawal at irrigation dams, tested against a
+plain runoff-rescaling null (offline study in `experiments/reservoir/laws_v6/`). The overnight arms used a frozen
+routing head as a screen; the user objected to frozen heads on 2026-09-26, so final runs train jointly.
