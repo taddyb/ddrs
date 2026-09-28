@@ -1,0 +1,34 @@
+
+== flood, on-reach DOR>0.5: dams n=43, controls n=43 (medians)
+  post_frac   dam 0.505   control 0.600
+  time_frac   dam 0.280   control 0.376
+  phase_frac  dam 0.068   control 0.066
+  coh_I       dam 0.199   control 0.208
+  coh_I_obs   dam 0.324   control 0.213
+  post_frac/time_frac  dam 1.52   control 1.41
+
+== flood, all DOR>0.5: dams n=74, controls n=74 (medians)
+  post_frac   dam 0.563   control 0.589
+  time_frac   dam 0.268   control 0.407
+  phase_frac  dam 0.068   control 0.070
+  coh_I       dam 0.207   control 0.220
+  coh_I_obs   dam 0.290   control 0.226
+  post_frac/time_frac  dam 1.65   control 1.43
+
+== all on-reach DOR>0.5: dams n=117, controls n=117 (medians)
+  post_frac   dam 0.498   control 0.609
+  time_frac   dam 0.267   control 0.416
+  phase_frac  dam 0.078   control 0.064
+  coh_I       dam 0.232   control 0.236
+  coh_I_obs   dam 0.302   control 0.244
+  post_frac/time_frac  dam 1.60   control 1.44
+
+== Irrigation: test-year observed/no-dam volume O/I, quantiles 10/25/50/75/90
+  dams     0.806 0.845 0.962 1.114 1.183   share < 0.8: 0.10
+  controls 0.817 0.945 0.990 1.070 1.218   share < 0.8: 0.07
+  mean I/O (predicted/observed volume): dams 1.050, controls 1.063
+
+== Water Supply: test-year observed/no-dam volume O/I, quantiles 10/25/50/75/90
+  dams     0.774 0.918 1.034 1.208 1.464   share < 0.8: 0.13
+  controls 0.770 0.876 0.978 1.063 1.139   share < 0.8: 0.15
+  mean I/O (predicted/observed volume): dams 1.012, controls 1.123

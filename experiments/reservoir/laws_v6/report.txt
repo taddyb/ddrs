@@ -1,0 +1,208 @@
+LAWS V6: FLOOD EVACUATION AND IRRIGATION WITHDRAWAL AT DAMS, OFFLINE (2026-09-28)
+Directory: /home/tbindas/projects/ddrs/.claude/worktrees/agent-a92e512a7c47c97b4/experiments/reservoir/laws_v6/
+No Rust edited, nothing trained, nothing committed. Smoke set routed no-dam flow (pred_1981_2010.zarr), fit WY1983-1995
+(WY1982 spin-up), score WY1996-2010, daily step. L2/L4 are the rulecurve_offline fits; v6.sim reproduces their test NSE
+to 4e-14 (check_repro.py) and the ported L4 fitter reproduces them (check_l4_port.py). CIs: 2,000-draw bootstrap of the
+median. "ctl" = the same law fitted at the matched undammed control; DiD = median of (dam gain minus its control's gain).
+
+VERDICT
+- Flood evacuation: a flood pool that captures inflow above a per-dam release target and evacuates at that target
+  (law FA) is a real, dam-specific effect at flood-control dams, but small. Over the per-dam bucket at all 166
+  flood-control dams: +0.0073 [+0.0034, +0.0124], 124/37, controls 0.0000, DiD +0.0084 [+0.0045, +0.0115]. Over the
+  rule curve: +0.0047 [+0.0019, +0.0088]. At the 117 on-reach DOR > 0.5 gauges it adds nothing at the median (+0.0006
+  over the bucket; 0.0000 over the rule curve). It cuts the 30-120 d band error at flood-control on-reach DOR > 0.5
+  dams by about a third of the excess over controls, but that improvement sits in a minority of gauges.
+- Withdrawal at irrigation dams: NOT supported. A May-Sep withdrawal does nothing (0.0000 over the bucket, 13/23), it
+  does not beat a plain per-gauge runoff scalar, and the scalar does not gain more at irrigation dams than at their
+  controls. The data say irrigation dams store water in Oct-Apr and release MORE than the no-dam flow in Jul-Aug, the
+  opposite of a summer diversion at the gauge.
+- Combined per-dam law set (bucket + rule curve everywhere, plus the flood pool at flood-control dams): +0.0494
+  [+0.0301, +0.0972] at the 117 target gauges (same median as the rule curve alone), +0.0250 [+0.0170, +0.0329] at all
+  458 smoke dam gauges, and +0.010 on the POPULATION median offline (+0.005 after the engine discount).
+- +0.03 on the population median is NOT reachable with dams plus runoff rescaling. Best offline estimate, per-gauge
+  scalar at every gauge plus the full dam law set: +0.014 to +0.017; with the engine discount on the dam part, about
+  +0.008 to +0.010. Per-HUC2 rescaling alone gives +0.0026; a global 0.9475 gives +0.0047.
+
+1. DIAGNOSIS (diag.py, diag2.py; diag.txt, diag2.txt, diag_events.csv; fig1-fig3)
+Events are picked on the model inflow I (never on observations): independent inflow peaks above the gauge's 95th
+percentile, >= 60 d apart, at most 2 per water year, WY1983-2010 (median 25 events per dam gauge).
+Flood-control dams, on-reach, DOR > 0.5 (n = 43; controls 43), per-gauge medians:
+- Peak ratio observed/no-dam 0.86 (controls 1.06); the bucket L2 gives 0.79, so peaks are already attenuated enough.
+- Volume held back (cumulative I - O, long-run bias removed): observed maximum 10.1 d of mean inflow (controls 2.9,
+  which is model drift), bucket 6.4 d.
+- The composite (fig1, right panel) is the 30-120 d signature. The observed dam still holds 3-5 d of mean inflow from
+  day 15 to day 60 and returns to zero near day 75. The bucket has given everything back by day 25. So flood water is
+  evacuated over 1-2 months, much more slowly than any bucket with the fitted T0 (median 1-2 d).
+- fig2: the observed-minus-bucket residual after peaks is small and noisy at the median (days 15-60: dams -0.01,
+  controls -0.07 of mean inflow). The hold-and-release is heterogeneous across dams (IQR of held volume -10 to +19 d).
+How much of the 30-120 d error is reachable at all (test years, residual of the bucket band-passed to 30-120 d):
+- 50 % of its energy falls in the 120-d windows after floods, which cover 28 % of days (ratio 1.5). Controls cluster
+  the same way (1.4), so clustering after floods is not dam-specific.
+- The day-of-year-locked share is 7 % at dams and at controls. No fixed seasonal rule curve can reach this band,
+  which is why L4 barely moved it.
+- Squared coherence with the model inflow: 0.20 (controls 0.21). The dam signal O - I at 30-120 d is 0.32 coherent
+  with inflow (controls 0.21). At most about a quarter to a third of the dam's 30-120 d error is predictable from
+  inflow by a time-invariant linear law. The rest is operator decisions that change from year to year.
+Irrigation dams (n = 40; fig3):
+- Observed flow is below the no-dam flow by 0.10-0.20 of mean inflow in Oct-Apr, and ABOVE it in Jul-Aug
+  (0.95 vs 0.79 and 0.79 vs 0.59 of mean inflow). Matched controls show the opposite in late summer (0.55 vs 0.74).
+- That is wet-season storage and late-summer release for downstream users, not water missing in the irrigation
+  season at the gauge.
+- Annual volume on test years: observed/no-dam median 0.962 (controls 0.990), and 10 % of dams below 0.8 (controls
+  7 %). Mean predicted/observed 1.050 (controls 1.063). The earlier "1.17 vs 1.06" (summed Q') does not reappear in
+  the routed test-year flow.
+- Water-supply dams show no volume deficit (median O/I 1.034, controls 0.978).
+
+2. FLOOD-EVACUATION LAWS (laws.c, v6.py, run_laws.py; laws_by_gauge.csv, summary.txt, lawset.txt, fig4)
+Laws. Each sits on top of the per-dam bucket T0, with T0 refitted jointly. Per dam there is one extra state, the flood
+pool F, starting empty.
+- Capture: c_t = min(phi * max(I_t - Qc, 0), Fmax - F_t). Pass-through: p_t = I_t - c_t.
+- FA, capacity evacuation (standard operating policy): e_t = min(F_t, max(Qc - p_t, 0)). Release is held at the target
+  Qc until the pool is empty. Parameters: Qc = kc * Ibar, phi, Fmax = z * Ibar.
+- FB, linear evacuation: e_t = F_t / (Te + 1), only while p_t < Qc, with an unbounded pool.
+- FC: e_t = min(F_t / (Te + 1), max(Qc - p_t, 0)).
+- Update: F_{t+1} = F_t + c_t - e_t, and the bucket receives x_t = p_t + e_t (minus the rule-curve flux in FA4/FC4).
+Fit and score:
+- Training NSE, grid (7 kc x 2 phi x 5 z/Te x 2 T0) then Nelder-Mead from the best 3 cells.
+- Mass is conserved exactly and x_t >= 0 by construction (c <= I, e <= F), so the discharge floor is never used.
+- Capture uses same-day inflow here. In the engine it uses the previous hourly step.
+Results, median paired dNSE, test years:
+  flood-control, all (n=166)       FA-L2 +0.0073 [+0.0034,+0.0124] 124/37, ctl +0.0000, DiD +0.0084 [+0.0045,+0.0115]
+                                   FC-L2 +0.0071 [+0.0014,+0.0127] 108/52 (controls 47/87, FC overfits more)
+                                   FB-L2 +0.0047 [+0.0009,+0.0115]
+                                   FA4-L4 +0.0047 [+0.0019,+0.0088] 115/48, DiD +0.0055 [+0.0022,+0.0100]
+                                   vs L0: L2 +0.0216, FA +0.0476, L4 +0.0527, FA4 +0.0705 [+0.0440,+0.0957]
+  flood-control on-reach DOR>0.5 (43)  FA-L2 +0.0048 [+0.0000,+0.0196] 28/13, DiD +0.0077 [+0.0009,+0.0195]
+                                   FA4-L4 +0.0025 [+0.0000,+0.0094], DiD +0.0034 [-0.0006,+0.0105]
+                                   vs L0: L2 +0.0501, FA +0.0710, L4 +0.1288, FA4 +0.1277
+  all on-reach DOR>0.5 (117)       FA-L2 +0.0006 [+0.0000,+0.0041] 64/46; FB, FC +0.0000; FA4-L4 +0.0000
+  KGE: FA-L2 +0.0011 at flood-control dams (alpha -0.002). The KGE gains of FA4 come from the rule curve.
+  Train vs test, FA-L2: flood-control +0.0157 -> +0.0073; on-reach DOR>0.5 +0.0133 -> +0.0006. About half of the
+  flood-control gain transfers to test years, almost none of the rest.
+30-120 d band, mean normalised MSE on test years:
+- Flood-control on-reach DOR>0.5: L0 0.205, L2 0.175, L4 0.172, FA 0.173, FB 0.134, FC 0.131, FA4 0.132, FC4 0.130;
+  controls 0.052. FB, FC and FA4 remove about 35 % of the bucket's excess over controls. The 120-400 d band also
+  falls, from 0.204 to 0.131.
+- All on-reach DOR>0.5: L2 0.166, L4 0.165, FC 0.148, FA4 0.150, FC4 0.151; controls 0.052, about 15 % of the excess.
+- The band means fall while median NSE barely moves, so the gain is carried by a minority of dams.
+Fitted FA at flood-control on-reach DOR>0.5 (median [IQR]):
+- Qc 3.3 x mean inflow [1.1, 7.9]; phi 0.95 [0.51, 1.0]; Fmax 20 d of mean inflow [5.7, 59]; T0 0.72 d.
+- The pool carries 2.1 % of test inflow (p90 11 %).
+fig4, left: FA4 holds more water than L2/L4 during days 0-30 after a peak, but gives it back by about day 35. The
+observed dams hold 3-4 d of mean inflow until about day 70. The laws capture the first month of the evacuation,
+not the second, which is where the unreachable, year-varying operator behaviour sits (section 1).
+fig4, right: one typical helped dam, Buford Dam (02334430, the FA-vs-L2 gain at the group's 75th percentile), in the
+water year with the most pool use.
+
+3. WITHDRAWAL LAW (irrigation n=40, water supply n=61; summary.txt, extras.txt, scalar_over_bucket.txt)
+Law: W*_t = w * Ibar * s(doy), with s scaled to an annual mean of 1. It is taken from what the dam holds today,
+W_t = min(W*_t, S_t + I_t), and removed on top of the bucket. The water leaves the system and is reported.
+Shapes tested:
+- W1: fixed smooth May-Sep window.
+- W2: the dam's training-year inflow climatology inside Apr-Oct.
+- W3: a window with per-dam centre and width.
+Nulls, fitted on training years: a per-gauge scalar (Kg), a per-HUC2 scalar (Kh; fitted on the 916 smoke gauges,
+kpool.json, k 0.88-1.00) and a global scalar (Kc 0.9475). Each was run alone and under a refitted bucket (L2K*).
+Irrigation dams, test years:
+  W1-L2 0.0000 [-0.0019,0.0000] 13/23 (w = 0 at 40 %) | W2-L2 0.0000 14/21 | W3-L2 +0.0024 [-0.0016,+0.0084], ctl +0.0016,
+  DiD -0.0014
+  W3 timing: centre doy 225 [IQR 160, 298]; 55 % of the fits centre the window in Oct-Apr. W3 withdraws 10.6 % of
+  inflow, and its training gain (+0.0124) falls to +0.0024 on test years.
+  Nulls vs L0: Kg +0.0006 [-0.0047,+0.0202] (ctl +0.0020), Kh -0.0034 (ctl -0.0036), Kc -0.0033 (ctl -0.0030);
+  L2Kg +0.0022 (ctl +0.0016)
+  Head to head: W1-L2Kg -0.0009 [-0.0118,+0.0074] 18/22; W2-L2Kg +0.0016 [-0.0061,+0.0136] 20/20;
+  W3-L2Kg -0.0024 [-0.0099,+0.0154]
+  Scalar over the bucket (L2Kg-L2): +0.0007 at irrigation dams vs +0.0011 at their controls, DiD +0.0008 [-0.0151,+0.0204]
+Water-supply dams: W1-L2Kg -0.0084 [-0.0155, -0.0009] 21/40 and W3-L2Kg -0.0081. The scalar beats the withdrawal.
+Conclusion: no withdrawal law beats the per-gauge scalar at irrigation dams on test years, and the scalar is not
+irrigation-specific. The "withdrawal at the dam" claim fails on both of its conditions.
+Side finding: a non-seasonal volume scalar IS dam-associated, but not at irrigation dams.
+- Over the bucket: all 458 dams +0.0036 [+0.0017, +0.0064] vs controls +0.0005, DiD +0.0045 [+0.0009, +0.0079].
+  Flood-control: DiD +0.0071 [+0.0012, +0.0132].
+- Fitted k: median 0.963 at dams vs 1.006 at controls; 29 % of dam gauges want k < 0.9 vs 9 % of controls. The gain
+  transfers from training to test years (+0.0034 -> +0.0036).
+- It is a per-dam loss fraction (evaporation, diversion, or Q' excess co-located with dams). The 2026-09-27 review
+  warned such a term absorbs Q' bias. The DiD says part of it is dam-specific. The defensible engine form is a
+  prescribed sink or a per-gauge calibrated k <= 1 at gauged dams, with the external check (loss vs open-water
+  evaporation x NID surface) before anyone reads it as physics.
+
+4. COMBINED LAW SET AND POPULATION (lawset.py, population.py; lawset.txt, population.txt, population.json)
+Law set SF4: at flood-control dams FA + rule curve + bucket (FA4); elsewhere rule curve + bucket (L4). Controls get
+their dam's law.
+(i) 117 on-reach DOR>0.5: SF4-L0 +0.0494 [+0.0301,+0.0972] 90/27, clipped mean +0.100 (L4 +0.097), ctl +0.0051,
+    DiD +0.0423 [+0.0189,+0.0906], dKGE +0.0182 [+0.0044,+0.0415] (dr +0.020, dalpha -0.022, dbeta 0).
+    SF4-L2 +0.0088 [+0.0039, +0.0231]; SF4-L4 0.0000. The 30-120 d band goes from 0.166 (L2) to 0.151.
+    Median NSE 0.337 -> 0.482 (controls 0.726 -> 0.749).
+(ii) all 458 dam gauges: SF4-L0 +0.0250 [+0.0170,+0.0329] 344/114, ctl +0.0031, DiD +0.0152 [+0.0114,+0.0249],
+    dKGE +0.0048. L4 alone gives +0.0212, the bucket +0.0056.
+(iii) Population, 2,365 gauges, median 0.7391; the target is 0.7691.
+    Method: the 458 smoke dam gauges carry their own measured gain. The other 459 dammed gauges are imputed from their
+    DOR bin x purpose cell. Purpose is taken from the largest upstream NID dam, matched by name via
+    nid_dams_by_gauge.csv and nid_dams_in_eval_network.csv.
+    Gains by law set (offline):
+                    cell-median   random draws (200)          DOR-bin only (population_ceiling)   x0.5 engine
+      L2            +0.0050       +0.0077 [+0.0066,+0.0086]   +0.0017                             +0.0013
+      L4            +0.0086       +0.0097 [+0.0087,+0.0107]   +0.0062                             +0.0033
+      SF (FA, no rule curve)  +0.0079  +0.0090               +0.0035                             +0.0022
+      SF4           +0.0103       +0.0113 [+0.0100,+0.0126]   +0.0067                             +0.0046
+    The paired bootstrap CI of the SF4 cell-median shift is [+0.0074, +0.0144].
+    Engine discount x0.5 is the rule curve's measured replay/offline ratio (+0.0244 / +0.049). For the bucket alone
+    the ratio is 0.74.
+Runoff rescaling on all 2,365 gauges, exact test-year NSE from the population predictions:
+- Per-HUC2 scalar (training fit): +0.0026 [0.0000, +0.0063], 1,300 up / 1,065 down.
+- Global 0.9475: +0.0047 [+0.0021, +0.0084]. A fixed 0.95 gives the same, reproducing the 0.7438 tier-0 figure.
+- Per-gauge scalar (training fit; 916 direct, 1,449 imputed): +0.0045 (median imputation), +0.0070
+  [+0.0051, +0.0092] (draws).
+- Per-gauge scalar fitted ON TEST YEARS: +0.0286. This is an in-sample oracle and not an allowed method.
+Combined:
+- Per-HUC2 rescaling plus SF4 refitted on the rescaled flow: +0.0126, or +0.0057 with the dam gains x0.5.
+- Per-gauge scalar everywhere plus SF4 refitted: +0.0144 (median imputation), +0.0166 [+0.0143, +0.0200] (draws).
+Why dams cannot deliver the median: only 174 gauges lie within 0.03 below the population median, and 43 of them are
+dammed. Most dammed gauges sit far below it: 4.7 % of dammed gauges are within that band, against 9.0 % of undammed
+gauges. Closing the whole dam-minus-control gap would give about +0.026 (population_ceiling.py).
+
+5. RECOMMENDATION
+Implement:
+(a) Keep the per-dam T0, the existing dam row.
+(b) Add the flood pool FA at gauged flood-control dams.
+    - Per-dam parameters: kc (release target Qc = kc * Ibar), phi in [0, 1], z (Fmax = z * Ibar). Ibar is the
+      detached training-mean model inflow at the dam.
+    - State: F per dam, in m3.
+    - Engine form, at step t+1: from step-t state take I_t (the dam's step-t inflow, upstream Q_t + q'_t) and F_t, and
+      compute c = min(phi (I_t - Qc)+, (Fmax - F_t)/dt), p = I_t - c, e = min(F_t/dt, (Qc - p)+).
+    - Solve with the dam row's q'_{t+1} replaced by q'_{t+1} - c + e. A and the CSR pattern are unchanged, and the
+      O(nnz) backward is untouched; c and e are piecewise-linear RHS fluxes, like the rule curve.
+    - After the solve: F_{t+1} = F_t + dt (c - e).
+    - Mass is exact and the effective inflow is >= 0 by construction, so the floor is never needed.
+    - F must be carried across test chunks. Initialise it at 0 (an empty flood pool) with a >= 30 d warmup in training
+      windows. The release_eval.rs test table must carry kc, phi, z and Ibar per dam.
+    - Expected gain over the bucket at flood-control dams: about +0.007 offline [+0.003, +0.012], roughly +0.004 in
+      the engine. On the population median it adds about +0.001 to +0.003.
+(c) The rule curve, if the extra 4 coefficients per dam are acceptable: +0.0036 on the population median offline
+    over the bucket, about +0.002 in the engine.
+Do not implement: FB/FC (no better than FA; FC loses at controls 47/87), any seasonal withdrawal law, or a learned
+dam loss beyond an optional per-gauge k <= 1.
+Expected population effect of the full recommended set: +0.005 (engine-discounted) to +0.010 (offline); with a global
+or per-gauge runoff scalar, +0.008 to +0.017.
++0.03 is not reachable from dams plus runoff rescaling. The remaining room is at undammed gauges near the median, in
+the routing head and in Q'.
+
+CAVEATS
+- The offline daily bucket sits on the routed gauge series, so the dam reach is double-counted. At off-reach dams the
+  pool acts on the whole gauge series.
+- Only the temporal hold-out is tested. Per-dam parameters apply only to gauged dams; ungauged dams were not tested.
+- Training-year predictions do not exist for the population, so the HUC2 and global scalars were fitted on the 916
+  smoke gauges' training years, and the per-gauge scalar is imputed for 1,449 gauges. The global scalar beat the
+  per-HUC2 set on the population (+0.0047 vs +0.0026): HUC2 fits from the dam-heavy smoke sample do not transfer.
+  A population training-year eval would settle this.
+- Medians of paired gains are not additive (for example, FA4-L2 is not FA-L2 plus L4-L2).
+- One seed of the no-dam model.
+
+FILES (all in the laws_v6 directory)
+- Code: laws.c (compiled to liblaws.so), v6.py, run_laws.py, run_kh.py (kh|kg), summarise.py, lawset.py,
+  population.py, diag.py, diag2.py, fig4.py, extras.py, scalar_over_bucket.py, check_repro.py, check_l4_port.py.
+- Data: laws_by_gauge.csv, laws_kh_by_gauge.csv, laws_kg_by_gauge.csv, kpool.json, diag_events.csv, summary.json,
+  population.json.
+- Text: summary.txt, lawset.txt, population.txt, diag.txt, diag2.txt, extras.txt, scalar_over_bucket.txt, this
+  report.
+- Figures: fig1_flood_composite.png, fig2_flood_residual.png, fig3_irrigation_season.png, fig4_flood_law.png.

@@ -1,0 +1,56 @@
+population n=2365; recomputed no-dam NSE vs paired_full_run nse_off: median abs diff 0.00e+00, max 3.55e-15
+HUC2 found for 2365 of 2365 gauges; missing use the global scalar 0.9475
+dammed population gauges 917, smoke dam gauges among them 458; purpose groups of dammed: {'flood': 312, 'hydro': 203, 'other': 187, 'supply': 132, 'irrigation': 83}
+
+smoke dam-gauge gains (median), by DOR bin | by purpose group:
+  L2   0-0.1:+0.0084 0.1-0.5:+0.0048 0.5-1:+0.0112 1-2:+0.0068 >2:+0.0017 | flood:+0.0216 hydro:+0.0022 supply:+0.0003 irrigation:+0.0012 other:+0.0042
+  L4   0-0.1:+0.0143 0.1-0.5:+0.0218 0.5-1:+0.0251 1-2:+0.0454 >2:+0.0010 | flood:+0.0527 hydro:+0.0135 supply:+0.0024 irrigation:+0.0099 other:+0.0169
+  SF   0-0.1:+0.0129 0.1-0.5:+0.0075 0.5-1:+0.0240 1-2:+0.0075 >2:+0.0023 | flood:+0.0476 hydro:+0.0022 supply:+0.0003 irrigation:+0.0012 other:+0.0042
+  SF4  0-0.1:+0.0170 0.1-0.5:+0.0239 0.5-1:+0.0316 1-2:+0.0447 >2:+0.0010 | flood:+0.0705 hydro:+0.0135 supply:+0.0024 irrigation:+0.0099 other:+0.0169
+
+== population median NSE, no-dam arm: 0.7391 (target +0.03 = 0.7691)
+-- dam law sets only (offline gains; smoke dam gauges direct, other dammed gauges imputed by DOR bin x purpose)
+  L2: cell-median imputation                                 median 0.7441  change +0.0050  (paired CI of the shift vs its own base [+0.0033,+0.0086])
+      L2: random-draw imputation, 200 draws: mean change +0.0077 [+0.0066,+0.0086]
+  L2: population_ceiling-style DOR-bin medians               median 0.7408  change +0.0017  (paired CI of the shift vs its own base [+0.0006,+0.0039])
+  L2: cell-median, engine discount x0.5                      median 0.7404  change +0.0013  (paired CI of the shift vs its own base [+0.0004,+0.0035])
+  L4: cell-median imputation                                 median 0.7477  change +0.0086  (paired CI of the shift vs its own base [+0.0059,+0.0123])
+      L4: random-draw imputation, 200 draws: mean change +0.0097 [+0.0087,+0.0107]
+  L4: population_ceiling-style DOR-bin medians               median 0.7453  change +0.0062  (paired CI of the shift vs its own base [+0.0035,+0.0086])
+  L4: cell-median, engine discount x0.5                      median 0.7425  change +0.0033  (paired CI of the shift vs its own base [+0.0013,+0.0049])
+  SF: cell-median imputation                                 median 0.7470  change +0.0079  (paired CI of the shift vs its own base [+0.0051,+0.0115])
+      SF: random-draw imputation, 200 draws: mean change +0.0090 [+0.0084,+0.0102]
+  SF: population_ceiling-style DOR-bin medians               median 0.7427  change +0.0035  (paired CI of the shift vs its own base [+0.0016,+0.0054])
+  SF: cell-median, engine discount x0.5                      median 0.7413  change +0.0022  (paired CI of the shift vs its own base [+0.0008,+0.0043])
+  SF4: cell-median imputation                                median 0.7494  change +0.0103  (paired CI of the shift vs its own base [+0.0074,+0.0144])
+      SF4: random-draw imputation, 200 draws: mean change +0.0113 [+0.0100,+0.0126]
+  SF4: population_ceiling-style DOR-bin medians              median 0.7458  change +0.0067  (paired CI of the shift vs its own base [+0.0040,+0.0092])
+  SF4: cell-median, engine discount x0.5                     median 0.7437  change +0.0046  (paired CI of the shift vs its own base [+0.0019,+0.0066])
+-- reference: close the whole dam-minus-control gap (population_ceiling.py): +0.026
+-- runoff rescaling on all 2,365 gauges (exact test-year NSE)
+  per-HUC2 scalar (fit: smoke training years)                median 0.7417  change +0.0026  (paired CI of the shift vs its own base [+0.0000,+0.0063]); gauges up 1300, down 1065
+  global scalar 0.9475 (fit: smoke training years)           median 0.7439  change +0.0047  (paired CI of the shift vs its own base [+0.0021,+0.0084])
+  fixed 0.95 (tier-0 check, expected 0.7438)                 median 0.7438  change +0.0047  (paired CI of the shift vs its own base [+0.0018,+0.0081])
+  per-gauge scalar fitted ON TEST YEARS (in-sample oracle bound) median 0.7677  change +0.0286  (paired CI of the shift vs its own base [+0.0244,+0.0336])
+-- combined: per-HUC2 rescaling on all gauges + dam law set refitted on the rescaled flow
+  Kh + L2: cell-median imputation                            median 0.7456  change +0.0065  (paired CI of the shift vs its own base [+0.0036,+0.0104])
+  Kh + L2: cell-median, dam gains x0.5                       median 0.7431  change +0.0039  (paired CI of the shift vs its own base [+0.0012,+0.0075])
+  Kh + L4: cell-median imputation                            median 0.7493  change +0.0101  (paired CI of the shift vs its own base [+0.0066,+0.0146])
+  Kh + L4: cell-median, dam gains x0.5                       median 0.7441  change +0.0050  (paired CI of the shift vs its own base [+0.0022,+0.0086])
+  Kh + SF: cell-median imputation                            median 0.7470  change +0.0078  (paired CI of the shift vs its own base [+0.0053,+0.0129])
+  Kh + SF: cell-median, dam gains x0.5                       median 0.7441  change +0.0050  (paired CI of the shift vs its own base [+0.0021,+0.0084])
+  Kh + SF4: cell-median imputation                           median 0.7517  change +0.0126  (paired CI of the shift vs its own base [+0.0085,+0.0167])
+  Kh + SF4: cell-median, dam gains x0.5                      median 0.7448  change +0.0057  (paired CI of the shift vs its own base [+0.0030,+0.0096])
+
+smoke dam gauges, gains on the rescaled flow (median vs Kh): L2 +0.0041 L4 +0.0197 SF +0.0072 SF4 +0.0219
+how far below the median are dammed gauges? share of dammed gauges within 0.03 below the population median: 0.047; undammed 0.090
+gauges within 0.03 below the median: 174 (dammed 43)
+-- per-gauge runoff scalar (training-year fit) at EVERY gauge, + dam law set refitted on that flow (smoke 916 direct; other undammed gauges draw from smoke controls, other dammed from their DOR x purpose cell)
+  Kg only: median imputation                                 median 0.7436  change +0.0045  (paired CI of the shift vs its own base [+0.0015,+0.0070])
+      Kg only: random-draw imputation, 200 draws: mean change +0.0070 [+0.0051,+0.0090]
+  Kg + L2: median imputation                                 median 0.7482  change +0.0091  (paired CI of the shift vs its own base [+0.0064,+0.0135])
+      Kg + L2: random-draw imputation, 200 draws: mean change +0.0127 [+0.0102,+0.0153]
+  Kg + L4: median imputation                                 median 0.7520  change +0.0129  (paired CI of the shift vs its own base [+0.0093,+0.0169])
+      Kg + L4: random-draw imputation, 200 draws: mean change +0.0154 [+0.0127,+0.0175]
+  Kg + SF4: median imputation                                median 0.7535  change +0.0144  (paired CI of the shift vs its own base [+0.0103,+0.0185])
+      Kg + SF4: random-draw imputation, 200 draws: mean change +0.0166 [+0.0143,+0.0200]

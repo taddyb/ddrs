@@ -1,0 +1,58 @@
+
+== flood, on-reach DOR>0.5: dams n=43, controls n=43 (medians over gauges of per-gauge event means)
+  n_ev               dam  +25.000   control  +34.000
+  peak_ratio_obs     dam   +0.863   control   +1.063
+  peak_ratio_L2      dam   +0.794   control   +0.977
+  peak_lag_obs       dam   +1.000   control   +0.000
+  stored_max_obs     dam  +10.107   control   +2.853
+  stored_day_obs     dam   +7.000   control  +55.000
+  evac_half_obs      dam   +6.000   control   +2.000
+  stored_max_L2      dam   +6.410   control   +0.524
+  stored_day_L2      dam   +1.000   control   +0.000
+  evac_half_L2       dam   +8.500   control   +2.000
+  res_post_15_60     dam   -0.008   control   -0.067
+  res_post_60_120    dam   +0.006   control   -0.063
+
+== flood, all DOR>0.5: dams n=74, controls n=74 (medians over gauges of per-gauge event means)
+  n_ev               dam  +25.000   control  +36.500
+  peak_ratio_obs     dam   +0.878   control   +1.050
+  peak_ratio_L2      dam   +0.891   control   +0.979
+  peak_lag_obs       dam   +0.000   control   +0.000
+  stored_max_obs     dam   +8.782   control   +3.366
+  stored_day_obs     dam  +15.000   control  +48.000
+  evac_half_obs      dam   +7.000   control   +3.000
+  stored_max_L2      dam   +4.116   control   +0.540
+  stored_day_L2      dam   +1.000   control   +0.000
+  evac_half_L2       dam   +8.000   control   +2.000
+  res_post_15_60     dam   -0.108   control   -0.057
+  res_post_60_120    dam   -0.057   control   -0.057
+
+== Irrigation dams n=40: missing volume (I - O)/Ibar, test years, median over gauges: annual +0.036 (controls +0.013); May-Sep mean -0.082 (controls -0.072)
+   observed/no-dam volume, median: dams 0.960, controls 0.989
+   O dam I 0.573 O 0.418 L2 0.573 | ctl I 0.454 O 0.299
+   N dam I 0.564 O 0.328 L2 0.563 | ctl I 0.489 O 0.359
+   D dam I 0.632 O 0.376 L2 0.635 | ctl I 0.561 O 0.501
+   J dam I 0.685 O 0.652 L2 0.685 | ctl I 0.619 O 0.699
+   F dam I 0.673 O 0.534 L2 0.673 | ctl I 0.741 O 0.698
+   M dam I 0.723 O 0.667 L2 0.711 | ctl I 0.955 O 1.028
+   A dam I 1.123 O 1.029 L2 1.115 | ctl I 1.267 O 1.339
+   M dam I 1.618 O 1.864 L2 1.531 | ctl I 1.786 O 2.093
+   J dam I 1.494 O 1.453 L2 1.579 | ctl I 1.317 O 1.331
+   J dam I 0.794 O 0.948 L2 0.916 | ctl I 0.737 O 0.547
+   A dam I 0.590 O 0.786 L2 0.619 | ctl I 0.549 O 0.406
+   S dam I 0.570 O 0.615 L2 0.568 | ctl I 0.459 O 0.290
+
+== Water Supply dams n=61: missing volume (I - O)/Ibar, test years, median over gauges: annual -0.027 (controls +0.027); May-Sep mean -0.007 (controls +0.037)
+   observed/no-dam volume, median: dams 1.034, controls 0.977
+   O dam I 0.612 O 0.513 L2 0.612 | ctl I 0.523 O 0.431
+   N dam I 0.700 O 0.634 L2 0.755 | ctl I 0.795 O 0.730
+   D dam I 1.208 O 1.136 L2 1.197 | ctl I 1.237 O 1.221
+   J dam I 1.363 O 1.468 L2 1.344 | ctl I 1.452 O 1.507
+   F dam I 1.382 O 1.290 L2 1.329 | ctl I 1.446 O 1.359
+   M dam I 1.694 O 1.599 L2 1.617 | ctl I 1.807 O 1.687
+   A dam I 1.555 O 1.499 L2 1.557 | ctl I 1.481 O 1.451
+   M dam I 1.285 O 1.173 L2 1.279 | ctl I 1.166 O 1.175
+   J dam I 1.097 O 1.090 L2 1.100 | ctl I 0.868 O 0.793
+   J dam I 0.684 O 0.624 L2 0.691 | ctl I 0.520 O 0.388
+   A dam I 0.524 O 0.467 L2 0.536 | ctl I 0.450 O 0.284
+   S dam I 0.524 O 0.521 L2 0.513 | ctl I 0.508 O 0.420
