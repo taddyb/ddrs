@@ -126,14 +126,14 @@ select:focus-visible, button.pick:focus-visible { outline: 2px solid var(--nodam
 <header style="display:grid;gap:14px">
   <div class="eyebrow">ddrs · learned dam release · overnight 27–28 September 2026 · smoke set, test water years 1996–2010</div>
   <h1>Per-Dam Release Calibration</h1>
-  <p class="lede">The goal was a median NSE gain of +0.03 at gauges where dams matter. Overnight the channel routing was frozen, so only dam parameters train. Each dam got its own residence time and seasonal rule curve, the dam row stopped replacing the reach's channel routing, and the water the discharge floor creates is now measured. The best trained arm gains <b id="bestV"></b> at the 117 target gauges. Run through the engine, the best offline-fitted per-dam parameters reach about +0.02. The target was not reached.</p>
+  <p class="lede">The goal is a median NSE gain of +0.03 over the full 2,365-gauge evaluation population, from 0.7391 to 0.7691. Overnight the channel routing was frozen, so only dam parameters train. Each dam got its own residence time and seasonal rule curve, the dam row stopped replacing the reach's channel routing, and the water the discharge floor creates is now measured. The arms were scored on 117 regulated smoke gauges, where the best trained arm gains <b id="bestV"></b>. Carried to the population median that is about +0.002; even a perfect dam model would give about +0.026. The target was not reached.</p>
   <div class="tiles" id="tiles"></div>
 </header>
 
 <section>
   <div class="eyebrow">Setup</div>
   <h2>What was compared, and on which years</h2>
-  <p class="prose">The smoke set has 916 gauges: 458 below an NID dam of at least 10 MCM, each paired with an undammed control in the same HUC2 region and closest in drainage area. The <b>target gauges</b> are the 117 dam gauges whose dam sits on the gauge's own reach and whose degree of regulation (DOR, upstream storage over one year of flow) is above 0.5. Every number below is the per-gauge change in test-year NSE against the same no-dam model at the same gauge, summarised as a median with a 95 % bootstrap interval.</p>
+  <p class="prose">The smoke set has 916 gauges: 458 below an NID dam of at least 10 MCM, each paired with an undammed control in the same HUC2 region and closest in drainage area. The <b>target gauges</b> in the figures below (a stand-in used overnight; the real target is the population median, see the flood-evacuation section) are the 117 dam gauges whose dam sits on the gauge's own reach and whose degree of regulation (DOR, upstream storage over one year of flow) is above 0.5. Every number below is the per-gauge change in test-year NSE against the same no-dam model at the same gauge, summarised as a median with a 95 % bootstrap interval.</p>
   <div class="timeline"><div class="tr">Training: water years 1982–1995 (90-day windows)</div><div class="te">Test: water years 1996–2010, one continuous pass</div></div>
   <p class="prose muted">Frozen routing: the channel network (Manning's n and γ per reach) is loaded from the smoke no-dam run and never trained again, so undammed gauges cannot change and every gain belongs to the dams. The jointly trained arm from the earlier session moved its controls by up to 0.345 NSE; the frozen arms move them by exactly 0.</p>
 </section>
@@ -216,6 +216,37 @@ select:focus-visible, button.pick:focus-visible { outline: 2px solid var(--nodam
   </div>
 </section>
 
+<section id="flood">
+  <div class="eyebrow">Next laws, tested offline (28 September)</div>
+  <h2>Flood-control dams hold water for about two months</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If flood-control operations cause the 30 to 120 day error, observed flow below these dams should hold water back for weeks after a flood and release it later, while the per-dam bucket gives it back too soon. A law with its own flood pool should follow the observed holding, with no change at controls.</p></div>
+    <div><b>Plain English</b><p>Every flood peak at 43 flood-control dams on their gauge's reach with DOR above 0.5 is lined up at day 0, and the same at their undammed controls. The flood pool captures inflow above a per-dam release target, then releases it at that target once the flood passes. Parameters are fitted per dam on water years 1983 to 1995 and scored on 1996 to 2010.</p></div>
+    <div><b>Graph</b><p>First figure, left and middle: median hydrograph around inflow peaks at dam gauges and at controls, evacuation window (days 30 to 120) shaded. Right: cumulative volume held back, in days of mean inflow; observed dams black, per-dam bucket blue, controls dashed. Second figure, left: the same held-back volume with the flood-pool law (orange); right: Buford Dam in water year 2003.</p></div>
+  </div>
+  <div class="fig"><img src="{{FIG1}}" alt="Composite hydrographs around inflow peaks at 43 flood-control dams and their matched controls, and the cumulative volume held back: observed dams hold 3 to 5 days of mean inflow until about day 60, the bucket releases it by day 25, controls hold nothing." style="width:100%;height:auto;background:#fff;border-radius:4px"></div>
+  <div class="fig"><img src="{{FIG4}}" alt="Volume held back after inflow peaks with the flood-pool law added: it holds water through the first month but not the second; right, Buford Dam in water year 2003." style="width:100%;height:auto;background:#fff;border-radius:4px"></div>
+  <div class="table-wrap"><table class="stats">
+    <thead><tr><th>Test years, per-gauge median change in NSE</th><th class="num">Median [95 % CI]</th><th class="num">Controls</th><th class="num">Dam minus control</th></tr></thead>
+    <tbody>
+      <tr class="hl"><td>Flood pool over the per-dam bucket, 166 flood-control dams</td><td class="num">+0.0073 [+0.0034, +0.0124]</td><td class="num">0.0000</td><td class="num">+0.0084</td></tr>
+      <tr><td>Same, on-reach flood-control dams with DOR above 0.5 (43)</td><td class="num">+0.0048 [+0.0000, +0.0196]</td><td class="num"></td><td class="num">+0.0077</td></tr>
+      <tr><td>Irrigation withdrawal (May to September) over the bucket, 40 irrigation dams</td><td class="num">0.0000 (13 up, 23 down)</td><td class="num"></td><td class="num">not supported</td></tr>
+      <tr><td>Irrigation withdrawal against a per-gauge runoff scalar</td><td class="num">−0.0009 [−0.0118, +0.0074]</td><td class="num"></td><td class="num">not supported</td></tr>
+    </tbody>
+  </table></div>
+  <div class="table-wrap"><table class="stats">
+    <thead><tr><th>Offline estimate for the full 2,365-gauge population</th><th class="num">Median change</th></tr></thead>
+    <tbody>
+      <tr><td>Dam law set: per-dam bucket, rule curve, flood pool at flood-control dams</td><td class="num">+0.010 (about +0.005 after the engine discount)</td></tr>
+      <tr><td>Global runoff scalar (0.9475), no dam law</td><td class="num">+0.005</td></tr>
+      <tr><td>Both together</td><td class="num">+0.014 to +0.017</td></tr>
+      <tr><td>Target</td><td class="num">+0.030</td></tr>
+    </tbody>
+  </table></div>
+  <p class="prose"><b>Result.</b> Observed dams hold back 3 to 5 days of mean inflow until about day 60 and give it back by about day 75; the bucket has released everything by day 25; controls hold nothing. The flood pool holds water through the first month but not the second and removes about 35 % of the 30 to 120 day excess error at flood-control dams with DOR above 0.5. Irrigation dams show wet-season storage and summer release, not missing summer water, and their routed test-year volume matches their controls (0.96 against 0.99). <b>Conclusion.</b> The flood pool is a real, flood-control-specific gain, but small; the withdrawal law is refuted. Only 174 gauges sit within 0.03 below the population median and 43 of them have a dam, so dams plus runoff rescaling cannot reach +0.03; the rest has to come from undammed gauges near the median, through the routing head and Q′. Offline, one no-dam seed, temporal hold-out only. Details: <span class="m">experiments/reservoir/laws_v6/report.txt</span>.</p>
+</section>
+
 <section>
   <div class="eyebrow">What changed in the code</div>
   <h2>New machinery on dam-release-v2</h2>
@@ -261,12 +292,12 @@ select:focus-visible, button.pick:focus-visible { outline: 2px solid var(--nodam
 
 <section>
   <div class="eyebrow">Next</div>
-  <h2>Decisions for the morning</h2>
+  <h2>Where this stands</h2>
   <div class="claims">
-    <div class="claim"><p>Accept per-dam calibrated parameters for gauged dams? They carry the gain; the feature head alone does not.</p></div>
-    <div class="claim"><p>Confirm the target: median NSE at on-reach gauges with DOR above 0.5. Over all dam gauges the best arm gains <span id="damAll"></span>.</p></div>
-    <div class="claim"><p>Run the best recipe on the full population at two seeds, to measure it where it counts, even though it is below +0.03.</p></div>
-    <div class="claim"><p>Next laws to try: flood-evacuation dynamics for the 30 to 120 day band, and a prescribed withdrawal term for irrigation dams, tested against a plain rescaling of runoff.</p></div>
+    <div class="claim"><p>Decided: per-dam calibrated parameters for gauged dams are accepted. They carry the gain; the feature head alone does not.</p></div>
+    <div class="claim"><p>Decided: the target is +0.03 in the population median over all 2,365 evaluation gauges. Over the 458 smoke dam gauges the best arm gains <span id="damAll"></span>; at the population median about +0.002.</p></div>
+    <div class="claim"><p>Tested: the flood pool is worth implementing at flood-control dams; the irrigation withdrawal is not.</p></div>
+    <div class="claim"><p>Open: implement the flood pool in the engine with joint training and run the full population at two seeds, then turn to the routing head and Q′ for the rest of +0.03.</p></div>
   </div>
   <p class="note">Code: branch <span class="m">dam-release-v2</span>. Journal: <span class="m">research/journal/2026-09.md</span> on that branch. Analyses: <span class="m">experiments/reservoir/smoke_v2/</span>, <span class="m">experiments/reservoir/rulecurve_offline/</span>. Earlier pages: <a href="https://claude.ai/artifact/HhcubFbHpBdmpKykN7PeUT">full run</a>, <a href="https://claude.ai/artifact/Epafz7WFiUhxCtZ8MMdLoc">status</a>.</p>
 </section>
@@ -316,8 +347,8 @@ select:focus-visible, button.pick:focus-visible { outline: 2px solid var(--nodam
     ["Best trained arm, 117 target gauges", sg(F.target.m, 3), `${ci(F.target)}; KGE ${sg(F.target_kge.m, 3)}`],
     ["Same arm, clean gauges only", sg(F.clean.m, 3), `n = ${F.clean.n}; dams creating under 0.5 % of inflow`],
     ["In-engine ceiling, offline per-dam fits", sg(A.L4pos.target.m, 3), `rule curve replay; residence time alone ${sg(A.L2pos.target.m, 3)}`],
-    ["Target", "+0.030", "median NSE at the 117 target gauges"],
-    ["Matched controls", "0.0000", "max change under frozen routing"],
+    ["Target", "+0.030", "population median, all 2,365 evaluation gauges"],
+    ["Population median, best arm", "+0.002", "transferred by DOR bin; a perfect dam model gives +0.026"],
   ];
   document.getElementById("tiles").innerHTML = tiles.map(([l, v, n], i) =>
     `<div class="tile"><div class="lab">${l}</div><div class="val${i === 3 ? " tgt" : ""}">${v}</div><div class="note">${n}</div></div>`).join("");
