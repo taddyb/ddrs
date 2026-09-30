@@ -92,7 +92,7 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
     let all_staids: Vec<Staid> = gage_meta.rows.iter().map(|r| r.staid.clone()).collect();
 
     let gages_adj = GagesAdjacencyStore::open(gages_adj_path, &all_staids)?;
-    let observations = ObservationsStore::open(&ds.observations)?;
+    let observations = ObservationsStore::open_at(&ds.observations, ds.pin_for("observations"))?;
     let valid_staids = valid_gauges(&all_staids, &gages_adj, |s| observations.contains(s));
     if valid_staids.is_empty() {
         return Err(BaselineError::NoGauges {
@@ -121,7 +121,7 @@ pub fn compute(test_cfg: &Config) -> Result<SummedQPrime, BaselineError> {
         n_days,
     );
 
-    let streamflow = StreamflowSource::open(&ds.streamflow)?;
+    let streamflow = StreamflowSource::open_at(&ds.streamflow, ds.pin_for("streamflow"))?;
 
     let qr_daily = streamflow.read_window_daily(start, n_days, &all_needed_sorted)?;
     let obs_daily = observations.read_window_daily(start, n_days, &valid_staids)?;

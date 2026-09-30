@@ -230,6 +230,8 @@ line citation outright rather than trusting it to stay pinned.
 | Flood pool (law FA) | `reservoir_flood_pool` (z = 0 bitwise, one-year mass balance, regime gradcheck incl. an upstream `n`, chunked = one engine, training = resolved table, dataset-open refusals, frozen training + resume), `cargo test --lib -- flood_pool pool dam_params lazy_adam release_eval reservoirs` |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
+| Source fingerprints (`src/cli/fingerprint.rs`) | `cli_fingerprint` (icechunk snapshot-id form, the two Juniata stores staying distinct, nested-content drift, old lock JSON without `snapshot`), then `cli_lockfile`, `cli_plan`, `cli_manifest` because all three serialize a `Fingerprint` |
+| Icechunk reader / snapshot pins (`src/data/store/icechunk.rs`, `data_sources.pins`) | `icechunk_pins` (pinned open equals unpinned at the tip; absent and malformed ids error naming path and id), `cli_lockfile`, `cargo test --lib config::tests` (pin name validation) and `cargo test --lib cache_key` (baseline key hashes the pins), plus `juniata_bundle`, `gridded_bundle`, `hourly_streamflow` as the read-path regression |
 | Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |
 | Eval robustness | `cargo test --lib training::eval::tests` |
 | Disagg freeze | `disagg_freeze` |
