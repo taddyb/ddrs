@@ -68,28 +68,37 @@ def share_stats(run):
 
 
 out = {}
-if "replay_FA_pool" in N and "replay_FA_nopool" in N:
-    d = (N["replay_FA_pool"] - N["replay_FA_nopool"])[fc_rep]
+# Replay: the fair twin (plain-bucket T0, no pool; review v6 MEDIUM 2) when present, else the FA-T0 twin.
+twin = "replay_FA_L2T0" if "replay_FA_L2T0" in N else "replay_FA_nopool"
+if "replay_FA_pool" in N and twin in N:
+    d = (N["replay_FA_pool"] - N[twin])[fc_rep]
     offd = (off_fits.FA_nse - off_fits.L2_nse).reindex(fc_rep)
     sh = share_stats(st["replay_FA_pool"])
-    out["replay"] = dict(engine=med_ci(d), offline=med_ci(offd), created=sh,
+    out["replay"] = dict(twin=twin, engine=med_ci(d), offline=med_ci(offd), created=sh,
                          kept=round(float(np.nanmedian(d) / np.nanmedian(offd)), 3) if np.nanmedian(offd) else None)
+    if "replay_FA_nopool" in N:
+        out["replay"]["engine_vs_FA_T0_twin"] = med_ci((N["replay_FA_pool"] - N["replay_FA_nopool"])[fc_rep])
     out["pass1"] = bool(out["replay"]["kept"] is not None and out["replay"]["kept"] >= 0.5 and sh and sh["gt05"] == 0)
-if "S6pool" in N and "S6base" in N:
-    d = N["S6pool"] - N["S6base"]
-    out["s6"] = {g: med_ci(d[idx]) for g, idx in (("flood_control", fc), ("target_117", target), ("dam_all", list(dam)))}
-    out["s6_vs_off"] = {a: {g: med_ci((N[a] - N["off"])[idx]) for g, idx in (("target_117", target), ("dam_all", list(dam)))}
-                        for a in ("S6base", "S6pool")}
-    out["controls_max"] = {a: round(float((N[a] - N["off"])[ctl].abs().max()), 6) for a in ("S6base", "S6pool")}
-    out["created"] = {a: share_stats(st[a]) for a in ("S6base", "S6pool")}
-    f = out["s6"]["flood_control"]
-    cr = out["created"]["S6pool"]
+# Smoke pair: S7 (per_dam_l2 0; review v6 HIGH 1) when present, else S6.
+pair = ("S7pool", "S7base") if "S7pool" in N and "S7base" in N else ("S6pool", "S6base")
+if pair[0] in N and pair[1] in N:
+    out["pair"] = pair
+    d = N[pair[0]] - N[pair[1]]
+    out["pool_minus_base"] = {g: med_ci(d[idx]) for g, idx in (("flood_control", fc), ("target_117", target), ("dam_all", list(dam)))}
+    out["vs_off"] = {a: {g: med_ci((N[a] - N["off"])[idx]) for g, idx in (("target_117", target), ("dam_all", list(dam)))}
+                     for a in pair}
+    out["controls_max"] = {a: round(float((N[a] - N["off"])[ctl].abs().max()), 6) for a in pair}
+    out["created"] = {a: share_stats(st[a]) for a in pair}
+    f = out["pool_minus_base"]["flood_control"]
+    cr = out["created"][pair[0]]
     out["pass2"] = bool(f["m"] > 0 and f["lo"] >= 0 and max(out["controls_max"].values()) == 0 and cr and cr["ge5"] == 0)
-for a in ("S6pool",):
-    p = R + st.get(a, "x") + "/release_pool.csv"
+    p = R + st[pair[0]] + "/release_pool.csv"
     if os.path.exists(p):
         pl = pd.read_csv(p)
+        # Validity (review v6 LOW 3): a pass with pools still near their 0.05 d init says nothing about the law.
         out["pool_diag"] = dict(n=int(len(pl)), median_max_F_days=round(float(pl.max_F_days.median()), 3),
+                                share_max_F_ge_1d=round(float((pl.max_F_days >= 1).mean()), 3),
                                 captured_m3=float(pl.captured_m3.sum()), evacuated_m3=float(pl.evacuated_m3.sum()))
+        out["pools_moved"] = bool(out["pool_diag"]["share_max_F_ge_1d"] >= 0.25)
 print(json.dumps(out, indent=1))
 json.dump(out, open(W + "experiments/reservoir/smoke_v2/flood_gate.json", "w"), indent=1)
