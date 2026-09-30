@@ -1,0 +1,196 @@
+RULE-CURVE RELEASE LAWS, OFFLINE (smoke set, routed no-dam flow, fit WY1983-1995, score WY1996-2010)
+Directory: /home/tbindas/.claude/jobs/dacd6d8c/tmp/rulecurve/   (read-only on the repo; nothing trained)
+
+VERDICT
+- Best law: L4, the harmonic rule curve. It is a linear bucket on I' = I - Ibar*sum_{k=1,2}(alpha_k sin kw + beta_k cos kw), with 5 parameters per dam (T0 and 4 dimensionless coefficients).
+- Per-gauge fit on the on-reach dams with DOR>0.5 (n=117):
+  - Median dNSE vs no dam is +0.0494 [+0.0276, +0.0811], 92 up / 25 down, sign p 3e-10.
+  - Mean dNSE (NSE clipped at -1) is +0.0972.
+  - DiD vs matched controls is +0.0472 [+0.0138, +0.0702], 81/36, p 4e-5.
+  - Controls gain +0.0045 [+0.0012, +0.0098], 9% of the dam gain. The law is dam-specific.
+  - dKGE is +0.0181 [+0.0048, +0.0385] (controls +0.0025), with dr +0.0198, dalpha -0.0220, dbeta 0.0000.
+  - The per-gauge target of >= +0.03 is MET. The seasonal bucket L1 reaches +0.0267 (reproduced exactly).
+- The paired increment over the seasonal bucket is smaller than the difference of medians suggests. L4 minus L1 per gauge has median +0.0095 [+0.0036, +0.0170] (77/40), mean +0.014.
+- Floor: the gain does NOT need the zero-release floor.
+  - With floor feedback, a mean of 13.8% of test days are floored (median 0.6%).
+  - L4pen is fitted with training floored days held <= 1% (1.5% of test days). It gets +0.0507 [+0.0328, +0.0710], DiD +0.0450, dKGE +0.0082.
+  - The pure linear fit with no floor gets +0.0507.
+  - Fitting under the engine's existing clamp (no storage feedback) also gets +0.0507.
+  - In practice the law is linear in the solve.
+- Feature-limited target (>= +0.02): NOT met by any rule-curve law. The rule-curve coefficients cannot be predicted from allowed inputs.
+  - 5-fold CV RF R^2 of the coefficients is -0.13 to +0.15.
+  - CV-predicted L4 gives -0.0039 at DOR>0.5 on-reach; L4pen gives +0.0050.
+  - A loss-trained linear feature->coefficient map (head-like, ridge chosen by inner CV) gives +0.0185 to +0.0206. That is no better than T0 alone (+0.0212) or the feature-limited seasonal bucket (+0.0228 [+0.0135, +0.0436]).
+  - The +0.049 is reachable only with per-dam free coefficients calibrated on a downstream gauge's training years. Held-out years generalise; held-out dams do not.
+  - Hybrid (T0 from features, per-dam calibrated coefficients): +0.0351 [+0.0156, +0.0694].
+- T0 does NOT lengthen once a rule curve exists. The L4/L2 T0 ratio at DOR>0.5 is median 1.00 (IQR 0.97-1.07). L4 T0 median is 2.08 d vs L2 1.96 d. The 30-120 d band excess stays.
+- "Flatten" (L3, the brief's hypothesis) fails.
+  - f median is 0.046, and f = 0 at 47% of dams. Gain is +0.0253, the same as the plain bucket (+0.0250).
+  - The fitted L4 flux is essentially uncorrelated with the model inflow climatology (median r 0.13).
+  - A per-dam Q' climatology table is therefore not needed.
+- The gain is concentrated at flood-control dams: +0.1288 [+0.0628, +0.1735], 40/3 (n=43, DOR>0.5 on-reach), vs +0.0262 at the other 74.
+- Head outputs: log T0 plus 4 bounded rule-curve coefficients. Drop the seasonal a, b terms: L5 (L4 + seasonal T) is +0.0460, no better than L4, and a, b are unpredictable (R^2 0.04 / 0.09).
+
+1. SANITY CHECK (harness reproduction)
+L1 was refitted with the harness grid (T0 at 40 log points 0.05-1000 d, a and b in linspace(-2, 2, 9), no T floor while fitting, scored with T >= 0.05 d as ceiling.py does):
+- Parameters are identical to expected_release_fit.csv at 214/214 dams.
+- On-reach median dNSE is +0.0211 [+0.0106, +0.0324], 149/65.
+- At DOR>0.5 on-reach it is +0.0267 [+0.0084, +0.0580], 79/38.
+Both match the brief. Refining L1 with Nelder-Mead does not help: +0.0260 (fits_l1ref.csv).
+
+2. LAWS AND RECURSION
+The bucket is the harness recursion (avail = S + x; q = avail/(T+1); S = avail - q) in C (bucket.c). Q is floored at 0 and the deficit stays in storage, so S may go negative (the dam is below its rule curve).
+
+Fitting:
+- Closed-form least squares for the flux coefficients on the unfloored bucket.
+- Grid over T0 (40 log points, 0.05-365 d), times phi for L3b, times a and b for L5.
+- Nelder-Mead refinement on the floored training NSE from the best 3 cells, within bounds.
+
+Laws:
+- L0: pass-through.
+- L1: seasonal-T bucket.
+- L2: plain bucket.
+- L3: flatten, f in [0, 1.5]. C is the 31-d circular moving average of the training-year doy mean of the model inflow I.
+- L3b: flatten plus phase phi in [-90, 90] d.
+- L4: harmonic rule curve, coefficients in [-3, 3].
+- L4r: rule curve only, with T0 held at the 0.05 d floor.
+- L5: L4 plus seasonal T.
+
+Variants (run_variants.py):
+- ec: fitted and scored with an engine-like clamp that keeps S = T Q, so a floored day forgets its deficit.
+- lin: no floor.
+- pen: training floored-day share held <= 1%.
+- asec: L4's parameters re-scored under the clamp, with no refit.
+
+3. RESULTS: 214 ON-REACH DAM GAUGES + 214 MATCHED CONTROLS (summary.txt, summary.json)
+Each row lists: median dNSE vs L0 [95% bootstrap CI] up/down; controls; DiD; dKGE; mean floored share of test days.
+
+DOR>0.5 (n=117):
+  L1   +0.0267 [+0.0084,+0.0580] 79/38 | ctl +0.0008 | DiD +0.0223 [+0.0036,+0.0500] | dKGE -0.0003 | floor 0
+  L2   +0.0250 [+0.0033,+0.0467] 88/29 | ctl +0.0004 | DiD +0.0218 | dKGE -0.0002 | floor 0
+  L3   +0.0253 [+0.0084,+0.0467] 90/27 | ctl +0.0004 | DiD +0.0257 | dKGE -0.0024 (dalpha -0.049) | floor 0.023
+  L3b  +0.0227 [+0.0069,+0.0382] 86/31 | ctl +0.0028 | DiD +0.0189 | dKGE -0.0009 | floor 0.065
+  L4   +0.0494 [+0.0276,+0.0811] 92/25 | ctl +0.0045 | DiD +0.0472 [+0.0138,+0.0702] | dKGE +0.0181 | floor 0.138
+  L4pen +0.0507 [+0.0328,+0.0710] 95/22 | ctl +0.0049 | DiD +0.0450 [+0.0138,+0.0607] | dKGE +0.0082 | floor 0.015
+  L4ec +0.0507 [+0.0301,+0.0825] 94/23 | ctl +0.0051 | DiD +0.0459 | dKGE +0.0152 | floor 0.070
+  L4lin +0.0507 [+0.0298,+0.0814] 93/24 | ctl +0.0049 | DiD +0.0426 | dKGE +0.0181 | no floor
+  L4asec +0.0276 (the L4 parameters scored under the clamp: parameters must be trained under the engine's own clamp)
+  L4r  +0.0115 [+0.0059,+0.0217] | ctl +0.0045 | DiD +0.0079 (the rule curve needs the bucket)
+  L5   +0.0460 [+0.0262,+0.1015] 86/31 | ctl +0.0045 | DiD +0.0406 | dKGE +0.0152 | floor 0.124
+
+L4 by DOR bin:
+  <=0.1    n=25: +0.0191, ctl +0.0013, DiD +0.0095 [-0.0014,+0.0407]
+  0.1-0.5  n=72: +0.0307, ctl +0.0032, DiD +0.0157 [+0.0058,+0.0348]
+  0.5-1    n=57: +0.0507, ctl +0.0030, DiD +0.0472 [+0.0128,+0.1257], dKGE +0.0378
+  1-2      n=30: +0.0709, ctl +0.0091, DiD +0.0504 [-0.0095,+0.1177]
+  >2       n=30: +0.0334, ctl +0.0067, DiD +0.0325 [+0.0003,+0.0996]
+All 214 on-reach dams: L4 +0.0363 [+0.0247,+0.0550] 164/50, DiD +0.0268, controls +0.0036.
+
+Median NSE levels at DOR>0.5:
+- Dam gauges: L0 0.337, L1 0.462, L4 0.482.
+- Controls: L0 0.726, L4 0.747.
+
+Training gains exceed test gains. At DOR>0.5 the median training dNSE is L4 +0.079 and L1 +0.055, against test gains of +0.049 and +0.027.
+
+4. RESULTS: ALL 458 DAM GAUGES + 458 CONTROLS
+The bucket here sits on the whole gauge series, which over-states the dam's share.
+- DOR>0.5 (n=214):
+  - L1: +0.0102, DiD +0.0102.
+  - L4: +0.0258 [+0.0122, +0.0400] 157/57, controls +0.0039 (15% of the dam gain), DiD +0.0142 [+0.0062, +0.0348], dKGE +0.0054.
+  - L4pen: +0.0255, DiD +0.0139.
+  - L3: +0.0100.
+- All 458 dams: L4 +0.0212 vs L1 +0.0083.
+- DOR>2 (mostly off-reach dams): L4 +0.0010 while controls get +0.0068. The law does not transfer to dams far upstream of the gauge.
+
+5. PERIOD-BAND SPLIT (test years, on-reach, DOR>0.5; diag.json and summary.json)
+Mean normalised MSE per band (<7, 7-30, 30-120, 120-400, >400 d):
+  dam L0 0.114 0.200 0.190 0.199 0.080
+  dam L1 0.066 0.134 0.169 0.215 0.077
+  dam L4 0.065 0.129 0.165 0.184 0.077
+  ctl L0 0.109 0.093 0.053 0.056 0.021
+Median dam-minus-control: L0 -0.010 +0.052 +0.104 +0.076 +0.021; L4 -0.020 +0.035 +0.077 +0.062 +0.020.
+
+What the bands show:
+- Any bucket fixes the <30 d bands.
+- The rule curve's specific contribution is the 120-400 d band. L1 makes that band worse (+0.016 mean) and L4 improves it (-0.015 mean).
+- The 30-120 d band (monthly, flood-storage evacuation) is barely touched: 0.190 to 0.165 against a control level of 0.053. It stays the largest unexplained dam error. A fixed rule curve cannot fix it, and neither can a longer T0, which the fits reject.
+
+6. FITTED PARAMETERS (on-reach; summary.json "params")
+T0 medians in days, by DOR bin (<=0.1, 0.1-0.5, 0.5-1, 1-2, >2):
+  L1 0.107, 0.935, 2.26, 2.91, 4.29
+  L2 0.362, 0.507, 1.20, 1.82, 4.49
+  L3 0.362, 0.525, 1.17, 1.82, 4.41
+  L4 0.364, 0.488, 1.17, 2.87, 4.30
+  L5 0.097, 0.692, 2.48, 9.36, 4.40
+At DOR>0.5 the share of dams with T0 > 5 d is L1 38%, L2 33%, L3 31%, L4 33%, L5 43%. Matched controls sit at T0 = 0.05 d (the floor).
+
+Rule-curve shape:
+- L3 f median: 0.000, 0.058, 0.000, 0.006, 0.182.
+- L3b f median: 0.08, 0.24, 0.19, 0.39, 0.48. L3b phi at DOR>0.5 has median +1.6 d and IQR -45 to +56 d, i.e. it is unidentified.
+- L4 flux amplitude, std(r)/Ibar median: 0.079, 0.147, 0.177, 0.340, 0.573. It rises with DOR.
+- Implied seasonal storage swing of the rule curve (range of S0) at DOR>0.5:
+  - Median 11.2% of annual inflow (IQR 5.0-23.5%).
+  - That is 9% of the NID storage (swing/DOR IQR 0.04-0.21).
+  - It exceeds the NID capacity at only 1.7% of dams.
+  - The fitted rule curves are therefore physically plausible. The controls' spurious curves swing only 4.2%.
+- At flood-control dams the doy of maximum S0 spans an IQR of 57-252: the phase is dam-specific. The fill peak relative to the inflow-climatology peak has median +7 d, IQR -79 to +74.
+
+7. FEATURE-LIMITED CEILING (features.json and features.txt, pooled.txt, hybrid_by_gauge.csv)
+Features:
+- The 19 normalised NID features (dam_features.csv).
+- log10 DOR.
+- Model-inflow shape on training years: amplitude and std of C/Cbar, peak doy and first-harmonic phase as sin/cos, CV of I.
+No observations or observed dam data were used.
+
+CV R^2 (on-reach):
+- L1: T0 0.375, a 0.041, b 0.089.
+- L3: T0 0.259, f 0.150.
+- L3b: f 0.255, phi 0.002.
+- L4 (calendar frame): T0 0.310, coefficients 0.151, -0.080, 0.114, 0.130.
+- L4 (inflow-phase frame): coefficients 0.111, 0.002, -0.033, -0.031.
+
+Simulated, on-reach DOR>0.5:
+- cvL1: +0.0228 [+0.0135, +0.0436]
+- cvL3: +0.0096
+- cvL3b: -0.0057
+- cvL4: -0.0039 [-0.0214, +0.0147]
+- cvL4 in the inflow-phase frame: -0.0098
+- cvL4pen: +0.0050
+- Pooled, loss-trained linear maps:
+  - T0 only: +0.0212 [+0.0076, +0.0317]
+  - Rule curve, small feature set: +0.0206
+  - Rule curve, full feature set: +0.0195 to +0.0200
+- Hybrid (T0 from features, per-dam calibrated coefficients): +0.0351 [+0.0156, +0.0694] 80/37. Its parameters scored under the engine clamp give +0.0227.
+- Flood-control dams (n=43): cvL1 +0.0352, T0-only +0.0303, hybrid +0.0876.
+- All 458 dams: cvL1 +0.0132, cvL4 -0.0030.
+
+The placebo test is not informative. Applying a dam law with dam-predicted parameters to each matched control lowers the controls by 0.02 to 0.07, so the feature-limited DiDs of +0.03 to +0.07 only mean that a dam law at an undammed site hurts.
+
+8. WHAT THIS MEANS FOR THE ENGINE
+a. Where the flux enters. The affine law S = T Q + S0(doy) only changes the right-hand side of the dam row: subtract S0(t+1) - S0(t) = dt*r. A (the system matrix) and the CSR pattern are unchanged, and the O(nnz) backward is untouched.
+b. No state at window starts. S0 is a function of doy, so the closed-form start S = T Q + S0 still holds. rho windows and test chunks need no state, unlike any long-memory law.
+c. Needs per dam:
+   - A scalar Ibar: the training-mean model inflow at the dam, e.g. the mean of upstream Q', detached, as a precomputed per-dam table or head input.
+   - sin 2w and cos 2w, from the existing seasonal_phase by double angle.
+   - It does NOT need a Q' climatology table, because L3 failed.
+d. The clamp:
+   - The existing post-solve clamp_min on Q (no feedback) reproduces the gain (L4ec +0.0507), but only when the parameters are trained under that clamp (L4asec +0.0276).
+   - The clamp creates mass: at DOR>0.5 on-reach the median is 0.04% of test inflow, the 75th percentile 2.0% and the 90th percentile 21%.
+   - Recommendation: keep the clamp and add a loss penalty on clamped dam-row days. L4pen shows <= 1% floored days costs nothing.
+   - A storage-deficit state with feedback is not required.
+e. Head outputs: log T0 from NID features, plus 4 coefficients (bounded, for example 1.5*tanh). Because features cannot predict the coefficients, emit them from a per-dam free parameter table (an embedding, initialised at 0) trained on the gauge loss.
+   - This is legitimate: gauge observations are the target, not an input.
+   - Expect it to help only at dams constrained by a training gauge.
+   - Report ungauged-dam performance separately. For those dams the ceiling is the T0-only bucket, about +0.021 at DOR>0.5.
+f. The trap noted in the earlier review still applies. The test-phase table in release_eval.rs must carry the 4 coefficients and Ibar per dam.
+
+CAVEATS
+- Offline, daily step. The bucket sits on the routed gauge series, which already routes the dam reach (engine T ~ K_reach, not 0).
+- Test years follow training years (temporal hold-out only).
+- Controls are matched by HUC2 and area, not by irrigation or withdrawal intensity. Part of the dam-associated seasonal signal could be withdrawals co-located with dams.
+- The medians of per-gauge gains are skewed: the paired L4-minus-L1 median is +0.0095, not +0.023.
+
+FILES (all in /home/tbindas/.claude/jobs/dacd6d8c/tmp/rulecurve/)
+- Code: rc.py (laws, recursion, fitting), bucket.c / libbucket.so, run_fits.py, run_variants.py, run_l1ref.py, summarise.py, features.py + feat_summary.py, pooled.py, hybrid.py, diag.py, purpose.py, check_probe.py (L1 reproduction).
+- Per-gauge outputs: fits_by_gauge.csv (parameters, test/train metrics, floors, bands, shape features), fits_variants.csv, fits_l1ref.csv, features_{on_reach,all_dams}_by_gauge.csv, pooled_by_gauge.csv, hybrid_by_gauge.csv, diag_by_gauge.csv.
+- Summaries: summary.txt/json, features.txt/json, features_r2.json, pooled.txt/json, diag.txt/json, purpose.json.

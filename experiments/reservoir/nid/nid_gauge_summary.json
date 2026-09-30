@@ -1,0 +1,53 @@
+{
+ "n_eval_gauges": 2365,
+ "gauges_with_any_nid_dam": 1560,
+ "gauges_with_nid_ge1mcm": 1265,
+ "gauges_with_nid_ge10mcm": 917,
+ "gauges_with_nwm_reservoir": 909,
+ "gauges_nid_ge10mcm_but_no_nwm": 75,
+ "gauges_with_dam_on_own_reach": 542,
+ "dor_class_nid": {
+  "DOR<=0.1": 883,
+  "none": 805,
+  "0.1<DOR<=0.5": 369,
+  "DOR>0.5": 308
+ },
+ "dor_class_nwm": {
+  "none": 1456,
+  "DOR>0.5": 347,
+  "0.1<DOR<=0.5": 344,
+  "DOR<=0.1": 218
+ },
+ "dor_gt_05_by_max_storage": 410,
+ "dor_gt_05_nid_not_nwm": 50,
+ "dor_gt_05_nwm_not_nid": 89,
+ "median_nse_by_nid_cls": {
+  "0.1<DOR<=0.5": 0.725,
+  "DOR<=0.1": 0.775,
+  "DOR>0.5": 0.487,
+  "none": 0.735
+ },
+ "n_by_nid_cls": {
+  "DOR<=0.1": 883,
+  "none": 805,
+  "0.1<DOR<=0.5": 369,
+  "DOR>0.5": 308
+ },
+ "dams_in_eval_networks": 5935,
+ "dams_in_eval_networks_ge1mcm": 2442,
+ "dams_in_eval_networks_ge10mcm": 1099,
+ "dams_in_eval_networks_ge100mcm": 304,
+ "dams_in_eval_networks_by_class": {
+  "A": 2906,
+  "B": 2139,
+  "C": 884,
+  "D": 6
+ },
+ "dams_on_an_eval_gauge_reach": 721,
+ "name_flagged_regulated": 96,
+ "name_flagged_with_nid_dam": 92,
+ "name_flagged_no_nwm_but_nid": 14,
+ "name_flagged_no_nwm": 18,
+ "benchmark_dam_comid_has_nid_dam": 111,
+ "benchmark_n": 121
+}

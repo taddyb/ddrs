@@ -1,0 +1,41 @@
+== flood-control all (n=166) median paired gain, train years | test years (dams), and controls test
+  FA   -L2  train +0.0157 | test +0.0073 | ctl test +0.0000
+  FC   -L2  train +0.0130 | test +0.0071 | ctl test -0.0000
+  FA4  -L4  train +0.0120 | test +0.0047 | ctl test +0.0000
+  L4   -L2  train +0.0129 | test +0.0047 | ctl test +0.0004
+  W1   -L2  train +0.0000 | test +0.0000 | ctl test +0.0000
+  W3   -L2  train +0.0073 | test +0.0041 | ctl test +0.0010
+  Kg   -L0  train +0.0095 | test +0.0177 | ctl test +0.0003
+  L2Kg -L2  train +0.0015 | test +0.0033 | ctl test +0.0004
+== on-reach DOR>0.5 (n=117) median paired gain, train years | test years (dams), and controls test
+  FA   -L2  train +0.0133 | test +0.0006 | ctl test +0.0000
+  FC   -L2  train +0.0027 | test +0.0000 | ctl test +0.0000
+  FA4  -L4  train +0.0097 | test +0.0000 | ctl test +0.0000
+  L4   -L2  train +0.0299 | test +0.0042 | ctl test +0.0010
+  W1   -L2  train +0.0000 | test +0.0000 | ctl test +0.0000
+  W3   -L2  train +0.0147 | test +0.0025 | ctl test +0.0007
+  Kg   -L0  train +0.0234 | test +0.0176 | ctl test -0.0004
+  L2Kg -L2  train +0.0113 | test +0.0072 | ctl test -0.0003
+== irrigation (n=40) median paired gain, train years | test years (dams), and controls test
+  FA   -L2  train +0.0036 | test +0.0000 | ctl test +0.0000
+  FC   -L2  train +0.0006 | test +0.0000 | ctl test -0.0000
+  FA4  -L4  train +0.0039 | test -0.0000 | ctl test +0.0000
+  L4   -L2  train +0.0220 | test +0.0024 | ctl test +0.0070
+  W1   -L2  train +0.0005 | test -0.0000 | ctl test -0.0000
+  W3   -L2  train +0.0124 | test +0.0024 | ctl test +0.0016
+  Kg   -L0  train +0.0126 | test +0.0006 | ctl test +0.0020
+  L2Kg -L2  train +0.0058 | test +0.0007 | ctl test +0.0011
+== all dams (n=458) median paired gain, train years | test years (dams), and controls test
+  FA   -L2  train +0.0069 | test +0.0004 | ctl test +0.0000
+  FC   -L2  train +0.0025 | test +0.0000 | ctl test +0.0000
+  FA4  -L4  train +0.0061 | test +0.0000 | ctl test +0.0000
+  L4   -L2  train +0.0116 | test +0.0024 | ctl test +0.0009
+  W1   -L2  train +0.0001 | test +0.0000 | ctl test +0.0000
+  W3   -L2  train +0.0068 | test +0.0029 | ctl test +0.0007
+  Kg   -L0  train +0.0093 | test +0.0092 | ctl test +0.0004
+  L2Kg -L2  train +0.0034 | test +0.0036 | ctl test +0.0005
+
+W3 at irrigation dams: centre doy median 225 [IQR 160,298], width 201 d, withdrawn share 0.106
+  share of irrigation dams whose W3 window is centred Oct-Apr (doy >= 274 or <= 120): 0.55
+per-gauge scalar k, dams: median 0.963, share k<0.9 0.29, share k>1.1 0.16, median |log k| 0.088, test beta L0 median 1.050, median |log beta| 0.116
+per-gauge scalar k, controls: median 1.006, share k<0.9 0.09, share k>1.1 0.16, median |log k| 0.052, test beta L0 median 1.041, median |log beta| 0.093

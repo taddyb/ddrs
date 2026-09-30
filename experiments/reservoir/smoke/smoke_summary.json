@@ -1,0 +1,102 @@
+{
+ "dam_gauges": 458,
+ "relaxed": [
+  "08015500"
+ ],
+ "cascades": 223,
+ "dam_on_gauge_reach": 214,
+ "controls": 458,
+ "controls_cross_huc": 54,
+ "per_huc": {
+  "01": {
+   "dam": 28,
+   "control": 7
+  },
+  "02": {
+   "dam": 52,
+   "control": 60
+  },
+  "03": {
+   "dam": 46,
+   "control": 46
+  },
+  "04": {
+   "dam": 22,
+   "control": 24
+  },
+  "05": {
+   "dam": 41,
+   "control": 49
+  },
+  "06": {
+   "dam": 1,
+   "control": 4
+  },
+  "07": {
+   "dam": 25,
+   "control": 25
+  },
+  "08": {
+   "dam": 1,
+   "control": 1
+  },
+  "09": {
+   "dam": 1,
+   "control": 1
+  },
+  "10": {
+   "dam": 30,
+   "control": 32
+  },
+  "11": {
+   "dam": 12,
+   "control": 12
+  },
+  "12": {
+   "dam": 6,
+   "control": 6
+  },
+  "13": {
+   "dam": 10,
+   "control": 10
+  },
+  "14": {
+   "dam": 17,
+   "control": 21
+  },
+  "15": {
+   "dam": 2,
+   "control": 12
+  },
+  "16": {
+   "dam": 18,
+   "control": 15
+  },
+  "17": {
+   "dam": 70,
+   "control": 87
+  },
+  "18": {
+   "dam": 76,
+   "control": 46
+  }
+ },
+ "network_reaches": 29395,
+ "dams_ge10mcm_in_network": 723,
+ "median_nse_trained": {
+  "dam": 0.6044012040058895,
+  "control": 0.7608002540896952
+ },
+ "purposes": {
+  "Flood Risk Reduction": 166,
+  "Hydroelectric": 126,
+  "Water Supply": 61,
+  "Irrigation": 40,
+  "Recreation": 29,
+  "Other": 17,
+  "Fish and Wildlife Pond": 8,
+  "Navigation": 8,
+  "Debris Control": 2,
+  "Grade Stabilization": 1
+ }
+}

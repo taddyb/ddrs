@@ -16,8 +16,9 @@ use crate::data::error::{DataError, Result};
 use crate::data::ids::{Comid, Staid};
 use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
-    AorcPrecipStore, AttributesStore, ConusAdjacencyStore, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, StateCache, StreamflowSource,
+    map_reservoir_rows, read_dam_features, read_fixed_release_table, AorcPrecipStore,
+    AttributesStore, ConusAdjacencyStore, FixedTable, GageMetadata, GagesAdjacencyStore,
+    ObservationsStore, ReservoirRows, ReservoirTable, StateCache, StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
 
@@ -86,6 +87,11 @@ pub struct RoutingBatch {
     /// stays `None`). NaN (no StreamCat coverage) → 1.0 (absence of
     /// imperviousness data ≠ concrete; leakance allowed).
     pub impervious_mask: Option<Vec<f32>>,
+    /// Dam rows of this network (positions in `divide_comids`) and their
+    /// residence times, from `data_sources.reservoirs`. `Some` exactly when
+    /// `params.use_reservoirs` is true (possibly with no rows, when no table
+    /// COMID is in this network); `None` leaves routing unchanged.
+    pub reservoir_rows: Option<ReservoirRows>,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +118,8 @@ struct StaticNetworkCache {
     /// Precomputed impervious mask (same as `RoutingBatch::impervious_mask`).
     /// Built once at static-network construction; cloned into every eval batch.
     impervious_mask: Option<Vec<f32>>,
+    /// Same as `RoutingBatch::reservoir_rows`, mapped once for the static network.
+    reservoir_rows: Option<ReservoirRows>,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +165,9 @@ pub struct RoutingTensors<B: Backend> {
     /// autograd. `None` when `corridor_impervious` is absent from attributes
     /// or leakance is disabled (byte-identical back-compat with PC1).
     pub impervious_mask: Option<Tensor<B, 1>>,
+    /// Carried from `RoutingBatch::reservoir_rows`; host-side indices, applied
+    /// by `training::forward::apply_reservoir_rows` after `setup_inputs`.
+    pub reservoir_rows: Option<ReservoirRows>,
 }
 
 impl RoutingBatch {
@@ -261,6 +272,7 @@ impl RoutingBatch {
             window: self.window,
             initial_state,
             impervious_mask,
+            reservoir_rows: self.reservoir_rows,
         }
     }
 }
@@ -358,6 +370,13 @@ pub struct MeritGagesDataset {
     /// leakance is enabled — `collate`/`build_static_network` will call
     /// `build_impervious_mask`. `None` ⇒ mask is never built (back-compat no-op).
     leakance_impervious_threshold: Option<f32>,
+    /// `data_sources.reservoirs`, read once at open when
+    /// `params.use_reservoirs` is true; `None` otherwise. A `fixed` table
+    /// (`T_days`, optional seasonal `a`, `b`) or, for
+    /// `reservoir_release: learned`, the dam feature table until the test
+    /// phase resolves it (`resolve_learned_release`). Mapped onto each batch's
+    /// COMID order by `map_reservoir_rows`.
+    reservoirs: Option<ReservoirTable>,
 }
 
 /// Log the data version a store opened at, as a sibling of the
@@ -583,6 +602,146 @@ impl MeritGagesDataset {
             None
         };
 
+        let reservoirs = if cfg.params.use_reservoirs {
+            let path = ds.reservoirs.as_ref().ok_or_else(|| DataError::Malformed {
+                path: std::path::PathBuf::from("<config>"),
+                message: "params.use_reservoirs is true but data_sources.reservoirs is not set"
+                    .into(),
+            })?;
+            let table = match cfg.params.reservoir_release {
+                crate::config::ReservoirRelease::Fixed => {
+                    ReservoirTable::Fixed(read_fixed_release_table(path)?)
+                }
+                crate::config::ReservoirRelease::Learned => {
+                    let section = cfg.release_head.as_ref().ok_or_else(|| DataError::Malformed {
+                        path: std::path::PathBuf::from("<config>"),
+                        message: "reservoir_release: learned needs a release_head block".into(),
+                    })?;
+                    let features = read_dam_features(path, &section.input_var_names)?;
+                    // The rule curve's flux scale is a table column, not a
+                    // feature: without it the rule curve cannot run.
+                    if section.rule_curve && features.inflow_mean.is_none() {
+                        return Err(DataError::Malformed {
+                            path: path.clone(),
+                            message: format!(
+                                "release_head.rule_curve needs the `{}` column (Ibar, the \
+                                 training-period mean of upstream-summed Q', m3/s) in the dam table; \
+                                 build it with experiments/reservoir/release_head/build_dam_inflow_clim.py",
+                                crate::data::store::INFLOW_MEAN_COLUMN
+                            ),
+                        });
+                    }
+                    // The flood pool scales Qc and Fmax by Ibar, and
+                    // `flood_control` picks its dams by `purpose_flood`.
+                    let pool = section.flood_pool;
+                    if pool != crate::config::FloodPoolMode::None && features.inflow_mean.is_none() {
+                        return Err(DataError::Malformed {
+                            path: path.clone(),
+                            message: format!(
+                                "release_head.flood_pool: {} needs the `{}` column (Ibar, m3/s) in \
+                                 the dam table; build it with \
+                                 experiments/reservoir/release_head/build_dam_inflow_clim.py",
+                                pool.name(),
+                                crate::data::store::INFLOW_MEAN_COLUMN
+                            ),
+                        });
+                    }
+                    if pool == crate::config::FloodPoolMode::FloodControl && features.purpose_flood.is_none() {
+                        return Err(DataError::Malformed {
+                            path: path.clone(),
+                            message: format!(
+                                "release_head.flood_pool: flood_control needs the `{}` column (0/1) \
+                                 in the dam table",
+                                crate::data::store::PURPOSE_FLOOD_COLUMN
+                            ),
+                        });
+                    }
+                    ReservoirTable::Learned(features)
+                }
+            };
+            // A fixed table's flood pool: `params.reservoir_flood_pool: true`
+            // needs its columns; columns without the key are not routed.
+            if let ReservoirTable::Fixed(t) = &table {
+                if cfg.flood_pool_on() && t.flood_pool.is_none() {
+                    return Err(DataError::Malformed {
+                        path: path.clone(),
+                        message: "params.reservoir_flood_pool: true needs the table's `kc`, `phi`, `z` \
+                                  columns (and `inflow_mean_m3s`)"
+                            .into(),
+                    });
+                }
+                if !cfg.flood_pool_on() && t.flood_pool.is_some() {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "reservoirs: table {} carries flood pool columns (kc, phi, z) but no pool is \
+                         routed (params.reservoir_flood_pool is not true)",
+                        path.display()
+                    );
+                }
+            }
+            // Logged at open so a train-only run, which never builds the eval
+            // network's match line, still leaves the table in `run.log`. Same
+            // fd-2 write as `build_static_network`, for the same libtest reason.
+            use std::io::Write;
+            let rule_curve = cfg.release_head.as_ref().is_some_and(|r| r.rule_curve);
+            let kind = match &table {
+                ReservoirTable::Fixed(t) if t.seasonal => " (fixed, seasonal a/b)",
+                ReservoirTable::Fixed(_) => "",
+                ReservoirTable::Learned(_) if rule_curve => {
+                    " (learned release, dam features, rule curve on inflow_mean_m3s)"
+                }
+                ReservoirTable::Learned(_) => " (learned release, dam features)",
+            };
+            let _ = writeln!(
+                std::io::stderr(),
+                "reservoirs: table {} has {} COMIDs{kind}",
+                path.display(),
+                table.len()
+            );
+            if cfg.flood_pool_on() {
+                let (label, pooled) = match &table {
+                    ReservoirTable::Learned(f) => {
+                        let mode = cfg.release_head.as_ref().map(|s| s.flood_pool).unwrap_or_default();
+                        let k = match mode {
+                            crate::config::FloodPoolMode::FloodControl => {
+                                f.purpose_flood.as_ref().map_or(0, |p| p.iter().filter(|&&b| b).count())
+                            }
+                            _ => f.comids.len(),
+                        };
+                        (format!("learned, {}", mode.name()), k)
+                    }
+                    ReservoirTable::Fixed(t) => (
+                        "fixed table, z > 0".to_string(),
+                        t.flood_pool.as_ref().map_or(0, |p| p.iter().filter(|v| v[2] > 0.0).count()),
+                    ),
+                };
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "reservoirs: flood pool on ({label}): {pooled} of {} table dams pooled",
+                    table.len()
+                );
+            }
+            // Completion years: how many dams exist over this dataset's axis.
+            // A dam is a reservoir only in windows / chunks starting on or
+            // after 1 January of its completion year.
+            let (active, switch_on, later, no_year) =
+                table.activation_counts(time_axis.start, time_axis.end);
+            if active != table.len() || no_year != table.len() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "reservoirs: {active} of {} dams active on {} ({switch_on} switch on by {}, \
+                     {later} completed later, {no_year} without a year, always active)",
+                    table.len(),
+                    time_axis.start,
+                    time_axis.end,
+                );
+            }
+            Some(table)
+        } else {
+            None
+        };
+
         Ok(Self {
             conus,
             gages_adj,
@@ -621,6 +780,7 @@ impl MeritGagesDataset {
             ddr_match: cfg.params.ddr_match,
             state_cache,
             leakance_impervious_threshold,
+            reservoirs,
         })
     }
 
@@ -648,6 +808,15 @@ impl MeritGagesDataset {
         if !self.want_gauge_std {
             return Ok(Vec::new());
         }
+        self.gauge_obs_std_required(staids)
+    }
+
+    /// As [`gauge_obs_std`], but computed regardless of the configured loss.
+    /// For callers whose objective is their own choice rather than the arm's
+    /// training loss — the landscape study scores `nse-batch` at a gauge even
+    /// when the arm trained with L1 (the synthetic-n students). Shares the
+    /// same one-shot cache.
+    pub fn gauge_obs_std_required(&self, staids: &[Staid]) -> Result<Vec<f32>> {
         if self.gauge_std.get().is_none() {
             let full = crate::data::dates::RhoWindow {
                 start_day_idx: 0,
@@ -865,6 +1034,12 @@ impl MeritGagesDataset {
 
         // ----- 7. Impervious mask (None when absent or leakance off) -----
         let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
+        // Reservoir rows in this batch's COMID order (None when use_reservoirs
+        // is off). Not logged: that would be once per training batch.
+        let reservoir_rows = self
+            .reservoirs
+            .as_ref()
+            .map(|table| map_reservoir_rows(table, &compressed.divide_comids));
 
         // ----- 8. Assemble -----
         Ok(RoutingBatch {
@@ -884,6 +1059,7 @@ impl MeritGagesDataset {
             window: *window,
             initial_state,
             impervious_mask,
+            reservoir_rows,
         })
     }
 
@@ -1143,7 +1319,53 @@ impl MeritGagesDataset {
             },
             initial_state,
             impervious_mask: cache.impervious_mask.clone(),
+            reservoir_rows: cache.reservoir_rows.clone(),
         })
+    }
+
+    /// The reservoir table this dataset carries (`None` unless
+    /// `params.use_reservoirs`).
+    pub fn reservoir_table(&self) -> Option<&ReservoirTable> {
+        self.reservoirs.as_ref()
+    }
+
+    /// Replace a `reservoir_release: learned` feature table with the fixed
+    /// seasonal table a trained release head resolves it to
+    /// (`training::release_eval`), so the test phase routes the learned
+    /// `(T0, a, b)` through the ordinary `fixed` path. The release head is a
+    /// per-dam function of its features, so resolving every table dam once
+    /// is exactly what resolving each network's dams would give.
+    ///
+    /// Must run before the first `collate_window`: the static test network
+    /// caches its reservoir rows. Errors if it already exists, if the dataset
+    /// carries no learned table, or if `table` does not list exactly the
+    /// feature table's COMIDs.
+    pub fn resolve_learned_release(&mut self, table: FixedTable) -> Result<()> {
+        let err = |message: String| DataError::Malformed {
+            path: std::path::PathBuf::from("<resolve_learned_release>"),
+            message,
+        };
+        if self.static_network.get().is_some() {
+            return Err(err(
+                "the static test network is already built with the unresolved table; resolve \
+                 the learned release before the first collate_window"
+                    .into(),
+            ));
+        }
+        let features = match &self.reservoirs {
+            Some(ReservoirTable::Learned(f)) => f,
+            _ => return Err(err("the dataset carries no learned dam feature table".into())),
+        };
+        let resolved: Vec<Comid> = table.dams.iter().map(|d| d.comid).collect();
+        if resolved != features.comids {
+            return Err(err(format!(
+                "the resolved table lists {} COMIDs, the feature table {} (or in another order)",
+                resolved.len(),
+                features.comids.len()
+            )));
+        }
+        self.reservoirs = Some(ReservoirTable::Fixed(table));
+        Ok(())
     }
 
     fn get_or_build_static_network(&self) -> Result<&StaticNetworkCache> {
@@ -1217,6 +1439,24 @@ impl MeritGagesDataset {
         // 6. Impervious mask (None when corridor_impervious absent or leakance off).
         let impervious_mask = self.build_impervious_mask(&compressed.divide_comids);
 
+        // 7. Reservoir rows. This is the full network the run routes at eval,
+        // built once per dataset, so the match is logged here and never per
+        // training batch. Written to fd 2 directly rather than via
+        // `eprintln!`: the libtest harness swallows the print macros, which
+        // would keep the line out of `run.log` (`cli::tee`) in
+        // `tests/juniata_acceptance.rs`.
+        let reservoir_rows = self.reservoirs.as_ref().map(|table| {
+            let rows = map_reservoir_rows(table, &compressed.divide_comids);
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "reservoirs: {} of {} table COMIDs are in the network",
+                rows.rows.len(),
+                table.len()
+            );
+            rows
+        });
+
         Ok(StaticNetworkCache {
             adjacency,
             outflow_idx: compressed.outflow_idx,
@@ -1226,6 +1466,7 @@ impl MeritGagesDataset {
             gauge_staids,
             divide_comids: compressed.divide_comids,
             impervious_mask,
+            reservoir_rows,
         })
     }
 }

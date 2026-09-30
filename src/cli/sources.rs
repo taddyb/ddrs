@@ -242,6 +242,9 @@ fn lock_sources_from_config(cfg_path: &Path, ws: &Workspace) -> Result<(), CliEr
     if let Some(p) = &ds.gridded_network {
         pairs.push(("gridded_network".into(), p.clone()));
     }
+    if let Some(p) = &ds.reservoirs {
+        pairs.push(("reservoirs".into(), p.clone()));
+    }
 
     // Parallel reachability + fingerprint. std::thread::scope is fine — these
     // are I/O-bound and the count is small.

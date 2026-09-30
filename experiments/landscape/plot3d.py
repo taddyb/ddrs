@@ -44,11 +44,26 @@ def load(path: Path):
     return xr.open_dataset(path, decode_timedelta=False)
 
 
+def axis_names(ds):
+    """Parameter in each alpha slot: the file's `param_names` attribute
+    (e.g. "n,K_D,d_gw"), falling back to the historical (n, p, q)."""
+    raw = ds.attrs.get("param_names") or ds.attrs.get("axes")
+    return raw.split(",") if raw else list(ALPHA_NAMES)
+
+
+def slice_center(ds):
+    """Where the axis planes are centred: alpha = 0 for `slice_center:
+    trained`, alpha_star otherwise (see LandscapeSpec::slice_center)."""
+    if ds.attrs.get("slice_center") == "trained":
+        return np.zeros(3)
+    return ds["alpha_star"].values.astype(np.float64)
+
+
 def plane_meshes(ds):
     """Build absolute-alpha (X, Y, Z), NSE and clamped-mask grids for the
-    three physical planes n-p, n-q, p-q (skip the stiff-sloppy plane)."""
+    three axis planes (skip the stiff-sloppy plane)."""
     plane_names = ds.attrs["plane_names"].split(",")
-    alpha_star = ds["alpha_star"].values.astype(np.float64)
+    alpha_star = slice_center(ds)
     meshes = {}
     for idx, name in enumerate(plane_names):
         if name == "stiff-sloppy":
@@ -129,9 +144,10 @@ def plot_mpl(ds, meshes, arrows, out_png: Path):
                 [alpha_star[0], end[0]], [alpha_star[1], end[1]], [alpha_star[2], end[2]],
                 color="k", lw=1.8, linestyle=style, zorder=6,
             )
-        ax.set_xlabel("ln multiplier n")
-        ax.set_ylabel("ln multiplier p")
-        ax.set_zlabel("ln multiplier q")
+        names = axis_names(ds)
+        ax.set_xlabel(f"ln multiplier {names[0]}")
+        ax.set_ylabel(f"ln multiplier {names[1]}")
+        ax.set_zlabel(f"ln multiplier {names[2]}")
         ax.view_init(elev=elev, azim=azim)
         ax.set_title(f"elev={elev}, azim={azim}", fontsize=9)
         if legend_handles is None:
@@ -177,14 +193,15 @@ def plot_plotly(ds, meshes, arrows, out_html: Path):
     sentinel = vmax + span * 0.15
 
     fig = go.Figure()
+    first_plane = next(iter(meshes))
     for name, m in meshes.items():
         surfacecolor = np.where(m["clamped"] > CLAMP_THRESHOLD, sentinel, m["nse"])
         fig.add_trace(
             go.Surface(
                 x=m["X"], y=m["Y"], z=m["Z"], surfacecolor=surfacecolor,
                 cmin=vmin, cmax=cmax_ext, colorscale=colorscale,
-                showscale=(name == "n-p"),
-                colorbar=dict(title="NSE") if name == "n-p" else None,
+                showscale=(name == first_plane),
+                colorbar=dict(title="NSE") if name == first_plane else None,
                 opacity=0.9, name=name,
             )
         )
@@ -217,9 +234,9 @@ def plot_plotly(ds, meshes, arrows, out_html: Path):
     fig.update_layout(
         title=f"{staid}  NSE trained {nse0:.3f} -> optimum {nse_star:.3f}",
         scene=dict(
-            xaxis_title="ln multiplier n",
-            yaxis_title="ln multiplier p",
-            zaxis_title="ln multiplier q",
+            xaxis_title=f"ln multiplier {axis_names(ds)[0]}",
+            yaxis_title=f"ln multiplier {axis_names(ds)[1]}",
+            zaxis_title=f"ln multiplier {axis_names(ds)[2]}",
         ),
         legend=dict(itemsizing="constant"),
     )

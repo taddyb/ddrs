@@ -54,6 +54,10 @@ pub struct Objective<'a, I: Backend> {
     pub axes: [String; 3],
     pub ranges: [[f32; 2]; 3],
     pub log_space: [bool; 3],
+    /// Physical units per unit alpha for a slot swept additively (`x = x0 +
+    /// alpha * s`), `None` for the log-multiplier convention (`x = x0 *
+    /// exp(alpha)`). See `LandscapeSpec::additive_axes`.
+    pub additive: [Option<f32>; 3],
     /// `active[k]` is true when the slot-`k` axis parameter is in the head's
     /// `learnable_parameters` (a real model parameter); false when it is
     /// fixed at `params.defaults` for this arm. See `Objective::active`.
@@ -103,7 +107,21 @@ pub struct PhysFields<I: Backend> {
 }
 
 /// Every parameter the landscape can hold or perturb.
-pub const AXIS_PARAMS: [&str; 4] = ["n", "p_spatial", "q_spatial", "gamma"];
+///
+/// `K_D` and `d_gw` joined on 2026-09-18. Before that the leakance directions
+/// were invisible to this instrument: a landscape of a leakance arm could only
+/// report where the ROUGHNESS parameters sat, with the exchange parameters
+/// pinned, which is not an answer to whether leakance is identifiable.
+///
+/// `leakance_factor` is deliberately NOT sweepable. It is the gate input, and
+/// the gate's own temperature anneal already drives its gradient to zero once a
+/// reach commits (`d(gate)/d(u)` = 3.2e-8 at u = 0.1, tau = 0.1), so a swept
+/// curvature along it would be reporting the anneal schedule, not the physics.
+pub const AXIS_PARAMS: [&str; 6] = ["n", "p_spatial", "q_spatial", "gamma", "K_D", "d_gw"];
+
+/// Parameters that only exist on a leakance arm, so they may only be swept or
+/// carried when `use_leakance` is set.
+pub const LEAKANCE_PARAMS: [&str; 3] = ["K_D", "d_gw", "leakance_factor"];
 
 /// `parameter_ranges` entry for an axis parameter.
 pub fn param_range(cfg: &crate::config::Config, name: &str) -> [f32; 2] {
@@ -113,7 +131,10 @@ pub fn param_range(cfg: &crate::config::Config, name: &str) -> [f32; 2] {
         "p_spatial" => r.p_spatial,
         "q_spatial" => r.q_spatial,
         "gamma" => r.gamma,
-        other => panic!("`{other}` is not a landscape axis parameter; valid: {AXIS_PARAMS:?}"),
+        "K_D" => r.k_d,
+        "d_gw" => r.d_gw,
+        "leakance_factor" => r.leakance_factor,
+        other => panic!("`{other}` is not a landscape parameter; valid: {AXIS_PARAMS:?} plus leakance_factor (carried only)"),
     }
 }
 
@@ -159,11 +180,22 @@ where
         objective: &str,
         deriv_weight: f32,
         axes: &[String; 3],
+        additive: [Option<f32>; 3],
     ) -> Result<Self, BoxError> {
         let device = &ctx.device;
         for a in axes {
             if !AXIS_PARAMS.contains(&a.as_str()) {
                 return Err(format!("unknown landscape axis `{a}`; valid axes are {AXIS_PARAMS:?}").into());
+            }
+            // A leakance axis on a non-leakance arm would sweep a head output
+            // that does not exist. Caught here rather than in `validate_axes`,
+            // which runs before the arm's config is resolved.
+            if LEAKANCE_PARAMS.contains(&a.as_str()) && !ctx.cfg.params.use_leakance {
+                return Err(format!(
+                    "landscape axis `{a}` requires an arm with `use_leakance: true`; \
+                     this arm does not learn it"
+                )
+                .into());
             }
         }
         if axes[0] == axes[1] || axes[0] == axes[2] || axes[1] == axes[2] {
@@ -174,11 +206,11 @@ where
         let log = &ctx.cfg.params.log_space_parameters;
         let sigma = ctx
             .dataset
-            .gauge_obs_std(&[staid.clone()])
+            .gauge_obs_std_required(&[staid.clone()])
             .map_err(|e| format!("gauge std: {e}"))?
             .first()
             .copied()
-            .ok_or("gauge std unavailable (loss.kind must be nse-batch in the arm's config)")?;
+            .ok_or("gauge std unavailable")?;
         let eps = ctx.cfg.experiment.as_ref().map(|e| e.loss.eps).unwrap_or(0.1);
         // Which of (n, p_spatial, q_spatial) is a real model parameter vs
         // fixed at `params.defaults` for this arm. Same source of truth as
@@ -248,7 +280,28 @@ where
                 if name == "gamma" && !learns_gamma {
                     continue;
                 }
+                // Leakance names go through the dedicated block below, which is
+                // gated on `use_leakance`. Carrying them here would demand a
+                // head output that does not exist on a non-leakance arm.
+                if LEAKANCE_PARAMS.contains(&name) {
+                    continue;
+                }
                 carried.push((name.to_string(), field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?));
+            }
+            // Leakance fields ride along at their trained values unless they are
+            // being swept. Without this the objective passed `k_d: None` and
+            // evaluated a NO-LEAKANCE model, which is why leakance arms were
+            // refused outright rather than silently mis-measured.
+            if ctx.cfg.params.use_leakance {
+                for name in LEAKANCE_PARAMS {
+                    if axes.iter().any(|a| a == name) {
+                        continue; // swept, not carried
+                    }
+                    carried.push((
+                        name.to_string(),
+                        field(name, param_range(&ctx.cfg, name), param_log(&ctx.cfg, name))?,
+                    ));
+                }
             }
             let x_storage = match params_map.get("x_storage") {
                 Some(x) => denormalize(
@@ -273,7 +326,7 @@ where
             let end = start + Duration::days(window_days.saturating_sub(1) as i64);
             return Err(Box::new(NoValidObservations { start, end }));
         }
-        Ok(Self { ctx, windows, sigma, eps, axes: axes.clone(), ranges, log_space, active, learns_gamma, objective: objective.to_string(), deriv_weight })
+        Ok(Self { ctx, windows, sigma, eps, axes: axes.clone(), ranges, log_space, additive, active, learns_gamma, objective: objective.to_string(), deriv_weight })
     }
 
     /// Trained physical field of parameter `name` (axis slot or carried);
@@ -305,7 +358,11 @@ where
         let at = |name: &str| -> Option<Tensor<I, 1>> {
             if let Some(k) = self.axes.iter().position(|a| a == name) {
                 let r = self.ranges[k];
-                return Some((w.x0[k].clone() * alpha[k].exp()).clamp(r[0], r[1]));
+                let phys = match self.additive[k] {
+                    Some(s) => w.x0[k].clone() + alpha[k] * s,
+                    None => w.x0[k].clone() * alpha[k].exp(),
+                };
+                return Some(phys.clamp(r[0], r[1]));
             }
             w.carried.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
         };
@@ -321,7 +378,13 @@ where
     fn normalize_ad(x_phys: Tensor<AD<I>, 1>, range: [f32; 2], log_space: bool) -> Tensor<AD<I>, 1> {
         let [lo, hi] = range;
         if log_space {
-            let log_lo = (lo + 1e-6).ln();
+            // Was `(lo + 1e-6).ln()`, the third copy of the bug PR #46 fixed in
+            // `routing/utils.rs::log_space_lower` and `training/forward.rs`.
+            // Harmless while `p_spatial` (lo = 1) was the only log-space axis,
+            // where the distortion is 1e-6. NOT harmless for `K_D` (lo = 1e-8),
+            // where `lo + 1e-6` is 100x the bound and collapses the box — which
+            // is exactly the parameter this file now carries.
+            let log_lo = crate::routing::utils::log_space_lower(lo);
             let log_hi = hi.ln();
             (x_phys.log() - log_lo) / (log_hi - log_lo)
         } else {
@@ -354,8 +417,13 @@ where
             // constant.
             let mut norm: Vec<(String, Tensor<AD<I>, 1>)> = Vec::new();
             for (k, x0) in w.x0.iter().enumerate() {
-                let scale = leaves[k].clone().exp() * ones.clone(); // [n]
-                let phys = Tensor::<AD<I>, 1>::from_inner(x0.clone()) * scale;
+                // Log-multiplier slot: x = x0 * exp(alpha). Additive slot:
+                // x = x0 + alpha * s (physical units), so a signed field can
+                // cross zero. Either way the leaf broadcasts to [n].
+                let phys = match self.additive[k] {
+                    Some(s) => Tensor::<AD<I>, 1>::from_inner(x0.clone()) + leaves[k].clone().mul_scalar(s) * ones.clone(),
+                    None => Tensor::<AD<I>, 1>::from_inner(x0.clone()) * (leaves[k].clone().exp() * ones.clone()),
+                };
                 let [lo, hi] = self.ranges[k];
                 // clamped fraction (diagnostic)
                 let v: Vec<f32> = phys.clone().inner().into_data().to_vec::<f32>().unwrap();
@@ -377,9 +445,9 @@ where
                     n: get("n").expect("n field"),
                     q_spatial: get("q_spatial").expect("q_spatial field"),
                     p_spatial: Some(get("p_spatial").expect("p_spatial field")),
-                    k_d: None,
-                    d_gw: None,
-                    leakance_factor: None,
+                    k_d: get("K_D"),
+                    d_gw: get("d_gw"),
+                    leakance_factor: get("leakance_factor"),
                     impervious_mask: None,
                     gamma: if self.learns_gamma { Some(get("gamma").expect("gamma field")) } else { None },
                 },

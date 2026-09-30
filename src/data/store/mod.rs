@@ -14,6 +14,7 @@ pub mod icechunk;
 pub mod netcdf;
 pub mod obs_writer;
 pub mod param_dump;
+pub mod reservoirs;
 pub mod state_cache;
 pub mod zarr;
 pub mod zarr_aorc;
@@ -26,6 +27,11 @@ pub use zarr_aorc::AorcPrecipStore;
 pub use icechunk::{StreamflowStore, UsgsObservationsStore};
 pub use netcdf::AttributesStore;
 pub use param_dump::load_comid_field;
+pub use reservoirs::{
+    map_reservoir_rows, read_dam_features, read_fixed_release_table, read_reservoir_table,
+    dam_is_active, reservoir_rows, DamFeatures, FixedDam, FixedTable, ReservoirRows, ReservoirTable,
+    INFLOW_MEAN_COLUMN, PURPOSE_FLOOD_COLUMN,
+};
 pub use state_cache::StateCache;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};
 pub use zarr_obs::GlobalObservationsStore;

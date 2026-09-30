@@ -15,7 +15,7 @@ use burn::backend::autodiff::checkpoint::base::Checkpointer;
 use burn::backend::autodiff::checkpoint::strategy::NoCheckpointing;
 use burn::backend::autodiff::grads::Gradients;
 use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
-use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
+use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, TensorPrimitive};
 
 use crate::config::Config;
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
@@ -40,10 +40,28 @@ pub fn negative_solve_stats() -> (u64, u64) {
     (NEG_SOLVES.load(Ordering::Relaxed), TOTAL_SOLVES.load(Ordering::Relaxed))
 }
 
-/// Zero both counters. Call at the start of each `forward`.
+/// Zero the counters. Call at the start of each `forward`.
 pub fn reset_negative_solve_stats() {
     NEG_SOLVES.store(0, Ordering::Relaxed);
     TOTAL_SOLVES.store(0, Ordering::Relaxed);
+}
+
+/// One step's pre-clamp solve `x_sol`, routed inflow `i_t = N·Q_t` and lateral
+/// coefficient `c4 = 2·dt/D`, all full-length `[n]` on the inner backend (no
+/// tape), handed out by [`timestep_forward_with_reservoirs`] for the engine's
+/// per-dam clamp accounting (`MuskingumCunge::dam_account`). They are the op's
+/// own saved primitives, so the account reads exactly what the S28 clamp
+/// rewrote. `c4` is the dam row's own (after the S19'' / S19'''' dam-row
+/// changes to `D`), so `dt/c4 = D/2` is the lateral volume per unit of `x` on
+/// that row: the account turns a deficit `lb − x` into the lateral inflow that
+/// would have held the row at `lb` (`mmc::DamAccount`).
+pub(crate) struct DamStepDiag<I: Backend> {
+    pub x_sol: Tensor<I, 1>,
+    pub i_t: Tensor<I, 1>,
+    pub c4: Tensor<I, 1>,
+    /// The step's inflow coefficient `c1` (after S19p on dam rows), for the
+    /// account's per-dam `c1` minimum and negative-`c1` step count.
+    pub c1: Tensor<I, 1>,
 }
 
 /// Safety margin pulling the S18'/S19' positivity clamp strictly INSIDE the
@@ -56,6 +74,16 @@ pub fn reset_negative_solve_stats() {
 /// 1% rise in the K floor.
 pub const POSITIVITY_DELTA: f32 = 1e-2;
 
+/// The dam-row positivity cap on the Muskingum X (S19p, `dam_row_positivity`):
+/// `0.5·Cr·(1 − δ)` with `Cr = dt/K`, i.e. S19''s `hi_a` op for op, so that
+/// `2·K·X_eff <= (1 − δ)·dt` and the dam row's `c1 >= δ·dt/D > 0`. The
+/// backward (B19p) recomputes it from the saved K with these same ops, which
+/// reproduces the forward's value bit for bit.
+fn dam_row_x_cap<I: Backend>(k_muskingum: Tensor<I, 1>, dt: f32) -> Tensor<I, 1> {
+    let cr = k_muskingum.recip() * dt;
+    cr * (0.5 * (1.0 - POSITIVITY_DELTA))
+}
+
 /// Inner-backend leakance inputs threaded into `forward_chain_inner`.
 #[derive(Clone)]
 pub(crate) struct LeakanceTensors<I: Backend> {
@@ -65,6 +93,62 @@ pub(crate) struct LeakanceTensors<I: Backend> {
     /// Optional per-reach impervious hard-zero mask (0.0 = impervious, 1.0 = normal).
     /// Constant, not autograd-tracked. `None` ⇒ all-ones (no-op, back-compat).
     pub mask: Option<Tensor<I, 1>>,
+}
+
+/// Linear-reservoir override (`.claude/RESERVOIRS.md`, option C) threaded into
+/// `forward_chain_inner`. On rows where `mask` is true, S19'' replaces the
+/// Muskingum K and X the chain computed with `t_seconds` and 0, and B19''
+/// zeroes the gradient into both. Inner-backend constants: `T` is prescribed
+/// data, never learned. `t_seconds` is only read where `mask` is true.
+///
+/// With `additive` the dam rows keep the reach's own K and X and ADD the
+/// reservoir storage `T·Q` to it (S19''''; `crate::routing::release`): `2·T`
+/// joins the denominator and c3's numerator, and the backward passes K and X
+/// through (B19''''). `t_prev_seconds` is then always `Some`.
+#[derive(Clone)]
+pub(crate) struct ReservoirTensors<I: Backend> {
+    pub mask: Tensor<I, 1, Bool>,
+    /// `T` at the step's END (`T_{t+1}`), seconds: the Muskingum K on dam rows.
+    pub t_seconds: Tensor<I, 1>,
+    /// `T` at the step's START (`T_t`), seconds, for a time-varying release.
+    /// `Some` makes the dam row the storage-conserving trapezoid on `S = T·Q`
+    /// (S19'''): `c3 = (2·T_t − dt)/(2·T_{t+1} + dt)`. `None` (option C, a
+    /// constant T) leaves c3 as the Muskingum row computed it, bit for bit.
+    pub t_prev_seconds: Option<Tensor<I, 1>>,
+    /// The additive dam row (`DamRow::Additive`) instead of the replace row.
+    pub additive: bool,
+    /// Dam-row positivity (`dam_row_positivity`, S19p): on the additive dam
+    /// rows, cap the reach's X at `0.5·(1 − δ)·dt/K` so `c1 >= 0`. Read only
+    /// with `additive` (the replace row's `c1 = dt/D > 0` already), and a
+    /// no-op under `enforce_positivity` (S19' caps every row at the same
+    /// bound).
+    pub positivity: bool,
+}
+
+/// The learned (or seasonal) dam release: this step's residence time per dam,
+/// `t_dams` in SECONDS, as an autodiff PARENT of the timestep op
+/// ([`TimestepReleaseOp`] / [`TimestepReleaseGammaOp`]). The op scatters it
+/// onto the dam `rows` and runs the same S19'' override as
+/// [`ReservoirTensors`]; the backward returns the dam rows' `∂L/∂K`, which
+/// B19'' otherwise discards, as `∂L/∂T`. `t_dams` is built from `(T0, a, b)`
+/// in ordinary Burn autodiff by `MuskingumCunge::forward`, so the chain to the
+/// release head needs nothing hand-written.
+#[derive(Clone)]
+pub(crate) struct ReleaseParent<I: Backend> {
+    /// `[n_dams]`, seconds, aligned with `rows`: `T_{t+1}`, the step's END.
+    pub t_dams: Tensor<Autodiff<I>, 1>,
+    /// `[n_dams]`, seconds: `T_t`, the step's START. Only in c3's numerator
+    /// (S19'''); may be the same tensor as `t_dams` when `T` is constant.
+    pub t_prev_dams: Tensor<Autodiff<I>, 1>,
+    /// `[n_dams]` dam row positions (unique).
+    pub rows: Tensor<I, 1, Int>,
+    /// `[n]` dam-row mask, true exactly at `rows`.
+    pub mask: Tensor<I, 1, Bool>,
+    /// The additive dam row (S19'''' / B19'''') instead of the replace row.
+    pub additive: bool,
+    /// Dam-row positivity on the additive row (S19p / B19p); see
+    /// [`ReservoirTensors::positivity`].
+    pub positivity: bool,
 }
 
 /// Per-step eval-time leakance diagnostics captured by the zeta sink: this
@@ -89,6 +173,16 @@ pub(crate) struct LeakanceSaved<I: Backend> {
     /// Mirrors `cfg.params.leakance_losing_only` at the moment of the forward
     /// call, so the backward can apply the same gate without accessing the config.
     pub losing_only: bool,
+    /// Mirrors `cfg.params.leakance_bed_thickness` at the moment of the forward,
+    /// so the backward applies the SAME disconnection cap without the config.
+    pub bed_thickness: Option<f32>,
+    /// `(base_factor, one_minus_binding)` for the mass bound, when
+    /// `leakance_max_rhs_fraction` is set. The forward computed both, so the
+    /// backward splits `gb_rhs` exactly as the forward split `b_rhs` and the
+    /// two cannot drift apart:
+    ///   `gb_rhs` for the c2/c3/c4/i_t/q_t/q' terms  *= base_factor
+    ///   `gb_rhs` handed to the zeta hook            *= one_minus_binding
+    pub rhs_bound: Option<(I::FloatTensorPrimitive, I::FloatTensorPrimitive)>,
     /// Mirrors the impervious mask from the forward (same 0/1 constant). Used by
     /// the backward to gate `gzeta` identically to the forward's multiplication.
     /// `None` ⇒ no mask applied (all-ones behavior, byte-identical to pre-Task-2).
@@ -177,6 +271,28 @@ pub(crate) struct TimestepState<B: Backend> {
     /// means that recorded result stays reproducible; the tensor path is what
     /// makes gamma learnable.
     pub gamma_t: Option<B::FloatTensorPrimitive>,
+    /// Dam rows of the linear-reservoir override ([`ReservoirTensors::mask`]).
+    /// The saved `k_muskingum` and `x_effective` already hold `T` and 0 there
+    /// (S19''), so B20..B23 need nothing; B19'' uses the mask to stop the
+    /// gradient into K and X on those rows. `None` ⇒ no op in the backward.
+    pub reservoir_mask: Option<B::BoolTensorPrimitive>,
+    /// `T_t` (seconds, full length; read on dam rows) when the dam rows are
+    /// the storage-conserving trapezoid (S19'''). The saved `c3` already holds
+    /// `(2·T_t − dt)/(2·T_{t+1} + dt)` there; the backward needs `T_t` for
+    /// c3's numerator in the denominator chain. `None` ⇒ no op in the backward.
+    pub reservoir_t_prev: Option<B::FloatTensorPrimitive>,
+    /// The dam rows are the ADDITIVE row (S19''''): the saved `k_muskingum`
+    /// and `x_effective` are the reach's own there, the saved `denom` holds
+    /// `2K(1−X) + 2·T_{t+1} + dt`, and `reservoir_t_prev` is `Some`. B19''''
+    /// passes K and X through and returns `∂L/∂T` from the denominator and
+    /// c3's numerator. `false` ⇒ the replace row (or no dams).
+    pub reservoir_additive: bool,
+    /// S19p ran: on the additive dam rows the saved `x_effective` is
+    /// `min(X_r, 0.5·(1 − δ)·dt/K)` ([`dam_row_x_cap`]). B19p recomputes the
+    /// cap from the saved K, sends `∂L/∂X` on the rows where it bound into K
+    /// (`∂cap/∂K = −cap/K`) instead of into the Cunge chain. Already the
+    /// combined `additive && positivity && !enforce_pos`; `false` ⇒ no op.
+    pub reservoir_positivity: bool,
 }
 
 #[derive(Debug)]
@@ -230,6 +346,9 @@ pub(crate) struct ParentMask {
     pub q_t: bool,
     pub q_prime_t: bool,
     pub gamma: bool,
+    /// The dam residence time `T` of the learned release ([`ReleaseParent`])
+    /// at the step's end (`T_{t+1}`) and start (`T_t`). Set together.
+    pub t_release: bool,
 }
 
 impl ParentMask {
@@ -240,6 +359,7 @@ impl ParentMask {
         q_t: true,
         q_prime_t: true,
         gamma: true,
+        t_release: true,
     };
 }
 
@@ -261,6 +381,14 @@ pub(crate) struct ParentGrads<I: Backend> {
     /// exponent (B5), the velocity's `(d/d_ref)^gamma` (B15), and the
     /// celerity's `gamma·A/(T·d)` (B17).
     pub gamma: Option<Tensor<I, 1>>,
+    /// `∂L/∂T_{t+1}` on the dam rows (zero elsewhere), full length `[n]`,
+    /// seconds: the dam row's `∂L/∂K`, which is the step-end `T` (B19''').
+    /// `Some` exactly when `mask.t_release`.
+    pub t_release: Option<Tensor<I, 1>>,
+    /// `∂L/∂T_t` on the dam rows, full length: the step-start `T`, which only
+    /// c3's numerator reads (S19''', storage-conserving row). `Some` exactly
+    /// when `mask.t_release`.
+    pub t_release_prev: Option<Tensor<I, 1>>,
 }
 
 /// Register `grad` on `parent` when the parent is tracked. A tracked parent
@@ -301,6 +429,13 @@ pub(crate) fn timestep_backward_core<I: Backend + 'static>(
     state: &TimestepState<I>,
     grad_out: I::FloatTensorPrimitive,
     mask: ParentMask,
+    // `(base_factor, one_minus_binding)` from the leakance MASS BOUND, both
+    // computed in the forward. The forward set
+    // `b_rhs = b_base - min(zeta, alpha*relu(b_base))`, so the two consumers of
+    // `gb_rhs` need DIFFERENT factors, and taking them from the forward rather
+    // than recomputing them is what keeps the split consistent.
+    // `None` ⇒ both factors are 1, recovering the unbounded math exactly.
+    rhs_bound: Option<(Tensor<I, 1>, Tensor<I, 1>)>,
     zeta_hook: impl FnOnce(&Tensor<I, 1>) -> Option<ZetaGeomGrads<I>>,
 ) -> ParentGrads<I>
 where
@@ -335,6 +470,17 @@ where
         // under `ddr_match`, Cunge-derived otherwise. `state.x_storage` is
         // deliberately never read here: it is not what c1..c4 were built from.
         let x_eff = wrap(state.x_effective.clone());
+        // Dam rows of the linear-reservoir override (S19''). `None` ⇒ B19''
+        // below adds no op.
+        let reservoir_mask = state
+            .reservoir_mask
+            .clone()
+            .map(Tensor::<I, 1, Bool>::from_primitive);
+        // The additive dam row (S19'''') keeps the reach's own K and X, so the
+        // B19'' masks below apply to the REPLACE row only.
+        let additive = state.reservoir_additive;
+        // Dam-row mask of the replace row only (`None` for the additive row).
+        let replace_mask = if additive { None } else { reservoir_mask.clone() };
 
         let depth = wrap(state.depth.clone());
         let top_width = wrap(state.top_width.clone());
@@ -390,13 +536,27 @@ where
         );
 
         // gA_values via direct gather+multiply on primitives (mirrors dispatch::grada_primitive).
-        let gb_rhs = wrap(gb_rhs_prim.clone());
+        let gb_rhs_raw = wrap(gb_rhs_prim.clone());
+
+        // Split `gb_rhs` for the MASS BOUND. Where the bound binds, the forward
+        // used `b_rhs = (1-alpha)*b_base` and zeta dropped out of the graph
+        // entirely, so zeta's parents get zero there while the base terms get
+        // `(1-alpha)`. Where it does not bind, both factors are 1 and this is
+        // the historical math. Doing this ONCE, here, is what keeps the two
+        // consumers below consistent with each other.
+        let (gb_rhs, gb_rhs_for_zeta) = match &rhs_bound {
+            Some((base_factor, one_minus_binding)) => (
+                gb_rhs_raw.clone() * base_factor.clone(),
+                gb_rhs_raw * one_minus_binding.clone(),
+            ),
+            None => (gb_rhs_raw.clone(), gb_rhs_raw),
+        };
 
         // Leakance fold-in: zeta = ... was subtracted from b_rhs, so its
         // parent grads derive from `gb_rhs`. The hook computes zeta_backward
         // (with the 3 leakance parents registered by the caller) and returns
         // the geometry-side grads to inject below. `None` ⇒ pre-leakance math.
-        let zeta_geom = zeta_hook(&gb_rhs);
+        let zeta_geom = zeta_hook(&gb_rhs_for_zeta);
 
         let g_a_values_prim = {
             // -gb[row] * x[col]
@@ -479,6 +639,22 @@ where
         let num_c2 = two_kx.clone() + dt;
         // num_c3 = 2k(1-x) - dt
         let num_c3 = two_k_1mx.clone() - dt;
+        // S19''' (storage-conserving dam rows): there c3's numerator is
+        // `2·T_t − dt`, the step-START residence time, not `2K(1−X) − dt`.
+        // `None` (every non-release path, and option C) ⇒ untouched.
+        let reservoir_t_prev = state
+            .reservoir_t_prev
+            .clone()
+            .map(|p| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(p)));
+        // S19'''' (additive dam rows): c3's numerator is `2K(1−X) + 2·T_t − dt`,
+        // the same expression op for op as the forward's.
+        let num_c3 = match (&reservoir_t_prev, reservoir_mask.as_ref()) {
+            (Some(tp), Some(m)) if additive => {
+                num_c3.mask_where(m.clone(), (two_k_1mx.clone() + tp.clone() * 2.0) - dt)
+            }
+            (Some(tp), Some(m)) => num_c3.mask_where(m.clone(), tp.clone() * 2.0 - dt),
+            _ => num_c3,
+        };
         // num_c4 = 2dt (constant, no dependence on denom in numerator)
 
         // ∂denom_from_ci = -gci · num_i / denom²
@@ -495,6 +671,23 @@ where
         let g_2kx_from_c2 = gc2.clone() / denom.clone();
         // ∂num_c3/∂(2k(1-x)) = +1 → g_2k1mx_from_c3 = +gc3 / denom
         let g_2k1mx_from_c3 = gc3.clone() / denom.clone();
+        // S19''': on dam rows c3's numerator is `2·T_t − dt`, so this term is
+        // `∂L/∂(2·T_t)` there, the step-start T's gradient, and does NOT reach
+        // K (= T_{t+1}). Split it off before `g_2k1mx_total` is formed.
+        // B19'''' (additive dam rows): c3's numerator is `2K(1−X) + 2·T_t − dt`,
+        // so this term is BOTH `∂L/∂(2K(1−X))` and `∂L/∂(2·T_t)`: it stays in
+        // the channel chain and is copied, on the dam rows, to the step-start T.
+        let (g_2k1mx_from_c3, g_2t_prev) = match (&reservoir_t_prev, reservoir_mask.as_ref()) {
+            (Some(_), Some(m)) if additive => (
+                g_2k1mx_from_c3.clone(),
+                Some(g_2k1mx_from_c3.mask_fill(m.clone().bool_not(), 0.0)),
+            ),
+            (Some(_), Some(m)) => (
+                g_2k1mx_from_c3.clone().mask_fill(m.clone(), 0.0),
+                Some(g_2k1mx_from_c3.mask_fill(m.clone().bool_not(), 0.0)),
+            ),
+            _ => (g_2k1mx_from_c3, None),
+        };
         // denom = 2k(1-x) + dt → ∂denom/∂(2k(1-x)) = 1 → g_2k1mx_from_denom = gdenom_total
         let g_2k1mx_from_denom = gdenom_total.clone();
 
@@ -552,12 +745,63 @@ where
         //     while `x_cunge` is saturated, and vice versa.
         // ===========================================================
         //
+        // ---------------------------------------------------------------
+        // B19p. Dam-row positivity cap (`dam_row_positivity`, S19p):
+        //
+        //   x_eff = min(X_r, cap)  on the additive dam rows,
+        //   cap   = 0.5·(1−δ)·Δt/K       ∂cap/∂K = −0.5·(1−δ)·Δt/K² = −cap/K
+        //
+        // The same `min` rule as B19': ∂L/∂x_eff goes to exactly one branch.
+        // Where the cap bound (`x_eff == cap`, recomputed from the saved K by
+        // the forward's own ops, so the comparison reproduces its choice; a
+        // tie counts as the cap, a measure-zero subgradient choice) it goes
+        // into K, and the Cunge chain (`∂X_r/∂Q`, `∂X_r/∂B`, `∂X_r/∂c`) gets
+        // nothing; elsewhere it goes on to X_r as before. With the cap bound,
+        // `2K·x_eff = (1−δ)Δt` is constant and `2K(1 − x_eff) = 2K − (1−δ)Δt`,
+        // so K's total is `2·g_2k1mx` exactly: the c1..c4 chain below
+        // (`2·(g_2kx·x + g_2k1mx·(1 − x))`) plus this term
+        // (`gx·(−cap/K) = −2·x·(g_2kx − g_2k1mx)`). The two T gradients are
+        // untouched in form: `x_eff` does not depend on T. It runs under
+        // `ddr_match` too, where X is the constant `x_storage` and this is
+        // its only path. Folded into `gk_muskingum` at the same point as
+        // B19''s `gk_from_x_cap` (the two never both act: S19p is skipped
+        // under `enforce_pos`). The mask is applied AFTER the product, so a
+        // zero-length reach (K = 0, cap = ∞) gets 0, not 0·∞.
+        // ---------------------------------------------------------------
+        let dam_cap = if state.reservoir_positivity {
+            let m = reservoir_mask
+                .as_ref()
+                .expect("dam-row positivity needs the dam-row mask in the saved state");
+            let cap = dam_row_x_cap(k_muskingum.clone(), dt);
+            let bound = m.clone().bool_and(x_eff.clone().equal(cap.clone()));
+            let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
+            let gk = (gx * -(cap / k_muskingum.clone())).mask_fill(bound.clone().bool_not(), 0.0);
+            Some((bound, gk))
+        } else {
+            None
+        };
+
         // `hi_a`/`hi_b` → `k_muskingum`. `None` unless `enforce_pos`.
         let mut gk_from_x_cap: Option<Tensor<I, 1>> = None;
         let x_grads = if state.ddr_match {
             None
         } else {
             let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
+            // B19'' (X half). On dam rows S19'' replaced X with the constant 0,
+            // so nothing flows on into the Cunge chain or the S19' cap. Masked
+            // HERE, before the branch split below, so `gk_from_x_cap` is zero
+            // on those rows as well. The additive row (B19'''') keeps the
+            // reach's X, so its gradient flows on like any channel row's.
+            let gx = match replace_mask.as_ref() {
+                Some(m) => gx.mask_fill(m.clone(), 0.0),
+                None => gx,
+            };
+            // B19p: where the dam-row cap bound, x_eff is the cap, not X_r,
+            // so the Cunge chain gets nothing (the cap's K term is above).
+            let gx = match dam_cap.as_ref() {
+                Some((bound, _)) => gx.mask_fill(bound.clone(), 0.0),
+                None => gx,
+            };
             // Same expression as the forward's S19 (including the +1e-12).
             let bscl =
                 top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
@@ -632,6 +876,54 @@ where
         // reaches where the floor binds.
         let gk_muskingum = match gk_from_x_cap {
             Some(g) => gk_muskingum + g,
+            None => gk_muskingum,
+        };
+        // B19p's `x_eff → cap → k_musk` term, at the same point.
+        let gk_muskingum = match dam_cap {
+            Some((_, g)) => gk_muskingum + g,
+            None => gk_muskingum,
+        };
+        // B19''' (learned release). When `T` is a parent ([`ReleaseParent`]),
+        // the dam rows' K IS `T` (S19''), so `∂L/∂T = ∂L/∂K` there, read HERE:
+        // after the c1..c4 chain and the `gk_from_x_cap` fold (zero on dam
+        // rows, since B19'' zeroed `gx` there), and before the K-half mask
+        // below discards it and before the B18' floor mask, which belongs to
+        // the channel's `k_raw`, not to `T` (S19'' runs after S18').
+        //
+        // B19'''' (additive dam rows): `T_{t+1}` enters only the denominator,
+        // `D = 2K(1−X) + 2·T_{t+1} + dt`, so `∂L/∂T_{t+1} = 2·∂L/∂D` there,
+        // with `∂L/∂D = gdenom_total` (the same sum the channel chain reads
+        // for `2K(1−X)`); K and X keep their own chain untouched.
+        let g_t_release = if mask.t_release {
+            let m = reservoir_mask
+                .as_ref()
+                .expect("a tracked release T needs the dam-row mask in the saved state");
+            if additive {
+                Some(gdenom_total.clone().mask_fill(m.clone().bool_not(), 0.0) * 2.0)
+            } else {
+                Some(gk_muskingum.clone().mask_fill(m.clone().bool_not(), 0.0))
+            }
+        } else {
+            None
+        };
+        // ∂L/∂T_t = 2·∂L/∂(2·T_t) (S19'''), zero off the dam rows.
+        let g_t_release_prev = if mask.t_release {
+            Some(
+                g_2t_prev
+                    .clone()
+                    .expect("a tracked release T needs the step-start T in the saved state")
+                    * 2.0,
+            )
+        } else {
+            None
+        };
+        // B19'' (K half). On dam rows S19'' replaced K with the constant T.
+        // Masked AFTER the `gk_from_x_cap` fold and BEFORE the B18' floor mask
+        // and B18, so no path carries a dam row's K gradient into its
+        // celerity, and from there into its n, q_spatial and p_spatial. The
+        // additive row keeps the reach's K, so its gradient flows on.
+        let gk_muskingum = match replace_mask {
+            Some(m) => gk_muskingum.mask_fill(m, 0.0),
             None => gk_muskingum,
         };
 
@@ -1050,6 +1342,8 @@ where
             q_t: gq_t,
             q_prime_t: gq_prime_t,
             gamma: ggamma,
+            t_release: g_t_release,
+            t_release_prev: g_t_release_prev,
         }
     }
 }
@@ -1081,12 +1375,13 @@ where
             q_t: ids[3].is_some(),
             q_prime_t: ids[4].is_some(),
             gamma: false,
+            t_release: false,
         };
 
         let grad_out = grads.consume::<I>(&ops.node);
 
         // No leakance ⇒ hook returns None ⇒ pre-leakance math, byte-identical.
-        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, None, |_gb_rhs| None);
 
         register_parent::<I>(grads, ids[0], g.n, "n");
         register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
@@ -1133,10 +1428,11 @@ where
             q_t: ids[3].is_some(),
             q_prime_t: ids[4].is_some(),
             gamma: ids[5].is_some(),
+            t_release: false,
         };
 
         let grad_out = grads.consume::<I>(&ops.node);
-        let g = timestep_backward_core::<I>(&state, grad_out, mask, |_gb_rhs| None);
+        let g = timestep_backward_core::<I>(&state, grad_out, mask, None, |_gb_rhs| None);
 
         register_parent::<I>(grads, ids[0], g.n, "n");
         register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
@@ -1147,6 +1443,156 @@ where
     }
 }
 
+/// Saved state of the learned-release ops: the base [`TimestepState`] (whose
+/// `reservoir_mask` is the dam-row mask) plus the dam rows, to gather the
+/// full-length `∂L/∂K` back onto the `[n_dams]` `T` parent.
+#[derive(Clone, Debug)]
+pub(crate) struct TimestepReleaseState<I: Backend> {
+    pub base: TimestepState<I>,
+    pub rows: I::IntTensorPrimitive,
+}
+
+/// Gather the dam rows of the core's full-length `t_release` gradient and
+/// register it on the `T` parent, when that parent is tracked.
+fn register_release_parent<I: Backend + 'static>(
+    grads: &mut Gradients,
+    parent: Option<burn::backend::autodiff::NodeId>,
+    g_full: Option<Tensor<I, 1>>,
+    rows: &I::IntTensorPrimitive,
+    name: &str,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if parent.is_none() {
+        return;
+    }
+    let rows = Tensor::<I, 1, Int>::from_primitive(rows.clone());
+    let g = g_full.map(|g| g.select(0, rows));
+    // `register` accumulates, so the constant-T case (one tensor in both the
+    // step-end and step-start slots) receives the sum of the two gradients.
+    register_parent::<I>(grads, parent, g, name);
+}
+
+/// Seven-parent sibling of [`TimestepOp`] for the learned dam release: parents
+/// `[n, q_spatial, p_spatial, q_t, q_prime_t, T_{t+1}, T_t]`, the per-dam
+/// residence time in seconds at the step's end and start ([`ReleaseParent`]). Same sibling-op pattern as
+/// [`TimestepGammaOp`] and [`TimestepLeakanceGammaOp`]: every existing run
+/// keeps its historical node, and only a run that routes dams through a
+/// release builds this one. The backward is [`timestep_backward_core`] with
+/// `t_release` set, which reads the dam rows' `∂L/∂K` (B19''').
+#[derive(Debug)]
+pub(crate) struct TimestepReleaseOp;
+
+impl<I: Backend + 'static> Backward<I, 7> for TimestepReleaseOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepReleaseState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 7>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
+            state.base.gamma_t.is_none(),
+            "a learned gamma with a release must route through TimestepReleaseGammaOp"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_t, p_tp] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        let t_id = p_t.as_ref().map(|n| n.id);
+        let tp_id = p_tp.as_ref().map(|n| n.id);
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: false,
+            t_release: t_id.is_some() || tp_id.is_some(),
+        };
+
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = timestep_backward_core::<I>(&state.base, grad_out, mask, None, |_gb_rhs| None);
+
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_release_parent::<I>(grads, t_id, g.t_release, &state.rows, "t_release");
+        register_release_parent::<I>(grads, tp_id, g.t_release_prev, &state.rows, "t_release_prev");
+    }
+}
+
+/// Eight-parent sibling for the learned dam release with a learned
+/// stage-roughness exponent: `[n, q_spatial, p_spatial, q_t, q_prime_t,
+/// gamma, T_{t+1}, T_t]`. Where gamma reaches a dam row depends on the row:
+///
+/// - **replace** (S19''' / B19'''): on a dam row the channel geometry, and so
+///   gamma, reaches the loss only through K and X, which B19'' cuts off; on a
+///   channel row `T` is absent. Gamma and `T` touch disjoint rows.
+/// - **additive** (S19'''' / B19''''): the dam row keeps the reach's own
+///   `K_r`, `X_r`, and B19'''' passes their gradient through unmasked, so
+///   gamma DOES reach the dam row, through `K_r` and `X_r`, on the same row
+///   whose denominator and c3 numerator also carry `T_{t+1}` and `T_t`.
+///
+/// In both cases [`timestep_backward_core`] returns the two parents' partial
+/// derivatives of the same row function (the dam row's `∂L/∂K` chain feeds
+/// gamma, `∂L/∂D` and `∂L/∂c3` feed `T`), and a gradient is the sum of its
+/// partials, so no cross-term is needed. `tests/reservoir_release_gradcheck.rs`
+/// checks both parents on the replace row and `tests/reservoir_additive.rs`
+/// (the learned-gamma case) on the additive row.
+#[derive(Debug)]
+pub(crate) struct TimestepReleaseGammaOp;
+
+impl<I: Backend + 'static> Backward<I, 8> for TimestepReleaseGammaOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepReleaseState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 8>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
+            state.base.gamma_t.is_some(),
+            "TimestepReleaseGammaOp requires a per-reach gamma in the saved state"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_gamma, p_t, p_tp] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt, &p_gamma].map(|p| p.as_ref().map(|n| n.id));
+        let t_id = p_t.as_ref().map(|n| n.id);
+        let tp_id = p_tp.as_ref().map(|n| n.id);
+        let mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: ids[5].is_some(),
+            t_release: t_id.is_some() || tp_id.is_some(),
+        };
+
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = timestep_backward_core::<I>(&state.base, grad_out, mask, None, |_gb_rhs| None);
+
+        register_parent::<I>(grads, ids[0], g.n, "n");
+        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, ids[5], g.gamma, "gamma");
+        register_release_parent::<I>(grads, t_id, g.t_release, &state.rows, "t_release");
+        register_release_parent::<I>(grads, tp_id, g.t_release_prev, &state.rows, "t_release_prev");
+    }
+}
+
 /// Saved primitives for the leakance op: the base `TimestepState` plus the
 /// extra leakance intermediates ([`LeakanceSaved`]). Reuses the SAME
 /// `LeakanceSaved` type produced by `forward_chain_inner` (no second type).
@@ -1154,6 +1600,103 @@ where
 pub(crate) struct TimestepLeakanceState<I: Backend> {
     pub base: TimestepState<I>,
     pub leak: LeakanceSaved<I>,
+}
+
+/// Gradients the leakance backward produces for the three leakance parents,
+/// alongside the base [`ParentGrads`] that [`timestep_backward_core`] returns.
+struct LeakanceParentGrads<I: Backend> {
+    base: ParentGrads<I>,
+    g_k_d: I::FloatTensorPrimitive,
+    g_d_gw: I::FloatTensorPrimitive,
+    g_leakance_factor: I::FloatTensorPrimitive,
+}
+
+/// Shared analytical backward for BOTH leakance ops — [`TimestepLeakanceOp`]
+/// (8 parents) and [`TimestepLeakanceGammaOp`] (9 parents, learned `gamma`).
+///
+/// The two differ only in parent bookkeeping: whether a ninth `gamma` node
+/// exists to receive `ParentGrads::gamma`. The math below is identical, so it
+/// lives here rather than being duplicated — the same reason
+/// [`timestep_backward_core`] is shared between the non-leakance ops.
+///
+/// `parent_mask.gamma` must be true exactly when `state.base.gamma_t` is
+/// `Some` AND a ninth parent is tracked; the core panics on the first half of
+/// that disagreement and [`register_parent`] on the second.
+fn leakance_backward_body<I: Backend + 'static>(
+    state: &TimestepLeakanceState<I>,
+    grad_out: I::FloatTensorPrimitive,
+    parent_mask: ParentMask,
+) -> LeakanceParentGrads<I>
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
+        Tensor::from_primitive(TensorPrimitive::Float(p))
+    };
+    let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
+        match t.into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        }
+    };
+
+    // Geometry inputs zeta depends on, read from the SHARED base state.
+    let depth = wrap(state.base.depth.clone());
+    let p_spatial = wrap(state.base.p_spatial.clone());
+    let q_eps = wrap(state.base.q_eps.clone());
+    // Leakance-only saved intermediates.
+    let area_z = wrap(state.leak.area_z.clone());
+    let k_d = wrap(state.leak.k_d.clone());
+    let d_gw = wrap(state.leak.d_gw.clone());
+    let leakance_factor = wrap(state.leak.leakance_factor.clone());
+
+    // Impervious mask: same 0/1 constant from the forward, used to gate gzeta.
+    let mask = state.leak.mask.as_ref().map(|m| wrap(m.clone()));
+
+    // Capture zeta's 3 leakance-parent grads out of the hook so we can
+    // register them after `core` returns. The hook runs zeta_backward with
+    // `gb_rhs` (no pre-negation — zeta_backward negates internally) and
+    // returns the geometry grads for `core` to fold into the 5 base grads.
+    let mut zeta_param_grads: Option<(
+        I::FloatTensorPrimitive,
+        I::FloatTensorPrimitive,
+        I::FloatTensorPrimitive,
+    )> = None;
+    let rhs_bound = state
+        .leak
+        .rhs_bound
+        .as_ref()
+        .map(|(bf, omb)| (wrap(bf.clone()), wrap(omb.clone())));
+    let base = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, rhs_bound, |gb_rhs| {
+        let zg = crate::routing::leakance::zeta_backward::<I>(
+            gb_rhs.clone(),
+            depth.clone(),
+            p_spatial.clone(),
+            q_eps.clone(),
+            area_z.clone(),
+            k_d.clone(),
+            d_gw.clone(),
+            leakance_factor.clone(),
+            state.leak.losing_only,
+            state.leak.bed_thickness,
+            mask.clone(),
+        );
+        zeta_param_grads = Some((
+            unwrap(zg.g_k_d),
+            unwrap(zg.g_d_gw),
+            unwrap(zg.g_leakance_factor),
+        ));
+        Some(ZetaGeomGrads {
+            g_depth: zg.g_depth,
+            g_q_eps: zg.g_q_eps,
+            g_p_spatial: zg.g_p_spatial,
+        })
+    });
+
+    let (g_k_d, g_d_gw, g_leakance_factor) =
+        zeta_param_grads.expect("zeta_hook always runs in the leakance backward");
+
+    LeakanceParentGrads { base, g_k_d, g_d_gw, g_leakance_factor }
 }
 
 #[derive(Debug)]
@@ -1172,9 +1715,14 @@ where
         _checkpointer: &mut Checkpointer,
     ) {
         let state = ops.state;
+        debug_assert!(
+            state.base.gamma_t.is_none(),
+            "a learned gamma must route through TimestepLeakanceGammaOp, which \
+             has the ninth parent needed to give it a gradient"
+        );
         let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac] = ops.parents;
         let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
-        // `mask` below is the impervious mask; this one is the parent mask.
+        // `mask` inside the body is the impervious mask; this one is the parent mask.
         let parent_mask = ParentMask {
             n: ids[0].is_some(),
             q_spatial: ids[1].is_some(),
@@ -1182,85 +1730,102 @@ where
             q_t: ids[3].is_some(),
             q_prime_t: ids[4].is_some(),
             gamma: false,
+            t_release: false,
         };
 
         let grad_out = grads.consume::<I>(&ops.node);
-
-        let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
-            Tensor::from_primitive(TensorPrimitive::Float(p))
-        };
-        let unwrap = |t: Tensor<I, 1>| -> I::FloatTensorPrimitive {
-            match t.into_primitive() {
-                TensorPrimitive::Float(p) => p,
-                _ => unreachable!(),
-            }
-        };
-
-        // Geometry inputs zeta depends on, read from the SHARED base state.
-        let depth = wrap(state.base.depth.clone());
-        let p_spatial = wrap(state.base.p_spatial.clone());
-        let q_eps = wrap(state.base.q_eps.clone());
-        // Leakance-only saved intermediates.
-        let area_z = wrap(state.leak.area_z.clone());
-        let k_d = wrap(state.leak.k_d.clone());
-        let d_gw = wrap(state.leak.d_gw.clone());
-        let leakance_factor = wrap(state.leak.leakance_factor.clone());
-
-        // Impervious mask: same 0/1 constant from the forward, used to gate gzeta.
-        let mask = state.leak.mask.as_ref().map(|m| wrap(m.clone()));
-
-        // Capture zeta's 3 leakance-parent grads out of the hook so we can
-        // register them after `core` returns. The hook runs zeta_backward with
-        // `gb_rhs` (no pre-negation — zeta_backward negates internally) and
-        // returns the geometry grads for `core` to fold into the 5 base grads.
-        let mut zeta_param_grads: Option<(
-            I::FloatTensorPrimitive,
-            I::FloatTensorPrimitive,
-            I::FloatTensorPrimitive,
-        )> = None;
-        let g = timestep_backward_core::<I>(&state.base, grad_out, parent_mask, |gb_rhs| {
-            let zg = crate::routing::leakance::zeta_backward::<I>(
-                gb_rhs.clone(),
-                depth.clone(),
-                p_spatial.clone(),
-                q_eps.clone(),
-                area_z.clone(),
-                k_d.clone(),
-                d_gw.clone(),
-                leakance_factor.clone(),
-                state.leak.losing_only,
-                mask.clone(),
-            );
-            zeta_param_grads = Some((
-                unwrap(zg.g_k_d),
-                unwrap(zg.g_d_gw),
-                unwrap(zg.g_leakance_factor),
-            ));
-            Some(ZetaGeomGrads {
-                g_depth: zg.g_depth,
-                g_q_eps: zg.g_q_eps,
-                g_p_spatial: zg.g_p_spatial,
-            })
-        });
+        let g = leakance_backward_body::<I>(&state, grad_out, parent_mask);
 
         // Register the 5 base parents (zeta geom already folded in by `core`).
-        register_parent::<I>(grads, ids[0], g.n, "n");
-        register_parent::<I>(grads, ids[1], g.q_spatial, "q_spatial");
-        register_parent::<I>(grads, ids[2], g.p_spatial, "p_spatial");
-        register_parent::<I>(grads, ids[3], g.q_t, "q_t");
-        register_parent::<I>(grads, ids[4], g.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, ids[0], g.base.n, "n");
+        register_parent::<I>(grads, ids[1], g.base.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.base.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.base.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.base.q_prime_t, "q_prime_t");
 
         // Register the 3 leakance parents.
-        let (g_k_d, g_d_gw, g_fac) =
-            zeta_param_grads.expect("zeta_hook always runs in the leakance backward");
         if let Some(node) = p_kd {
-            grads.register::<I>(node.id, g_k_d);
+            grads.register::<I>(node.id, g.g_k_d);
         }
         if let Some(node) = p_dgw {
-            grads.register::<I>(node.id, g_d_gw);
+            grads.register::<I>(node.id, g.g_d_gw);
         }
         if let Some(node) = p_fac {
-            grads.register::<I>(node.id, g_fac);
+            grads.register::<I>(node.id, g.g_leakance_factor);
+        }
+    }
+}
+
+/// Nine-parent variant of [`TimestepLeakanceOp`] for a LEARNED stage-roughness
+/// exponent, i.e. losing-stream leakance and `n(d) = n_0·(d/d_ref)^(−gamma)`
+/// active at the same time.
+///
+/// This is the same sibling-op pattern [`TimestepGammaOp`] uses for gamma
+/// without leakance: a tensor that is not a parent receives no gradient, so
+/// adding gamma to the leakance path means adding a parent slot, not widening
+/// the existing op and giving every leakance run a ninth parent it does not
+/// use. The backward body is shared via [`leakance_backward_body`]; only the
+/// parent bookkeeping differs.
+///
+/// Gamma and leakance compose through the state rather than interacting
+/// directly: gamma changes `velocity`, `celerity`, and the depth exponent
+/// (B5/B15/B17), zeta reads `depth`, `p_spatial`, and `q_eps` and is folded
+/// into `b_rhs` (B27). The coupling both ways runs through the geometry
+/// accumulators that `timestep_backward_core` already shares, so no new
+/// cross-term is needed here — which is what the finite-difference gradcheck
+/// in `tests/leakance_gamma_gradcheck.rs` is there to confirm rather than
+/// assume.
+#[derive(Debug)]
+pub(crate) struct TimestepLeakanceGammaOp;
+
+impl<I: Backend + 'static> Backward<I, 9> for TimestepLeakanceGammaOp
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    type State = TimestepLeakanceState<I>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 9>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        debug_assert!(
+            state.base.gamma_t.is_some(),
+            "TimestepLeakanceGammaOp requires a per-reach gamma in the saved state"
+        );
+        let [p_n, p_qsp, p_psp, p_qt, p_qpt, p_kd, p_dgw, p_fac, p_gamma] = ops.parents;
+        let ids = [&p_n, &p_qsp, &p_psp, &p_qt, &p_qpt].map(|p| p.as_ref().map(|n| n.id));
+        let gamma_id = p_gamma.as_ref().map(|n| n.id);
+        let parent_mask = ParentMask {
+            n: ids[0].is_some(),
+            q_spatial: ids[1].is_some(),
+            p_spatial: ids[2].is_some(),
+            q_t: ids[3].is_some(),
+            q_prime_t: ids[4].is_some(),
+            gamma: gamma_id.is_some(),
+            t_release: false,
+        };
+
+        let grad_out = grads.consume::<I>(&ops.node);
+        let g = leakance_backward_body::<I>(&state, grad_out, parent_mask);
+
+        register_parent::<I>(grads, ids[0], g.base.n, "n");
+        register_parent::<I>(grads, ids[1], g.base.q_spatial, "q_spatial");
+        register_parent::<I>(grads, ids[2], g.base.p_spatial, "p_spatial");
+        register_parent::<I>(grads, ids[3], g.base.q_t, "q_t");
+        register_parent::<I>(grads, ids[4], g.base.q_prime_t, "q_prime_t");
+        register_parent::<I>(grads, gamma_id, g.base.gamma, "gamma");
+
+        if let Some(node) = p_kd {
+            grads.register::<I>(node.id, g.g_k_d);
+        }
+        if let Some(node) = p_dgw {
+            grads.register::<I>(node.id, g.g_d_gw);
+        }
+        if let Some(node) = p_fac {
+            grads.register::<I>(node.id, g.g_leakance_factor);
         }
     }
 }
@@ -1333,6 +1898,8 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     // Per-reach stage-roughness exponent when it is a learned KAN output.
     // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`.
     gamma_in: Option<Tensor<I, 1>>,
+    // Linear-reservoir override (S19''). `None` ⇒ no op, byte-identical.
+    reservoir: Option<&ReservoirTensors<I>>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -1531,6 +2098,52 @@ where
             x_cunge
         }
     };
+
+    // S19'': linear-reservoir override (`.claude/RESERVOIRS.md`, option C).
+    // Muskingum storage S = K·[X·I + (1−X)·Q] at X = 0, K = T is exactly the
+    // linear reservoir S = T·Q, so on dam rows the K and X computed above are
+    // replaced by the prescribed residence time T (seconds) and 0. Placed
+    // AFTER S18'/S19', so the positivity clamps never see T (at X = 0,
+    // c1 > 0 always and c3 >= 0 needs only T >= dt/2, which
+    // `set_reservoir_rows` guarantees), and BEFORE `x_eff_out`, the
+    // coefficients and the saved K, so B20..B23 read T and 0. `mask_where` /
+    // `mask_fill` copy every off-mask element unchanged, so every other row is
+    // bitwise identical. See B19'' for the backward.
+    // The additive row (S19'''' below) keeps the reach's own K and X.
+    let (k_muskingum, x_eff) = match reservoir {
+        Some(res) if !res.additive => (
+            k_muskingum.mask_where(res.mask.clone(), res.t_seconds.clone()),
+            x_eff.mask_fill(res.mask.clone(), 0.0),
+        ),
+        _ => (k_muskingum, x_eff),
+    };
+    // S19p: dam-row positivity (`dam_row_positivity`, the ADDITIVE dam rows
+    // only). The additive row keeps the reach's channel wedge `K_r·X_r·I` in
+    // its storage, so `c1 = (dt − 2·K_r·X_r)/D` goes negative wherever
+    // `K_r·X_r > dt/2`: at low outflow the Cunge K is days and X is 0.5, and
+    // rising inflow then drives the pre-clamp solve below the floor (the
+    // "debt pump" of the carried floor). A dam reach is a pool, so its wedge
+    // is capped instead: `X_eff = min(X_r, 0.5·Cr·(1 − δ))`, which is S19''s
+    // `hi_a` branch alone ([`dam_row_x_cap`]), giving `c1 >= δ·dt/D > 0`.
+    // `δ` is S19''s margin, for S19''s reason: at `δ = 0` the cap lands on
+    // `c1 = 0` and f32 roundoff crosses it. S19''s other two clamps are not
+    // needed here: c3's numerator on the additive row carries `2·T_t`, and
+    // capping X only raises `2K(1 − X)`, so c3 cannot turn negative through
+    // the cap; and the cap `0.5·(1 − δ)·dt/K` is positive for any `K > 0`,
+    // so no K floor is required (K → 0 makes it infinite: inactive). Placed
+    // after S19'' and before `x_eff_out`, so the saved X, c1..c4 and D all
+    // read `X_eff`. Skipped under `enforce_pos`, where S19' already capped
+    // every row at `hi_a` (the key is rejected there at load). `mask_where`
+    // and `min_pair` return the operand unchanged wherever the cap does not
+    // bind, so those rows (and every channel row) are bitwise the additive
+    // row. See B19p for the backward.
+    let x_eff = match reservoir {
+        Some(res) if res.additive && res.positivity && !enforce_pos => {
+            let capped = x_eff.clone().min_pair(dam_row_x_cap(k_muskingum.clone(), dt));
+            x_eff.mask_where(res.mask.clone(), capped)
+        }
+        _ => x_eff,
+    };
     *x_eff_out = Some(unwrap(x_eff.clone()));
 
     let one_minus_x = -x_eff.clone() + 1.0;
@@ -1538,10 +2151,43 @@ where
     let two_kx = two_k.clone() * x_eff.clone();
     let two_k_1mx = two_k.clone() * one_minus_x.clone();
     let denom = two_k_1mx.clone() + dt;
+    // S19'''': the ADDITIVE dam row (`crate::routing::release`). Storage is the
+    // reach's channel storage plus the reservoir's, S = K[X·I + (1−X)·Q] + T·Q,
+    // with the K, X computed above (after S18'/S19'). The trapezoid on it adds
+    // 2·T_{t+1} to the denominator (every coefficient) and 2·T_t to c3's
+    // numerator (below); c1, c2, c4 keep their channel numerators. Written as
+    // `(2K(1−X) + 2T) + dt` so T = 0 reproduces the channel row bit for bit
+    // (x + 0 = x in IEEE), and only dam rows are touched (`mask_where`).
+    let denom = match reservoir {
+        Some(res) if res.additive => denom.mask_where(
+            res.mask.clone(),
+            (two_k_1mx.clone() + res.t_seconds.clone() * 2.0) + dt,
+        ),
+        _ => denom,
+    };
     let c1 = (-two_kx.clone() + dt) / denom.clone();
     let c2 = (two_kx.clone() + dt) / denom.clone();
     let c3 = (two_k_1mx.clone() - dt) / denom.clone();
     let c4 = denom.clone().recip() * (2.0 * dt);
+    // S19''': storage-conserving dam rows for a time-varying release. The
+    // trapezoid on S = T·Q with T moving from T_t to T_{t+1} over the step,
+    //     T_{t+1}·Q_{t+1} − T_t·Q_t = dt·[(I_t + I_{t+1})/2 + q' − (Q_t + Q_{t+1})/2],
+    // is the Muskingum row at K = T_{t+1}, X = 0 with ONE change: c3's
+    // numerator reads the step-start T, `c3 = (2·T_t − dt)/(2·T_{t+1} + dt)`.
+    // A Muskingum row with only K := T_{t+1} carries Q across the change in T
+    // and adds a spurious Q·dT/dt (research/findings/
+    // 2026-09-27-learned-dam-release-findings.md, check 2). The expression is
+    // the generic c3's op for op (`T·2` vs `(K·2)·(1 − 0)`, exact in f32), so
+    // `T_t == T_{t+1}` reproduces option C bit for bit.
+    let c3 = match reservoir.and_then(|r| r.t_prev_seconds.as_ref().map(|tp| (r, tp))) {
+        // S19'''': c3 = (2K(1−X) + 2·T_t − dt)/D on additive dam rows.
+        Some((res, t_prev)) if res.additive => c3.mask_where(
+            res.mask.clone(),
+            ((two_k_1mx.clone() + t_prev.clone() * 2.0) - dt) / denom.clone(),
+        ),
+        Some((res, t_prev)) => c3.mask_where(res.mask.clone(), (t_prev.clone() * 2.0 - dt) / denom.clone()),
+        None => c3,
+    };
 
     // S24: i_t = N · q_t (inner-backend SpMV)
     let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
@@ -1551,6 +2197,7 @@ where
     // subtracted from b_rhs below. `None` ⇒ this block is skipped entirely and
     // the kernel order is byte-identical to the pre-leakance path.
     let losing_only = cfg.params.leakance_losing_only;
+    let bed_thickness = cfg.params.leakance_bed_thickness;
     let zeta_opt = leakance.as_ref().map(|lk| {
         let (_w, area_z, zeta) = crate::routing::leakance::zeta_forward::<I>(
             depth.clone(),
@@ -1561,6 +2208,7 @@ where
             lk.d_gw.clone(),
             lk.leakance_factor.clone(),
             losing_only,
+            bed_thickness,
             lk.mask.clone(),
         );
         *leak_out = Some(LeakanceSaved {
@@ -1569,6 +2217,10 @@ where
             d_gw: unwrap(lk.d_gw.clone()),
             leakance_factor: unwrap(lk.leakance_factor.clone()),
             losing_only,
+            bed_thickness,
+            // Filled in below, at the point the bound is actually applied: the
+            // binding set is not known until b_rhs_base exists.
+            rhs_bound: None,
             mask: lk.mask.as_ref().map(|m| unwrap(m.clone())),
         });
         zeta
@@ -1577,8 +2229,77 @@ where
     // S25: b_rhs = c2·i_t + c3·q_t + c4·q_prime_t  (− zeta when leakance active)
     let b_rhs_base =
         c2.clone() * i_t.clone() + c3.clone() * qt_in.clone() + c4.clone() * qpt_in.clone();
+    // MASS BOUND. `leakance_losing_only` fixes the SIGN of the exchange but
+    // never its MAGNITUDE, so a large enough conductance removes more water
+    // than the reach carries, the solve returns negative discharge, and the S28
+    // clamp manufactures mass to hide it. Measured 2026-09-17: a K_D box whose
+    // geometric centre was 31.6x too high drove 30.8% of CONUS reaches negative
+    // against a 0.04-0.06% no-leakance baseline, and the gradient through that many
+    // saturated clamps went non-finite on the first optimizer step.
+    //
+    // `zeta <- min(zeta, alpha * b_base)` bounds the loss by the water locally
+    // available. With every Muskingum coefficient non-negative and the inflows
+    // non-negative, `b_base >= 0`, so for `alpha < 1` the bounded RHS stays
+    // strictly positive and leakance can no longer produce a negative solve on
+    // its own. (Coefficient-induced negatives, the 0.04-0.06% baseline, are a
+    // separate matter and unaffected.)
+    //
+    // `None` ⇒ unbounded, byte-identical to every run before 2026-09-17 and to
+    // the DDR c2bd0f9 reference.
     let b_rhs = match zeta_opt {
-        Some(zeta) => b_rhs_base - zeta,
+        Some(zeta) => match cfg.params.leakance_max_rhs_fraction {
+            Some(alpha) => {
+                // `b_rhs_base` IS NOT GUARANTEED NON-NEGATIVE. With
+                // `enforce_positivity: false` (the default) the Cunge-derived
+                // Muskingum coefficients go negative on a large fraction of
+                // reach-timesteps, so `b_base` can be below zero. A raw
+                // `alpha*b_base` cap would then be negative, bind against a
+                // positive zeta, and rescale the whole RHS by `(1-alpha)` —
+                // turning a mass bound into a silent 10x attenuation. Caught by
+                // `tests/leakance_gamma_gradcheck.rs::an_unreached_bound_is_bit_identical`.
+                //
+                // `relu` is the physics, not a patch: a reach with no water
+                // available can lose none, so the cap there is zero.
+                // SYMMETRIC. zeta > 0 is a losing reach (water leaves for the
+                // aquifer); zeta < 0 is a GAINING reach (the aquifer feeds the
+                // stream). Both directions need bounding, and for different
+                // reasons. Unbounded loss empties the channel, which is what
+                // produced the 2026-09-17 NaN. Unbounded GAIN is worse
+                // scientifically: a source term can manufacture water wherever
+                // the model runs short, so it will absorb any inflow deficit
+                // and improve skill while meaning nothing.
+                //
+                // `|zeta| <= alpha * relu(b_base)` says the exchange is a
+                // CORRECTION on the local flow, not a multiple of it, which is
+                // the right prior given dHBV's q' already carries baseflow.
+                let cap = b_rhs_base.clone().clamp_min(0.0) * alpha;
+                let neg_cap = -cap.clone();
+                let bound = zeta
+                    .clone()
+                    .min_pair(cap.clone())
+                    .max_pair(neg_cap.clone());
+
+                // Two factors, because the forward splits b_rhs two ways:
+                //   d(b_rhs)/d(zeta)   = -(1 - s_up - s_dn)
+                //   d(b_rhs)/d(b_base) = 1 - (s_up - s_dn) * alpha  where b_base > 0
+                //                      = 1                          where b_base <= 0
+                // the sign difference being that an upper bind gives
+                // `b_rhs = (1-alpha)*b_base` and a lower bind `(1+alpha)*b_base`.
+                // Both are recorded here rather than recomputed in the backward,
+                // so the two cannot drift.
+                let s_up = zeta.clone().greater(cap).float();
+                let s_dn = zeta.lower(neg_cap).float();
+                let ones = s_up.clone().ones_like();
+                let one_minus_binding = ones.clone() - s_up.clone() - s_dn.clone();
+                let positive_base = b_rhs_base.clone().greater_elem(0.0).float();
+                let base_factor = ones - (s_up - s_dn) * positive_base * alpha;
+                if let Some(ls) = leak_out.as_mut() {
+                    ls.rhs_bound = Some((unwrap(base_factor), unwrap(one_minus_binding)));
+                }
+                b_rhs_base - bound
+            }
+            None => b_rhs_base - zeta,
+        },
         None => b_rhs_base,
     };
 
@@ -1997,9 +2718,10 @@ where
     (q_next_prim, saved)
 }
 
-/// Forward + register-on-tape entry point. Called from
-/// `MuskingumCunge::route_timestep` (Task 4). Returns Q_{t+1} as an
-/// autograd-tracked rank-1 tensor.
+/// Forward + register-on-tape entry point, without the linear-reservoir
+/// override. `MuskingumCunge::route_timestep` calls
+/// `timestep_forward_with_reservoirs`, which holds the body. Returns Q_{t+1}
+/// as an autograd-tracked rank-1 tensor.
 ///
 /// Parent order: [n, q_spatial, p_spatial, q_t, q_prime_t]. The three
 /// constants (length, slope, x_storage) are not differentiated through.
@@ -2031,7 +2753,54 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    timestep_forward_with_reservoirs::<I>(
+        cfg, pattern, _assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        track_neg,
+        gamma_at,
+        None,
+        None,
+        None,
+    )
+}
+
+/// [`timestep_forward`] plus the linear-reservoir override
+/// ([`ReservoirTensors`], S19''/B19''), or the learned dam release
+/// ([`ReleaseParent`], whose `T` is an autodiff parent). The two are
+/// exclusive. `MuskingumCunge::route_timestep` calls this directly; every
+/// other caller goes through `timestep_forward`, which passes `None` for both.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn timestep_forward_with_reservoirs<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    _assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    track_neg: bool,
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
+    reservoir: Option<&ReservoirTensors<I>>,
+    release: Option<ReleaseParent<I>>,
+    // Receives this step's pre-clamp solve and routed inflow when `Some`
+    // (the engine's dam-row clamp accounting). Reads only; no numerics change.
+    dam_diag: Option<&mut Option<DamStepDiag<I>>>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
     use crate::config::SparseSolver;
+    assert!(
+        reservoir.is_none() || release.is_none(),
+        "the option C reservoir override and the dam release are exclusive"
+    );
 
     let dt = crate::routing::mmc::DT_SECONDS;
     let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
@@ -2074,6 +2843,31 @@ where
         Tensor::from_primitive(TensorPrimitive::Float(p))
     };
 
+    // Learned release: scatter this step's per-dam T (seconds) onto the dam
+    // rows, giving the same `ReservoirTensors` the S19'' override reads. The
+    // off-dam entries are never read (`mask_where`), so zeros are fine.
+    let t_aut = release.as_ref().map(|r| unwrap_at(r.t_dams.clone()));
+    let t_prev_aut = release.as_ref().map(|r| unwrap_at(r.t_prev_dams.clone()));
+    let release_res: Option<ReservoirTensors<I>> = release.as_ref().map(|r| {
+        let n_rows = r.mask.dims()[0];
+        let scatter = |p: I::FloatTensorPrimitive| {
+            Tensor::<I, 1>::zeros([n_rows], &I::float_device(&n_p)).select_assign(
+                0,
+                r.rows.clone(),
+                wrap(p),
+                IndexingUpdateOp::Add,
+            )
+        };
+        ReservoirTensors {
+            mask: r.mask.clone(),
+            t_seconds: scatter(t_aut.as_ref().expect("set above").primitive.clone()),
+            t_prev_seconds: Some(scatter(t_prev_aut.as_ref().expect("set above").primitive.clone())),
+            additive: r.additive,
+            positivity: r.positivity,
+        }
+    });
+    let reservoir = reservoir.or(release_res.as_ref());
+
     let mut x_eff_out: Option<I::FloatTensorPrimitive> = None;
     let gamma_chain = gamma_p.clone().map(wrap);
     let (q_next_prim, saved) = forward_chain_inner::<I>(
@@ -2092,6 +2886,7 @@ where
         &mut x_eff_out,
         track_neg,
         gamma_chain.clone(),
+        reservoir,
     );
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
@@ -2108,6 +2903,14 @@ where
     // Compile-time sanity: confirm the index constants are aligned with the
     // destructure above (touch each so a future re-order is caught).
     let _ = (fsi::DEPTH, fsi::BW_RAW);
+    if let Some(sink) = dam_diag {
+        *sink = Some(DamStepDiag {
+            x_sol: wrap(x_sol_prim.clone()),
+            i_t: wrap(i_t_prim.clone()),
+            c4: wrap(c4_p.clone()),
+            c1: wrap(c1_prim.clone()),
+        });
+    }
 
     // Build TimestepState saving every intermediate the backward needs.
     let state = TimestepState::<I> {
@@ -2155,7 +2958,63 @@ where
         gamma,
         d_ref,
         gamma_t: gamma_p.clone(),
+        reservoir_mask: reservoir.map(|r| r.mask.clone().into_primitive()),
+        reservoir_t_prev: reservoir
+            .and_then(|r| r.t_prev_seconds.clone())
+            .map(|t| match t.into_primitive() {
+                TensorPrimitive::Float(p) => p,
+                _ => unreachable!(),
+            }),
+        reservoir_additive: reservoir.is_some_and(|r| r.additive),
+        // Mirrors S19p's gate in `forward_chain_inner` exactly.
+        reservoir_positivity: reservoir.is_some_and(|r| r.additive && r.positivity) && !enforce_pos,
     };
+    debug_assert!(
+        !state.reservoir_additive || state.reservoir_t_prev.is_some(),
+        "the additive dam row needs the step-start T in the saved state"
+    );
+
+    // Learned release: `T` is one more parent, so it routes through the
+    // release siblings. Everything else below is untouched.
+    if let (Some(t), Some(tp), Some(r)) = (t_aut, t_prev_aut, release) {
+        let state = TimestepReleaseState::<I> { base: state, rows: r.rows.into_primitive() };
+        let result_prim = match &gamma_aut {
+            Some(g) => match TimestepReleaseGammaOp
+                .prepare::<NoCheckpointing>([
+                    n_aut.node.clone(),
+                    qsp_aut.node.clone(),
+                    psp_aut.node.clone(),
+                    qt_aut.node.clone(),
+                    qpt_aut.node.clone(),
+                    g.node.clone(),
+                    t.node.clone(),
+                    tp.node.clone(),
+                ])
+                .compute_bound()
+                .stateful()
+            {
+                OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+                OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+            },
+            None => match TimestepReleaseOp
+                .prepare::<NoCheckpointing>([
+                    n_aut.node.clone(),
+                    qsp_aut.node.clone(),
+                    psp_aut.node.clone(),
+                    qt_aut.node.clone(),
+                    qpt_aut.node.clone(),
+                    t.node.clone(),
+                    tp.node.clone(),
+                ])
+                .compute_bound()
+                .stateful()
+            {
+                OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+                OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+            },
+        };
+        return Tensor::from_primitive(TensorPrimitive::Float(result_prim));
+    }
 
     // Register the op on the autograd tape. A learned gamma needs a sixth
     // parent to receive a gradient at all, so it routes through the sibling
@@ -2195,10 +3054,103 @@ where
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
 }
 
+/// One routed step with the dam release, for tests and diagnostics: the
+/// `rows` are dams whose residence time is `t_next` (`T_{t+1}`, seconds) at
+/// the step's end and `t_prev` (`T_t`) at its start, both autodiff parents
+/// (S19''' / B19'''). The same tensor may be passed as both (constant T).
+/// `MuskingumCunge::set_dam_release` is the production entry.
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_release<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    rows: Vec<usize>,
+    t_next: Tensor<Autodiff<I>, 1>,
+    t_prev: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    timestep_forward_release_as::<I>(
+        cfg, pattern, assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        rows, t_next, t_prev,
+        crate::config::DamRow::Replace,
+    )
+}
+
+/// [`timestep_forward_release`] with the dam-row form chosen: `Replace`
+/// (S19''' / B19''') or `Additive` (S19'''' / B19''''). The additive row's
+/// positivity cap (S19p / B19p) follows `cfg.dam_row_positivity()`.
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_release_as<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    rows: Vec<usize>,
+    t_next: Tensor<Autodiff<I>, 1>,
+    t_prev: Tensor<Autodiff<I>, 1>,
+    dam_row: crate::config::DamRow,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let device = q_t_at.device();
+    let n = q_t_at.dims()[0];
+    let mut mask = vec![false; n];
+    for &r in &rows {
+        mask[r] = true;
+    }
+    let rows_i: Vec<i32> = rows.iter().map(|&r| r as i32).collect();
+    let n_dams = rows_i.len();
+    let release = ReleaseParent {
+        t_dams: t_next,
+        t_prev_dams: t_prev,
+        rows: Tensor::from_data(burn::tensor::TensorData::new(rows_i, [n_dams]), &device),
+        mask: Tensor::from_data(burn::tensor::TensorData::from(mask.as_slice()), &device),
+        additive: dam_row == crate::config::DamRow::Additive,
+        // From the config, as the engine takes it at construction.
+        positivity: cfg.dam_row_positivity(),
+    };
+    timestep_forward_with_reservoirs::<I>(
+        cfg, pattern, assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        false,
+        None,
+        None,
+        Some(release),
+        None,
+    )
+}
+
 /// Leakance variant of [`timestep_forward`]. Identical to it, plus three extra
 /// autograd-tracked parents (`K_D`, `d_gw`, `leakance_factor`) threaded into
 /// `forward_chain_inner`'s leakance gate so `zeta` is subtracted from `b_rhs`.
-/// Registers a [`TimestepLeakanceOp`] node (8 parents). Never uses CUDA graphs
+/// Registers a [`TimestepLeakanceOp`] node (8 parents), or a
+/// [`TimestepLeakanceGammaOp`] node (9 parents) when `gamma_at` carries a
+/// learned per-reach stage-roughness exponent. Never uses CUDA graphs
 /// (leakance forces `use_cuda_graphs: false`).
 ///
 /// `impervious_mask`: optional per-reach 0/1 constant (inner backend, not
@@ -2229,6 +3181,10 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     impervious_mask: Option<Tensor<I, 1>>,
     zeta_out: Option<&mut Option<ZetaStepDiag<I>>>,
     track_neg: bool,
+    // Per-reach stage-roughness exponent when it is a learned KAN output.
+    // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`, which is what
+    // every pre-2026-09-17 leakance run used.
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -2259,6 +3215,8 @@ where
     let length_aut = unwrap_at(length_at);
     let slope_aut = unwrap_at(slope_at);
     let xst_aut = unwrap_at(x_storage_at);
+    let gamma_aut = gamma_at.map(unwrap_at);
+    let gamma_p = gamma_aut.as_ref().map(|g| g.primitive.clone());
     let kd_aut = unwrap_at(k_d_at);
     let dgw_aut = unwrap_at(d_gw_at);
     let fac_aut = unwrap_at(leakance_factor_at);
@@ -2303,6 +3261,8 @@ where
         &mut leak_out,
         &mut x_eff_out,
         track_neg,
+        gamma_p.clone().map(wrap),
+        // Reservoir rows are rejected with leakance (`route_timestep`).
         None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
@@ -2319,17 +3279,24 @@ where
     let _ = (fsi::DEPTH, fsi::BW_RAW);
 
     // Eval-time zeta diagnostic: zeta = factor · area_z · K_D · head, where
-    // head = max(0, depth − d_gw) when losing_only, else depth − d_gw.
-    // Recomputed from the saved primitives so the reported value is exactly
-    // what was subtracted from b_rhs (same losing_only flag as the forward).
+    // head = max(0, min(depth − d_gw, depth + M)) when losing_only, else the
+    // same without the outer clamp. Recomputed from the saved primitives so the
+    // reported value is exactly what was subtracted from b_rhs — it must mirror
+    // `zeta_forward` in EVERY branch (losing_only, the disconnection cap, and
+    // the impervious mask), or the eval diagnostic reports a flux the routing
+    // never applied.
     if let Some(out) = zeta_out {
         let depth = wrap(depth_p.clone());
         let area_z = wrap(leak.area_z.clone());
         let m_raw = depth.clone() - wrap(leak.d_gw.clone());
+        let m_capped = match leak.bed_thickness {
+            Some(bed_m) => m_raw.min_pair(depth.clone() + bed_m),
+            None => m_raw,
+        };
         let head = if leak.losing_only {
-            m_raw.clamp_min(0.0)
+            m_capped.clamp_min(0.0)
         } else {
-            m_raw
+            m_capped
         };
         let zeta_raw = wrap(leak.leakance_factor.clone()) * area_z.clone() * wrap(leak.k_d.clone()) * head;
         // Apply the impervious mask so the reported zeta equals exactly what was
@@ -2385,27 +3352,54 @@ where
         enforce_pos,
         gamma,
         d_ref,
-        gamma_t: None,
+        gamma_t: gamma_p.clone(),
+        reservoir_mask: None,
+        reservoir_t_prev: None,
+        reservoir_additive: false,
+        reservoir_positivity: false,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
 
-    let result_prim = match TimestepLeakanceOp
-        .prepare::<NoCheckpointing>([
-            n_aut.node.clone(),
-            qsp_aut.node.clone(),
-            psp_aut.node.clone(),
-            qt_aut.node.clone(),
-            qpt_aut.node.clone(),
-            kd_aut.node.clone(),
-            dgw_aut.node.clone(),
-            fac_aut.node.clone(),
-        ])
-        .compute_bound()
-        .stateful()
-    {
-        OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
-        OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+    // A learned gamma needs a ninth parent to receive a gradient at all, so it
+    // routes through the sibling `TimestepLeakanceGammaOp`; a constant gamma
+    // (or none) keeps the historical eight-parent node, byte-identical.
+    let result_prim = match &gamma_aut {
+        Some(g) => match TimestepLeakanceGammaOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+                kd_aut.node.clone(),
+                dgw_aut.node.clone(),
+                fac_aut.node.clone(),
+                g.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
+        None => match TimestepLeakanceOp
+            .prepare::<NoCheckpointing>([
+                n_aut.node.clone(),
+                qsp_aut.node.clone(),
+                psp_aut.node.clone(),
+                qt_aut.node.clone(),
+                qpt_aut.node.clone(),
+                kd_aut.node.clone(),
+                dgw_aut.node.clone(),
+                fac_aut.node.clone(),
+            ])
+            .compute_bound()
+            .stateful()
+        {
+            OpsKind::Tracked(prep) => prep.finish(state, q_next_prim),
+            OpsKind::UnTracked(prep) => prep.finish(q_next_prim),
+        },
     };
 
     Tensor::from_primitive(TensorPrimitive::Float(result_prim))
@@ -2703,6 +3697,11 @@ where
         gamma: 0.0,
         d_ref: 1.0,
         gamma_t: None,
+        // Reservoir rows are rejected with CUDA graphs (`route_timestep`).
+        reservoir_mask: None,
+        reservoir_t_prev: None,
+        reservoir_additive: false,
+        reservoir_positivity: false,
     };
 
     let result_prim = match TimestepOp
@@ -2750,7 +3749,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None,
+        &mut None, &mut None, false, None, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -2813,7 +3812,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None,
+        &mut None, &mut None, false, None, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

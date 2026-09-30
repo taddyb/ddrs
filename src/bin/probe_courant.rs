@@ -264,6 +264,12 @@ where
     if cfg.params.ddr_match {
         return Err("this probe requires params.ddr_match: false (enforce_positivity is gated on it)".into());
     }
+    // `run_courant_probe` drives `forward_chain_inner` with no reservoir
+    // override, so a reservoir config would be probed with its dams routed as
+    // channels. Refuse it rather than report statistics for the wrong model.
+    if cfg.params.use_reservoirs {
+        return Err("this probe does not support params.use_reservoirs: true (it routes every reach as a channel)".into());
+    }
     if let (Some(exp), Some(ckpt)) = (cfg.experiment.as_mut(), cli.checkpoint.clone()) {
         exp.checkpoint = Some(ckpt);
     }

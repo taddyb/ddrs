@@ -18,10 +18,11 @@ use crate::config::Config;
 use crate::data::error::Result;
 use crate::nn::kan_head::KanHead;
 use crate::training::checkpoint::{
-    head_base, load_disagg_head, load_kan_head, load_optimizer, load_train_state, optim_base,
-    state_path,
+    head_base, load_dam_params, load_disagg_head, load_kan_head, load_optimizer, load_train_state,
+    optim_base, release_dams_base, release_dams_optim_base, release_dams_optim_path,
+    release_head_base, release_optim_base, state_path,
 };
-use crate::training::driver::TrainState;
+use crate::training::driver::{DamTrainer, ReleaseTrainer, TrainState};
 use crate::training::optimizer::{build_head_optimizer, HeadOptimizer};
 
 /// Initialise the KAN head, the mutable training state, and the Adam
@@ -93,8 +94,113 @@ where
         }
     }
 
+    // The learned dam release head (`params.reservoir_release: learned`): a
+    // separate module + optimizer of the same kind, initialised after the
+    // routing head from its own seeded RNG, so the routing head's init is
+    // untouched. See `nn::release_head` for the pass-through init.
+    let learned_release = cfg.params.use_reservoirs
+        && cfg.params.reservoir_release == crate::config::ReservoirRelease::Learned;
+
+    // Release-only training (`release_head.routing_checkpoint` /
+    // `freeze_routing`): the routing head's WEIGHTS come from another run's
+    // checkpoint directory; its optimizer and train-loop state do not (the
+    // routing optimizer starts cold and the run at epoch 1). Frozen, the
+    // head is detached with `no_grad`, like the disaggregation freeze above:
+    // its parameters are not autodiff leaves, so the backward spends nothing
+    // on them and the driver takes no routing step (`Config::routing_frozen`).
+    // `load_record` keeps the template's `require_grad`, so a frozen head
+    // stays frozen across the `experiment.checkpoint` resume below.
+    if let Some(rh) = cfg.release_head.as_ref().filter(|_| learned_release) {
+        if let Some(dir) = rh.routing_checkpoint.as_ref() {
+            head = load_kan_head::<Autodiff<I>>(&head_base(dir), head, device)?;
+            println!(
+                "routing warm start: loaded routing head weights from {}.mpk \
+                 (weights only: optimizer and state.json not read)",
+                head_base(dir).display()
+            );
+            if rh.freeze_routing {
+                head = head.no_grad();
+                println!(
+                    "routing warm start: routing head FROZEN (release_head.freeze_routing); \
+                     only the release head trains"
+                );
+            }
+        }
+    }
+    let release = if learned_release {
+        let section = cfg
+            .release_head
+            .as_ref()
+            .expect("reservoir_release: learned requires a release_head block (validated at load)");
+        let head = crate::nn::release_head::init_release_head::<Autodiff<I>>(
+            section,
+            &cfg.params.parameter_ranges,
+            cfg.seed,
+            device,
+        );
+        eprintln!(
+            "release head: {} inputs, outputs {:?}, T0 at init {} h",
+            section.input_var_names.len(),
+            head.learnable_parameters(),
+            crate::nn::release_head::INIT_T0_HOURS
+        );
+        // Per-dam free parameters (rule curve, per-dam T0): one row per dam
+        // of the feature table, all zero, with their own Adam (constant
+        // `per_dam_lr`, stepped by the driver).
+        let dams = if section.has_per_dam() {
+            let path = cfg
+                .data_sources
+                .as_ref()
+                .and_then(|d| d.reservoirs.as_ref())
+                .expect("use_reservoirs requires data_sources.reservoirs (validated at load)");
+            let n = crate::data::store::read_dam_features(path, &section.input_var_names)?.comids.len();
+            let pool = section.flood_pool != crate::config::FloodPoolMode::None;
+            let params = crate::nn::dam_params::DamParams::<Autodiff<I>>::zeros_with_pool(
+                n,
+                section.rule_curve,
+                section.per_dam_t0,
+                pool,
+                device,
+            );
+            eprintln!(
+                "release head: per-dam parameters for {n} table dams (rule_curve: {}, per_dam_t0: {}, \
+                 flood_pool: {}, lr {} constant, l2 {})",
+                section.rule_curve,
+                section.per_dam_t0,
+                section.flood_pool.name(),
+                section.per_dam_lr,
+                section.per_dam_l2
+            );
+            if pool {
+                use crate::nn::dam_params as dp;
+                eprintln!(
+                    "flood pool: init kc {} (box [{}, {}]), phi 0.5, z {} d (bound {} d, logistic rate {}), \
+                     Ibar = inflow_mean_m3s",
+                    dp::POOL_KC_INIT,
+                    dp::POOL_KC_RANGE[0],
+                    dp::POOL_KC_RANGE[1],
+                    dp::POOL_Z_INIT_DAYS,
+                    dp::POOL_Z_MAX_DAYS,
+                    dp::POOL_Z_RATE
+                );
+            }
+            let optimizer = crate::training::lazy_adam::LazyAdam::new(&params);
+            Some(DamTrainer::<I> { params, optimizer })
+        } else {
+            None
+        };
+        Some(ReleaseTrainer::<I> {
+            head,
+            optimizer: build_head_optimizer::<KanHead<Autodiff<I>>, Autodiff<I>>(optim_kind),
+            dams,
+        })
+    } else {
+        None
+    };
+
     let mut state = TrainState::<I> {
         head,
+        release,
         epoch: 1,
         mini_batch: 0,
         rng: ChaCha12Rng::seed_from_u64(cfg.seed),
@@ -116,6 +222,52 @@ where
             println!("warm start: restored Adam state from {}.mpk", optim.display());
         } else {
             println!("warm start: no {}.mpk — Adam starts cold", optim.display());
+        }
+
+        // The learned dam release head and its optimizer. A checkpoint from a
+        // run without the release (e.g. warm-starting the routing head from a
+        // no-dam run) has neither file, and the release head starts cold.
+        if let Some(r) = state.release.as_mut() {
+            let rhead = release_head_base(ckpt_dir);
+            if rhead.with_extension("mpk").is_file() {
+                r.head = load_kan_head::<Autodiff<I>>(&rhead, r.head.clone(), device)?;
+                println!("warm start: loaded release head from {}.mpk", rhead.display());
+                let roptim = release_optim_base(ckpt_dir);
+                if roptim.with_extension("mpk").is_file() {
+                    r.optimizer = load_optimizer(&roptim, r.optimizer.clone(), device)?;
+                    println!("warm start: restored release optimizer from {}.mpk", roptim.display());
+                } else {
+                    println!("warm start: no {}.mpk; release optimizer starts cold", roptim.display());
+                }
+            } else {
+                println!(
+                    "warm start: no {}.mpk; release head starts cold (T0 = {} h)",
+                    rhead.display(),
+                    crate::nn::release_head::INIT_T0_HOURS
+                );
+            }
+            // The per-dam parameters and their optimizer, when both the run
+            // and the checkpoint carry them.
+            if let Some(d) = r.dams.as_mut() {
+                let dbase = release_dams_base(ckpt_dir);
+                if dbase.with_extension("mpk").is_file() {
+                    d.params = load_dam_params::<Autodiff<I>>(&dbase, d.params.clone(), device)?;
+                    println!("warm start: loaded per-dam parameters from {}.mpk", dbase.display());
+                    let doptim = release_dams_optim_path(ckpt_dir);
+                    if doptim.is_file() {
+                        d.optimizer = d.optimizer.clone().load(&doptim)?;
+                        println!("warm start: restored per-dam row-sparse Adam from {}", doptim.display());
+                    } else if release_dams_optim_base(ckpt_dir).with_extension("mpk").is_file() {
+                        println!(
+                            "warm start: {}.mpk is a dense-Adam record from an older build; the \
+                             per-dam row-sparse Adam starts cold",
+                            release_dams_optim_base(ckpt_dir).display()
+                        );
+                    }
+                } else {
+                    println!("warm start: no {}.mpk; per-dam parameters start at zero", dbase.display());
+                }
+            }
         }
 
         // Train-loop position (epoch, mini-batch, rng, sampler).

@@ -12,13 +12,17 @@
 pub mod adadelta;
 pub mod bootstrap;
 pub mod checkpoint;
+pub mod dam_terms;
 pub mod driver;
 pub mod eval;
 pub mod forward;
+pub mod gate;
+pub mod lazy_adam;
 pub mod loss;
 pub mod metrics;
 pub mod optimizer;
 pub mod probe;
+pub mod release_eval;
 pub mod zarr_io;
 
 pub use bootstrap::bootstrap_head_and_state;
@@ -37,6 +41,7 @@ pub use loss::{
     tau_trim_and_downsample, FilteredPair,
 };
 pub use driver::{train, TrainState};
+pub use gate::{leakance_gate, GATE_EPS};
 pub use eval::{evaluate, EvalOutput, EvalParams};
 pub use metrics::Metrics;
 pub use adadelta::{AdaDelta, AdaDeltaConfig};

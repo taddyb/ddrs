@@ -61,6 +61,18 @@ where
     /// dataset's time axis and every window resolved against it cover the
     /// period the model was actually trained on).
     pub fn open(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str) -> Result<Self, BoxError> {
+        Self::open_inner(arm, device, force_cpu, period, false)
+    }
+
+    /// As [`open`], but permitting a leakance arm. Only the landscape study may
+    /// use this, and only because it carries `K_D`/`d_gw`/`leakance_factor` at
+    /// their trained fields; anything that does not would silently evaluate a
+    /// different model than the one trained.
+    pub fn open_allowing_leakance(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str) -> Result<Self, BoxError> {
+        Self::open_inner(arm, device, force_cpu, period, true)
+    }
+
+    fn open_inner(arm: &ResolvedArm, device: &I::Device, force_cpu: bool, period: &str, allow_leakance: bool) -> Result<Self, BoxError> {
         let mode = if period == PERIOD_TRAINING { ConfigMode::Training } else { ConfigMode::Testing };
         let mut cfg = Config::from_yaml_file_with_mode(&arm.config_path, mode)
             .map_err(|e| format!("arm `{}`: {e}", arm.name))?;
@@ -68,12 +80,30 @@ where
             cfg.params.sparse_solver = SparseSolver::Cpu;
             cfg.params.use_cuda_graphs = false;
         }
-        if cfg.params.use_leakance {
+        // The ADJOINT study still refuses leakance: its functionals are
+        // gradients w.r.t. lateral inflow, and zeta is an additional sink on
+        // the RHS whose contribution those functionals do not account for.
+        // The LANDSCAPE study now carries the leakance fields explicitly
+        // (`landscape/objective.rs`), so it opts out of this guard.
+        if cfg.params.use_leakance && !allow_leakance {
             return Err(format!("arm `{}`: leakance arms are out of scope for the adjoint study", arm.name).into());
         }
         if cfg.params.ddr_match {
             return Err(format!(
                 "arm `{}`: ddr_match arms are unsupported (gauge prediction omits the gauge reach)",
+                arm.name
+            )
+            .into());
+        }
+        // Both studies build their own engines
+        // (`InfluenceContext::forward_with_inflow_leaf`,
+        // `landscape::objective::Objective::forward_loss`) and never arm
+        // reservoir rows, so a reservoir arm would be evaluated as a different
+        // model than the one trained.
+        if cfg.params.use_reservoirs {
+            return Err(format!(
+                "arm `{}`: `params.use_reservoirs: true` arms are unsupported by the paper studies \
+                 (their engines route dam reaches as channels)",
                 arm.name
             )
             .into());
@@ -490,6 +520,42 @@ mod tests {
         assert_eq!(d[2], 0.0);
         assert_eq!(d[1], 300.0);
         assert_eq!(d[0], 500.0);
+    }
+
+    #[test]
+    fn reservoir_arms_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "mode: training\nseed: 1\nnp_seed: 1\ndata_sources:\n  attributes: /dev/null/a.nc\n  \
+             conus_adjacency: /dev/null/c.zarr\n  gages_adjacency: /dev/null/g.zarr\n  \
+             streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
+             gages: /dev/null/g.csv\n  reservoirs: /dev/null/r.csv\n\
+             params:\n  use_reservoirs: true\n",
+        )
+        .unwrap();
+        let arm = ResolvedArm {
+            name: "dam".into(),
+            run_id: "run".into(),
+            run_dir: dir.path().into(),
+            config_path,
+            checkpoint_dir: dir.path().into(),
+            checkpoint_label: "init".into(),
+        };
+        for allow_leakance in [false, true] {
+            let err = InfluenceContext::<burn::backend::NdArray<f32>>::open_inner(
+                &arm,
+                &Default::default(),
+                true,
+                PERIOD_TESTING,
+                allow_leakance,
+            )
+            .err()
+            .expect("a reservoir arm must be refused")
+            .to_string();
+            assert!(err.contains("use_reservoirs"), "{err}");
+        }
     }
 
     #[test]

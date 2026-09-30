@@ -1,0 +1,142 @@
+{
+ "vs off: cap_off - off": {
+  "median": 0.0006,
+  "ci": [
+   0.0003,
+   0.0008
+  ],
+  "up": 88,
+  "down": 29,
+  "n": 117
+ },
+ "vs off: cap_on - off": {
+  "median": 0.0006,
+  "ci": [
+   0.0003,
+   0.0011
+  ],
+  "up": 84,
+  "down": 33,
+  "n": 117
+ },
+ "vs off: L2 - off": {
+  "median": 0.0109,
+  "ci": [
+   0.0033,
+   0.0311
+  ],
+  "up": 81,
+  "down": 36,
+  "n": 117
+ },
+ "vs off: L4 - off": {
+  "median": 0.0204,
+  "ci": [
+   0.0044,
+   0.0477
+  ],
+  "up": 79,
+  "down": 38,
+  "n": 117
+ },
+ "vs off: L2pos - off": {
+  "median": 0.0186,
+  "ci": [
+   0.0048,
+   0.0357
+  ],
+  "up": 83,
+  "down": 34,
+  "n": 117
+ },
+ "vs off: L4pos - off": {
+  "median": 0.0244,
+  "ci": [
+   0.0045,
+   0.0487
+  ],
+  "up": 79,
+  "down": 38,
+  "n": 117
+ },
+ "vs off: cap_on_all - off": {
+  "median": 0.0006,
+  "ci": [
+   0.0004,
+   0.0012
+  ],
+  "up": 82,
+  "down": 35,
+  "n": 117
+ },
+ "hour of storage: cap_off - off": {
+  "median": 0.0006,
+  "ci": [
+   0.0003,
+   0.0008
+  ],
+  "up": 88,
+  "down": 29,
+  "n": 117
+ },
+ "cap alone: cap_on - cap_off": {
+  "median": 0.0,
+  "ci": [
+   -0.0,
+   0.0001
+  ],
+  "up": 62,
+  "down": 54,
+  "n": 117
+ },
+ "fitted T0 | cap: L2pos - cap_on": {
+  "median": 0.0189,
+  "ci": [
+   0.0019,
+   0.036
+  ],
+  "up": 81,
+  "down": 36,
+  "n": 117
+ },
+ "fitted T0 + rule curve | cap: L4pos - cap_on": {
+  "median": 0.0235,
+  "ci": [
+   0.0058,
+   0.0475
+  ],
+  "up": 80,
+  "down": 37,
+  "n": 117
+ },
+ "fitted T0 | no cap: L2 - cap_off": {
+  "median": 0.009,
+  "ci": [
+   0.0018,
+   0.0302
+  ],
+  "up": 81,
+  "down": 36,
+  "n": 117
+ },
+ "rule curve over T0 | cap: L4pos - L2pos": {
+  "median": 0.0008,
+  "ci": [
+   -0.001,
+   0.004
+  ],
+  "up": 61,
+  "down": 56,
+  "n": 117
+ },
+ "all 458 dam gauges: cap_on_all - off": {
+  "median": 0.0006,
+  "ci": [
+   0.0003,
+   0.0007
+  ],
+  "up": 295,
+  "down": 163,
+  "n": 458
+ }
+}

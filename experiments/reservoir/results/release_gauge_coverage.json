@@ -1,0 +1,8 @@
+{
+ "n_dor_gt_05": 347,
+ "n_with_mapped_res": 347,
+ "n_with_gauge_between": 216,
+ "n_first_gauge_below": 131,
+ "median_main_share": 1.0,
+ "adjacency_gauges": 8945
+}

@@ -97,7 +97,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run<I: Backend>(cfg: Config, cli: Cli, device: I::Device) -> Result<(), Box<dyn std::error::Error>> {
-    let dataset = MeritGagesDataset::open(&cfg)?;
+    let mut dataset = MeritGagesDataset::open(&cfg)?;
+    // Learned dam release: resolve the checkpoint's release head into a fixed
+    // seasonal table and write the per-dam parameters next to the output.
+    if let Some(ckpt) = cli.checkpoint.as_ref() {
+        if let Some(table) = ddrs::training::release_eval::resolve_learned_release::<I>(
+            &cfg,
+            &mut dataset,
+            ckpt,
+            &device,
+        )? {
+            let csv = cli.output.with_extension("release_params.csv");
+            ddrs::training::release_eval::write_release_params_csv(&csv, &table, cfg.dam_row())?;
+            eprintln!("release params -> {}", csv.display());
+        }
+    }
     println!(
         "sparse_solver={:?} use_cuda_graphs={}",
         cfg.params.sparse_solver, cfg.params.use_cuda_graphs,

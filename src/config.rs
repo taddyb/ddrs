@@ -138,6 +138,12 @@ pub struct DataSources {
     /// `research/specs/2026-09-08-ddrs-gridded-routing-design.md`.
     #[serde(default)]
     pub gridded_network: Option<std::path::PathBuf>,
+    /// Reservoir table CSV for `params.use_reservoirs` (option C in
+    /// `.claude/RESERVOIRS.md`): header `COMID,T_days`, extra columns
+    /// ignored; read by `data::store::reservoirs::read_reservoir_table`.
+    /// Required when `params.use_reservoirs: true`; ignored otherwise.
+    #[serde(default)]
+    pub reservoirs: Option<std::path::PathBuf>,
     /// Optional per-source icechunk snapshot pins: source name → snapshot id
     /// (Crockford base32, as icechunk prints it). A pinned source is opened at
     /// `VersionInfo::SnapshotId` instead of the `main` branch tip, so a run is
@@ -424,6 +430,54 @@ pub struct StageRoughnessSection {
     pub d_ref: f32,
 }
 
+/// YAML `params.leakance_gate:` block. Absent by default, and absent means the
+/// gate is not applied at all (byte-identical to the historical path).
+///
+/// Turns the head's `leakance_factor` output from a continuous multiplier into
+/// a temperature-annealed 0/1 selector,
+/// `g = sigmoid(logit(clamp(u, eps, 1 − eps)) / tau)`, applied to the
+/// NORMALIZED head output in every reader (`src/training/gate.rs::leakance_gate`).
+/// `tau = 1` is the exact identity; smaller `tau` sharpens toward a step at
+/// `u = 0.5`. The motivation is the exact scaling degeneracy between
+/// `leakance_factor` and `K_D` (they multiply, so only their product reaches
+/// the physics); a gate and a conductance are not degenerate with each other.
+///
+/// Requires `params.use_leakance: true` (`validate_leakance_gate`): a gate on a
+/// disabled term is silently inert.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeakanceGate {
+    /// Temperature schedule keyed by 1-indexed epoch, resolved exactly like
+    /// `experiment.learning_rate` (`LeakanceGate::resolve` takes the largest
+    /// key `<= epoch`; an epoch before the first key takes the first value).
+    /// Training uses the epoch's value; eval, the probe and `dump_parameters`
+    /// use the FINAL value (`LeakanceGate::final_temperature`), so the scored
+    /// model is the one training ended on. Values must be positive and finite.
+    pub temperature: BTreeMap<usize, f32>,
+}
+
+impl LeakanceGate {
+    /// Temperature in force at `epoch` (1-indexed). Mirrors
+    /// `src/training/optimizer.rs::resolve_lr`: largest key `<= epoch`, else
+    /// the first value. Panics on an empty schedule, which
+    /// `validate_leakance_gate` rejects at load.
+    pub fn resolve(&self, epoch: usize) -> f32 {
+        self.temperature
+            .range(..=epoch)
+            .next_back()
+            .map(|(_, &t)| t)
+            .unwrap_or_else(|| {
+                *self.temperature.values().next().expect("leakance_gate.temperature is empty")
+            })
+    }
+
+    /// The last scheduled temperature: what eval, the probe and
+    /// `dump_parameters` apply.
+    pub fn final_temperature(&self) -> f32 {
+        *self.temperature.values().next_back().expect("leakance_gate.temperature is empty")
+    }
+}
+
 /// YAML `kan_head.disaggregation:` block (presence enables the head, unless
 /// `enabled: false`). The head always consumes `(daily Q', that day's 24h
 /// precip)` — requires `data_sources.aorc_precip` to be set. See
@@ -596,11 +650,24 @@ pub struct ParameterRanges {
     /// depth goes to zero; 0.183 reproduces observed at-a-station hydraulic
     /// geometry when paired with `q ≈ 0.65`.
     pub gamma: [f32; 2],
+    /// Dam residence time `T0` in days, the release head's first output
+    /// (`params.reservoir_release: learned`). Always denormalised in LOG space.
+    /// YAML key `reservoir_T0`. The lower bound must be at least one hour
+    /// (`1/24` d): `T >= dt/2` keeps the dam row's `c3 >= 0`.
+    pub reservoir_t0: [f32; 2],
+    /// Seasonal coefficient `a` of `T(t) = T0·exp(a·sin ω_t + b·cos ω_t)`,
+    /// linear space. YAML key `reservoir_a`.
+    pub reservoir_a: [f32; 2],
+    /// Seasonal coefficient `b`, linear space. YAML key `reservoir_b`.
+    pub reservoir_b: [f32; 2],
 }
 
 impl Default for ParameterRanges {
     fn default() -> Self {
         Self {
+            reservoir_t0: [1.0 / 24.0, 365.0],
+            reservoir_a: [-2.0, 2.0],
+            reservoir_b: [-2.0, 2.0],
             gamma: [0.0, 0.5],
             n: [0.015, 0.25],
             q_spatial: [0.0, 1.0],
@@ -733,6 +800,49 @@ pub struct Params {
     /// (Phase C on). Set to `false` to recover the prior unclamped behavior
     /// byte-identically (e.g. for the recovery control answer key).
     pub leakance_losing_only: bool,
+    /// Streambed thickness `M` (metres) for the leakance DISCONNECTION CAP.
+    ///
+    /// `Some(M)` caps the driving head at `depth + M`: once the water table
+    /// falls more than `M` below the bed, an unsaturated zone opens beneath the
+    /// channel, stream and aquifer are no longer hydraulically connected, and
+    /// the flux is set by the head across the bed layer alone rather than by
+    /// how far down the table sits. This is the MODFLOW river-package `RBOT`
+    /// behaviour, and it is what makes a DEEP `d_gw` box meaningful: without
+    /// it the linear head `depth - d_gw` grows without bound, so a large head
+    /// with a small `K_D` becomes indistinguishable from a small head with a
+    /// large one, and widening the box buys degeneracy rather than coverage.
+    ///
+    /// `None` (the default) leaves the head uncapped, byte-identical to every
+    /// run before 2026-09-17 and to the DDR `c2bd0f9` reference pinned by
+    /// `tests/leakance_reference_match.rs`.
+    ///
+    /// Typical alluvial streambeds are 0.1 to 1 m thick.
+    pub leakance_bed_thickness: Option<f32>,
+    /// Mass bound on leakance: `zeta <- min(zeta, alpha * b_rhs_base)`, with
+    /// `alpha` this fraction and `b_rhs_base = c2*i_t + c3*q_t + c4*q'_t` the
+    /// locally available water in the Muskingum RHS.
+    ///
+    /// `leakance_losing_only` constrains the SIGN of the exchange (a gaining
+    /// reach contributes zero) but nothing constrains its MAGNITUDE, so a large
+    /// enough conductance removes more water than the reach carries. The solve
+    /// then returns negative discharge and the S28 `clamp_min(discharge_lb)`
+    /// manufactures mass to conceal it.
+    ///
+    /// Measured 2026-09-17: a `K_D` box whose geometric centre sat 31.6x too
+    /// high drove 30.8% of CONUS reaches negative pre-clamp, against a
+    /// no-leakance baseline of 0.013-0.114% (six prior CONUS runs), and the gradient through that many saturated
+    /// clamps went non-finite on the first optimizer step. The flaw was
+    /// unobservable for the whole prior history of the feature because the
+    /// `log_space_lower` bug kept `K_D` frozen near 1e-7.
+    ///
+    /// With every Muskingum coefficient non-negative and inflows non-negative,
+    /// `b_rhs_base >= 0`, so `alpha < 1` keeps the bounded RHS strictly
+    /// positive and leakance can no longer drive a negative solve on its own.
+    /// Must lie in `(0, 1)`; `validate_leakance_mass_bound` rejects otherwise.
+    ///
+    /// `None` (the default) leaves zeta unbounded, byte-identical to every run
+    /// before 2026-09-17 and to the DDR `c2bd0f9` reference.
+    pub leakance_max_rhs_fraction: Option<f32>,
     /// Phase C: impervious hard-zero threshold. Reaches with
     /// `corridor_impervious > threshold` get `zeta ≡ 0` and zero gradient to
     /// their leakance params. Only applied when an impervious mask tensor is
@@ -779,6 +889,349 @@ pub struct Params {
     /// Stage-dependent Manning roughness, `n(d) = n_0·(d/d_ref)^(−gamma)`.
     /// Absent ⇒ `gamma = 0`, byte-identical to the historical solver.
     pub stage_roughness: Option<StageRoughnessSection>,
+    /// Temperature-annealed 0/1 gate on the head's `leakance_factor` output.
+    /// Absent ⇒ the output is used as-is, byte-identical to the historical
+    /// readers. See `LeakanceGate`.
+    pub leakance_gate: Option<LeakanceGate>,
+    /// Route the dam reaches listed in `data_sources.reservoirs` as linear
+    /// reservoirs `S = T·Q` (option C in `.claude/RESERVOIRS.md`, via
+    /// `MuskingumCunge::set_reservoir_rows`). Off by default; `false` routes
+    /// every reach as before, bit for bit. `validate_reservoirs` lists the
+    /// combinations rejected at load.
+    pub use_reservoirs: bool,
+    /// Where each dam's residence time comes from when `use_reservoirs` is on.
+    /// `fixed` (the default) reads it from `data_sources.reservoirs` (option C,
+    /// optionally seasonal with `a`/`b` columns); `learned` emits
+    /// `(T0, a, b)` per dam from the `release_head:` block, trained jointly
+    /// with the routing head. See `.claude/RESERVOIRS.md`.
+    pub reservoir_release: ReservoirRelease,
+    /// The dam-row form ([`DamRow`]) of a `reservoir_release: fixed` table:
+    /// `replace` (absent, the default: every earlier config) or `additive`.
+    /// A learned release chooses its row with `release_head.dam_row`
+    /// instead; setting this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load (two sources of truth, or a
+    /// silent no-op). With `additive`, a fixed table may also carry the
+    /// rule-curve columns and route them on the additive row, which is how
+    /// an offline fit is replayed in the engine. [`Config::dam_row`] reads it.
+    pub reservoir_dam_row: Option<DamRow>,
+    /// What the S28 discharge clamp does with the water it creates on a dam
+    /// row ([`DamFloor`]) for a `reservoir_release: fixed` table: `forgive`
+    /// (absent, the default: every earlier config) or `carry`. Mirrors
+    /// `reservoir_dam_row`: a learned release sets it with
+    /// `release_head.dam_floor`; this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load. [`Config::dam_floor`] reads it.
+    pub reservoir_dam_floor: Option<DamFloor>,
+    /// Keep the additive dam row's inflow coefficient `c1 >= 0` for a
+    /// `reservoir_release: fixed` table: on the dam rows only, the channel
+    /// wedge `K_r·X_r` is capped at `(1 − δ)·dt/2`
+    /// (`X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)`, S19p in `mmc_op`). Absent (the
+    /// default) or `false` is bitwise today's routing. Mirrors
+    /// `reservoir_dam_floor`: a learned release sets it with
+    /// `release_head.dam_row_positivity`; this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load, and so is `true` without
+    /// `reservoir_dam_row: additive` (the replace row's `c1 = dt/D > 0`
+    /// already) or with `enforce_positivity` (S19' caps every row at the same
+    /// bound). [`Config::dam_row_positivity`] reads it.
+    pub reservoir_dam_row_positivity: Option<bool>,
+    /// Route the per-dam flood pool (law FA, [`FloodPoolMode`]) of a
+    /// `reservoir_release: fixed` table: `true` requires the table's `kc`,
+    /// `phi`, `z` columns (and `inflow_mean_m3s`) and arms a pool at every
+    /// table dam with `z > 0`; absent (the default) or `false` routes no pool,
+    /// bitwise today's routing, even when the table carries the columns.
+    /// Mirrors `reservoir_dam_row_positivity`: a learned release sets it with
+    /// `release_head.flood_pool`; this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load, and so is `true` with
+    /// `reservoir_dam_floor: carry`. [`Config::flood_pool_on`] reads it.
+    pub reservoir_flood_pool: Option<bool>,
+}
+
+/// `release_head.flood_pool`: which dams carry the per-dam flood pool (law FA
+/// of `experiments/reservoir/laws_v6`, `crate::routing::mmc::FloodPool`). A
+/// pooled dam captures `phi` of its inflow above a release target
+/// `Qc = kc·Ibar` into a pool of `Fmax = z·Ibar` (`z` days of mean inflow)
+/// and evacuates it at the target afterwards; both fluxes act on the dam
+/// row's lateral inflow. `kc`, `phi`, `z` are per-dam free parameters
+/// (`crate::nn::dam_params`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloodPoolMode {
+    /// No pool anywhere (the default): bitwise today's routing.
+    #[default]
+    None,
+    /// A pool at every dam whose table row has `purpose_flood` set (the
+    /// table's raw 0/1 `purpose_flood` column).
+    FloodControl,
+    /// A pool at every dam of the table.
+    All,
+}
+
+impl FloodPoolMode {
+    /// The YAML spelling: `none`, `flood_control`, `all`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FloodControl => "flood_control",
+            Self::All => "all",
+        }
+    }
+}
+
+/// `params.reservoir_release`. See [`Params::reservoir_release`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReservoirRelease {
+    /// `T` (and optional seasonal `a`, `b`) prescribed by the table.
+    #[default]
+    Fixed,
+    /// `(T0, a, b)` emitted by the release head from dam features.
+    Learned,
+}
+
+/// `release_head.dam_row`: how a dam row relates to its reach's own channel
+/// routing. See `crate::routing::release` for the two rows and their
+/// coefficients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DamRow {
+    /// The dam row REPLACES the reach's channel routing: Muskingum `K := T`,
+    /// `X := 0` (S19'' / S19''' in `mmc_op`), the linear reservoir `S = T·Q`
+    /// alone. `T >= 1 h` keeps `c3 >= 0`. Every config before 2026-09-27
+    /// routes this row.
+    #[default]
+    Replace,
+    /// The reservoir's storage is ADDED to the reach's channel storage,
+    /// `S = K_r·[X_r·I + (1 − X_r)·Q] + T·Q` with the reach's own Muskingum
+    /// `K_r`, `X_r` (S19'''' in `mmc_op`). `T = 0` is the channel row exactly,
+    /// so the release head can opt a dam out, and `T` may go down to 0.
+    Additive,
+}
+
+/// `release_head.dam_floor` / `params.reservoir_dam_floor`: what happens to
+/// the water the S28 discharge clamp creates on a dam row, when the dam's law
+/// (a rule curve storing more than the dam receives, or the channel's
+/// negative `c1` at low flow on the additive row) drives the pre-clamp solve
+/// below the floor `lb`. The created volume is `Σ max(lb − x, 0)·dt/c4`
+/// (`crate::routing::mmc`'s dam account).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DamFloor {
+    /// The clamp forgives the deficit: the created water stays in the river.
+    /// Every config before 2026-09-28; bitwise the historical routing.
+    #[default]
+    Forgive,
+    /// Mass-conserving floor: each dam carries an owed volume (m³, >= 0).
+    /// After a solve whose dam row clamped, `owed += created`; before every
+    /// solve the dam repays `r = min(owed/dt, max(Qin_t − lb, 0))` m³/s out of
+    /// its effective lateral inflow (`Qin_t` = routed upstream inflow plus the
+    /// reach's own `q'`, before the rule-curve flux) and `owed −= r·dt`. The
+    /// owed state is DETACHED (no gradient). It restarts at 0 at every training
+    /// window and runs across the test phase's chunks. On the additive row it
+    /// pumps debt wherever the channel's `c1 < 0`; pair it with
+    /// `dam_row_positivity` there.
+    Carry,
+}
+
+/// YAML `release_head:` block: the learned dam release head
+/// (`params.reservoir_release: learned`). A second `KanHead` instance,
+/// `Linear(F, H) -> KanLayer(H, H) x num_hidden_layers -> Linear(H, P) -> Sigmoid`
+/// with `P = 3` (`T0`, `a`, `b`), or `P = 1` (`T0`) when `seasonal: false`.
+/// Inputs are columns of the dam feature table (`data_sources.reservoirs`).
+/// See `src/nn/release_head.rs`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseHeadSection {
+    #[serde(default = "default_release_hidden_size")]
+    pub hidden_size: usize,
+    #[serde(default = "default_release_num_hidden_layers")]
+    pub num_hidden_layers: usize,
+    #[serde(default = "default_grid")]
+    pub grid: usize,
+    #[serde(default = "default_k")]
+    pub k: usize,
+    /// Feature-table columns fed to the head, in this order.
+    pub input_var_names: Vec<String>,
+    /// `true`: `T(t) = T0·exp(a·sin ω_t + b·cos ω_t)`. `false`: constant `T0`.
+    #[serde(default = "default_true")]
+    pub seasonal: bool,
+    /// `replace` (default) or `additive`; see [`DamRow`]. The test phase
+    /// routes the resolved table through the same row. With `additive` the
+    /// `reservoir_T0` box may start below one hour (any `lo > 0`).
+    #[serde(default)]
+    pub dam_row: DamRow,
+    /// `forgive` (default) or `carry`; see [`DamFloor`]. The test phase
+    /// routes the resolved table with the same floor. `carry`'s owed state
+    /// is detached: training sees each repayment as a fixed cut to the dam's
+    /// inflow, with no gradient back to the release that caused the debt.
+    #[serde(default)]
+    pub dam_floor: DamFloor,
+    /// Keep the additive dam row's inflow coefficient `c1 >= 0`: on the dam
+    /// rows only, `X_eff = min(X_r, 0.5·(1 − δ)·dt/K_r)`, so the channel
+    /// wedge `K_r·X_r` never exceeds `(1 − δ)·dt/2` (S19p / B19p in `mmc_op`).
+    /// Default false: bitwise today's routing. Requires `dam_row: additive`
+    /// and `params.enforce_positivity: false` (checked at load). The test
+    /// phase routes the resolved table with the same setting.
+    #[serde(default)]
+    pub dam_row_positivity: bool,
+    /// A checkpoint DIRECTORY (`.../checkpoints/epoch_E_mb_M/`) whose
+    /// `head.mpk` initialises the ROUTING head. Only those weights are read:
+    /// not its `optim.mpk` (the routing optimizer starts cold), not its
+    /// `state.json` (the run starts at epoch 1), not any release head in it.
+    /// The architecture in `kan_head:` must match the checkpoint.
+    /// `experiment.checkpoint` (a full resume) is applied after it and wins.
+    #[serde(default)]
+    pub routing_checkpoint: Option<std::path::PathBuf>,
+    /// Freeze the routing head at `routing_checkpoint`: its parameters are
+    /// detached (`Module::no_grad`), so the backward spends nothing on them
+    /// and the routing optimizer never steps; only the release head trains,
+    /// with the gradient still flowing through the routing solve into `T`.
+    /// The test phase routes with the same frozen weights. Requires
+    /// `routing_checkpoint` (checked at load). Default false.
+    #[serde(default)]
+    pub freeze_routing: bool,
+    /// Per-dam harmonic rule curve (`src/routing/release.rs`): the storage
+    /// law becomes `S = T·Q + S0_d(t)`, a periodic `S0` whose flux
+    /// `r_d(t) = Ibar_d·Σ_{k=1,2}(c_{k,s} sin kω_t + c_{k,c} cos kω_t)` is taken
+    /// off the dam row's lateral inflow. The four coefficients are per-dam
+    /// FREE parameters (`crate::nn::dam_params`), calibrated through the gauge
+    /// loss; `Ibar_d` is the table's `inflow_mean_m3s` column (required,
+    /// checked at dataset open). Default false.
+    #[serde(default)]
+    pub rule_curve: bool,
+    /// Bound on each rule-curve coefficient: `c = rule_curve_max·tanh(θ)`.
+    /// Default 1.0; must be finite and > 0.
+    #[serde(default = "default_rule_curve_max")]
+    pub rule_curve_max: f32,
+    /// Per-dam free multiplier on the head's `T0`: `T0_d = T0_head,d·exp(δ_d)`.
+    /// Default false.
+    #[serde(default)]
+    pub per_dam_t0: bool,
+    /// Constant learning rate of the per-dam parameters' own optimizer (Adam):
+    /// a dam's parameters get a gradient only when a gauge below it is in the
+    /// batch. Default 0.05; must be finite and > 0.
+    #[serde(default = "default_per_dam_lr")]
+    pub per_dam_lr: f32,
+    /// Weight of the L2 penalty `per_dam_l2·Σ(θ² + δ²)` over the optimizer
+    /// step's dams (the union of its micro-batches' active dams, each once),
+    /// added ONCE per optimizer step (`crate::training::dam_terms`), so its
+    /// strength does not depend on how the batch is split into micro-batches.
+    /// Default 0; rejected < 0.
+    #[serde(default)]
+    pub per_dam_l2: f32,
+    /// Weight of the rule curve's feasibility penalty (`rule_curve: true`
+    /// only; `crate::training::dam_terms`):
+    /// `P = rule_curve_penalty · Σ_{d,t} relu(r_d(t) − α·Qin_d(t))² / Σ_{d,t} Qin_d(t)²`,
+    /// with `r_d(t) = (S0_{t+1} − S0_t)/dt` the flux (positive = storing) and
+    /// `Qin_d(t)` the dam's inflow at that step from the model's own forward
+    /// (routed upstream inflow plus the reach's own `q'`), DETACHED, so `P`
+    /// is differentiable in the rule-curve coefficients only. It is the
+    /// restoring gradient against storing more than the dam receives, which
+    /// the S28 clamp removes. Added once per optimizer step over the step's
+    /// (dam, window) pairs. Default 0 (off); must be finite and >= 0; > 0
+    /// requires `rule_curve: true`.
+    #[serde(default)]
+    pub rule_curve_penalty: f32,
+    /// The penalty's `α`: the share of the dam's inflow the rule curve may
+    /// store at a step before it is penalised. Default 0.9; must be in (0, 1].
+    #[serde(default = "default_rule_curve_alpha")]
+    pub rule_curve_alpha: f32,
+    /// The per-dam flood pool ([`FloodPoolMode`]): `none` (default),
+    /// `flood_control` (dams with `purpose_flood` in the table) or `all`.
+    /// `kc`, `phi`, `z` are per-dam free parameters trained with the other
+    /// per-dam parameters (`per_dam_lr`, `per_dam_l2`); `Ibar` is the table's
+    /// `inflow_mean_m3s` (required at dataset open). Rejected with
+    /// `dam_floor: carry`.
+    #[serde(default)]
+    pub flood_pool: FloodPoolMode,
+}
+
+impl ReleaseHeadSection {
+    /// Whether the run carries per-dam free parameters (`rule_curve`,
+    /// `per_dam_t0` or a flood pool), i.e. a
+    /// `crate::nn::dam_params::DamParams` module.
+    pub fn has_per_dam(&self) -> bool {
+        self.rule_curve || self.per_dam_t0 || self.flood_pool != FloodPoolMode::None
+    }
+}
+
+fn default_rule_curve_max() -> f32 {
+    1.0
+}
+fn default_per_dam_lr() -> f32 {
+    0.05
+}
+fn default_rule_curve_alpha() -> f32 {
+    0.9
+}
+
+fn default_release_hidden_size() -> usize {
+    8
+}
+fn default_release_num_hidden_layers() -> usize {
+    1
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Config {
+    /// The dam-row form: `release_head.dam_row` for a learned release (and
+    /// its resolved test-phase table), `params.reservoir_dam_row` for a
+    /// `fixed` table, [`DamRow::Replace`] when neither is set. The two keys
+    /// never both apply: the block is rejected with `fixed` and the params key
+    /// with `learned` (`validate_reservoirs`).
+    pub fn dam_row(&self) -> DamRow {
+        match self.release_head.as_ref() {
+            Some(r) => r.dam_row,
+            None => self.params.reservoir_dam_row.unwrap_or_default(),
+        }
+    }
+
+    /// The dam floor ([`DamFloor`]): `release_head.dam_floor` for a learned
+    /// release (and its resolved test-phase table), `params.reservoir_dam_floor`
+    /// for a `fixed` table, [`DamFloor::Forgive`] when neither is set. Like
+    /// [`Config::dam_row`], the two keys never both apply
+    /// (`validate_reservoirs`).
+    pub fn dam_floor(&self) -> DamFloor {
+        match self.release_head.as_ref() {
+            Some(r) => r.dam_floor,
+            None => self.params.reservoir_dam_floor.unwrap_or_default(),
+        }
+    }
+
+    /// Whether the additive dam rows keep `c1 >= 0` (S19p in `mmc_op`):
+    /// `release_head.dam_row_positivity` for a learned release (and its
+    /// resolved test-phase table), `params.reservoir_dam_row_positivity` for a
+    /// `fixed` table, `false` when neither is set. Like [`Config::dam_floor`],
+    /// the two keys never both apply (`validate_reservoirs`).
+    pub fn dam_row_positivity(&self) -> bool {
+        match self.release_head.as_ref() {
+            Some(r) => r.dam_row_positivity,
+            None => self.params.reservoir_dam_row_positivity.unwrap_or(false),
+        }
+    }
+
+    /// Whether dams carry the flood pool: `release_head.flood_pool` is not
+    /// `none` for a learned release (and its resolved test-phase table),
+    /// `params.reservoir_flood_pool: true` for a `fixed` table. Like
+    /// [`Config::dam_floor`], the two keys never both apply
+    /// (`validate_reservoirs`). `false` without `use_reservoirs`.
+    pub fn flood_pool_on(&self) -> bool {
+        if !self.params.use_reservoirs {
+            return false;
+        }
+        match self.release_head.as_ref() {
+            Some(r) => r.flood_pool != FloodPoolMode::None,
+            None => self.params.reservoir_flood_pool.unwrap_or(false),
+        }
+    }
+
+    /// True when the routing head is frozen for release-only training
+    /// (`release_head.freeze_routing` under `reservoir_release: learned`).
+    pub fn routing_frozen(&self) -> bool {
+        self.params.use_reservoirs
+            && self.params.reservoir_release == ReservoirRelease::Learned
+            && self.release_head.as_ref().is_some_and(|r| r.freeze_routing)
+    }
 }
 
 impl Params {
@@ -814,11 +1267,20 @@ impl Default for Params {
             use_cuda_graphs: false,
             use_leakance: false,
             leakance_losing_only: true,
+            leakance_bed_thickness: None,
+            leakance_max_rhs_fraction: None,
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
             enforce_positivity: false,
             subdivision: Subdivision::default(),
             stage_roughness: None,
+            leakance_gate: None,
+            use_reservoirs: false,
+            reservoir_release: ReservoirRelease::Fixed,
+            reservoir_dam_row: None,
+            reservoir_dam_floor: None,
+            reservoir_dam_row_positivity: None,
+            reservoir_flood_pool: None,
         }
     }
 }
@@ -840,6 +1302,8 @@ struct ParamsRaw {
     use_cuda_graphs: Option<bool>,
     use_leakance: Option<bool>,
     leakance_losing_only: Option<bool>,
+    leakance_bed_thickness: Option<f32>,
+    leakance_max_rhs_fraction: Option<f32>,
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
     enforce_positivity: Option<bool>,
@@ -847,6 +1311,14 @@ struct ParamsRaw {
     subdivision: Subdivision,
     #[serde(default)]
     stage_roughness: Option<StageRoughnessSection>,
+    #[serde(default)]
+    leakance_gate: Option<LeakanceGate>,
+    use_reservoirs: Option<bool>,
+    reservoir_release: Option<ReservoirRelease>,
+    reservoir_dam_row: Option<DamRow>,
+    reservoir_dam_floor: Option<DamFloor>,
+    reservoir_dam_row_positivity: Option<bool>,
+    reservoir_flood_pool: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -877,6 +1349,16 @@ impl From<ParamsRaw> for Params {
         }
         if let Some(v) = r.parameter_ranges.get("leakance_factor") {
             p.parameter_ranges.leakance_factor = *v;
+        }
+        // Learned dam release (`reservoir_release: learned`).
+        if let Some(v) = r.parameter_ranges.get("reservoir_T0") {
+            p.parameter_ranges.reservoir_t0 = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("reservoir_a") {
+            p.parameter_ranges.reservoir_a = *v;
+        }
+        if let Some(v) = r.parameter_ranges.get("reservoir_b") {
+            p.parameter_ranges.reservoir_b = *v;
         }
         // attribute_minimums — named field mapping.
         if let Some(&v) = r.attribute_minimums.get("discharge") {
@@ -919,6 +1401,12 @@ impl From<ParamsRaw> for Params {
         if let Some(b) = r.use_leakance {
             p.use_leakance = b;
         }
+        if let Some(m) = r.leakance_bed_thickness {
+            p.leakance_bed_thickness = Some(m);
+        }
+        if let Some(a) = r.leakance_max_rhs_fraction {
+            p.leakance_max_rhs_fraction = Some(a);
+        }
         if let Some(b) = r.leakance_losing_only {
             p.leakance_losing_only = b;
         }
@@ -944,6 +1432,17 @@ impl From<ParamsRaw> for Params {
         // exactly what `Params::default()` carries.
         p.subdivision = r.subdivision;
         p.stage_roughness = r.stage_roughness;
+        p.leakance_gate = r.leakance_gate;
+        if let Some(b) = r.use_reservoirs {
+            p.use_reservoirs = b;
+        }
+        if let Some(m) = r.reservoir_release {
+            p.reservoir_release = m;
+        }
+        p.reservoir_dam_row = r.reservoir_dam_row;
+        p.reservoir_dam_floor = r.reservoir_dam_floor;
+        p.reservoir_dam_row_positivity = r.reservoir_dam_row_positivity;
+        p.reservoir_flood_pool = r.reservoir_flood_pool;
         p
     }
 }
@@ -958,6 +1457,8 @@ pub struct Config {
     pub data_sources: Option<DataSources>,
     pub experiment: Option<Experiment>,
     pub kan_head: Option<KanHeadConfigSection>,
+    /// The learned dam release head (`params.reservoir_release: learned`).
+    pub release_head: Option<ReleaseHeadSection>,
     pub mode: String,
     pub geodataset: String,
     pub seed: u64,
@@ -1014,6 +1515,7 @@ struct ConfigRaw {
     /// alias so existing YAML configs still parse during the migration.
     #[serde(alias = "mlp")]
     kan_head: Option<KanHeadConfigSection>,
+    release_head: Option<ReleaseHeadSection>,
     testing: TestingOverridesRaw,
 }
 
@@ -1031,6 +1533,7 @@ impl From<ConfigRaw> for Config {
             data_sources: r.data_sources,
             experiment: r.experiment,
             kan_head: r.kan_head,
+            release_head: r.release_head,
             mode: r.mode.unwrap_or_else(|| "training".to_string()),
             // Absent `geodataset:` is INFERRED from the adjacency source rather
             // than defaulting blindly to "merit", so a gridded config that
@@ -1092,11 +1595,23 @@ impl Config {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
+        validate_reservoirs(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
         validate_leakance(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_ddr_match(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_leakance_mass_bound(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_leakance_gate(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -1286,6 +1801,294 @@ fn validate_geodataset(cfg: &Config) -> std::result::Result<(), String> {
     ))
 }
 
+/// `params.use_reservoirs` (option C in `.claude/RESERVOIRS.md`) is built for
+/// one combination: the corrected-physics, non-leakance, uncaptured timestep
+/// op on an un-split MERIT network. `route_timestep` panics if reservoir rows
+/// reach the leakance or CUDA-graph path, so every other combination is
+/// rejected here, before a run starts. A `data_sources.reservoirs` table with
+/// the flag off is allowed and ignored.
+fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
+    let p = &cfg.params;
+    let learned = p.reservoir_release == ReservoirRelease::Learned;
+    // The learned release first: both halves of its contract would otherwise
+    // be silent no-ops (a `learned` switch with the flag off, or a head block
+    // nothing reads).
+    if cfg.release_head.is_some() && !learned {
+        return Err(
+            "`release_head:` is set but `params.reservoir_release` is not `learned`; the \
+             block would be ignored. Set `params.reservoir_release: learned` or remove it."
+                .to_string(),
+        );
+    }
+    if let Some(row) = p.reservoir_dam_row {
+        if learned {
+            return Err(format!(
+                "params.reservoir_dam_row = {row:?} is for `reservoir_release: fixed` tables; a \
+                 learned release sets its row with `release_head.dam_row`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_dam_row = {row:?} is set but `use_reservoirs` is false; no dam \
+                 row would be routed"
+            ));
+        }
+    }
+    if let Some(floor) = p.reservoir_dam_floor {
+        if learned {
+            return Err(format!(
+                "params.reservoir_dam_floor = {floor:?} is for `reservoir_release: fixed` tables; a \
+                 learned release sets its floor with `release_head.dam_floor`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_dam_floor = {floor:?} is set but `use_reservoirs` is false; no dam \
+                 row would be routed"
+            ));
+        }
+    }
+    if let Some(pos) = p.reservoir_dam_row_positivity {
+        if learned {
+            return Err(format!(
+                "params.reservoir_dam_row_positivity = {pos} is for `reservoir_release: fixed` \
+                 tables; a learned release sets it with `release_head.dam_row_positivity`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_dam_row_positivity = {pos} is set but `use_reservoirs` is false; \
+                 no dam row would be routed"
+            ));
+        }
+        if pos {
+            validate_dam_row_positivity(
+                p.reservoir_dam_row.unwrap_or_default(),
+                p.enforce_positivity,
+                "params.reservoir_dam_row_positivity",
+                "params.reservoir_dam_row",
+            )?;
+        }
+    }
+    if let Some(pool) = p.reservoir_flood_pool {
+        if learned {
+            return Err(format!(
+                "params.reservoir_flood_pool = {pool} is for `reservoir_release: fixed` tables; a \
+                 learned release sets it with `release_head.flood_pool`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_flood_pool = {pool} is set but `use_reservoirs` is false; no dam \
+                 row would be routed"
+            ));
+        }
+        if pool && p.reservoir_dam_floor == Some(DamFloor::Carry) {
+            return Err(
+                "params.reservoir_flood_pool: true does not combine with \
+                 `params.reservoir_dam_floor: carry`: the carried floor repays out of the dam's \
+                 inflow before the pool captures from the same inflow"
+                    .to_string(),
+            );
+        }
+    }
+    if learned {
+        if !p.use_reservoirs {
+            return Err(
+                "params: `reservoir_release: learned` requires `use_reservoirs: true`; without \
+                 it no dam row is routed and the release head would never train."
+                    .to_string(),
+            );
+        }
+        let rh = cfg.release_head.as_ref().ok_or_else(|| {
+            "params: `reservoir_release: learned` requires a `release_head:` block (the dam \
+             release head: input_var_names, hidden_size, ...)."
+                .to_string()
+        })?;
+        if cfg.kan_head.is_none() {
+            return Err(
+                "params: `reservoir_release: learned` requires `kan_head`: the release head \
+                 trains jointly with the routing head."
+                    .to_string(),
+            );
+        }
+        if rh.input_var_names.is_empty() {
+            return Err(
+                "`release_head.input_var_names` is empty: list the dam feature-table columns \
+                 the release head reads."
+                    .to_string(),
+            );
+        }
+        if !(rh.rule_curve_max.is_finite() && rh.rule_curve_max > 0.0) {
+            return Err(format!(
+                "release_head.rule_curve_max = {} must be finite and > 0",
+                rh.rule_curve_max
+            ));
+        }
+        if !(rh.per_dam_lr.is_finite() && rh.per_dam_lr > 0.0) {
+            return Err(format!(
+                "release_head.per_dam_lr = {} must be finite and > 0",
+                rh.per_dam_lr
+            ));
+        }
+        if !(rh.per_dam_l2.is_finite() && rh.per_dam_l2 >= 0.0) {
+            return Err(format!(
+                "release_head.per_dam_l2 = {} must be finite and >= 0",
+                rh.per_dam_l2
+            ));
+        }
+        if !(rh.rule_curve_penalty.is_finite() && rh.rule_curve_penalty >= 0.0) {
+            return Err(format!(
+                "release_head.rule_curve_penalty = {} must be finite and >= 0",
+                rh.rule_curve_penalty
+            ));
+        }
+        if rh.rule_curve_penalty > 0.0 && !rh.rule_curve {
+            return Err(format!(
+                "release_head.rule_curve_penalty = {} needs `rule_curve: true` (it penalises the \
+                 rule curve's flux; without one it would silently do nothing)",
+                rh.rule_curve_penalty
+            ));
+        }
+        if !(rh.rule_curve_alpha.is_finite() && rh.rule_curve_alpha > 0.0 && rh.rule_curve_alpha <= 1.0) {
+            return Err(format!(
+                "release_head.rule_curve_alpha = {} must be in (0, 1]",
+                rh.rule_curve_alpha
+            ));
+        }
+        if rh.flood_pool != FloodPoolMode::None && rh.dam_floor == DamFloor::Carry {
+            return Err(format!(
+                "release_head.flood_pool = {} does not combine with `release_head.dam_floor: \
+                 carry`: the carried floor repays out of the dam's inflow before the pool \
+                 captures from the same inflow",
+                rh.flood_pool.name()
+            ));
+        }
+        if rh.dam_row_positivity {
+            validate_dam_row_positivity(
+                rh.dam_row,
+                p.enforce_positivity,
+                "release_head.dam_row_positivity",
+                "release_head.dam_row",
+            )?;
+        }
+        if rh.freeze_routing && rh.routing_checkpoint.is_none() {
+            return Err(
+                "release_head: `freeze_routing: true` requires `routing_checkpoint` (a \
+                 checkpoint directory holding head.mpk) — freezing a randomly-initialized \
+                 routing head would route every reach with untrained parameters."
+                    .to_string(),
+            );
+        }
+        let r = &p.parameter_ranges;
+        let [t_lo, t_hi] = r.reservoir_t0;
+        match rh.dam_row {
+            DamRow::Replace => {
+                if !(t_lo >= 1.0 / 24.0 && t_lo < t_hi && t_hi.is_finite()) {
+                    return Err(format!(
+                        "params.parameter_ranges.reservoir_T0 = [{t_lo}, {t_hi}] must satisfy \
+                         1/24 <= lo < hi < inf (days; with `release_head.dam_row: replace`, \
+                         T >= dt/2 keeps the dam row's c3 >= 0)"
+                    ));
+                }
+            }
+            DamRow::Additive => {
+                // T0 is denormalised in log space, so lo > 0; the additive
+                // row itself is the channel row at T = 0.
+                if !(t_lo > 0.0 && t_lo < t_hi && t_hi.is_finite()) {
+                    return Err(format!(
+                        "params.parameter_ranges.reservoir_T0 = [{t_lo}, {t_hi}] must satisfy \
+                         0 < lo < hi < inf (days; T0 is denormalised in log space)"
+                    ));
+                }
+            }
+        }
+        for (name, [lo, hi]) in [("reservoir_a", r.reservoir_a), ("reservoir_b", r.reservoir_b)] {
+            if !(lo < hi && lo.is_finite() && hi.is_finite()) {
+                return Err(format!(
+                    "params.parameter_ranges.{name} = [{lo}, {hi}] must be finite with lo < hi"
+                ));
+            }
+        }
+    }
+    if !p.use_reservoirs {
+        return Ok(());
+    }
+    let ds = cfg.data_sources.as_ref();
+    if ds.and_then(|d| d.reservoirs.as_ref()).is_none() {
+        return Err(
+            "params: `use_reservoirs: true` requires `data_sources.reservoirs`, the CSV \
+             (header `COMID,T_days`) listing each dam reach and its residence time."
+                .to_string(),
+        );
+    }
+    if p.use_leakance {
+        return Err(
+            "params: `use_reservoirs: true` requires `use_leakance: false`: the leakance \
+             timestep op has no linear-reservoir K/X override."
+                .to_string(),
+        );
+    }
+    if p.use_cuda_graphs {
+        return Err(
+            "params: `use_reservoirs: true` requires `use_cuda_graphs: false`: the captured \
+             CUDA graph has no linear-reservoir K/X override."
+                .to_string(),
+        );
+    }
+    if p.ddr_match {
+        return Err(
+            "params: `use_reservoirs: true` requires `ddr_match: false`: the override is \
+             built and verified on the corrected physics only, and the DEPRECATED legacy \
+             path exists to reproduce pre-#192 DDR results, which have no reservoirs."
+                .to_string(),
+        );
+    }
+    if p.subdivision.enabled {
+        return Err(
+            "params: `use_reservoirs: true` does not support `params.subdivision.enabled: \
+             true`: a split reach repeats its COMID on every piece, so one dam COMID would \
+             mark every piece as a reservoir with the whole reservoir's residence time."
+                .to_string(),
+        );
+    }
+    if ds.is_some_and(|d| d.gridded_network.is_some()) {
+        return Err(
+            "params: `use_reservoirs: true` does not support `data_sources.gridded_network`: \
+             the reservoir table is keyed on MERIT COMIDs, and a gridded network's rows are \
+             DDM30 cell sub-reaches."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// `dam_row_positivity: true` (either key) acts only on the additive dam row,
+/// and only when S19' is not already capping every row: on the replace row
+/// `X = 0`, so `c1 = dt/D > 0` already, and `enforce_positivity` caps `X` at
+/// the same `0.5·Cr·(1 − δ)` on every row, dam rows included. Either would
+/// make the key a silent no-op.
+fn validate_dam_row_positivity(
+    row: DamRow,
+    enforce_positivity: bool,
+    key: &str,
+    row_key: &str,
+) -> std::result::Result<(), String> {
+    if row != DamRow::Additive {
+        return Err(format!(
+            "{key}: true needs `{row_key}: additive`; the replace row's c1 = dt/(2T + dt) is \
+             already > 0, so the key would do nothing"
+        ));
+    }
+    if enforce_positivity {
+        return Err(format!(
+            "{key}: true is redundant with `params.enforce_positivity: true`, which already \
+             caps X at 0.5·Cr·(1 − δ) on every row, dam rows included; set one of the two"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
     if cfg.params.use_leakance && cfg.params.use_cuda_graphs {
         return Err(
@@ -1293,6 +2096,64 @@ fn validate_leakance(cfg: &Config) -> std::result::Result<(), String> {
              CUDA-graph capture path bakes the non-leakance b_rhs into the graph."
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// `params.leakance_max_rhs_fraction` bounds zeta by the locally available
+/// water. It only makes sense on a leakance run, and only in `(0, 1)`: at or
+/// above 1 the bounded RHS can reach zero and the guarantee it exists to
+/// provide (leakance alone never drives a negative solve) is lost.
+fn validate_leakance_mass_bound(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(alpha) = cfg.params.leakance_max_rhs_fraction else {
+        return Ok(());
+    };
+    if !cfg.params.use_leakance {
+        return Err(
+            "params: `leakance_max_rhs_fraction` requires `use_leakance: true` — it bounds \
+             the leakance flux, and there is no flux to bound without leakance."
+                .to_string(),
+        );
+    }
+    if !(alpha.is_finite() && alpha > 0.0 && alpha < 1.0) {
+        return Err(format!(
+            "params.leakance_max_rhs_fraction must lie strictly inside (0, 1), got {alpha}. \
+             It is the fraction of the Muskingum RHS that leakance may remove. At 1.0 the \
+             bounded RHS can reach exactly zero, so the property this bound exists to \
+             guarantee — that leakance alone cannot drive a negative solve — no longer \
+             holds. At or below 0 leakance is disabled, which `use_leakance: false` \
+             already expresses."
+        ));
+    }
+    Ok(())
+}
+
+/// `params.leakance_gate` is only meaningful on a leakance run, and its
+/// schedule must hold usable temperatures.
+fn validate_leakance_gate(cfg: &Config) -> std::result::Result<(), String> {
+    let Some(gate) = cfg.params.leakance_gate.as_ref() else {
+        return Ok(());
+    };
+    if !cfg.params.use_leakance {
+        return Err(
+            "params: `leakance_gate` requires `use_leakance: true` — the gate transforms \
+             the head's `leakance_factor` output, which nothing reads while leakance is \
+             off, so the block would be silently inert."
+                .to_string(),
+        );
+    }
+    if gate.temperature.is_empty() {
+        return Err(
+            "params.leakance_gate: `temperature` must map at least one epoch to a \
+             temperature (e.g. `{1: 1.0, 10: 0.2}`)."
+                .to_string(),
+        );
+    }
+    if let Some((epoch, t)) = gate.temperature.iter().find(|(_, t)| !(t.is_finite() && **t > 0.0)) {
+        return Err(format!(
+            "params.leakance_gate: temperature at epoch {epoch} is {t}; every temperature \
+             must be positive and finite (1.0 is the exact identity, smaller sharpens)."
+        ));
     }
     Ok(())
 }
@@ -1335,12 +2196,25 @@ fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
         return Ok(());
     }
     let r = cfg.params.parameter_ranges.gamma;
-    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < 0.0 || r[1] <= r[0] || r[1] > 1.0 {
+    if !(r[0].is_finite() && r[1].is_finite()) || r[0] < -0.5 || r[1] <= r[0] || r[1] > 1.0 {
         return Err(format!(
-            "params.parameter_ranges.gamma must be a valid range inside [0, 1] \
-             with lo < hi, got {r:?}. Channels get SMOOTHER as they fill so gamma \
-             is non-negative, and above 1 the depth exponent 3/(5+3q+3·gamma) \
-             collapses while roughness explodes as depth goes to zero."
+            "params.parameter_ranges.gamma must be a valid range inside [-0.5, 1] \
+             with lo < hi, got {r:?}. Above 1 the depth exponent 3/(5+3q+3·gamma) \
+             collapses while roughness explodes as depth goes to zero. Below \
+             -0.5 is refused as a guard, not as physics: the exponent's \
+             denominator only degenerates at gamma = -(5+3q)/3 (about -2.3 at \
+             q = 0.65), so -0.5 leaves a wide margin.
+
+             Negative gamma IS admitted, and deliberately. The usual argument \
+             that channels get smoother as they fill holds for an in-bank \
+             section, where the relative roughness of the bed falls as depth \
+             grows. It fails once flow reaches a vegetated floodplain or a \
+             composite section, where the effective roughness RISES with stage. \
+             A box floored at 0 cannot represent those reaches at all, and the \
+             2026-09-17 parameter-range audit measured learned gamma sitting \
+             hard against that floor on one product. The backward is exercised \
+             at negative gamma by `tests/sp8_gradcheck.rs` and, with leakance \
+             active, by `tests/leakance_gamma_gradcheck.rs`."
         ));
     }
     if cfg.params.ddr_match {
@@ -1356,15 +2230,6 @@ fn validate_learned_gamma(cfg: &Config) -> std::result::Result<(), String> {
             "`gamma` in kan_head.learnable_parameters requires \
              `use_cuda_graphs: false`. The captured graph is ddr_match-only and \
              bakes the constant-5/3 celerity in."
-                .to_string(),
-        );
-    }
-    if cfg.params.use_leakance {
-        return Err(
-            "`gamma` in kan_head.learnable_parameters is not supported together \
-             with `use_leakance: true`. Leakance routes through its own \
-             eight-parent op, which has no gamma parent, so gamma would silently \
-             receive no gradient."
                 .to_string(),
         );
     }
@@ -2564,6 +3429,77 @@ params:
         );
     }
 
+    fn write_yaml(name: &str, yaml: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, yaml).unwrap();
+        path
+    }
+
+    const GATE_HEAD: &str = r#"
+mode: training
+geodataset: merit
+seed: 1
+np_seed: 1
+"#;
+
+    #[test]
+    fn leakance_gate_absent_is_none() {
+        let path = write_yaml("ddrs_leakance_gate_absent.yaml", &format!("{GATE_HEAD}params:\n  use_leakance: true\n"));
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        assert!(cfg.params.leakance_gate.is_none());
+        assert!(Params::default().leakance_gate.is_none());
+    }
+
+    #[test]
+    fn leakance_gate_rejected_without_use_leakance() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_no_leakance.yaml",
+            &format!("{GATE_HEAD}params:\n  leakance_gate:\n    temperature: {{1: 1.0, 5: 0.2}}\n"),
+        );
+        let err = Config::from_yaml_file(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("leakance_gate") && msg.contains("use_leakance"),
+            "error should name both keys: {msg}"
+        );
+    }
+
+    #[test]
+    fn leakance_gate_rejects_empty_and_nonpositive_temperatures() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_empty.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{}}\n"),
+        );
+        let msg = Config::from_yaml_file(&path).unwrap_err().to_string();
+        assert!(msg.contains("temperature"), "{msg}");
+
+        let path = write_yaml(
+            "ddrs_leakance_gate_zero.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{1: 1.0, 5: 0.0}}\n"),
+        );
+        let msg = Config::from_yaml_file(&path).unwrap_err().to_string();
+        assert!(msg.contains("epoch 5") && msg.contains("positive"), "{msg}");
+    }
+
+    #[test]
+    fn leakance_gate_schedule_resolves_at_epoch_boundaries() {
+        let path = write_yaml(
+            "ddrs_leakance_gate_schedule.yaml",
+            &format!("{GATE_HEAD}params:\n  use_leakance: true\n  leakance_gate:\n    temperature: {{1: 1.0, 3: 0.5, 6: 0.1}}\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        let gate = cfg.params.leakance_gate.as_ref().expect("block parsed");
+        // Same rule as `resolve_lr`: largest key <= epoch, first value before it.
+        assert_eq!(gate.resolve(0), 1.0);
+        assert_eq!(gate.resolve(1), 1.0);
+        assert_eq!(gate.resolve(2), 1.0);
+        assert_eq!(gate.resolve(3), 0.5);
+        assert_eq!(gate.resolve(5), 0.5);
+        assert_eq!(gate.resolve(6), 0.1);
+        assert_eq!(gate.resolve(100), 0.1);
+        assert_eq!(gate.final_temperature(), 0.1);
+    }
+
     #[test]
     fn leakance_impervious_threshold_parses() {
         let yaml = r#"
@@ -2755,5 +3691,694 @@ data_sources:
         assert_eq!(exp.batch_size, 64, "training default preserved");
         assert_eq!(exp.rho, Some(90), "training default rho preserved");
         assert_eq!(exp.start_time, "1981/10/01");
+    }
+
+    // ---- params.use_reservoirs + data_sources.reservoirs (option C) ----
+
+    /// A config whose `data_sources` uses `adjacency` (one YAML line per key,
+    /// indented two spaces), optionally carries `reservoirs:`, and whose
+    /// `params:` block is `params`. `/dev/null` paths are never opened at load.
+    fn reservoir_yaml(name: &str, adjacency: &str, reservoirs: bool, params: &str) -> std::path::PathBuf {
+        let table = if reservoirs { "  reservoirs: /dev/null/reservoirs.csv\n" } else { "" };
+        write_yaml_with_data_sources(
+            name,
+            &format!(
+                "data_sources:\n  attributes: /dev/null/attrs.nc\n{adjacency}  \
+                 streamflow: /dev/null/sf.ic\n  observations: /dev/null/obs.ic\n  \
+                 gages: /dev/null/gages.csv\n{table}params:\n{params}"
+            ),
+        )
+    }
+
+    const EXPLICIT_ADJ: &str =
+        "  conus_adjacency: /dev/null/conus.zarr\n  gages_adjacency: /dev/null/gages_adj.zarr\n";
+
+    /// Loads the config at `path` and asserts the load error names both
+    /// `use_reservoirs` and the offending key.
+    fn reservoir_rejection(path: std::path::PathBuf, offending: &str) {
+        let msg = Config::from_yaml_file(&path)
+            .expect_err("config must be rejected at load")
+            .to_string();
+        assert!(
+            msg.contains("use_reservoirs") && msg.contains(offending),
+            "error should name `use_reservoirs` and `{offending}`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn use_reservoirs_defaults_false() {
+        assert!(!Params::default().use_reservoirs);
+        let path = reservoir_yaml("ddrs_res_default.yaml", EXPLICIT_ADJ, false, "  tau: 9\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert!(!cfg.params.use_reservoirs);
+        assert!(cfg.data_sources.unwrap().reservoirs.is_none());
+    }
+
+    #[test]
+    fn use_reservoirs_with_table_loads() {
+        let path = reservoir_yaml("ddrs_res_ok.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("both keys, no conflicts, must load");
+        assert!(cfg.params.use_reservoirs);
+        assert_eq!(
+            cfg.data_sources.unwrap().reservoirs,
+            Some(std::path::PathBuf::from("/dev/null/reservoirs.csv"))
+        );
+    }
+
+    #[test]
+    fn reservoirs_table_without_the_flag_is_allowed() {
+        let path = reservoir_yaml("ddrs_res_table_only.yaml", EXPLICIT_ADJ, true, "  tau: 9\n");
+        let cfg = Config::from_yaml_file(&path).expect("a table with the flag off must load");
+        assert!(!cfg.params.use_reservoirs);
+    }
+
+    #[test]
+    fn use_reservoirs_without_table_rejected() {
+        let path = reservoir_yaml("ddrs_res_no_table.yaml", EXPLICIT_ADJ, false, "  use_reservoirs: true\n");
+        reservoir_rejection(path, "data_sources.reservoirs");
+    }
+
+    #[test]
+    fn use_reservoirs_with_leakance_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_leakance.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  use_leakance: true\n",
+        );
+        reservoir_rejection(path, "use_leakance");
+    }
+
+    #[test]
+    fn use_reservoirs_with_cuda_graphs_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_graphs.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  use_cuda_graphs: true\n",
+        );
+        reservoir_rejection(path, "use_cuda_graphs");
+    }
+
+    #[test]
+    fn use_reservoirs_with_ddr_match_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_ddr_match.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  ddr_match: true\n",
+        );
+        reservoir_rejection(path, "ddr_match");
+    }
+
+    #[test]
+    fn use_reservoirs_with_subdivision_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_subdivision.yaml",
+            "  geospatial_fabric: /dev/null/rivers.shp\n",
+            true,
+            "  use_reservoirs: true\n  subdivision:\n    enabled: true\n",
+        );
+        reservoir_rejection(path, "params.subdivision");
+    }
+
+    // ---- params.reservoir_release + release_head (learned dam release) ----
+
+    const KAN_HEAD_BLOCK: &str = "kan_head:\n  hidden_size: 4\n  num_hidden_layers: 1\n  \
+        input_var_names: [aridity]\n  learnable_parameters: [n, q_spatial]\n";
+    const RELEASE_HEAD_BLOCK: &str =
+        "release_head:\n  input_var_names: [log10_storage, purpose_flood]\n";
+
+    /// `reservoir_yaml` plus extra top-level blocks appended after `params:`.
+    fn learned_yaml(name: &str, params: &str, extra: &str) -> std::path::PathBuf {
+        let path = reservoir_yaml(name, EXPLICIT_ADJ, true, params);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(extra);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    const LEARNED_PARAMS: &str = "  use_reservoirs: true\n  reservoir_release: learned\n";
+
+    #[test]
+    fn reservoir_dam_row_selects_the_fixed_tables_row() {
+        // Absent: replace, as every earlier config.
+        let path = reservoir_yaml("ddrs_rdr_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!((cfg.params.reservoir_dam_row, cfg.dam_row()), (None, DamRow::Replace));
+        // A fixed table on the additive row.
+        let path = reservoir_yaml(
+            "ddrs_rdr_additive.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed additive table loads");
+        assert_eq!(cfg.dam_row(), DamRow::Additive);
+        // Rejected with a learned release (release_head.dam_row owns that) and
+        // without use_reservoirs (a silent no-op).
+        let path = learned_yaml(
+            "ddrs_rdr_learned.yaml",
+            "  use_reservoirs: true\n  reservoir_release: learned\n  reservoir_dam_row: additive\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_dam_row", "release_head.dam_row"]);
+        let path = reservoir_yaml("ddrs_rdr_off.yaml", EXPLICIT_ADJ, true, "  reservoir_dam_row: additive\n");
+        reservoir_rejection(path, "reservoir_dam_row");
+    }
+
+    #[test]
+    fn reservoir_dam_floor_selects_the_fixed_tables_floor() {
+        // Absent: forgive, as every earlier config.
+        let path = reservoir_yaml("ddrs_rdf_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!((cfg.params.reservoir_dam_floor, cfg.dam_floor()), (None, DamFloor::Forgive));
+        assert_eq!(Config::default().dam_floor(), DamFloor::Forgive);
+        // A fixed table with the carried floor.
+        let path = reservoir_yaml(
+            "ddrs_rdf_carry.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n  reservoir_dam_floor: carry\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed carried table loads");
+        assert_eq!(cfg.dam_floor(), DamFloor::Carry);
+        // Rejected with a learned release (release_head.dam_floor owns that) and
+        // without use_reservoirs (a silent no-op); an unknown value is refused.
+        let path = learned_yaml(
+            "ddrs_rdf_learned.yaml",
+            "  use_reservoirs: true\n  reservoir_release: learned\n  reservoir_dam_floor: carry\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_dam_floor", "release_head.dam_floor"]);
+        let path = reservoir_yaml("ddrs_rdf_off.yaml", EXPLICIT_ADJ, true, "  reservoir_dam_floor: carry\n");
+        reservoir_rejection(path, "reservoir_dam_floor");
+        let path = reservoir_yaml(
+            "ddrs_rdf_bogus.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_floor: repay\n",
+        );
+        assert!(Config::from_yaml_file(&path).is_err(), "unknown dam floor must be refused");
+    }
+
+    #[test]
+    fn reservoir_release_defaults_fixed() {
+        assert_eq!(Params::default().reservoir_release, ReservoirRelease::Fixed);
+        let path = reservoir_yaml("ddrs_rel_default.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!(cfg.params.reservoir_release, ReservoirRelease::Fixed);
+        assert!(cfg.release_head.is_none());
+        let r = &cfg.params.parameter_ranges;
+        assert_eq!(r.reservoir_t0, [1.0 / 24.0, 365.0]);
+        assert_eq!(r.reservoir_a, [-2.0, 2.0]);
+        assert_eq!(r.reservoir_b, [-2.0, 2.0]);
+    }
+
+    #[test]
+    fn learned_release_loads_with_its_blocks() {
+        let path = learned_yaml(
+            "ddrs_rel_learned.yaml",
+            &format!(
+                "{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.05, 100.0]\n    \
+                 reservoir_a: [-1.0, 1.5]\n    reservoir_b: [-0.5, 0.5]\n"
+            ),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a complete learned config must load");
+        assert_eq!(cfg.params.reservoir_release, ReservoirRelease::Learned);
+        let rh = cfg.release_head.as_ref().expect("release_head");
+        assert_eq!(rh.input_var_names, vec!["log10_storage", "purpose_flood"]);
+        assert!(rh.seasonal, "seasonal defaults true");
+        assert_eq!((rh.hidden_size, rh.num_hidden_layers, rh.grid, rh.k), (8, 1, 5, 3));
+        let r = &cfg.params.parameter_ranges;
+        assert_eq!(r.reservoir_t0, [0.05, 100.0]);
+        assert_eq!(r.reservoir_a, [-1.0, 1.5]);
+        assert_eq!(r.reservoir_b, [-0.5, 0.5]);
+    }
+
+    fn learned_rejection(path: std::path::PathBuf, needles: &[&str]) {
+        let msg = Config::from_yaml_file(&path)
+            .expect_err("config must be rejected at load")
+            .to_string();
+        for n in needles {
+            assert!(msg.contains(n), "error should contain {n:?}, got: {msg}");
+        }
+    }
+
+    #[test]
+    fn learned_release_without_use_reservoirs_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_no_flag.yaml",
+            "  reservoir_release: learned\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_release: learned", "use_reservoirs"]);
+    }
+
+    #[test]
+    fn learned_release_without_release_head_rejected() {
+        let path = learned_yaml("ddrs_rel_no_head.yaml", LEARNED_PARAMS, KAN_HEAD_BLOCK);
+        learned_rejection(path, &["reservoir_release: learned", "release_head"]);
+    }
+
+    #[test]
+    fn learned_release_without_kan_head_rejected() {
+        let path = learned_yaml("ddrs_rel_no_kan.yaml", LEARNED_PARAMS, RELEASE_HEAD_BLOCK);
+        learned_rejection(path, &["reservoir_release: learned", "kan_head"]);
+    }
+
+    #[test]
+    fn release_head_with_fixed_release_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_fixed_head.yaml",
+            "  use_reservoirs: true\n",
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["release_head", "reservoir_release: learned"]);
+    }
+
+    #[test]
+    fn release_head_without_inputs_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_empty_inputs.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}release_head:\n  input_var_names: []\n"),
+        );
+        learned_rejection(path, &["release_head.input_var_names"]);
+    }
+
+    #[test]
+    fn release_head_unknown_key_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_unknown_key.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  use_ressops: true\n"),
+        );
+        learned_rejection(path, &["use_ressops"]);
+    }
+
+    #[test]
+    fn freeze_routing_without_routing_checkpoint_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_freeze_no_ckpt.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  freeze_routing: true\n"),
+        );
+        learned_rejection(path, &["freeze_routing", "routing_checkpoint"]);
+    }
+
+    #[test]
+    fn routing_checkpoint_and_freeze_parse_and_default_off() {
+        // Absent keys: no checkpoint, not frozen (every config before 2026-09-27).
+        let path = learned_yaml(
+            "ddrs_rel_freeze_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert!(rh.routing_checkpoint.is_none() && !rh.freeze_routing);
+        assert!(!cfg.routing_frozen());
+
+        // Frozen at a checkpoint.
+        let path = learned_yaml(
+            "ddrs_rel_freeze_on.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  routing_checkpoint: /tmp/ckpt/epoch_3_mb_1\n  \
+                 freeze_routing: true\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a frozen config with a checkpoint loads");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!(
+            rh.routing_checkpoint.as_deref(),
+            Some(std::path::Path::new("/tmp/ckpt/epoch_3_mb_1"))
+        );
+        assert!(rh.freeze_routing && cfg.routing_frozen());
+
+        // Warm start without freezing: the checkpoint alone is allowed.
+        let path = learned_yaml(
+            "ddrs_rel_warm_only.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  routing_checkpoint: /tmp/ckpt/epoch_3_mb_1\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("warm start without freeze loads");
+        assert!(!cfg.routing_frozen());
+    }
+
+    #[test]
+    fn rule_curve_keys_default_off_and_parse() {
+        let path = learned_yaml(
+            "ddrs_rel_rc_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert!(!rh.rule_curve && !rh.per_dam_t0 && !rh.has_per_dam());
+        assert_eq!((rh.rule_curve_max, rh.per_dam_lr, rh.per_dam_l2), (1.0, 0.05, 0.0));
+
+        let path = learned_yaml(
+            "ddrs_rel_rc_on.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  rule_curve_max: 0.5\n  \
+                 per_dam_t0: true\n  per_dam_lr: 0.01\n  per_dam_l2: 0.001\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a rule-curve config loads");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert!(rh.rule_curve && rh.per_dam_t0 && rh.has_per_dam());
+        assert_eq!((rh.rule_curve_max, rh.per_dam_lr, rh.per_dam_l2), (0.5, 0.01, 0.001));
+    }
+
+    #[test]
+    fn rule_curve_penalty_keys_default_parse_and_guard() {
+        let path = learned_yaml(
+            "ddrs_rel_rcp_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!((rh.rule_curve_penalty, rh.rule_curve_alpha), (0.0, 0.9));
+
+        let path = learned_yaml(
+            "ddrs_rel_rcp_on.yaml",
+            LEARNED_PARAMS,
+            &format!(
+                "{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  rule_curve_penalty: 2.5\n  \
+                 rule_curve_alpha: 1.0\n"
+            ),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a penalised rule curve loads");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!((rh.rule_curve_penalty, rh.rule_curve_alpha), (2.5, 1.0));
+
+        for (name, extra, needle) in [
+            ("ddrs_rel_rcp_neg.yaml", "  rule_curve: true\n  rule_curve_penalty: -1.0\n", "rule_curve_penalty"),
+            ("ddrs_rel_rcp_norc.yaml", "  rule_curve_penalty: 1.0\n", "rule_curve: true"),
+            ("ddrs_rel_rcp_a0.yaml", "  rule_curve: true\n  rule_curve_alpha: 0.0\n", "rule_curve_alpha"),
+            ("ddrs_rel_rcp_a2.yaml", "  rule_curve: true\n  rule_curve_alpha: 1.5\n", "rule_curve_alpha"),
+        ] {
+            let path = learned_yaml(name, LEARNED_PARAMS, &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}{extra}"));
+            learned_rejection(path, &[needle]);
+        }
+    }
+
+    #[test]
+    fn negative_per_dam_l2_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_rc_l2.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  per_dam_l2: -0.1\n"),
+        );
+        learned_rejection(path, &["per_dam_l2"]);
+    }
+
+    #[test]
+    fn nonpositive_rule_curve_max_and_per_dam_lr_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_rc_max.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  rule_curve: true\n  rule_curve_max: 0.0\n"),
+        );
+        learned_rejection(path, &["rule_curve_max"]);
+        let path = learned_yaml(
+            "ddrs_rel_rc_lr.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  per_dam_t0: true\n  per_dam_lr: -1.0\n"),
+        );
+        learned_rejection(path, &["per_dam_lr"]);
+    }
+
+    #[test]
+    fn dam_row_defaults_replace_and_parses_additive() {
+        let path = learned_yaml(
+            "ddrs_rel_dam_row_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!(cfg.release_head.as_ref().unwrap().dam_row, DamRow::Replace);
+        assert_eq!(cfg.dam_row(), DamRow::Replace);
+        assert_eq!(Config::default().dam_row(), DamRow::Replace, "no release_head block");
+
+        // Additive allows a T0 floor far below one hour.
+        let path = learned_yaml(
+            "ddrs_rel_dam_row_additive.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.0001, 365.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("additive with a sub-hour T0 floor loads");
+        assert_eq!(cfg.dam_row(), DamRow::Additive);
+        assert_eq!(cfg.params.parameter_ranges.reservoir_t0, [0.0001, 365.0]);
+    }
+
+    #[test]
+    fn release_head_dam_floor_defaults_forgive_and_parses_carry() {
+        let path = learned_yaml(
+            "ddrs_rel_dam_floor_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert_eq!(cfg.release_head.as_ref().unwrap().dam_floor, DamFloor::Forgive);
+        assert_eq!(cfg.dam_floor(), DamFloor::Forgive);
+        let path = learned_yaml(
+            "ddrs_rel_dam_floor_carry.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_floor: carry\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("carry loads");
+        assert_eq!(cfg.dam_floor(), DamFloor::Carry);
+        let path = learned_yaml(
+            "ddrs_rel_dam_floor_bogus.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_floor: repay\n"),
+        );
+        assert!(Config::from_yaml_file(&path).is_err(), "unknown dam floor must be refused");
+    }
+
+    #[test]
+    fn release_head_dam_row_positivity_defaults_off_and_needs_the_additive_row() {
+        let path = learned_yaml(
+            "ddrs_rel_pos_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        assert!(!cfg.release_head.as_ref().unwrap().dam_row_positivity);
+        assert!(!cfg.dam_row_positivity());
+        assert!(!Config::default().dam_row_positivity());
+        let path = learned_yaml(
+            "ddrs_rel_pos_on.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n  dam_row_positivity: true\n"),
+        );
+        assert!(Config::from_yaml_file(&path).expect("additive + positivity loads").dam_row_positivity());
+        // The replace row's c1 is already > 0: a silent no-op, refused.
+        let path = learned_yaml(
+            "ddrs_rel_pos_replace.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row_positivity: true\n"),
+        );
+        learned_rejection(path, &["release_head.dam_row_positivity", "release_head.dam_row: additive"]);
+        // S19' already caps every row at the same bound.
+        let path = learned_yaml(
+            "ddrs_rel_pos_enforce.yaml",
+            &format!("{LEARNED_PARAMS}  enforce_positivity: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n  dam_row_positivity: true\n"),
+        );
+        learned_rejection(path, &["release_head.dam_row_positivity", "enforce_positivity"]);
+    }
+
+    #[test]
+    fn reservoir_dam_row_positivity_selects_the_fixed_tables_setting() {
+        let path = reservoir_yaml(
+            "ddrs_rdp_on.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n  reservoir_dam_row_positivity: true\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed additive table with positivity loads");
+        assert_eq!(cfg.params.reservoir_dam_row_positivity, Some(true));
+        assert!(cfg.dam_row_positivity());
+        // `false` is allowed on either row; absent is false.
+        let path = reservoir_yaml(
+            "ddrs_rdp_off.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row_positivity: false\n",
+        );
+        assert!(!Config::from_yaml_file(&path).expect("false loads").dam_row_positivity());
+        // Rejected: with a learned release, without use_reservoirs, on the
+        // replace row, and with enforce_positivity.
+        let path = learned_yaml(
+            "ddrs_rdp_learned.yaml",
+            &format!("{LEARNED_PARAMS}  reservoir_dam_row_positivity: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_dam_row_positivity", "release_head.dam_row_positivity"]);
+        let path = reservoir_yaml("ddrs_rdp_nores.yaml", EXPLICIT_ADJ, true, "  reservoir_dam_row_positivity: true\n");
+        reservoir_rejection(path, "reservoir_dam_row_positivity");
+        let path = reservoir_yaml(
+            "ddrs_rdp_replace.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row_positivity: true\n",
+        );
+        learned_rejection(path, &["params.reservoir_dam_row_positivity", "params.reservoir_dam_row: additive"]);
+        let path = reservoir_yaml(
+            "ddrs_rdp_enforce.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  enforce_positivity: true\n  reservoir_dam_row: additive\n  \
+             reservoir_dam_row_positivity: true\n",
+        );
+        learned_rejection(path, &["params.reservoir_dam_row_positivity", "enforce_positivity"]);
+    }
+
+    #[test]
+    fn release_head_flood_pool_defaults_none_parses_modes_and_refuses_carry() {
+        let path = learned_yaml(
+            "ddrs_rel_pool_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!(rh.flood_pool, FloodPoolMode::None);
+        assert!(!rh.has_per_dam() && !cfg.flood_pool_on());
+        assert!(!Config::default().flood_pool_on());
+        for (mode, want) in [("flood_control", FloodPoolMode::FloodControl), ("all", FloodPoolMode::All)] {
+            let path = learned_yaml(
+                &format!("ddrs_rel_pool_{mode}.yaml"),
+                LEARNED_PARAMS,
+                &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  flood_pool: {mode}\n"),
+            );
+            let cfg = Config::from_yaml_file(&path).expect("a flood pool mode loads");
+            let rh = cfg.release_head.as_ref().unwrap();
+            assert_eq!(rh.flood_pool, want);
+            // The pool's kc, phi, z are per-dam parameters.
+            assert!(rh.has_per_dam() && cfg.flood_pool_on());
+        }
+        let path = learned_yaml(
+            "ddrs_rel_pool_bogus.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  flood_pool: some\n"),
+        );
+        assert!(Config::from_yaml_file(&path).is_err(), "unknown flood pool mode must be refused");
+        // The carried floor repays out of the same inflow the pool captures from.
+        let path = learned_yaml(
+            "ddrs_rel_pool_carry.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  flood_pool: all\n  dam_floor: carry\n"),
+        );
+        learned_rejection(path, &["release_head.flood_pool", "dam_floor: carry"]);
+    }
+
+    #[test]
+    fn reservoir_flood_pool_selects_the_fixed_tables_pool() {
+        let path = reservoir_yaml(
+            "ddrs_rfp_on.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n  reservoir_flood_pool: true\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed table with the pool loads");
+        assert_eq!(cfg.params.reservoir_flood_pool, Some(true));
+        assert!(cfg.flood_pool_on());
+        // Absent and `false` route no pool.
+        let path = reservoir_yaml("ddrs_rfp_absent.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        assert!(!Config::from_yaml_file(&path).unwrap().flood_pool_on());
+        let path = reservoir_yaml(
+            "ddrs_rfp_off.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_flood_pool: false\n",
+        );
+        assert!(!Config::from_yaml_file(&path).expect("false loads").flood_pool_on());
+        // Rejected: with a learned release, without use_reservoirs, with the carried floor.
+        let path = learned_yaml(
+            "ddrs_rfp_learned.yaml",
+            &format!("{LEARNED_PARAMS}  reservoir_flood_pool: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_flood_pool", "release_head.flood_pool"]);
+        let path = reservoir_yaml("ddrs_rfp_nores.yaml", EXPLICIT_ADJ, true, "  reservoir_flood_pool: true\n");
+        reservoir_rejection(path, "reservoir_flood_pool");
+        let path = reservoir_yaml(
+            "ddrs_rfp_carry.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_floor: carry\n  reservoir_flood_pool: true\n",
+        );
+        learned_rejection(path, &["params.reservoir_flood_pool", "reservoir_dam_floor: carry"]);
+    }
+
+    #[test]
+    fn additive_dam_row_rejects_a_nonpositive_t0_floor() {
+        let path = learned_yaml(
+            "ddrs_rel_additive_zero_floor.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.0, 365.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: additive\n"),
+        );
+        learned_rejection(path, &["reservoir_T0", "0 < lo"]);
+    }
+
+    #[test]
+    fn unknown_dam_row_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_dam_row_bogus.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  dam_row: parallel\n"),
+        );
+        learned_rejection(path, &["parallel"]);
+    }
+
+    #[test]
+    fn reservoir_t0_floor_below_one_hour_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_t0_floor.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_T0: [0.01, 365.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_T0"]);
+    }
+
+    #[test]
+    fn inverted_release_ranges_rejected() {
+        let path = learned_yaml(
+            "ddrs_rel_a_inverted.yaml",
+            &format!("{LEARNED_PARAMS}  parameter_ranges:\n    reservoir_a: [1.0, -1.0]\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_a"]);
+    }
+
+    #[test]
+    fn learned_release_keeps_the_option_c_rejections() {
+        let path = learned_yaml(
+            "ddrs_rel_leakance.yaml",
+            &format!("{LEARNED_PARAMS}  use_leakance: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        reservoir_rejection(path, "use_leakance");
+    }
+
+    #[test]
+    fn use_reservoirs_with_gridded_network_rejected() {
+        let path = reservoir_yaml(
+            "ddrs_res_gridded.yaml",
+            "  gridded_network: /dev/null/ddm30_subreach_adjacency.zarr\n",
+            true,
+            "  use_reservoirs: true\n",
+        );
+        reservoir_rejection(path, "gridded_network");
     }
 }

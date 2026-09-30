@@ -12,7 +12,7 @@ retired all of them.
 §Gauge-set definitions · §Benchmarks → §The KGE claim · §Closed campaigns
 (leakance · selective equifinality H1–H6 · Q′-store waves · synthetic-n) ·
 **§Do-not-use list** · §Structural constants · §Evidence standard ·
-§Doc conventions · §Open, not closed
+§Doc conventions · §Reservoirs · §Open, not closed
 
 If you are about to cite a number, read §Gauge-set definitions and
 §Do-not-use list first — most wrong numbers here are population confusions, not
@@ -63,13 +63,19 @@ do not repeat the blanket claim undated, and do not upgrade it to a result eithe
 
 ## Closed campaigns — do not re-open
 
-### Leakance (GW–SW exchange): **CLOSED — NO-GO, 2026-07-06**
+### Leakance (GW–SW exchange): 2026-07-06 NO-GO, measurements superseded 2026-09-16
 
 Authority: `research/findings/2026-07-06-leakance-nogo-scientific-summary.md`. Read §3 before
 proposing any retry.
 
-The term is code-complete and gradient-exact. **Do not remove it.** But it is not
-promotable, and identifiability is **REFUTED — not "pending"**.
+The term is code-complete and gradient-exact. **Do not remove it.**
+
+**Every number in the table below was measured with `K_D` frozen.** The
+`log_space_lower` bug (fixed in `src/routing/utils.rs`, 2026-09-16) collapsed
+`K_D`'s `[1e-8, 1e-6]` box to a span of ~1e-8 with the log range inverted, and
+`K_D` is in `log_space_parameters` for every leakance config. Treat the recovery
+ratio, the noise-floor refutation, and the Phase C legs as pending re-measurement,
+not as settled. The structural argument below is unaffected by the bug and stands.
 
 | Finding | Value |
 |---|---|
@@ -148,7 +154,7 @@ paper's R1–R5.
 | `+0.026` NSE improvement | Computed against the global baseline. The correct value is **+0.037** |
 | Any "own baseline" NSE from the 07-07 / 07-16 docs | 3,211-gauge population including 513 phantom zeros. KGE is unaffected (phantom gauges are NaN-KGE and were dropped) |
 | R1 = 0.009 / "130× noise floor" as the live blocker | Superseded by R1 = 0.008 on the fixed objective |
-| "leakance is identifiable" (any phrasing) | Explicitly forbidden by the NO-GO summary §7 |
+| Any leakance identifiability number from the 2026-07-06 campaign (R1 = 0.008, the 0.11 m³/s noise floor, the three Phase C legs) | Measured with `K_D` frozen by the `log_space_lower` bug fixed 2026-09-16. Pending re-measurement |
 | H1–H6 in either direction | INCONCLUSIVE |
 | "KGE has never beaten the baseline", undated | Needs the 2026-07-30 qualification above |
 | Dense-grid landscape runs on a binary before `658cbfc` | Leaked the autodiff tape per forward-only eval (77 GB); fixed 2026-09-08 by running backward in `Objective::eval`, see traps.md T13 |
@@ -167,6 +173,9 @@ paper's R1–R5.
 | "10 attributes carry roughly one usable direction" | Their effective rank over 2,939,404 reaches is **6.11 of 10**, six directions for 90 % of variance (findings §32.1). The GBM ceiling R^2 = 0.160 measures how much of the target they explain, not how many directions they span — do not conflate the two |
 | "no objective can separate two outputs reading the same latent direction" as a reason to skip the objective question | The premise is withdrawn: at init the outputs are not reading the same direction. The §30 case for a geometry-aware objective stands on its own |
 | A single-seed init rho(n, q) as evidence that one head topology decouples better than another | Chance alone gives \|rho\| of order 1/sqrt(effective rank), which is 0.479 at the measured rank 4.36 — and the current head measures 0.466, i.e. exactly chance. Use the 8-seed sweep and compare each arm against its OWN chance line (findings §32.6) |
+| `dam_sandbox.py`'s "linear, T fitted" numbers as the linear reservoir's skill (Raystown 0.737 / 0.649, T 0.66 d; Abiquiu 0.73 / 0.66) | Driven by the previous day's inflow while pass-through uses the same day's. Same-day: Raystown 0.800 / 0.732, T 1.23 d; Abiquiu 0.743 / 0.677 (§Reservoirs) |
+| "The 17 % inflow-volume excess" as the Abiquiu sandbox's inflow bias | 1.17 is summed Q' at the dam gauge; the sandbox's mostly-observed inflow is 0.98 of release (arid doc §5) |
+| A median NSE over the 2,365 eval gauges quoted as "unregulated skill" | 347 of them are below DOR > 0.5 at median 0.495; without them the median is 0.751, not 0.732 (§Reservoirs) |
 | A CUDA wall-clock for CONUS training, or a CUDA-vs-CPU skill comparison | CUDA runs this model ~6x slower than CPU (~20 s vs ~3.5 s per micro-batch, GPU at 7 % utilisation) and is non-deterministic in scatter-add. Every reference CONUS result was produced on CPU — check `head -1 <run>/run.log`. See traps.md T13 |
 
 ## Head topology (2026-09-11)
@@ -660,6 +669,106 @@ n was already converged by update 20 of 60.
   east of the Rockies, worth 0.03 NSE at the median and up to 0.45 at the ten most egregious
   rivers (n × 3.9 to 8.6, low-gradient agricultural/coastal-plain rivers of the Midwest and
   Southeast).
+
+## Reservoirs (2026-09-22 to 25)
+
+Authority: `research/findings/2026-09-25-reservoir-representation-options.md` (linear reservoir,
+population, literature, options), `2026-09-22-raystown-storage-law-sandbox.md`,
+`2026-09-25-arid-dam-sandboxes.md`. ddrs has no reservoir code; DDR's level pool (#137 to #139)
+was reverted in #143 and never evaluated at gauges.
+
+- **Closed: the dMC fill-fraction law** `Q = Q0 (S / S0)^b` with `S0` = capacity. It is WaterGAP's
+  natural-lake law; with capacity as `S0` its response time is bounded below by weeks. Never beat a
+  one-parameter linear reservoir at four dams. Do not port it.
+- **Linear reservoir = Muskingum row with `X = 0`, `K = T`.** Same-day inflow: Raystown
+  0.800 / 0.732 (T 1.23 d, band 0.64 to 2.03), Abiquiu 0.743 / 0.677 (T 5.8 d); arid dams about 0.
+  Free Muskingum fits pick `X = 0` at all four dams.
+- **Release cap:** `min(S / T, Q_max)` gives Raystown 0.877 / 0.856 (`Q_max` 288 m³/s, ±17 %)
+  with observed inflow, but 0.844 / 0.703 with the trained model's inflow (linear alone 0.683,
+  trained model at the dam 0.622). Treat `Q_max` as data, not a learned parameter.
+- **Population (lower bound, NWM reservoir set):** 347 of 2,365 eval gauges have DOR > 0.5,
+  median trained NSE 0.495 against 0.739 unregulated, 0.12 to 0.38 below in every area bin; a
+  perfect volume fix only reaches 0.553. Below DOR 0.5 there is no deficit. Excluding them moves
+  the population median from 0.732 to 0.751.
+- **Option C implemented 2026-09-25, off by default** (`params.use_reservoirs`,
+  `data_sources.reservoirs`, a `COMID,T_days` CSV; see `.claude/RESERVOIRS.md`). Verified only on
+  the Juniata bundle with Raystown at `T = 1.23 d` (the routed gauge series changes); no CONUS skill
+  number exists yet, and no `T` table beyond that fixture.
+- **ResOpsUS is on disk** at `/mnt/ssd1/data/resops/` (ResOpsUS v2, ISTARF-CONUS, ResOpsUS+CARS
+  attributes; fetch scripts and provenance in `~/projects/remote_sensing_extraction/`). Derived:
+  `derived/grand_to_merit_comid.csv` (2,177 GRanD ids to MERIT COMID, 663 in ResOpsUS) and
+  `derived/resops_inventory.csv`: 298 reservoirs have at least 5 years of overlapping daily inflow
+  and outflow, 289 of them mapped to a COMID. That is the population for fitting `T` per dam.
+- **Benchmark of record (2026-09-26):** `experiments/reservoir/benchmark/dam_benchmark.csv`, 121 dam-gauge pairs,
+  up to ten per HUC2 (nine regions full; 06 and 08 empty; 09, 11, 12, 13, 15 short), built by
+  `select_dam_benchmark.py`: GRanD dams of the NWM table, nearest eval gauge within 1.5x watershed area, gauge
+  carries NWIS peak code 6 in WY1996-2010, ResOpsUS dams first. Current trained-model median NSE 0.458
+  [0.387, 0.508] against summed Q' 0.371; regional medians at n = 10 are uncertain by 0.2 to 0.6, so compare
+  representations paired per gauge. Findings `2026-09-26-dam-benchmark.md`. USGS regulation flags (peak codes,
+  GAGES-II dams/classification) are at `/mnt/ssd1/data/usgs_regulation/`.
+- **Option C on the benchmark, bolted onto a head trained without it (2026-09-26):** host
+  `2026-09-12T23-39-03Z` (`sr_n0_gamma`; the leakance run cannot host reservoirs). `T` fitted per dam
+  on ResOpsUS days outside WY1997-2010 for 44 of 121 dams (median 22.6 d); table
+  `experiments/reservoir/benchmark/reservoirs_T_fit.csv`. Paired ΔNSE +0.015 [−0.082, +0.066], 23 up /
+  21 down (null); ΔKGE −0.081, 36 of 44 down, α 0.885 → 0.607 (the head already supplies part of the
+  attenuation). `T` ≤ 60 d +0.040, `T` > 60 d −0.145 (post hoc). A median `T` at dams without a fit:
+  ΔNSE −0.143, 53 of 77 down. No runtime cost (461 s off and on, CPU, 11,522 reaches). Reservoir
+  attributes: `T` at 44, reconstructable at 33 more, no source at 44; not predictable from published
+  attributes. Findings `2026-09-26-option-c-dam-benchmark-findings.md`.
+- **Release tuned on routed inflow, no dam data (2026-09-26, offline stage 1):** linear law fitted
+  to the gauge on WY1997-2001, scored WY2002-2010, benchmark run's routed flow as inflow. ΔNSE
+  +0.027 [+0.010, +0.045], 89 of 121 up; seasonal `T` +0.040; area-matched undammed controls +0.000
+  (65 / 56). Fitted `T0` 2.1 d at dams vs pass-through at controls. Cap overfits; KGE flat. This is the
+  user's chosen direction: learn release parameters, tune against gauges, no schedules. Findings §9.
+- **NID dam table (2026-09-26):** `/mnt/ssd1/data/nid/` (fetch + snap scripts in
+  `~/projects/remote_sensing_extraction/nid/`). 11,796 CONUS dams snapped to MERIT (91 % same reach as the GRanD
+  crosswalk, 98.5 % same or adjacent); 5,935 inside eval networks (1,099 >= 10 MCM),
+  `experiments/reservoir/nid/nid_dams_in_eval_network.csv`. 1,560 eval gauges have a dam upstream vs 909 with the
+  NWM table; DOR > 0.5: 308 (normal storage) or 410 (maximum). Use it, not the NWM table, for the dam list.
+  Findings `2026-09-26-nid-dams-merit-findings.md`.
+- **Dam-release smoke set (2026-09-26):** `experiments/reservoir/smoke/` (README has the five pass/fail checks and
+  known issues). 628 gauges, all 18 HUC2: 314 just below a NID dam >= 10 MCM, 314 matched undammed controls; 23,024
+  reaches; no-dam run 1981-2010 in 1,468 s CPU. Expected seasonal-bucket fit (routed inflow, fit 1983-1995, test
+  1996-2010): dam median NSE 0.526 -> 0.601, per-gauge +0.017 [+0.007, +0.026] (210 / 314 up); controls 0.000
+  (155 / 159); dam minus matched control +0.014. Results page https://claude.ai/artifact/UbLNfpeMRS4k44vGXM6uV2.
+- **Learned dam release built (2026-09-27, branch `dam-release-head`, off by default):** `reservoir_release:
+  learned`, a release head on NID dam features emitting `(T0, a, b)` per dam, trained jointly with the routing
+  head, no observed dam data. Smoke set at the 3x rule (916 gauges; runs `2026-09-27T04-29-33Z` off,
+  `2026-09-27T04-29-43Z` learned, worktree workspace, CPU): dam gauges ΔNSE +0.0049 [+0.0027, +0.0072], 300 / 158
+  up; controls −0.0001; dam minus matched control +0.0058 [+0.0032, +0.0086]; ~70 % of the offline ceiling
+  (+0.0068); ΔKGE null. Learned `T0` median 0.56 d, `|a|, |b|` < 0.46 (first build). **Flaw found by smoke
+  check 2, fixed the same day:** a Muskingum row with a time-varying `K := T(t)` conserves `Q`, not
+  `S = T·Q` (spurious source `Q·dT/dt`; mass ratio up to 2.49 at `T0` ~ 800 d with amplitude 2); the dam row
+  is now the storage-conserving trapezoid, `c3 = (2T_t − dt)/(2T_{t+1} + dt)`. Check 1b's "one-hour bucket is
+  pass-through" premise is wrong: a dam row replaces its reach's channel routing (median `K` ~4 h); the
+  adopted criterion is the bucket recurrence plus the median and the length dependence. After the fix, smoke
+  re-run `2026-09-27T07-30-13Z`: dam gauges ΔNSE +0.0056 [+0.0021, +0.0095], controls −0.0011, dam minus control
+  +0.0072 [+0.0044, +0.0108]. **Full population (2,365 gauges, seed 42, `0ac6f2e`):** off
+  `2026-09-27T07-29-47Z` (reproduces `2026-09-12T23-39-03Z` exactly), learned `2026-09-27T07-29-55Z`. Median NSE
+  0.7391 off, 0.7378 learned (summed Q' 0.6785). Paired ΔNSE: 917 gauges with a NID dam >= 10 MCM upstream
+  +0.0014 [+0.0007, +0.0020] (532 / 385); 1,448 without −0.0007 [−0.0009, −0.0004] (573 / 875); dam on the gauge
+  reach +0.0027. Learned `T0` median 0.35 d, amplitude median 0.13. Helps below dams, costs undammed gauges a little
+  through the co-trained routing head; seed-43 replicates `2026-09-27T10-31-30Z` / `10-31-50Z`. Findings
+  `2026-09-27-learned-dam-release-findings.md`; paired analysis
+  `experiments/reservoir/full_run/paired_full_run.json` (branch `reservoir-options`). <!-- verify-doc-paths: ignore -->
+- **Per-dam release calibration (2026-09-27/28, branch `dam-release-v2`, smoke set, one seed):** the dam deficit is
+  real and in the forcing already: at DOR > 0.5 dam gauges trail matched undammed controls by -0.229 median NSE
+  routed and -0.274 on summed Q', mostly correlation at 30-400 d periods. New machinery (all default-off, gated):
+  completion years, `release_head.freeze_routing` (controls bitwise unchanged), `dam_row: additive`,
+  `dam_row_positivity` (c1 >= 0 on dam rows; alone it changes nothing, +0.0000), per-dam `rule_curve` and
+  `per_dam_t0` with row-sparse Adam and a feasibility penalty, corrected created-water account
+  (`release_clamp.csv`), `dam_floor: carry` (only safe with the positivity cap). Target set = 117 on-reach smoke
+  gauges with DOR > 0.5. **Best trained: rule curve + per-dam T0 (`2026-09-27T23-36-04Z`) +0.0168
+  [+0.0074, +0.0256], +0.020 on gauges whose dam creates < 0.5 % water, dKGE +0.006.** In-engine ceiling with
+  offline per-dam fits (replays): per-dam T0 +0.0186 on the capped row (+0.009 uncapped), + rule curve +0.0244; the
+  rule curve adds only about +0.001 paired over a fitted per-dam T0 (offline audit agrees: +0.004). Flood-control
+  dams gain about four times any other purpose. +0.03 not reached; the per-dam coefficients are not predictable from
+  NID features (RF R2 <= 0.15), so the gain needs gauged calibration. Results page
+  https://claude.ai/artifact/YELrGtjwb5qjhq9JEjLs2u; findings `2026-09-28-per-dam-release-calibration-findings.md`.
+- **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
+  (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
+  routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release
+  head from GRanD attributes and lagged forcings (stage 2); operating rules from ISTARF-CONUS (option E).
 
 ## Open, not closed
 

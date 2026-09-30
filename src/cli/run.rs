@@ -364,11 +364,14 @@ where
                 drop(state);
                 drop(train_dataset);
 
-                let metrics = serde_json::json!({
+                let mut metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
                     "phase1_seconds": phase1_elapsed.as_secs_f32(),
                 });
+                if let Some(v) = release_training_record(&train_cfg) {
+                    metrics["release_training"] = v;
+                }
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
                     ..Default::default()
@@ -434,15 +437,52 @@ where
                     test_cfg.params.sparse_solver = crate::config::SparseSolver::Cpu;
                     test_cfg.params.use_cuda_graphs = false;
                 }
-                let test_dataset = MeritGagesDataset::open(&test_cfg)
+                let mut test_dataset = MeritGagesDataset::open(&test_cfg)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
 
-                let latest = latest_checkpoint_base(&ckpt_dir)
-                    .ok_or_else(|| CliError::Runtime("no .mpk checkpoints found after Phase 1".into()))?;
+                // Phase 1 writes a checkpoint per optimizer step. A resume from
+                // `experiment.checkpoint` that has no step left to take (e.g. the
+                // resumed epoch is the last and its sampler is exhausted, as in the
+                // in-engine replay of a fixed dam table) writes none: the model is
+                // then exactly the resumed checkpoint, so the test phase evaluates it.
+                let latest = match latest_checkpoint_base(&ckpt_dir) {
+                    Some(latest) => latest,
+                    None => match train_cfg.experiment.as_ref().and_then(|e| e.checkpoint.as_ref()) {
+                        Some(resumed) => {
+                            eprintln!(
+                                "Phase 1 took no optimizer step and wrote no checkpoint; testing the \
+                                 resumed checkpoint {}",
+                                resumed.display()
+                            );
+                            crate::training::head_base(resumed)
+                        }
+                        None => {
+                            return Err(CliError::Runtime("no .mpk checkpoints found after Phase 1".into()))
+                        }
+                    },
+                };
 
                 let head_template: KanHead<I> = head_cfg.init::<I>(&device);
                 let head = load_kan_head::<I>(&latest, head_template, &device)
                     .map_err(|e| CliError::Other(Box::new(e)))?;
+
+                // Learned dam release: resolve the trained release head into a
+                // fixed seasonal table for the test phase, and keep the
+                // per-dam (T0, a, b) with the run. No-op otherwise.
+                let latest_dir = latest.parent().unwrap_or(&ckpt_dir).to_path_buf();
+                if let Some(table) = crate::training::release_eval::resolve_learned_release::<I>(
+                    &test_cfg,
+                    &mut test_dataset,
+                    &latest_dir,
+                    &device,
+                )
+                .map_err(|e| CliError::Other(Box::new(e)))?
+                {
+                    let csv = run_dir.join("release_params.csv");
+                    crate::training::release_eval::write_release_params_csv(&csv, &table, test_cfg.dam_row())
+                        .map_err(|e| CliError::Other(Box::new(e)))?;
+                    eprintln!("release params -> {}", csv.display());
+                }
 
                 // In Testing mode, experiment.batch_size carries DAYS (not gauges)
                 // because the testing: overlay sets `batch_size: 15`.
@@ -503,6 +543,30 @@ where
                     }
                 }
 
+                // Dam rows: the per-dam S28 clamp account over the test
+                // period (water the discharge floor created vs the dam's
+                // inflow) -> <run_dir>/release_clamp.csv.
+                let release_clamp = output.dam_clamp.as_ref().map(|records| {
+                    let csv = run_dir.join("release_clamp.csv");
+                    match crate::training::release_eval::write_release_clamp_csv(&csv, records) {
+                        Ok(()) => eprintln!("release clamp -> {}", csv.display()),
+                        Err(e) => eprintln!("warning: release_clamp.csv write failed: {e}"),
+                    }
+                    // Per-dam created shares, no pooled ratio (cascaded dams
+                    // count the same inflow twice; review v3, finding 6).
+                    crate::training::release_eval::clamp_summary(records, test_cfg.dam_floor()).to_json()
+                });
+                // Flood pools: per-dam captured / evacuated volumes and fill
+                // over the test period -> <run_dir>/release_pool.csv.
+                let release_pool = output.dam_pool.as_ref().map(|records| {
+                    let csv = run_dir.join("release_pool.csv");
+                    match crate::training::release_eval::write_release_pool_csv(&csv, records) {
+                        Ok(()) => eprintln!("release pool -> {}", csv.display()),
+                        Err(e) => eprintln!("warning: release_pool.csv write failed: {e}"),
+                    }
+                    crate::training::release_eval::pool_summary(records).to_json()
+                });
+
                 let median = |xs: &[f32]| -> f32 {
                     let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
                     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -532,7 +596,7 @@ where
                 let (baseline_predictions, baseline_observations, baseline_manifest) =
                     copy_baseline_into_run_dir(&test_cfg, &input.workspace, run_dir);
 
-                let metrics = serde_json::json!({
+                let mut metrics = serde_json::json!({
                     "epochs_completed": epochs_completed,
                     "final_mini_batch": final_mini_batch,
                     "phase1_seconds": phase1_elapsed.as_secs_f32(),
@@ -543,6 +607,15 @@ where
                     "median_nse_finite": median_nse,
                     "median_kge_finite": median_kge,
                 });
+                if let Some(v) = release_training_record(&train_cfg) {
+                    metrics["release_training"] = v;
+                }
+                if let Some(v) = release_clamp {
+                    metrics["release_clamp"] = v;
+                }
+                if let Some(v) = release_pool {
+                    metrics["release_pool"] = v;
+                }
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
                     eval_zarr: Some(PathBuf::from("eval/predictions.zarr")),
@@ -571,6 +644,31 @@ where
             RunOutputs::default(),
         ),
     }
+}
+
+/// How the learned dam release trained, for the manifest's `metrics`:
+/// `routing_checkpoint` (the routing head's warm-start weights, or null) and
+/// `freeze_routing`. `None` for every config without the learned release, so
+/// their manifests are unchanged.
+fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
+    let learned = cfg.params.use_reservoirs
+        && cfg.params.reservoir_release == crate::config::ReservoirRelease::Learned;
+    let rh = cfg.release_head.as_ref().filter(|_| learned)?;
+    Some(serde_json::json!({
+        "routing_checkpoint": rh.routing_checkpoint.as_ref().map(|p| p.display().to_string()),
+        "freeze_routing": rh.freeze_routing,
+        "dam_row": format!("{:?}", rh.dam_row).to_lowercase(),
+        "dam_floor": format!("{:?}", rh.dam_floor).to_lowercase(),
+        "dam_row_positivity": rh.dam_row_positivity,
+        "rule_curve": rh.rule_curve,
+        "per_dam_t0": rh.per_dam_t0,
+        "rule_curve_max": rh.rule_curve_max,
+        "per_dam_lr": rh.per_dam_lr,
+        "per_dam_l2": rh.per_dam_l2,
+        "rule_curve_penalty": rh.rule_curve_penalty,
+        "rule_curve_alpha": rh.rule_curve_alpha,
+        "flood_pool": rh.flood_pool.name(),
+    }))
 }
 
 /// Load (or compute) the summed Q' baseline and copy its cache files into

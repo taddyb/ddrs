@@ -255,6 +255,12 @@ where
     // read from the run's config snapshot by the plotting scripts.
     let dump_gamma = learn_has("gamma");
     let mut gamma_phys: Vec<f32> = Vec::new();
+    // Leakance gate at the FINAL scheduled temperature (mirrors eval): the
+    // dumped factor is the value routing multiplies, not the raw head output.
+    let gate_tau = cfg.params.leakance_gate.as_ref().map(|g| g.final_temperature());
+    if let Some(tau) = gate_tau {
+        eprintln!("leakance gate: final temperature tau={tau} (dump applies the last scheduled value)");
+    }
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -319,8 +325,13 @@ where
             let kd_d = denormalize(raw["K_D"].clone(), cfg.params.parameter_ranges.k_d, is_log("K_D"));
             let dgw_d =
                 denormalize(raw["d_gw"].clone(), cfg.params.parameter_ranges.d_gw, is_log("d_gw"));
+            let lfac_u = raw["leakance_factor"].clone();
+            let lfac_u = match gate_tau {
+                Some(tau) => crate::training::gate::leakance_gate(lfac_u, tau),
+                None => lfac_u,
+            };
             let lfac_d = denormalize(
-                raw["leakance_factor"].clone(),
+                lfac_u,
                 cfg.params.parameter_ranges.leakance_factor,
                 is_log("leakance_factor"),
             );
@@ -527,6 +538,12 @@ where
     // read from the run's config snapshot by the plotting scripts.
     let dump_gamma = learn_has("gamma");
     let mut gamma_phys: Vec<f32> = Vec::new();
+    // Leakance gate at the FINAL scheduled temperature (mirrors eval): the
+    // dumped factor is the value routing multiplies, not the raw head output.
+    let gate_tau = cfg.params.leakance_gate.as_ref().map(|g| g.final_temperature());
+    if let Some(tau) = gate_tau {
+        eprintln!("leakance gate: final temperature tau={tau} (dump applies the last scheduled value)");
+    }
 
     for start in (0..n_reaches).step_by(batch_size) {
         let end = (start + batch_size).min(n_reaches);
@@ -591,8 +608,13 @@ where
             let kd_d = denormalize(raw["K_D"].clone(), cfg.params.parameter_ranges.k_d, is_log("K_D"));
             let dgw_d =
                 denormalize(raw["d_gw"].clone(), cfg.params.parameter_ranges.d_gw, is_log("d_gw"));
+            let lfac_u = raw["leakance_factor"].clone();
+            let lfac_u = match gate_tau {
+                Some(tau) => crate::training::gate::leakance_gate(lfac_u, tau),
+                None => lfac_u,
+            };
             let lfac_d = denormalize(
-                raw["leakance_factor"].clone(),
+                lfac_u,
                 cfg.params.parameter_ranges.leakance_factor,
                 is_log("leakance_factor"),
             );

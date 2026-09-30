@@ -22,6 +22,7 @@ cargo test --test leakance_gradcheck    # run even if you did not touch leakance
 cargo test --test leakance_off_parity   # any routing change can disturb OFF-parity
 cargo test --test zeta_accum
 cargo test --test leakance_reference_match  # the only DDR anchor leakance has
+cargo test --test reservoir_override    # the plain timestep op carries S19''/B19''
 ```
 
 Since 2026-09-02 the sandbox gate is machine-enforced twice over:
@@ -34,7 +35,7 @@ form (per-reach table, PNG, `DDRS_FORCE_GRAPHS` GPU path).
 ### Acceptance — end-to-end metric floors (Juniata)
 
 ```bash
-cargo test --release --test juniata_acceptance -- --nocapture   # ~20 s after build
+cargo test --release --test juniata_acceptance -- --nocapture   # ~53 s after build (3 trainings)
 ```
 
 The only test covering the full data → train → route → eval → metric chain.
@@ -48,6 +49,15 @@ debug_assertions** (a debug train takes minutes), so it only runs with
 `--release`; run it for any change to routing, training, eval, or the data
 readers when you want end-to-end confirmation. Verified 2026-09-02:
 NSE 0.7903 / KGE 0.8810 / baseline 0.6947 in 18.3 s.
+
+Since 2026-09-25 the file also holds the reservoir end-to-end test,
+`juniata_reservoir_is_matched_logged_and_changes_the_gauge_series`: two more
+trainings of the bundle, as committed and with `params.use_reservoirs: true`
+plus the Raystown Lake table. It asserts the match line
+`reservoirs: 1 of 1 table COMIDs are in the network` appears in `run.log`
+exactly once, the table line from dataset open is there too, the table is
+fingerprinted in the manifest, and the gauge series changes. The two tests
+serialize on a lock because the `run.log` tee is process-global.
 
 ```bash
 cargo test --release --test gridded_acceptance -- --nocapture   # ~30 s after build
@@ -74,7 +84,10 @@ cargo test --lib && cargo test && \
   mkdir -p output && cargo run --release --example compare_ddr_sandbox
 ```
 If you touched `src/training/forward.rs` (disagg / leakance threading), also run
-`cargo test --test leakance_off_parity`.
+`cargo test --test leakance_off_parity`. If you touched any of the three head
+readers (`forward`, `forward_eval_core`, `probe_forward`) or
+`src/training/gate.rs`, also run
+`cargo test --features fixtures --test gamma_eval_parity --test leakance_gate`.
 
 If you touched `src/routing/leakance.rs`, `src/geometry.rs`'s depth inversion, or
 the S6/S25 leakance call site in `src/routing/mmc_op.rs::forward_chain_inner`, run
@@ -87,6 +100,68 @@ commit `c2bd0f9` and is extracted from history by
 the `q_eps = q_spatial + 1e-6` width-exponent stabilisation (predicted 6.2e-6,
 measured 6.17e-6) - if a failure reports a larger difference, that is a real
 discrepancy against DDR, not a bar to widen.
+
+If you touched the linear-reservoir override (S19''/B19'' in
+`src/routing/mmc_op.rs::forward_chain_inner` and its backward, or
+`src/routing/mmc.rs::set_reservoir_rows`), the table reader
+`src/data/store/reservoirs.rs`, or its wiring
+(`src/training/forward.rs::apply_reservoir_rows`, `src/data/dataset.rs`,
+`src/config.rs::validate_reservoirs`), run:
+
+```bash
+cargo test --test reservoir_override
+cargo test --test ddr_sandbox_match
+mkdir -p output && cargo run --release --example compare_ddr_sandbox  # must print ABSOLUTE MATCH
+cargo test --release --test juniata_acceptance  # holds the reservoir end-to-end test
+```
+
+If you touched the learned or seasonal dam release (`src/routing/release.rs`,
+`MuskingumCunge::set_dam_release`, `ReleaseParent` / `TimestepReleaseOp` /
+`TimestepReleaseGammaOp` / the `t_release` branch of `timestep_backward_core`,
+`src/nn/release_head.rs`, `src/training/release_eval.rs`, the release parts of
+`forward.rs` / `driver.rs` / `bootstrap.rs`), add:
+
+```bash
+cargo test --test reservoir_release --test reservoir_release_gradcheck --test reservoir_release_training
+cargo test --test release_freeze_routing   # routing_checkpoint / freeze_routing, via the real driver on Juniata
+cargo test --test reservoir_additive       # release_head.dam_row: additive (S19''''/B19''''), gradchecks + opt-out
+cargo test --test reservoir_rule_curve     # rule curve: θ = 0 identity, one-period volume, continuous phase across
+                                           # year boundaries, θ/δ gradcheck, resolved table, clamp account (dam-row volume balance, both rows)
+cargo test --test reservoir_dam_floor      # dam_floor: carry == forgive bitwise without a clamp, one-year mass balance (both rows),
+                                           # owed carried across 15-day test-phase chunks, set_dam_owed checks
+cargo test --test reservoir_dam_positivity # dam_row_positivity (S19p/B19p): bitwise where the cap does not bind, c1 >= 0 at low flow,
+                                           # gradchecks with the cap inactive/active (+ ddr_match, T_t/T_t+1), the debt pump stopped, carried balance
+cargo test --test reservoir_flood_pool     # flood pool (law FA): z = 0 bitwise no pool, one-year flood mass balance (no clamp),
+                                           # gradcheck kc/phi/z/T0/upstream n in the capture, cap and evacuation regimes,
+                                           # 15-day chunks = one engine, input checks, training = resolved table,
+                                           # dataset-open refusals, frozen-routing training moves the pool + resume
+cargo test --lib -- reservoir release_head lazy_adam release_eval dam_params dam_terms   # incl. the row-sparse Adam (untouched rows bitwise at init, bitwise = dense Adam on an always-touched row, bitwise save/restore) and the per-step terms (L2 and feasibility penalty bitwise independent of the micro-batch split; penalty = hand value, gradient = central differences)
+cargo test --release --test juniata_acceptance   # holds juniata_learned_release_trains_t0_and_writes_release_params
+```
+
+`reservoir_release_gradcheck` is the mandatory gate before any training run:
+central differences on `T0`, `a`, `b` at `T0` = 0.1, 1.5 and 20 d, with a
+learned gamma (the 8-parent op), one release-head read-out weight end to end,
+exactly zero gradient where the one-hour clamp binds, and, at one step through
+`mmc_op::timestep_forward_release`, the step-start `T_t` and step-end `T_{t+1}`
+parents separately and as one leaf (constant `T`, whose gradient is their sum;
+the two nearly cancel there, so it is judged on the parts' scale).
+`reservoir_release::seasonal_release_conserves_storage` pins the storage
+balance of the dam row under a violent seasonal swing. At `T0 = 20` d it
+uses a 0.1 step on `a`, `b` (the module docs record the step sweep).
+`reservoir_release_training` pins that the training path (head on the feature
+rows) and the test-phase path (head resolved into a fixed seasonal table) route
+bitwise identically on the deterministic NdArray backend. On CUDA expect ulp-level
+`T0` differences: the test phase runs the head on every table dam in one matmul,
+training on each batch's subset, so the reductions need not associate the same way.
+
+`reservoir_override` pins a dam row to the linear-reservoir recurrence and
+checks bit-identity with the override off, mass balance, gradcheck, zero
+gradient on a dam row's `n`/`q_spatial`/`p_spatial`, and row validation. The
+two sandbox gates confirm the override stayed out of the no-reservoir path,
+which every non-leakance, non-graph timestep now runs through. The unit tests
+(`cargo test --lib reservoir`: table reader, COMID mapping, load-time
+rejections) are part of `cargo test --lib`.
 
 ### Tier D — config YAML only
 ```bash
@@ -148,8 +223,11 @@ line citation outright rather than trusting it to stay pinned.
 | Gridded (DDM30) ingestion | `gridded_bundle` (sub-reach store → subdivided layout, gauge at the cell's last piece, cache hit, dataset opens), `cargo test --lib adjacency::gridded` (synthetic-store validation), `hourly_streamflow::time_major_store_reads_identically_to_divide_major`, `cargo test --lib zarr::tests::upstream_comids_names_each_subdivided_parent_once` |
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
-| Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting) |
+| Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting), `leakance_gate` (tau = 1 bit-exact identity through all three readers, gate gradcheck, saturation) |
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
+| Reservoirs (option C) | `reservoir_override` (linear-reservoir recurrence, off is bit-identical, mass balance, gradcheck, zero dam-row gradient, row validation), `cargo test --lib reservoir` (table reader, COMID mapping, `use_reservoirs` load guards), `juniata_acceptance`'s `juniata_reservoir_is_matched_logged_and_changes_the_gauge_series` (release-only end-to-end); `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
+| Learned / seasonal dam release | `reservoir_release` (a = b = 0 is bitwise option C, seasonal recurrence at the end-hour phase, clamp, phase table, untouched upstream rows, validation), `reservoir_release_gradcheck` (T0, a, b, head weight, gamma op, clamp), `reservoir_release_training` (training = resolved test path bitwise on NdArray, no-head refusal, checkpoint + optimizer restore), `cargo test --lib release_head` (init, log-space T0), `juniata_acceptance`'s learned run |
+| Flood pool (law FA) | `reservoir_flood_pool` (z = 0 bitwise, one-year mass balance, regime gradcheck incl. an upstream `n`, chunked = one engine, training = resolved table, dataset-open refusals, frozen training + resume), `cargo test --lib -- flood_pool pool dam_params lazy_adam release_eval reservoirs` |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
 | Source fingerprints (`src/cli/fingerprint.rs`) | `cli_fingerprint` (icechunk snapshot-id form, the two Juniata stores staying distinct, nested-content drift, old lock JSON without `snapshot`), then `cli_lockfile`, `cli_plan`, `cli_manifest` because all three serialize a `Fingerprint` |
