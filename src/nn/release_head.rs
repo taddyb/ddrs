@@ -175,6 +175,7 @@ mod tests {
             per_dam_l2: 0.0,
             rule_curve_penalty: 0.0,
             rule_curve_alpha: 0.9,
+            flood_pool: crate::config::FloodPoolMode::None,
         }
     }
 

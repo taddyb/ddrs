@@ -608,9 +608,55 @@ impl MeritGagesDataset {
                             ),
                         });
                     }
+                    // The flood pool scales Qc and Fmax by Ibar, and
+                    // `flood_control` picks its dams by `purpose_flood`.
+                    let pool = section.flood_pool;
+                    if pool != crate::config::FloodPoolMode::None && features.inflow_mean.is_none() {
+                        return Err(DataError::Malformed {
+                            path: path.clone(),
+                            message: format!(
+                                "release_head.flood_pool: {} needs the `{}` column (Ibar, m3/s) in \
+                                 the dam table; build it with \
+                                 experiments/reservoir/release_head/build_dam_inflow_clim.py",
+                                pool.name(),
+                                crate::data::store::INFLOW_MEAN_COLUMN
+                            ),
+                        });
+                    }
+                    if pool == crate::config::FloodPoolMode::FloodControl && features.purpose_flood.is_none() {
+                        return Err(DataError::Malformed {
+                            path: path.clone(),
+                            message: format!(
+                                "release_head.flood_pool: flood_control needs the `{}` column (0/1) \
+                                 in the dam table",
+                                crate::data::store::PURPOSE_FLOOD_COLUMN
+                            ),
+                        });
+                    }
                     ReservoirTable::Learned(features)
                 }
             };
+            // A fixed table's flood pool: `params.reservoir_flood_pool: true`
+            // needs its columns; columns without the key are not routed.
+            if let ReservoirTable::Fixed(t) = &table {
+                if cfg.flood_pool_on() && t.flood_pool.is_none() {
+                    return Err(DataError::Malformed {
+                        path: path.clone(),
+                        message: "params.reservoir_flood_pool: true needs the table's `kc`, `phi`, `z` \
+                                  columns (and `inflow_mean_m3s`)"
+                            .into(),
+                    });
+                }
+                if !cfg.flood_pool_on() && t.flood_pool.is_some() {
+                    use std::io::Write;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "reservoirs: table {} carries flood pool columns (kc, phi, z) but no pool is \
+                         routed (params.reservoir_flood_pool is not true)",
+                        path.display()
+                    );
+                }
+            }
             // Logged at open so a train-only run, which never builds the eval
             // network's match line, still leaves the table in `run.log`. Same
             // fd-2 write as `build_static_network`, for the same libtest reason.
@@ -630,6 +676,29 @@ impl MeritGagesDataset {
                 path.display(),
                 table.len()
             );
+            if cfg.flood_pool_on() {
+                let (label, pooled) = match &table {
+                    ReservoirTable::Learned(f) => {
+                        let mode = cfg.release_head.as_ref().map(|s| s.flood_pool).unwrap_or_default();
+                        let k = match mode {
+                            crate::config::FloodPoolMode::FloodControl => {
+                                f.purpose_flood.as_ref().map_or(0, |p| p.iter().filter(|&&b| b).count())
+                            }
+                            _ => f.comids.len(),
+                        };
+                        (format!("learned, {}", mode.name()), k)
+                    }
+                    ReservoirTable::Fixed(t) => (
+                        "fixed table, z > 0".to_string(),
+                        t.flood_pool.as_ref().map_or(0, |p| p.iter().filter(|v| v[2] > 0.0).count()),
+                    ),
+                };
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "reservoirs: flood pool on ({label}): {pooled} of {} table dams pooled",
+                    table.len()
+                );
+            }
             // Completion years: how many dams exist over this dataset's axis.
             // A dam is a reservoir only in windows / chunks starting on or
             // after 1 January of its completion year.

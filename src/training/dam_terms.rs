@@ -13,7 +13,7 @@
 //! on their own, and adds their gradient to the step's (already pooled) data
 //! gradient.
 //!
-//! - `release_head.per_dam_l2`: `λ·Σ_{d ∈ D}(θ_d² + δ_d²)`, `D` the union of
+//! - `release_head.per_dam_l2`: `λ·Σ_{d ∈ D}(θ_d² + δ_d² + |r_pool,d|²)`, `D` the union of
 //!   the step's active dams (feature-table rows), each dam once.
 //! - `release_head.rule_curve_penalty` (the rule curve's feasibility
 //!   penalty):
@@ -96,7 +96,7 @@ pub struct DamStepTerms {
 /// backpropagate and each term's value, for the log.
 pub struct DamTermsLoss<B: AutodiffBackend> {
     pub total: Tensor<B, 1>,
-    /// `per_dam_l2·Σ(θ² + δ²)`, when on.
+    /// `per_dam_l2·Σ(θ² + δ² + r_pool²)`, when on.
     pub l2: Option<f32>,
     /// The feasibility penalty, when on.
     pub penalty: Option<PenaltyValue>,
@@ -147,11 +147,7 @@ impl DamStepTerms {
         params: &DamParams<B>,
         rh: &ReleaseHeadSection,
     ) -> Option<DamTermsLoss<B>> {
-        let device = params
-            .theta
-            .as_ref()
-            .map(|t| t.val().device())
-            .or_else(|| params.delta.as_ref().map(|d| d.val().device()))?;
+        let device = params.device()?;
         let l2 = (rh.per_dam_l2 > 0.0 && !self.rows.is_empty())
             .then(|| params.sum_sq(table_index::<B>(&self.rows(), &device)))
             .flatten()

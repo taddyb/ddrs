@@ -52,6 +52,9 @@ pub struct EvalOutput {
     /// Per-dam S28 clamp account over the test period (`release_clamp.csv`),
     /// one record per dam armed at least once. `None` without dam rows.
     pub dam_clamp: Option<Vec<crate::training::release_eval::DamClampRecord>>,
+    /// Per-dam flood pool account over the test period (`release_pool.csv`),
+    /// one record per dam pooled at least once. `None` without a pool.
+    pub dam_pool: Option<Vec<crate::training::release_eval::PoolRecord>>,
 }
 
 /// Returns a diagnostic reason when a chunk's predictions are provably wrong
@@ -400,6 +403,11 @@ pub fn evaluate<I: Backend>(
         };
 
     // Dam rows: the clamp account over the whole test period, named by COMID.
+    let dam_pool = (!dam_clamp.pool_by_row.is_empty()).then(|| dam_clamp.pool_records(&dam_comids));
+    if let Some(records) = dam_pool.as_ref() {
+        let summary = crate::training::release_eval::pool_summary(records);
+        eprintln!("flood pool (test phase): {}", summary.describe("dam"));
+    }
     let dam_clamp = (!dam_clamp.by_row.is_empty()).then(|| dam_clamp.records(&dam_comids));
     if let Some(records) = dam_clamp.as_ref() {
         let summary = crate::training::release_eval::clamp_summary(records, cfg.dam_floor());
@@ -431,6 +439,7 @@ pub fn evaluate<I: Backend>(
         zeta_q_mean,
         zeta_comids,
         dam_clamp,
+        dam_pool,
     })
 }
 

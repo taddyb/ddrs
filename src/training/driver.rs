@@ -162,6 +162,9 @@ struct MicroBatchOutcome<I: Backend> {
     /// This forward's per-dam S28 clamp account, one record per dam of the
     /// window (empty without dam rows), for the step's `dam clamp` log line.
     dam_clamp: Vec<crate::training::release_eval::DamClampRecord>,
+    /// This forward's flood pool account, one record per pooled dam of the
+    /// window (empty without a pool), for the step's `flood pool` log line.
+    dam_pool: Vec<crate::training::release_eval::PoolRecord>,
 }
 
 /// Steps 2–6 of the per-mini-batch flow (collate → forward → NaN filter →
@@ -215,6 +218,11 @@ fn run_micro_batch<I: Backend>(
         .dam_clamp
         .as_ref()
         .map(crate::training::release_eval::account_records)
+        .unwrap_or_default();
+    let dam_pool = fwd
+        .flood_pool
+        .as_ref()
+        .map(crate::training::release_eval::pool_account_records)
         .unwrap_or_default();
     // This batch's dams (their table rows), for the per-dam terms the driver
     // adds ONCE per optimizer step (`crate::training::dam_terms`), not here.
@@ -318,6 +326,7 @@ fn run_micro_batch<I: Backend>(
         release_t0,
         dam_record,
         dam_clamp,
+        dam_pool,
     }))
 }
 
@@ -344,14 +353,18 @@ fn step_dams<I: Backend>(
     release: Option<&mut ReleaseTrainer<I>>,
     dam_grads: Option<GradientsParams>,
     grad_clip: f32,
-) -> Option<(f32, usize)> {
-    let d = release?.dams.as_mut()?;
-    let dg = dam_grads?;
+) -> String {
+    let Some(d) = release.and_then(|r| r.dams.as_mut()) else { return String::new() };
+    let Some(dg) = dam_grads else { return String::new() };
     let rh = cfg.release_head.as_ref().expect("per-dam parameters come from the release_head block");
     let dg = clip_grad_norm(dg, &d.params, grad_clip);
     let (params, _touched) = d.optimizer.step(rh.per_dam_lr, d.params.clone(), &dg);
     d.params = params;
-    rule_curve_c_stats(d, &dg, rh.rule_curve_max)
+    format!(
+        "{}{}",
+        rule_curve_log(rule_curve_c_stats(d, &dg, rh.rule_curve_max)),
+        pool_param_log(pool_param_stats(d, &dg))
+    )
 }
 
 /// The step's per-dam terms (`crate::training::dam_terms`), evaluated ONCE on
@@ -428,6 +441,50 @@ fn log_dam_clamp(cfg: &Config, mini_batch: usize, records: &[crate::training::re
     }
     let summary = crate::training::release_eval::clamp_summary(records, cfg.dam_floor());
     eprintln!("  dam clamp, step {mini_batch}: {}", summary.describe("dam-window"));
+}
+
+/// One line per optimizer step whose forwards armed a flood pool: the pools
+/// of the step's dam-windows (each window starts empty), as
+/// `crate::training::release_eval::PoolSummary::describe`. Nothing without a
+/// pool.
+fn log_flood_pool(mini_batch: usize, records: &[crate::training::release_eval::PoolRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    let summary = crate::training::release_eval::pool_summary(records);
+    eprintln!("  flood pool, step {mini_batch}: {}", summary.describe("dam-window"));
+}
+
+/// Median `(kc, phi, z)` over the flood pool parameters of the dams whose
+/// raw pool parameters received a nonzero gradient in `grads`, and how many
+/// dams that is; read after the step. `None` without a pool or gradient.
+fn pool_param_stats<I: Backend>(dams: &DamTrainer<I>, grads: &GradientsParams) -> Option<([f32; 3], usize)> {
+    let pool = dams.params.pool.as_ref()?;
+    let g = grads.get::<I, 2>(pool.id)?;
+    let [n, _] = g.dims();
+    let g: Vec<f32> = g.into_data().to_vec().ok()?;
+    let rows: Vec<usize> = (0..n).filter(|&d| (0..3).any(|j| g[d * 3 + j] != 0.0)).collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let idx = crate::nn::dam_params::table_index::<Autodiff<I>>(&rows, &pool.val().device());
+    let p = dams.params.pool_params(idx)?;
+    let median = |t: Tensor<Autodiff<I>, 1>| -> f32 {
+        let mut v: Vec<f32> = t.into_data().to_vec().unwrap_or_default();
+        v.sort_unstable_by(|a, b| a.total_cmp(b));
+        v.get(v.len() / 2).copied().unwrap_or(f32::NAN)
+    };
+    Some(([median(p.kc), median(p.phi), median(p.z_days)], rows.len()))
+}
+
+/// ` flood_pool_median kc=<> phi=<> z=<>d (<k> dams with gradient)`, or empty.
+fn pool_param_log(stats: Option<([f32; 3], usize)>) -> String {
+    match stats {
+        Some(([kc, phi, z], k)) => {
+            format!(" flood_pool_median kc={kc:.3} phi={phi:.3} z={z:.3}d ({k} dams with gradient)")
+        }
+        None => String::new(),
+    }
 }
 
 /// ` release_T0_median=<d>d (<k> dams)` for the mini-batch log line, or empty.
@@ -567,6 +624,7 @@ pub fn train<I: Backend>(
                     release_t0,
                     dam_record,
                     dam_clamp,
+                    dam_pool,
                     ..
                 }) = outcome
                 else {
@@ -614,7 +672,7 @@ pub fn train<I: Backend>(
                 }
                 let (dam_grads, term_values) =
                     add_dam_step_terms::<I>(cfg, state.release.as_ref(), &terms, dam_grads);
-                let rc_stats = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
+                let dam_step_log = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
 
                 save_step_checkpoint::<I>(checkpoint_dir, epoch, state, &*optimizer, &sampler)?;
 
@@ -636,10 +694,11 @@ pub fn train<I: Backend>(
                     loss_f32,
                     n_at_floor * 100.0,
                     release_log(release_t0),
-                    rule_curve_log(rc_stats),
+                    dam_step_log,
                     dam_terms_log(term_values),
                 );
                 log_dam_clamp(cfg, state.mini_batch, &dam_clamp);
+                log_flood_pool(state.mini_batch, &dam_pool);
                 state.mini_batch += 1;
                 mb_done += 1;
                 if let Some(limit) = max_mini_batches {
@@ -664,6 +723,7 @@ pub fn train<I: Backend>(
                 let mut dam_terms = crate::training::dam_terms::DamStepTerms::default();
                 // The step's dam-window clamp accounts, for its log line.
                 let mut step_dam_clamp: Vec<crate::training::release_eval::DamClampRecord> = Vec::new();
+                let mut step_dam_pool: Vec<crate::training::release_eval::PoolRecord> = Vec::new();
 
                 while micros_drawn < accum_steps {
                     let Some(idx) = sampler.next_batch() else { break };
@@ -691,9 +751,11 @@ pub fn train<I: Backend>(
                         release_t0,
                         dam_record,
                         dam_clamp,
+                        dam_pool,
                     }) = outcome
                     {
                         step_dam_clamp.extend(dam_clamp);
+                        step_dam_pool.extend(dam_pool);
                         // Scale the mean loss back to a SUM before backward;
                         // the group total is renormalized by 1/Σn below, so
                         // the accumulated gradient is exactly the pooled-mean
@@ -777,7 +839,7 @@ pub fn train<I: Backend>(
                     // the pooled (1/Σn) data gradient unscaled.
                     let (dam_grads, term_values) =
                         add_dam_step_terms::<I>(cfg, state.release.as_ref(), &dam_terms, dam_grads);
-                    let rc_stats = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
+                    let dam_step_log = step_dams::<I>(cfg, state.release.as_mut(), dam_grads, grad_clip);
 
                     save_step_checkpoint::<I>(
                         checkpoint_dir,
@@ -791,10 +853,11 @@ pub fn train<I: Backend>(
                         "  mb={} loss={:.6} (accumulated {micros_valid}/{micros_drawn} micro-batches, n={total_n}){}{}",
                         state.mini_batch,
                         loss_weighted_sum / total_n as f64,
-                        rule_curve_log(rc_stats),
+                        dam_step_log,
                         dam_terms_log(term_values),
                     );
                     log_dam_clamp(cfg, state.mini_batch, &step_dam_clamp);
+                    log_flood_pool(state.mini_batch, &step_dam_pool);
                 }
 
                 state.mini_batch += 1;

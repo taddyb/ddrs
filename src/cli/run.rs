@@ -556,6 +556,16 @@ where
                     // count the same inflow twice; review v3, finding 6).
                     crate::training::release_eval::clamp_summary(records, test_cfg.dam_floor()).to_json()
                 });
+                // Flood pools: per-dam captured / evacuated volumes and fill
+                // over the test period -> <run_dir>/release_pool.csv.
+                let release_pool = output.dam_pool.as_ref().map(|records| {
+                    let csv = run_dir.join("release_pool.csv");
+                    match crate::training::release_eval::write_release_pool_csv(&csv, records) {
+                        Ok(()) => eprintln!("release pool -> {}", csv.display()),
+                        Err(e) => eprintln!("warning: release_pool.csv write failed: {e}"),
+                    }
+                    crate::training::release_eval::pool_summary(records).to_json()
+                });
 
                 let median = |xs: &[f32]| -> f32 {
                     let mut v: Vec<f32> = xs.iter().copied().filter(|x| x.is_finite()).collect();
@@ -602,6 +612,9 @@ where
                 }
                 if let Some(v) = release_clamp {
                     metrics["release_clamp"] = v;
+                }
+                if let Some(v) = release_pool {
+                    metrics["release_pool"] = v;
                 }
                 let outputs = RunOutputs {
                     checkpoints: list_mpk_files(&ckpt_dir),
@@ -654,6 +667,7 @@ fn release_training_record(cfg: &Config) -> Option<serde_json::Value> {
         "per_dam_l2": rh.per_dam_l2,
         "rule_curve_penalty": rh.rule_curve_penalty,
         "rule_curve_alpha": rh.rule_curve_alpha,
+        "flood_pool": rh.flood_pool.name(),
     }))
 }
 

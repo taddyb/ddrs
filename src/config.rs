@@ -909,6 +909,47 @@ pub struct Params {
     /// already) or with `enforce_positivity` (S19' caps every row at the same
     /// bound). [`Config::dam_row_positivity`] reads it.
     pub reservoir_dam_row_positivity: Option<bool>,
+    /// Route the per-dam flood pool (law FA, [`FloodPoolMode`]) of a
+    /// `reservoir_release: fixed` table: `true` requires the table's `kc`,
+    /// `phi`, `z` columns (and `inflow_mean_m3s`) and arms a pool at every
+    /// table dam with `z > 0`; absent (the default) or `false` routes no pool,
+    /// bitwise today's routing, even when the table carries the columns.
+    /// Mirrors `reservoir_dam_row_positivity`: a learned release sets it with
+    /// `release_head.flood_pool`; this key with `learned`, or without
+    /// `use_reservoirs`, is rejected at load, and so is `true` with
+    /// `reservoir_dam_floor: carry`. [`Config::flood_pool_on`] reads it.
+    pub reservoir_flood_pool: Option<bool>,
+}
+
+/// `release_head.flood_pool`: which dams carry the per-dam flood pool (law FA
+/// of `experiments/reservoir/laws_v6`, `crate::routing::mmc::FloodPool`). A
+/// pooled dam captures `phi` of its inflow above a release target
+/// `Qc = kc·Ibar` into a pool of `Fmax = z·Ibar` (`z` days of mean inflow)
+/// and evacuates it at the target afterwards; both fluxes act on the dam
+/// row's lateral inflow. `kc`, `phi`, `z` are per-dam free parameters
+/// (`crate::nn::dam_params`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloodPoolMode {
+    /// No pool anywhere (the default): bitwise today's routing.
+    #[default]
+    None,
+    /// A pool at every dam whose table row has `purpose_flood` set (the
+    /// table's raw 0/1 `purpose_flood` column).
+    FloodControl,
+    /// A pool at every dam of the table.
+    All,
+}
+
+impl FloodPoolMode {
+    /// The YAML spelling: `none`, `flood_control`, `all`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::FloodControl => "flood_control",
+            Self::All => "all",
+        }
+    }
 }
 
 /// `params.reservoir_release`. See [`Params::reservoir_release`].
@@ -1069,13 +1110,22 @@ pub struct ReleaseHeadSection {
     /// store at a step before it is penalised. Default 0.9; must be in (0, 1].
     #[serde(default = "default_rule_curve_alpha")]
     pub rule_curve_alpha: f32,
+    /// The per-dam flood pool ([`FloodPoolMode`]): `none` (default),
+    /// `flood_control` (dams with `purpose_flood` in the table) or `all`.
+    /// `kc`, `phi`, `z` are per-dam free parameters trained with the other
+    /// per-dam parameters (`per_dam_lr`, `per_dam_l2`); `Ibar` is the table's
+    /// `inflow_mean_m3s` (required at dataset open). Rejected with
+    /// `dam_floor: carry`.
+    #[serde(default)]
+    pub flood_pool: FloodPoolMode,
 }
 
 impl ReleaseHeadSection {
-    /// Whether the run carries per-dam free parameters (`rule_curve` or
-    /// `per_dam_t0`), i.e. a `crate::nn::dam_params::DamParams` module.
+    /// Whether the run carries per-dam free parameters (`rule_curve`,
+    /// `per_dam_t0` or a flood pool), i.e. a
+    /// `crate::nn::dam_params::DamParams` module.
     pub fn has_per_dam(&self) -> bool {
-        self.rule_curve || self.per_dam_t0
+        self.rule_curve || self.per_dam_t0 || self.flood_pool != FloodPoolMode::None
     }
 }
 
@@ -1136,6 +1186,21 @@ impl Config {
         }
     }
 
+    /// Whether dams carry the flood pool: `release_head.flood_pool` is not
+    /// `none` for a learned release (and its resolved test-phase table),
+    /// `params.reservoir_flood_pool: true` for a `fixed` table. Like
+    /// [`Config::dam_floor`], the two keys never both apply
+    /// (`validate_reservoirs`). `false` without `use_reservoirs`.
+    pub fn flood_pool_on(&self) -> bool {
+        if !self.params.use_reservoirs {
+            return false;
+        }
+        match self.release_head.as_ref() {
+            Some(r) => r.flood_pool != FloodPoolMode::None,
+            None => self.params.reservoir_flood_pool.unwrap_or(false),
+        }
+    }
+
     /// True when the routing head is frozen for release-only training
     /// (`release_head.freeze_routing` under `reservoir_release: learned`).
     pub fn routing_frozen(&self) -> bool {
@@ -1191,6 +1256,7 @@ impl Default for Params {
             reservoir_dam_row: None,
             reservoir_dam_floor: None,
             reservoir_dam_row_positivity: None,
+            reservoir_flood_pool: None,
         }
     }
 }
@@ -1228,6 +1294,7 @@ struct ParamsRaw {
     reservoir_dam_row: Option<DamRow>,
     reservoir_dam_floor: Option<DamFloor>,
     reservoir_dam_row_positivity: Option<bool>,
+    reservoir_flood_pool: Option<bool>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -1351,6 +1418,7 @@ impl From<ParamsRaw> for Params {
         p.reservoir_dam_row = r.reservoir_dam_row;
         p.reservoir_dam_floor = r.reservoir_dam_floor;
         p.reservoir_dam_row_positivity = r.reservoir_dam_row_positivity;
+        p.reservoir_flood_pool = r.reservoir_flood_pool;
         p
     }
 }
@@ -1756,6 +1824,28 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
             )?;
         }
     }
+    if let Some(pool) = p.reservoir_flood_pool {
+        if learned {
+            return Err(format!(
+                "params.reservoir_flood_pool = {pool} is for `reservoir_release: fixed` tables; a \
+                 learned release sets it with `release_head.flood_pool`"
+            ));
+        }
+        if !p.use_reservoirs {
+            return Err(format!(
+                "params.reservoir_flood_pool = {pool} is set but `use_reservoirs` is false; no dam \
+                 row would be routed"
+            ));
+        }
+        if pool && p.reservoir_dam_floor == Some(DamFloor::Carry) {
+            return Err(
+                "params.reservoir_flood_pool: true does not combine with \
+                 `params.reservoir_dam_floor: carry`: the carried floor repays out of the dam's \
+                 inflow before the pool captures from the same inflow"
+                    .to_string(),
+            );
+        }
+    }
     if learned {
         if !p.use_reservoirs {
             return Err(
@@ -1818,6 +1908,14 @@ fn validate_reservoirs(cfg: &Config) -> std::result::Result<(), String> {
             return Err(format!(
                 "release_head.rule_curve_alpha = {} must be in (0, 1]",
                 rh.rule_curve_alpha
+            ));
+        }
+        if rh.flood_pool != FloodPoolMode::None && rh.dam_floor == DamFloor::Carry {
+            return Err(format!(
+                "release_head.flood_pool = {} does not combine with `release_head.dam_floor: \
+                 carry`: the carried floor repays out of the dam's inflow before the pool \
+                 captures from the same inflow",
+                rh.flood_pool.name()
             ));
         }
         if rh.dam_row_positivity {
@@ -4035,6 +4133,84 @@ data_sources:
              reservoir_dam_row_positivity: true\n",
         );
         learned_rejection(path, &["params.reservoir_dam_row_positivity", "enforce_positivity"]);
+    }
+
+    #[test]
+    fn release_head_flood_pool_defaults_none_parses_modes_and_refuses_carry() {
+        let path = learned_yaml(
+            "ddrs_rel_pool_default.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let rh = cfg.release_head.as_ref().unwrap();
+        assert_eq!(rh.flood_pool, FloodPoolMode::None);
+        assert!(!rh.has_per_dam() && !cfg.flood_pool_on());
+        assert!(!Config::default().flood_pool_on());
+        for (mode, want) in [("flood_control", FloodPoolMode::FloodControl), ("all", FloodPoolMode::All)] {
+            let path = learned_yaml(
+                &format!("ddrs_rel_pool_{mode}.yaml"),
+                LEARNED_PARAMS,
+                &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  flood_pool: {mode}\n"),
+            );
+            let cfg = Config::from_yaml_file(&path).expect("a flood pool mode loads");
+            let rh = cfg.release_head.as_ref().unwrap();
+            assert_eq!(rh.flood_pool, want);
+            // The pool's kc, phi, z are per-dam parameters.
+            assert!(rh.has_per_dam() && cfg.flood_pool_on());
+        }
+        let path = learned_yaml(
+            "ddrs_rel_pool_bogus.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  flood_pool: some\n"),
+        );
+        assert!(Config::from_yaml_file(&path).is_err(), "unknown flood pool mode must be refused");
+        // The carried floor repays out of the same inflow the pool captures from.
+        let path = learned_yaml(
+            "ddrs_rel_pool_carry.yaml",
+            LEARNED_PARAMS,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}  flood_pool: all\n  dam_floor: carry\n"),
+        );
+        learned_rejection(path, &["release_head.flood_pool", "dam_floor: carry"]);
+    }
+
+    #[test]
+    fn reservoir_flood_pool_selects_the_fixed_tables_pool() {
+        let path = reservoir_yaml(
+            "ddrs_rfp_on.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_row: additive\n  reservoir_flood_pool: true\n",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("a fixed table with the pool loads");
+        assert_eq!(cfg.params.reservoir_flood_pool, Some(true));
+        assert!(cfg.flood_pool_on());
+        // Absent and `false` route no pool.
+        let path = reservoir_yaml("ddrs_rfp_absent.yaml", EXPLICIT_ADJ, true, "  use_reservoirs: true\n");
+        assert!(!Config::from_yaml_file(&path).unwrap().flood_pool_on());
+        let path = reservoir_yaml(
+            "ddrs_rfp_off.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_flood_pool: false\n",
+        );
+        assert!(!Config::from_yaml_file(&path).expect("false loads").flood_pool_on());
+        // Rejected: with a learned release, without use_reservoirs, with the carried floor.
+        let path = learned_yaml(
+            "ddrs_rfp_learned.yaml",
+            &format!("{LEARNED_PARAMS}  reservoir_flood_pool: true\n"),
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        learned_rejection(path, &["reservoir_flood_pool", "release_head.flood_pool"]);
+        let path = reservoir_yaml("ddrs_rfp_nores.yaml", EXPLICIT_ADJ, true, "  reservoir_flood_pool: true\n");
+        reservoir_rejection(path, "reservoir_flood_pool");
+        let path = reservoir_yaml(
+            "ddrs_rfp_carry.yaml",
+            EXPLICIT_ADJ,
+            true,
+            "  use_reservoirs: true\n  reservoir_dam_floor: carry\n  reservoir_flood_pool: true\n",
+        );
+        learned_rejection(path, &["params.reservoir_flood_pool", "reservoir_dam_floor: carry"]);
     }
 
     #[test]

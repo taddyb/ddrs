@@ -414,6 +414,7 @@ fn section(dam_row: DamRow) -> ReleaseHeadSection {
         per_dam_l2: 0.0,
         rule_curve_penalty: 0.0,
         rule_curve_alpha: 0.9,
+        flood_pool: ddrs::config::FloodPoolMode::None,
     }
 }
 
@@ -433,6 +434,7 @@ fn features() -> DamFeatures {
         values: ndarray::array![[0.8_f32, -1.2], [0.0, 0.0], [-0.5, 1.7]],
         years: vec![None, None, None],
         inflow_mean: Some(vec![40.0, 5.0, 12.0]),
+        purpose_flood: None,
     }
 }
 

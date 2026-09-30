@@ -98,6 +98,9 @@ pub struct LazyAdam {
     pub theta: Option<RowAdamState>,
     /// State of `δ` (`None` without per-dam `T0`).
     pub delta: Option<RowAdamState>,
+    /// State of the flood pool's raw `(r_kc, r_phi, r_z)` (`None` without a
+    /// flood pool).
+    pub pool: Option<RowAdamState>,
 }
 
 /// Rows each parameter updated in one [`LazyAdam::step`].
@@ -105,6 +108,7 @@ pub struct LazyAdam {
 pub struct RowsTouched {
     pub theta: usize,
     pub delta: usize,
+    pub pool: usize,
 }
 
 impl LazyAdam {
@@ -114,6 +118,7 @@ impl LazyAdam {
         Self {
             theta: params.theta.as_ref().map(|_| RowAdamState::zeros(n, 4)),
             delta: params.delta.as_ref().map(|_| RowAdamState::zeros(n, 1)),
+            pool: params.pool.as_ref().map(|_| RowAdamState::zeros(n, 3)),
         }
     }
 
@@ -136,6 +141,11 @@ impl LazyAdam {
             let (de, k) = step_param::<B, 1>(de, st, lr, grads);
             params.delta = Some(de);
             touched.delta = k;
+        }
+        if let (Some(po), Some(st)) = (params.pool.take(), self.pool.as_mut()) {
+            let (po, k) = step_param::<B, 2>(po, st, lr, grads);
+            params.pool = Some(po);
+            touched.pool = k;
         }
         (params, touched)
     }
@@ -161,13 +171,19 @@ impl LazyAdam {
         let rec: LazyAdamRecord = serde_json::from_str(&json).map_err(|e| err(e.to_string()))?;
         let loaded = LazyAdam::from(rec);
         let shape = |s: &Option<RowAdamState>| s.as_ref().map(|s| (s.width, s.t.len()));
-        if shape(&loaded.theta) != shape(&self.theta) || shape(&loaded.delta) != shape(&self.delta) {
+        if shape(&loaded.theta) != shape(&self.theta)
+            || shape(&loaded.delta) != shape(&self.delta)
+            || shape(&loaded.pool) != shape(&self.pool)
+        {
             return Err(err(format!(
-                "per-dam optimizer state has shapes theta {:?} / delta {:?}, the run expects {:?} / {:?}",
+                "per-dam optimizer state has shapes theta {:?} / delta {:?} / pool {:?}, the run \
+                 expects {:?} / {:?} / {:?}",
                 shape(&loaded.theta),
                 shape(&loaded.delta),
+                shape(&loaded.pool),
                 shape(&self.theta),
-                shape(&self.delta)
+                shape(&self.delta),
+                shape(&self.pool)
             )));
         }
         Ok(loaded)
@@ -219,6 +235,9 @@ struct LazyAdamRecord {
     betas_eps: [u32; 3],
     theta: Option<RowAdamRecord>,
     delta: Option<RowAdamRecord>,
+    /// Absent in files written before the flood pool (read as `None`).
+    #[serde(default)]
+    pool: Option<RowAdamRecord>,
 }
 
 impl From<&LazyAdam> for LazyAdamRecord {
@@ -229,6 +248,7 @@ impl From<&LazyAdam> for LazyAdamRecord {
             betas_eps: [BETA_1.to_bits(), BETA_2.to_bits(), EPSILON.to_bits()],
             theta: a.theta.as_ref().map(row),
             delta: a.delta.as_ref().map(row),
+            pool: a.pool.as_ref().map(row),
         }
     }
 }
@@ -237,7 +257,7 @@ impl From<LazyAdamRecord> for LazyAdam {
     fn from(r: LazyAdamRecord) -> Self {
         let floats = |v: Vec<u32>| v.into_iter().map(f32::from_bits).collect();
         let row = |s: RowAdamRecord| RowAdamState { width: s.width, m: floats(s.m), v: floats(s.v), t: s.t };
-        Self { theta: r.theta.map(row), delta: r.delta.map(row) }
+        Self { theta: r.theta.map(row), delta: r.delta.map(row), pool: r.pool.map(row) }
     }
 }
 
@@ -382,5 +402,47 @@ mod tests {
         // A state for a different dam count is refused.
         let other = DamParams::<AB>::zeros(5, true, true, &d);
         assert!(LazyAdam::new(&other).load(&path).is_err());
+        // So is one for a different option set (the flood pool added).
+        let pooled = DamParams::<AB>::zeros_with_pool(4, true, true, true, &d);
+        assert!(LazyAdam::new(&pooled).load(&path).is_err());
+    }
+
+    #[test]
+    fn flood_pool_rows_step_sparsely_and_restore_bitwise() {
+        let d: <I as burn::tensor::backend::BackendTypes>::Device = Default::default();
+        let mut params = DamParams::<AB>::zeros_with_pool(3, false, false, true, &d);
+        let mut opt = LazyAdam::new(&params);
+        assert!(opt.theta.is_none() && opt.delta.is_none());
+        for k in 0..4 {
+            // Row 0 every step, row 2 never.
+            let mut g = vec![0.0_f32; 9];
+            for j in 0..3 {
+                g[j] = gval(k, j);
+            }
+            if k % 2 == 1 {
+                g[3] = gval(k, 5);
+            }
+            let mut gp = GradientsParams::new();
+            gp.register::<I, 2>(
+                params.pool.as_ref().unwrap().id,
+                Tensor::<I, 1>::from_floats(g.as_slice(), &d).reshape([3, 3]),
+            );
+            let (p, touched) = opt.step(0.02, params, &gp);
+            params = p;
+            assert_eq!(touched.pool, if k % 2 == 1 { 2 } else { 1 }, "step {k}");
+        }
+        let pool = host2(params.pool.as_ref().unwrap().val());
+        assert!(pool[0..3].iter().all(|&v| v != 0.0), "row 0 moved");
+        assert!(pool[6..9].iter().all(|&v| v.to_bits() == 0), "row 2 stays at its init");
+        assert_eq!(opt.pool.as_ref().unwrap().t, vec![4, 2, 0]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("release_dams_optim.json");
+        opt.save(&path).unwrap();
+        assert_eq!(LazyAdam::new(&params).load(&path).unwrap(), opt);
+        // A file written before the flood pool (no `pool` key) still reads.
+        let old = r#"{"betas_eps":[0,0,0],"theta":null,"delta":{"width":1,"m":[0],"v":[0],"t":[0]}}"#;
+        std::fs::write(&path, old).unwrap();
+        let no_pool = DamParams::<AB>::zeros(1, false, true, &d);
+        assert!(LazyAdam::new(&no_pool).load(&path).unwrap().pool.is_none());
     }
 }

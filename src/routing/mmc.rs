@@ -143,6 +143,152 @@ pub struct RuleCurve<I: Backend> {
     pub phase0: f64,
 }
 
+/// Per-dam flood pool for [`MuskingumCunge::set_flood_pool`]: law FA of
+/// `experiments/reservoir/laws_v6` (report §2, §5), on top of whatever the dam
+/// row already is (option C, the seasonal or learned bucket, a rule curve).
+///
+/// Each pooled dam `d` carries a pool `F_d` (m³, `>= 0`), empty at a window
+/// start (or the previous test-phase chunk's closing value, set with
+/// [`MuskingumCunge::set_flood_pool_state`]). Before each step's solve, from
+/// the dam's inflow at the step start
+/// `I_d = (N·Q_t)_d + q'_d` (routed upstream inflow plus the reach's own
+/// lateral inflow after the floor and the sub-reach divisor, before the rule
+/// curve's flux: the `Qin` of the feasibility penalty and of the clamp
+/// account), with `Qc = kc·Ibar`, `Fmax = z·Ibar·86400`:
+///
+/// ```text
+/// Vc = min(phi·max(I − Qc, 0)·dt, max(Fmax − F, 0))      captured, m³
+/// p  = I − Vc/dt                                          passed through, m³/s
+/// Ve = min(F, max(Qc − p, 0)·dt)                          evacuated at the target, m³
+/// q'_d ← q'_d + (Ve − Vc)/dt                              the dam row's lateral inflow
+/// F  ← (F + Vc) − Ve                                      after the solve
+/// ```
+///
+/// Mass is conserved by construction: the pool captures only what enters
+/// (`Vc <= phi·I·dt <= I·dt`) and evacuates only what it holds (`Ve <= F`),
+/// and `F + Vc − Ve >= 0` exactly in f32 (`fl(F + Vc) >= F >= Ve`). It never
+/// relies on the discharge floor. The system matrix, the CSR pattern and the
+/// hand-written backward are unchanged: the fluxes act on the dam row's `q'`
+/// like the rule curve's, and reach `kc`, `phi`, `z` (and, through `I`, the
+/// routed upstream discharge and `q'`) by ordinary autodiff through the
+/// timestep op's `q'` parent. `F` stays on the autodiff tape across the
+/// window's steps (`O(n_pool)` nodes per step); `I` is NOT detached, so a
+/// routing parameter upstream of a pooled dam sees the pool's response to its
+/// inflow (e.g. `1 − phi` of a change above `Qc` while the pool captures).
+/// `min`/`max` take their subgradients (Burn's `mask_where`: the selected
+/// operand, the left one at a tie).
+///
+/// `z = 0` is no pool, bit for bit: `Fmax = F = 0`, so `Vc = Ve = 0` and the
+/// dam row's `q'` gains an exact `+0`.
+pub struct FloodPool<I: Backend> {
+    /// Network rows of the pooled dams: armed dam rows, unique.
+    pub rows: Vec<usize>,
+    /// `[rows.len()]` release target multiplier, `Qc = kc·Ibar` (m³/s).
+    pub kc: Tensor<Autodiff<I>, 1>,
+    /// `[rows.len()]` capture share of the inflow above `Qc`, in `[0, 1]`.
+    pub phi: Tensor<Autodiff<I>, 1>,
+    /// `[rows.len()]` pool size in days of mean inflow,
+    /// `Fmax = z·Ibar·86400` m³; `>= 0`.
+    pub z_days: Tensor<Autodiff<I>, 1>,
+    /// `[rows.len()]` `Ibar`, m³/s: the dam's training-period mean inflow
+    /// (the table's `inflow_mean_m3s`), a constant.
+    pub inflow_mean: Vec<f32>,
+}
+
+/// [`FloodPool`] armed on an engine: device tensors, the pool state and the
+/// pool's account (inner backend, detached).
+struct ArmedFloodPool<I: Backend> {
+    rows: Vec<usize>,
+    /// The pooled rows, for the gather of `q'` and the scatter onto it.
+    rows_ad: Tensor<Autodiff<I>, 1, Int>,
+    /// Upstream edges of the pooled rows: source row, pool slot, and the
+    /// adjacency weight (`None` when every weight is 1). `None` when no
+    /// pooled dam has an upstream reach.
+    upstream: Option<(Tensor<Autodiff<I>, 1, Int>, Tensor<Autodiff<I>, 1, Int>, Option<Tensor<Autodiff<I>, 1>>)>,
+    /// `Qc = kc·Ibar`, m³/s.
+    qc: Tensor<Autodiff<I>, 1>,
+    phi: Tensor<Autodiff<I>, 1>,
+    /// `Fmax = z·Ibar·86400`, m³.
+    fmax: Tensor<Autodiff<I>, 1>,
+    /// The pool `F`, m³, on the tape.
+    f: Tensor<Autodiff<I>, 1>,
+    inflow_mean: Vec<f32>,
+    /// Account: `Σ Vc`, `Σ Ve`, `max F` (including the carried-in state),
+    /// `Σ I·dt`, m³, and the steps routed.
+    captured: Tensor<I, 1>,
+    evacuated: Tensor<I, 1>,
+    f_peak: Tensor<I, 1>,
+    inflow: Tensor<I, 1>,
+    steps: usize,
+}
+
+impl<I: Backend> ArmedFloodPool<I> {
+    /// One step's pool fluxes (see [`FloodPool`]): `(Ve − Vc)/dt` per pooled
+    /// dam, m³/s, to add to its `q'`; updates `F` and the account. `q_t` is the
+    /// routed discharge at the step start (`[n]`), `q_prime` the lateral
+    /// inflow after the floor and the divisor, before the rule-curve flux.
+    fn step(&mut self, q_t: Tensor<Autodiff<I>, 1>, q_prime: Tensor<Autodiff<I>, 1>, dt: f32) -> Tensor<Autodiff<I>, 1> {
+        let own = q_prime.select(0, self.rows_ad.clone());
+        let inflow = match &self.upstream {
+            Some((src, dst, w)) => {
+                let up = q_t.select(0, src.clone());
+                let up = match w {
+                    Some(w) => up * w.clone(),
+                    None => up,
+                };
+                let n_pool = self.rows.len();
+                Tensor::<Autodiff<I>, 1>::zeros([n_pool], &own.device()).select_assign(
+                    0,
+                    dst.clone(),
+                    up,
+                    IndexingUpdateOp::Add,
+                ) + own
+            }
+            None => own,
+        };
+        let want = (inflow.clone() - self.qc.clone()).clamp_min(0.0) * self.phi.clone() * dt;
+        let room = (self.fmax.clone() - self.f.clone()).clamp_min(0.0);
+        let vc = want.min_pair(room);
+        let pass = inflow.clone() - vc.clone() / dt;
+        let head = (self.qc.clone() - pass).clamp_min(0.0) * dt;
+        let ve = self.f.clone().min_pair(head);
+        self.f = self.f.clone() + vc.clone() - ve.clone();
+        self.captured = self.captured.clone() + vc.clone().inner();
+        self.evacuated = self.evacuated.clone() + ve.clone().inner();
+        self.f_peak = self.f_peak.clone().max_pair(self.f.clone().inner());
+        self.inflow = self.inflow.clone() + inflow.inner() * dt;
+        self.steps += 1;
+        (ve - vc) / dt
+    }
+}
+
+/// Host copy of the engine's flood pool account
+/// ([`MuskingumCunge::flood_pool_account`]) over the routed steps; one entry
+/// per pooled dam, in the armed order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FloodPoolAccount {
+    /// Network rows of the pooled dams.
+    pub rows: Vec<usize>,
+    /// `Σ Vc`: volume the pool captured, m³.
+    pub captured_m3: Vec<f64>,
+    /// `Σ Ve`: volume it evacuated, m³.
+    pub evacuated_m3: Vec<f64>,
+    /// `F` after the last routed step, m³ (the next test-phase chunk starts
+    /// from it).
+    pub f_end_m3: Vec<f64>,
+    /// Largest `F` held, m³ (the carried-in state counts).
+    pub f_peak_m3: Vec<f64>,
+    /// Capacity `Fmax = z·Ibar·86400`, m³.
+    pub fmax_m3: Vec<f64>,
+    /// `Ibar`, m³/s.
+    pub inflow_mean_m3s: Vec<f64>,
+    /// `Σ I·dt`: the dam's inflow (routed upstream plus its own `q'`) at the
+    /// step starts, m³.
+    pub inflow_m3: Vec<f64>,
+    /// Routed steps.
+    pub steps: u64,
+}
+
 /// [`DamRelease`] armed on an engine: the dam rows as device tensors, plus the
 /// constant `T` (seconds) when the release is not seasonal, and the step `T`
 /// `forward` hands to `route_timestep`.
@@ -511,6 +657,9 @@ pub struct MuskingumCunge<I: Backend> {
     /// The last routed step's pre-clamp solve and routed inflow, handed from
     /// `route_timestep` to `forward`'s accounting.
     last_dam_diag: Option<crate::routing::mmc_op::DamStepDiag<I>>,
+    /// Per-dam flood pool on armed dam rows ([`FloodPool`],
+    /// `set_flood_pool`). `None` routes bitwise as before the pool existed.
+    flood_pool: Option<ArmedFloodPool<I>>,
     /// What the S28 clamp does with the water it creates on a dam row
     /// ([`DamFloor`]; `Config::dam_floor` at construction). `Forgive` routes
     /// bitwise as before the option existed.
@@ -624,6 +773,7 @@ impl<I: Backend> MuskingumCunge<I> {
             release: None,
             dam_account: None,
             last_dam_diag: None,
+            flood_pool: None,
             dam_floor,
             dam_row_positivity,
             n_segments: None,
@@ -745,6 +895,7 @@ impl<I: Backend> MuskingumCunge<I> {
         self.reservoir = None;
         self.release = None;
         self.dam_account = None;
+        self.flood_pool = None;
 
         match initial_state {
             Some(q0_ext) => {
@@ -939,6 +1090,8 @@ impl<I: Backend> MuskingumCunge<I> {
             }
         });
         self.dam_account = (!rows.is_empty()).then(|| DamAccount::new(rows, false, &self.device));
+        // A pool indexes the previous dam rows: re-arm it after this call.
+        self.flood_pool = None;
         Ok(())
     }
 
@@ -1013,6 +1166,8 @@ impl<I: Backend> MuskingumCunge<I> {
                 ));
             }
         }
+        // A pool indexes the previous dam rows: re-arm it after this call.
+        self.flood_pool = None;
         if n_dams == 0 {
             self.release = None;
             self.dam_account = None;
@@ -1058,6 +1213,149 @@ impl<I: Backend> MuskingumCunge<I> {
         let record_qin = self.release.as_ref().is_some_and(|r| r.rule_curve.is_some());
         self.dam_account = Some(DamAccount::new(&release.rows, record_qin, &self.device));
         Ok(())
+    }
+
+    /// Arm the per-dam flood pool ([`FloodPool`]) on dam rows already armed
+    /// with `set_reservoir_rows_as` or `set_dam_release` (call after them;
+    /// re-arming the dams drops the pool). Every pool starts empty; see
+    /// [`Self::set_flood_pool_state`] to carry one in. Empty `rows` leaves
+    /// the engine without a pool.
+    ///
+    /// `Err`, changing nothing, without armed dam rows, on a row that is not
+    /// an armed dam row or is listed twice, a parameter length that is not
+    /// `rows.len()`, or an `Ibar` that is negative or not finite.
+    pub fn set_flood_pool(&mut self, pool: FloodPool<I>) -> Result<(), String> {
+        let dams = self
+            .dam_account
+            .as_ref()
+            .ok_or("set_flood_pool: no dam rows are armed; call set_reservoir_rows_as / set_dam_release first")?;
+        let n_pool = pool.rows.len();
+        let mut seen = std::collections::HashSet::new();
+        for &row in &pool.rows {
+            if !dams.rows.contains(&row) {
+                return Err(format!("set_flood_pool: row {row} is not an armed dam row"));
+            }
+            if !seen.insert(row) {
+                return Err(format!("set_flood_pool: row {row} is listed twice"));
+            }
+        }
+        for (name, len) in [
+            ("kc", pool.kc.dims()[0]),
+            ("phi", pool.phi.dims()[0]),
+            ("z", pool.z_days.dims()[0]),
+            ("Ibar", pool.inflow_mean.len()),
+        ] {
+            if len != n_pool {
+                return Err(format!("set_flood_pool: {name} has {len} entries but there are {n_pool} pooled dams"));
+            }
+        }
+        if let Some(v) = pool.inflow_mean.iter().find(|v| !(v.is_finite() && **v >= 0.0)) {
+            return Err(format!("set_flood_pool: Ibar {v} must be finite and >= 0"));
+        }
+        if n_pool == 0 {
+            self.flood_pool = None;
+            return Ok(());
+        }
+        let device = self.device.clone();
+        let pattern = self.pattern.as_ref().ok_or("set_flood_pool: call setup_inputs first")?;
+        // Upstream edges of each pooled row, from the CSR pattern (diagonal
+        // slots carry weight 0 and are skipped).
+        let (mut src, mut dst, mut w) = (Vec::new(), Vec::new(), Vec::new());
+        for (slot, &row) in pool.rows.iter().enumerate() {
+            for k in pattern.crow[row] as usize..pattern.crow[row + 1] as usize {
+                let col = pattern.col[k] as usize;
+                if col != row && pattern.adj_values[k] != 0.0 {
+                    src.push(col as i64);
+                    dst.push(slot as i64);
+                    w.push(pattern.adj_values[k]);
+                }
+            }
+        }
+        let idx = |v: Vec<i64>| {
+            let n = v.len();
+            Tensor::<Autodiff<I>, 1, Int>::from_data(TensorData::new(v, [n]), &device)
+        };
+        let upstream = (!src.is_empty()).then(|| {
+            let weights = w
+                .iter()
+                .any(|&x| x != 1.0)
+                .then(|| Tensor::<Autodiff<I>, 1>::from_floats(w.as_slice(), &device));
+            (idx(src), idx(dst), weights)
+        });
+        let ibar = Tensor::<Autodiff<I>, 1>::from_floats(pool.inflow_mean.as_slice(), &device);
+        let rows_i: Vec<i64> = pool.rows.iter().map(|&r| r as i64).collect();
+        self.flood_pool = Some(ArmedFloodPool {
+            rows: pool.rows.clone(),
+            rows_ad: idx(rows_i),
+            upstream,
+            qc: pool.kc * ibar.clone(),
+            phi: pool.phi,
+            fmax: pool.z_days * (ibar * SECONDS_PER_DAY),
+            f: Tensor::zeros([n_pool], &device),
+            inflow_mean: pool.inflow_mean,
+            captured: Tensor::zeros([n_pool], &device),
+            evacuated: Tensor::zeros([n_pool], &device),
+            f_peak: Tensor::zeros([n_pool], &device),
+            inflow: Tensor::zeros([n_pool], &device),
+            steps: 0,
+        });
+        Ok(())
+    }
+
+    /// Start the armed pools holding `f_m3` (m³, one per pooled dam in the
+    /// armed order, [`FloodPoolAccount::rows`]) instead of empty, e.g. the
+    /// pools at the end of the previous test-phase chunk. A constant (no
+    /// gradient). Call after [`Self::set_flood_pool`], before `forward`.
+    /// `Err`, changing nothing, without a pool, on a length mismatch, or on a
+    /// value that is negative or not finite.
+    pub fn set_flood_pool_state(&mut self, f_m3: &[f64]) -> Result<(), String> {
+        let p = self.flood_pool.as_mut().ok_or("set_flood_pool_state: no flood pool is armed")?;
+        if f_m3.len() != p.rows.len() {
+            return Err(format!(
+                "set_flood_pool_state: {} pool volumes for {} pooled dams",
+                f_m3.len(),
+                p.rows.len()
+            ));
+        }
+        if let Some(v) = f_m3.iter().find(|v| !(v.is_finite() && **v >= 0.0)) {
+            return Err(format!("set_flood_pool_state: pool volume {v} must be finite and >= 0"));
+        }
+        let v: Vec<f32> = f_m3.iter().map(|&v| v as f32).collect();
+        p.f = Tensor::from_floats(v.as_slice(), &self.device);
+        p.f_peak = Tensor::from_floats(v.as_slice(), &self.device);
+        Ok(())
+    }
+
+    /// The pooled dams' rows, in the armed order; `None` without a pool.
+    pub fn flood_pool_rows(&self) -> Option<&[usize]> {
+        self.flood_pool.as_ref().map(|p| p.rows.as_slice())
+    }
+
+    /// The flood pools' volumes now, m³, on the autodiff tape (the pooled
+    /// dams in the armed order); `None` without a pool. After `forward`, the
+    /// window's closing pools.
+    pub fn flood_pool_state(&self) -> Option<Tensor<Autodiff<I>, 1>> {
+        self.flood_pool.as_ref().map(|p| p.f.clone())
+    }
+
+    /// The flood pool account ([`FloodPoolAccount`]) over every step
+    /// `forward` has routed since the pool was armed; `None` without a pool.
+    pub fn flood_pool_account(&self) -> Option<FloodPoolAccount> {
+        let p = self.flood_pool.as_ref()?;
+        let host = |t: Tensor<I, 1>| -> Vec<f64> {
+            t.into_data().convert::<f32>().to_vec::<f32>().expect("f32").into_iter().map(f64::from).collect()
+        };
+        Some(FloodPoolAccount {
+            rows: p.rows.clone(),
+            captured_m3: host(p.captured.clone()),
+            evacuated_m3: host(p.evacuated.clone()),
+            f_end_m3: host(p.f.clone().inner()),
+            f_peak_m3: host(p.f_peak.clone()),
+            fmax_m3: host(p.fmax.clone().inner()),
+            inflow_mean_m3s: p.inflow_mean.iter().map(|&v| v as f64).collect(),
+            inflow_m3: host(p.inflow.clone()),
+            steps: p.steps as u64,
+        })
     }
 
     /// Muskingum-Cunge coefficients `(c1, c2, c3, c4)`. Direct port of
@@ -1267,6 +1565,8 @@ impl<I: Backend> MuskingumCunge<I> {
             // The dam's own lateral inflow for the clamp account, before the
             // rule-curve flux below.
             let q_prime_pre = self.dam_account.is_some().then(|| q_prime_t.clone().inner());
+            // The same, on the tape, for the flood pool's inflow.
+            let q_prime_pool = self.flood_pool.is_some().then(|| q_prime_t.clone());
             // Dam release: T at this step's end (hour t) and start (hour
             // t − 1), for the storage-conserving dam row
             // (`crate::routing::release`, S19''' in `mmc_op`).
@@ -1302,6 +1602,17 @@ impl<I: Backend> MuskingumCunge<I> {
                     let rate = acc.repay(i_t, q_pre.clone(), discharge_lb, self.dt);
                     let rows = Tensor::<Autodiff<I>, 1, Int>::from_inner(acc.rows_t.clone());
                     q_prime_t.select_assign(0, rows, -Tensor::<Autodiff<I>, 1>::from_inner(rate), IndexingUpdateOp::Add)
+                }
+                _ => q_prime_t,
+            };
+            // Flood pool (law FA, `FloodPool`): capture above the release
+            // target from the dam's step-start inflow `(N·Q_t)_d + q'_d`,
+            // evacuate at the target, both on the dam row's q'. On the tape.
+            let q_prime_t = match (self.flood_pool.as_mut(), q_prime_pool) {
+                (Some(pool), Some(q_own)) => {
+                    let q_t = self.discharge_t.as_ref().expect("setup_inputs ran").clone();
+                    let rate = pool.step(q_t, q_own, self.dt);
+                    q_prime_t.select_assign(0, pool.rows_ad.clone(), rate, IndexingUpdateOp::Add)
                 }
                 _ => q_prime_t,
             };

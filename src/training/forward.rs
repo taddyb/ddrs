@@ -9,7 +9,7 @@ use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 use crate::config::Config;
 use crate::data::dataset::RoutingTensors;
 use crate::data::store::ReservoirRows;
-use crate::routing::mmc::{DamRelease, MuskingumCunge, RoutingInputs, RuleCurve, SpatialParameters};
+use crate::routing::mmc::{DamRelease, FloodPool, MuskingumCunge, RoutingInputs, RuleCurve, SpatialParameters};
 use crate::routing::utils::denormalize;
 use crate::training::gate::leakance_gate;
 
@@ -336,12 +336,93 @@ pub fn apply_reservoir_rows_with<I: Backend>(
         engine
             .set_reservoir_rows_as(&rows.rows, &rows.t_days, dam_row)
             .expect("reservoir rows are mapped from this batch's own COMID order");
+        arm_flood_pool(cfg, engine, rows, dams, &device);
         return;
     };
     let phase = crate::routing::release::seasonal_phase(window_start, n_hours);
     engine
         .set_dam_release(DamRelease { phase, ..release })
         .expect("dam rows are mapped from this batch's own COMID order");
+    arm_flood_pool(cfg, engine, rows, dams, &device);
+}
+
+/// Arm the per-dam flood pool (`crate::routing::mmc::FloodPool`) on the dams
+/// of `rows` (the window's ACTIVE rows, already armed on `engine`) when
+/// [`Config::flood_pool_on`]. A learned table pools the dams
+/// `release_head.flood_pool` selects (`flood_control`: `purpose_flood`) with
+/// `(kc, phi, z)` from the per-dam parameters at their feature-table rows
+/// (autodiff alive); a fixed table (the resolved test-phase table, or an
+/// offline fit) pools every dam whose `z > 0`, with constants. `Ibar` is the
+/// table's `inflow_mean_m3s`. A no-op otherwise.
+fn arm_flood_pool<I: Backend>(
+    cfg: &Config,
+    engine: &mut MuskingumCunge<I>,
+    rows: &ReservoirRows,
+    dams: Option<&crate::nn::dam_params::DamParams<Autodiff<I>>>,
+    device: &I::Device,
+) {
+    if !cfg.flood_pool_on() || rows.rows.is_empty() {
+        return;
+    }
+    let n = rows.rows.len();
+    let ibar = |pick: &[usize]| -> Vec<f32> {
+        assert_eq!(rows.inflow_mean.len(), n, "the flood pool needs the table's inflow_mean_m3s (checked at dataset open)");
+        pick.iter().map(|&j| rows.inflow_mean[j]).collect()
+    };
+    let pool = if rows.features.is_some() {
+        let mode = cfg.release_head.as_ref().map(|s| s.flood_pool).unwrap_or_default();
+        let pick: Vec<usize> = match mode {
+            crate::config::FloodPoolMode::None => return,
+            crate::config::FloodPoolMode::FloodControl => {
+                assert_eq!(
+                    rows.purpose_flood.len(),
+                    n,
+                    "flood_pool: flood_control needs the table's purpose_flood column (checked at dataset open)"
+                );
+                (0..n).filter(|&j| rows.purpose_flood[j]).collect()
+            }
+            crate::config::FloodPoolMode::All => (0..n).collect(),
+        };
+        if pick.is_empty() {
+            return;
+        }
+        let d = dams.expect(
+            "release_head.flood_pool rows reached a forward without the per-dam parameters \
+             (training::driver::DamTrainer); resolve the learned release into a fixed table first",
+        );
+        let table_rows: Vec<usize> = pick.iter().map(|&j| rows.table_index[j]).collect();
+        let p = d
+            .pool_params(crate::nn::dam_params::table_index::<Autodiff<I>>(&table_rows, device))
+            .expect("release_head.flood_pool carries the pool parameters");
+        FloodPool {
+            rows: pick.iter().map(|&j| rows.rows[j]).collect(),
+            kc: p.kc,
+            phi: p.phi,
+            z_days: p.z_days,
+            inflow_mean: ibar(&pick),
+        }
+    } else {
+        let table = rows.flood_pool.as_ref().expect(
+            "params.reservoir_flood_pool: true but the table carries no kc, phi, z columns \
+             (checked at dataset open)",
+        );
+        let pick: Vec<usize> = (0..n).filter(|&j| table[j][2] > 0.0).collect();
+        if pick.is_empty() {
+            return;
+        }
+        let col = |k: usize| {
+            let v: Vec<f32> = pick.iter().map(|&j| table[j][k]).collect();
+            Tensor::<Autodiff<I>, 1>::from_floats(v.as_slice(), device)
+        };
+        FloodPool {
+            rows: pick.iter().map(|&j| rows.rows[j]).collect(),
+            kc: col(0),
+            phi: col(1),
+            z_days: col(2),
+            inflow_mean: ibar(&pick),
+        }
+    };
+    engine.set_flood_pool(pool).expect("pooled rows are this window's armed dam rows");
 }
 
 /// The device an engine was built on (its routing state lives there).
@@ -601,6 +682,9 @@ pub struct ForwardRecord {
     /// This forward's per-dam S28 clamp account (one window), whenever dam
     /// rows are armed; the driver logs it per mini-batch.
     pub dam_clamp: Option<crate::routing::mmc::DamClampAccount>,
+    /// This forward's flood pool account (one window), whenever a pool is
+    /// armed; the driver logs it per optimizer step.
+    pub flood_pool: Option<crate::routing::mmc::FloodPoolAccount>,
 }
 
 /// [`forward_with_release_dams`] that also returns the [`ForwardRecord`]:
@@ -747,7 +831,10 @@ pub fn forward_with_release_dams_record<I: Backend>(
         tensors.group_ids.clone(),
         tensors.num_gauges,
     );
-    (pred, ForwardRecord { rule_curve, dam_clamp: engine.dam_account() })
+    (
+        pred,
+        ForwardRecord { rule_curve, dam_clamp: engine.dam_account(), flood_pool: engine.flood_pool_account() },
+    )
 }
 
 /// Running zeta accumulation across chunked `forward_eval` calls (eval builds
@@ -973,6 +1060,25 @@ pub fn carry_dam_owed<I: Backend>(
         .expect("carried owed volumes are finite, >= 0, one per armed dam");
 }
 
+/// Every dam state the test phase carries across its chunks (the test period
+/// is continuous): the carried floor's owed volume ([`carry_dam_owed`]) and
+/// the flood pools (`DamClampSums::pool_f_for`: each pooled dam starts the
+/// chunk holding what it held at the end of the previous one, 0 for a dam
+/// pooled for the first time, e.g. one completed since). Call after
+/// [`apply_reservoir_rows`], before `forward`; merge the engine's accounts
+/// back into `sums` afterwards (`DamClampSums::merge` / `merge_pool`).
+pub fn carry_dam_state<I: Backend>(
+    engine: &mut MuskingumCunge<I>,
+    sums: &crate::training::release_eval::DamClampSums,
+) {
+    carry_dam_owed(engine, sums);
+    let Some(rows) = engine.flood_pool_rows() else { return };
+    let f = sums.pool_f_for(rows);
+    engine
+        .set_flood_pool_state(&f)
+        .expect("carried pool volumes are finite, >= 0, one per pooled dam");
+}
+
 /// [`forward_eval_reaches`] that also merges the chunk engine's per-dam S28
 /// clamp account into `dams` (`crate::routing::mmc::DamClampAccount`) when
 /// dam rows are armed. The test phase (`training::eval::evaluate`) uses it
@@ -1144,10 +1250,11 @@ fn forward_eval_core<I: Backend>(
         n_hourly,
         None,
     );
-    // Carried dam floor: each armed dam starts this chunk owing what it owed
-    // at the end of the previous one (the test period is continuous).
+    // Carried dam state: each armed dam starts this chunk owing what it owed,
+    // and each pool holding what it held, at the end of the previous one (the
+    // test period is continuous).
     if let Some(sink) = dams.as_deref() {
-        carry_dam_owed(&mut engine, sink);
+        carry_dam_state(&mut engine, sink);
     }
     if zeta.is_some() {
         engine.enable_zeta_accumulation();
@@ -1159,8 +1266,13 @@ fn forward_eval_core<I: Backend>(
             sink.merge(sums);
         }
     }
-    if let (Some(sink), Some(account)) = (dams, engine.dam_account()) {
-        sink.merge(&account);
+    if let Some(sink) = dams {
+        if let Some(account) = engine.dam_account() {
+            sink.merge(&account);
+        }
+        if let Some(pool) = engine.flood_pool_account() {
+            sink.merge_pool(&pool);
+        }
     }
 
     runoff

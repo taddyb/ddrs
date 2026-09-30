@@ -162,6 +162,17 @@ change.
   checkpoint (training and test phase), and only the release head trains, through the solve.
   This removes the co-training confound (undammed gauges are then unchanged by construction).
   `tests/release_freeze_routing.rs`; config contract in `skills/ddrs-dev/references/config.md`.
+- **Flood pool (v6, 2026-09-29, `release_head.flood_pool` / `params.reservoir_flood_pool`).** Law FA of
+  `experiments/reservoir/laws_v6` (report §2, §5) on top of the dam row: a per-dam pool `F` captures
+  `phi·(I − kc·Ibar)+` of the dam's step-start inflow `I = (N·Q_t)_d + q'_d` up to `Fmax = z·Ibar` and
+  evacuates it at the release target `kc·Ibar`, both as fluxes on the dam row's `q'` (`src/routing/mmc.rs`
+  `FloodPool`; A, the pattern and the backward unchanged). Mass-exact by construction, never uses the floor.
+  `kc`, `phi`, `z` are per-dam free parameters (`dam_params.rs` `pool`, raw 0 = kc 3, phi 0.5, z 0.05 d);
+  `F` is on the tape within a window and `I` is not detached; `F` restarts empty per training window and is
+  carried across test-phase chunks (`carry_dam_state`). `flood_control` pools the `purpose_flood` dams.
+  Pool configs train on 180-day windows with a 30-day warm-up (`testing.warmup: 5` keeps the test metrics
+  comparable). Contract and logs: `skills/ddrs-dev/references/config.md` `flood_pool`;
+  `tests/reservoir_flood_pool.rs`. Replay of the offline fits: `experiments/reservoir/smoke/replay_flood_pool.py`.
 - **Off is identical.** `use_reservoirs: false`, or a `fixed` table without `a`/`b`, runs the
   historical ops and nodes; `a = b = 0` is bitwise option C (`tests/reservoir_release.rs`).
 - **Refusals.** A learned table reaching a forward with no release head panics (probe and frozen

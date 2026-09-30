@@ -16,7 +16,7 @@ use std::path::Path;
 
 use burn::tensor::{backend::Backend, Tensor};
 
-use crate::config::{Config, DamFloor, DamRow, ReservoirRelease};
+use crate::config::{Config, DamFloor, DamRow, FloodPoolMode, ReservoirRelease};
 use crate::data::dataset::MeritGagesDataset;
 use crate::data::error::{DataError, Result};
 use crate::data::store::{DamFeatures, FixedDam, FixedTable, ReservoirTable};
@@ -82,6 +82,25 @@ pub fn resolve_release_table_with<B: Backend>(
     };
     // Ibar travels with the rule curve (and whenever the table has it).
     let inflow_mean = features.inflow_mean.clone();
+    // The flood pool: every dam's (kc, phi, z) from the same transform
+    // training applies to the batch's rows; a dam training does not pool
+    // (`flood_control` without `purpose_flood`) gets z = 0, which the fixed
+    // path does not arm.
+    let flood_pool = match (dams, section.map(|s| s.flood_pool)) {
+        (Some(d), Some(mode)) if mode != FloodPoolMode::None => {
+            let p = d.pool_params(idx()).expect("flood_pool carries the pool parameters");
+            let (kc, phi, z) = (host(p.kc), host(p.phi), host(p.z_days));
+            let pooled = |i: usize| match mode {
+                FloodPoolMode::FloodControl => features
+                    .purpose_flood
+                    .as_ref()
+                    .expect("flood_pool: flood_control needs purpose_flood (checked at dataset open)")[i],
+                _ => true,
+            };
+            Some((0..n).map(|i| [kc[i], phi[i], if pooled(i) { z[i] } else { 0.0 }]).collect::<Vec<[f32; 3]>>())
+        }
+        _ => None,
+    };
     let seasonal = p.seasonal.is_some();
     let floor = t_floor_days(cfg.dam_row());
     let (a, b) = match p.seasonal {
@@ -103,10 +122,10 @@ pub fn resolve_release_table_with<B: Backend>(
         })
         .collect();
     assert!(
-        rule_curve.is_none() || inflow_mean.is_some(),
-        "a rule curve resolves only with the table's inflow_mean_m3s (checked at dataset open)"
+        (rule_curve.is_none() && flood_pool.is_none()) || inflow_mean.is_some(),
+        "a rule curve or flood pool resolves only with the table's inflow_mean_m3s (checked at dataset open)"
     );
-    FixedTable { dams, seasonal, rule_curve, inflow_mean }
+    FixedTable { dams, seasonal, rule_curve, inflow_mean, flood_pool }
 }
 
 /// For a `reservoir_release: learned` config: load the release head from
@@ -143,10 +162,11 @@ pub fn resolve_learned_release<B: Backend>(
     // be resolved without them.
     let dams = if section.has_per_dam() {
         let dbase = release_dams_base(ckpt_dir);
-        let template = DamParams::<B>::zeros(
+        let template = DamParams::<B>::zeros_with_pool(
             features.comids.len(),
             section.rule_curve,
             section.per_dam_t0,
+            section.flood_pool != FloodPoolMode::None,
             device,
         );
         Some(load_dam_params::<B>(&dbase, template, device)?)
@@ -158,12 +178,18 @@ pub fn resolve_learned_release<B: Backend>(
     use std::io::Write;
     let _ = writeln!(
         std::io::stderr(),
-        "release head: resolved {} dams from {}.mpk (seasonal: {}, rule curve: {}, per-dam T0: {})",
+        "release head: resolved {} dams from {}.mpk (seasonal: {}, rule curve: {}, per-dam T0: {}, \
+         flood pool: {}{})",
         table.dams.len(),
         base.display(),
         table.seasonal,
         table.rule_curve.is_some(),
-        section.per_dam_t0
+        section.per_dam_t0,
+        section.flood_pool.name(),
+        table.flood_pool.as_ref().map_or(String::new(), |p| format!(
+            ", {} dams pooled",
+            p.iter().filter(|v| v[2] > 0.0).count()
+        )),
     );
     Ok(Some(table))
 }
@@ -172,12 +198,21 @@ pub fn resolve_learned_release<B: Backend>(
 /// `COMID,T0_days,a,b,T_min_days,T_max_days`, the extremes after `dam_row`'s
 /// floor.
 pub fn write_release_params_csv(path: &Path, table: &FixedTable, dam_row: DamRow) -> Result<()> {
-    // With a rule curve, the coefficients and Ibar follow (the columns the
-    // fixed-table reader accepts; T0_days is the effective T0).
-    let rule = table.rule_curve.as_ref().zip(table.inflow_mean.as_ref());
+    // With a rule curve, the coefficients follow, with a flood pool its
+    // `kc, phi, z` (days; 0 = no pool), and with either, Ibar: the columns the
+    // fixed-table reader accepts (T0_days is the effective T0).
+    let rule = table.rule_curve.as_ref();
+    let pool = table.flood_pool.as_ref();
+    let ibar = table.inflow_mean.as_ref().filter(|_| rule.is_some() || pool.is_some());
     let mut out = String::from("COMID,T0_days,a,b,T_min_days,T_max_days");
     if rule.is_some() {
-        out.push_str(",c1s,c1c,c2s,c2c,inflow_mean_m3s");
+        out.push_str(",c1s,c1c,c2s,c2c");
+    }
+    if pool.is_some() {
+        out.push_str(",kc,phi,z");
+    }
+    if ibar.is_some() {
+        out.push_str(",inflow_mean_m3s");
     }
     out.push('\n');
     for (i, d) in table.dams.iter().enumerate() {
@@ -187,9 +222,16 @@ pub fn write_release_params_csv(path: &Path, table: &FixedTable, dam_row: DamRow
             (d.t_days, d.t_days)
         };
         out.push_str(&format!("{},{},{},{},{},{}", d.comid.0, d.t_days, d.a, d.b, lo, hi));
-        if let Some((c, q)) = rule {
+        if let Some(c) = rule {
             let [c1s, c1c, c2s, c2c] = c[i];
-            out.push_str(&format!(",{c1s},{c1c},{c2s},{c2c},{}", q[i]));
+            out.push_str(&format!(",{c1s},{c1c},{c2s},{c2c}"));
+        }
+        if let Some(p) = pool {
+            let [kc, phi, z] = p[i];
+            out.push_str(&format!(",{kc},{phi},{z}"));
+        }
+        if let Some(q) = ibar {
+            out.push_str(&format!(",{}", q[i]));
         }
         out.push('\n');
     }
@@ -203,6 +245,183 @@ pub fn write_release_params_csv(path: &Path, table: &FixedTable, dam_row: DamRow
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DamClampSums {
     pub by_row: std::collections::BTreeMap<usize, DamClampRecord>,
+    /// The flood pools' account over the chunks, by network row
+    /// ([`Self::merge_pool`]); empty without a pool.
+    pub pool_by_row: std::collections::BTreeMap<usize, PoolRecord>,
+}
+
+/// One pooled dam's flood pool account (`crate::routing::mmc::FloodPoolAccount`)
+/// over the routed test period, or in training over one window.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PoolRecord {
+    /// MERIT COMID of the dam reach (0 until [`DamClampSums::pool_records`]
+    /// names it, and in training).
+    pub comid: i64,
+    /// Volume the pool captured, m³.
+    pub captured_m3: f64,
+    /// Volume it evacuated, m³.
+    pub evacuated_m3: f64,
+    /// What it holds at the end of the period (the last chunk), m³.
+    /// `captured − evacuated = f_end` over a period that starts empty.
+    pub f_end_m3: f64,
+    /// The most it held, m³.
+    pub f_peak_m3: f64,
+    /// Capacity `Fmax = z·Ibar·86400`, m³.
+    pub fmax_m3: f64,
+    /// `Ibar`, m³/s.
+    pub inflow_mean_m3s: f64,
+    /// The dam's inflow (routed upstream plus its own `q'`) at the step
+    /// starts, `Σ I·dt`, m³.
+    pub inflow_m3: f64,
+    /// Steps the pool was armed.
+    pub steps: u64,
+}
+
+impl PoolRecord {
+    /// The most the pool held, in days of mean inflow (`f_peak / (Ibar·86400)`).
+    pub fn max_f_days(&self) -> f64 {
+        if self.f_peak_m3 == 0.0 { 0.0 } else { self.f_peak_m3 / (self.inflow_mean_m3s * 86_400.0) }
+    }
+
+    /// The pool size, days of mean inflow (`z`).
+    pub fn fmax_days(&self) -> f64 {
+        if self.fmax_m3 == 0.0 { 0.0 } else { self.fmax_m3 / (self.inflow_mean_m3s * 86_400.0) }
+    }
+
+    /// `f_end / Fmax` (0 for an empty pool).
+    pub fn fill_end(&self) -> f64 {
+        if self.f_end_m3 == 0.0 { 0.0 } else { self.f_end_m3 / self.fmax_m3 }
+    }
+
+    /// `f_peak / Fmax` (0 for a pool never filled).
+    pub fn fill_peak(&self) -> f64 {
+        if self.f_peak_m3 == 0.0 { 0.0 } else { self.f_peak_m3 / self.fmax_m3 }
+    }
+}
+
+/// One record per pooled dam of one engine's pool account (`comid` 0): one
+/// dam over one training window.
+pub fn pool_account_records(a: &crate::routing::mmc::FloodPoolAccount) -> Vec<PoolRecord> {
+    (0..a.rows.len())
+        .map(|i| PoolRecord {
+            comid: 0,
+            captured_m3: a.captured_m3[i],
+            evacuated_m3: a.evacuated_m3[i],
+            f_end_m3: a.f_end_m3[i],
+            f_peak_m3: a.f_peak_m3[i],
+            fmax_m3: a.fmax_m3[i],
+            inflow_mean_m3s: a.inflow_mean_m3s[i],
+            inflow_m3: a.inflow_m3[i],
+            steps: a.steps,
+        })
+        .collect()
+}
+
+/// The flood pools of a set of records, as the training log line, the test
+/// phase's log line and the manifest's `metrics.release_pool` read them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PoolSummary {
+    /// Records (dams, or dam-windows).
+    pub n: usize,
+    pub captured_m3: f64,
+    pub evacuated_m3: f64,
+    /// `Σ f_end`.
+    pub f_end_m3: f64,
+    /// `Σ inflow` of the pooled dams.
+    pub inflow_m3: f64,
+    /// Median over records of `f_end / Fmax` and of `f_peak / Fmax`.
+    pub fill_end_median: f64,
+    pub fill_peak_median: f64,
+    /// Median over records of the pool size `z` and of the most held, days of
+    /// mean inflow.
+    pub fmax_days_median: f64,
+    pub max_f_days_median: f64,
+    /// Median over records of `captured / inflow`.
+    pub capture_share_median: f64,
+}
+
+/// [`PoolSummary`] of `records`.
+pub fn pool_summary(records: &[PoolRecord]) -> PoolSummary {
+    let median = |mut v: Vec<f64>| -> f64 {
+        if v.is_empty() {
+            return 0.0;
+        }
+        v.sort_by(f64::total_cmp);
+        let m = v.len() / 2;
+        if v.len() % 2 == 0 { 0.5 * (v[m - 1] + v[m]) } else { v[m] }
+    };
+    let of = |f: fn(&PoolRecord) -> f64| median(records.iter().map(f).collect());
+    PoolSummary {
+        n: records.len(),
+        captured_m3: records.iter().map(|r| r.captured_m3).sum(),
+        evacuated_m3: records.iter().map(|r| r.evacuated_m3).sum(),
+        f_end_m3: records.iter().map(|r| r.f_end_m3).sum(),
+        inflow_m3: records.iter().map(|r| r.inflow_m3).sum(),
+        fill_end_median: of(PoolRecord::fill_end),
+        fill_peak_median: of(PoolRecord::fill_peak),
+        fmax_days_median: of(PoolRecord::fmax_days),
+        max_f_days_median: of(PoolRecord::max_f_days),
+        capture_share_median: of(|r| if r.captured_m3 == 0.0 { 0.0 } else { r.captured_m3 / r.inflow_m3 }),
+    }
+}
+
+impl PoolSummary {
+    /// The log fragment; `unit` names a record ("dam", "dam-window").
+    pub fn describe(&self, unit: &str) -> String {
+        format!(
+            "{} {unit}s; fill F/Fmax median {:.4} at the end, {:.4} at the peak; pool size median {:.3} d, \
+             most held median {:.3} d of mean inflow; captured {:.4e} m3 (median {:.4}% of a {unit}'s \
+             inflow), evacuated {:.4e} m3, held at the end {:.4e} m3",
+            self.n,
+            self.fill_end_median,
+            self.fill_peak_median,
+            self.fmax_days_median,
+            self.max_f_days_median,
+            self.captured_m3,
+            100.0 * self.capture_share_median,
+            self.evacuated_m3,
+            self.f_end_m3,
+        )
+    }
+
+    /// `metrics.release_pool` in the run manifest.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "n_dams": self.n,
+            "captured_m3": self.captured_m3,
+            "evacuated_m3": self.evacuated_m3,
+            "f_end_m3": self.f_end_m3,
+            "inflow_m3": self.inflow_m3,
+            "fill_end_median": self.fill_end_median,
+            "fill_peak_median": self.fill_peak_median,
+            "fmax_days_median": self.fmax_days_median,
+            "max_f_days_median": self.max_f_days_median,
+            "capture_share_median": self.capture_share_median,
+        })
+    }
+}
+
+/// Write the test phase's per-dam flood pool account:
+/// `COMID,captured_m3,evacuated_m3,F_end_m3,max_F_days,Fmax_days,inflow_mean_m3s,inflow_m3,steps`,
+/// one row per dam pooled at least once, in network row order.
+pub fn write_release_pool_csv(path: &Path, records: &[PoolRecord]) -> Result<()> {
+    let mut out =
+        String::from("COMID,captured_m3,evacuated_m3,F_end_m3,max_F_days,Fmax_days,inflow_mean_m3s,inflow_m3,steps\n");
+    for r in records {
+        out.push_str(&format!(
+            "{},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{:.6e},{}\n",
+            r.comid,
+            r.captured_m3,
+            r.evacuated_m3,
+            r.f_end_m3,
+            r.max_f_days(),
+            r.fmax_days(),
+            r.inflow_mean_m3s,
+            r.inflow_m3,
+            r.steps
+        ));
+    }
+    std::fs::write(path, out).map_err(|source| DataError::Io { path: path.to_path_buf(), source })
 }
 
 /// One dam's clamp account over the routed test period (or, in training, one
@@ -274,6 +493,39 @@ impl DamClampSums {
     /// state).
     pub fn owed_for(&self, rows: &[usize]) -> Vec<f64> {
         rows.iter().map(|r| self.by_row.get(r).map_or(0.0, |rec| rec.owed_m3)).collect()
+    }
+
+    /// Add one engine's flood pool account (one chunk): volumes sum, the
+    /// pool `f_end` becomes the chunk's closing value (the next chunk starts
+    /// from it, [`Self::pool_f_for`]), `f_peak` the larger of the two.
+    pub fn merge_pool(&mut self, a: &crate::routing::mmc::FloodPoolAccount) {
+        for (i, &row) in a.rows.iter().enumerate() {
+            let r = self.pool_by_row.entry(row).or_default();
+            r.captured_m3 += a.captured_m3[i];
+            r.evacuated_m3 += a.evacuated_m3[i];
+            r.f_end_m3 = a.f_end_m3[i];
+            r.f_peak_m3 = r.f_peak_m3.max(a.f_peak_m3[i]);
+            r.fmax_m3 = a.fmax_m3[i];
+            r.inflow_mean_m3s = a.inflow_mean_m3s[i];
+            r.inflow_m3 += a.inflow_m3[i];
+            r.steps += a.steps;
+        }
+    }
+
+    /// The flood pools across test-phase chunks: what each of `rows`
+    /// (network rows, in the engine's pooled order) held at the end of the
+    /// last chunk that pooled it, m³; 0 for a dam not pooled before (the
+    /// first chunk, or a dam completed since: an inactive dam has no pool).
+    pub fn pool_f_for(&self, rows: &[usize]) -> Vec<f64> {
+        rows.iter().map(|r| self.pool_by_row.get(r).map_or(0.0, |rec| rec.f_end_m3)).collect()
+    }
+
+    /// The pool records in row order, each named by `comids[row]`.
+    pub fn pool_records(&self, comids: &[i64]) -> Vec<PoolRecord> {
+        self.pool_by_row
+            .iter()
+            .map(|(&row, r)| PoolRecord { comid: comids[row], ..*r })
+            .collect()
     }
 
     /// The records in row order, each named by `comids[row]` (the network's
@@ -531,6 +783,59 @@ mod tests {
              101,0.000000e0,0.000000e0,0.000000e0,0.000000e0,5.000000e1,0.000000e0,0,360,0\n\
              104,1.500000e1,1.200000e1,1.500000e1,0.000000e0,1.500000e3,1.000000e-2,3,456,9\n"
         );
+    }
+
+    #[test]
+    fn pool_sums_carry_the_pool_across_chunks_and_write_release_pool_csv() {
+        use crate::routing::mmc::FloodPoolAccount;
+        let mut sums = DamClampSums::default();
+        let day = 86_400.0;
+        sums.merge_pool(&FloodPoolAccount {
+            rows: vec![4, 1],
+            captured_m3: vec![100.0, 0.0],
+            evacuated_m3: vec![40.0, 0.0],
+            f_end_m3: vec![60.0, 0.0],
+            f_peak_m3: vec![80.0, 0.0],
+            fmax_m3: vec![2.0 * 10.0 * day, 1.0 * 5.0 * day],
+            inflow_mean_m3s: vec![10.0, 5.0],
+            inflow_m3: vec![1e4, 5e3],
+            steps: 360,
+        });
+        // The next chunk starts row 4 holding 60 m3; row 7 (pooled for the
+        // first time, e.g. completed since) empty.
+        assert_eq!(sums.pool_f_for(&[4, 7, 1]), vec![60.0, 0.0, 0.0]);
+        sums.merge_pool(&FloodPoolAccount {
+            rows: vec![4],
+            captured_m3: vec![10.0],
+            evacuated_m3: vec![70.0],
+            f_end_m3: vec![0.0],
+            f_peak_m3: vec![65.0],
+            fmax_m3: vec![2.0 * 10.0 * day],
+            inflow_mean_m3s: vec![10.0],
+            inflow_m3: vec![2e3],
+            steps: 96,
+        });
+        let recs = sums.pool_records(&[100, 101, 102, 103, 104]);
+        assert_eq!(recs.len(), 2);
+        let r = recs[1];
+        assert_eq!((r.comid, r.captured_m3, r.evacuated_m3, r.f_end_m3, r.f_peak_m3), (104, 110.0, 110.0, 0.0, 80.0));
+        assert_eq!((r.inflow_m3, r.steps), (1.2e4, 456));
+        assert_eq!(r.fmax_days(), 2.0);
+        assert!((r.max_f_days() - 80.0 / (10.0 * day)).abs() < 1e-15);
+        assert_eq!(r.fill_peak(), 80.0 / (20.0 * day));
+        assert_eq!(recs[0].fill_end(), 0.0);
+        let s = pool_summary(&recs);
+        assert_eq!((s.n, s.captured_m3, s.evacuated_m3), (2, 110.0, 110.0));
+        assert!(s.describe("dam").contains("2 dams;"));
+        assert_eq!(s.to_json()["n_dams"], 2);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("release_pool.csv");
+        write_release_pool_csv(&path, &recs).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(
+            "COMID,captured_m3,evacuated_m3,F_end_m3,max_F_days,Fmax_days,inflow_mean_m3s,inflow_m3,steps\n101,"
+        ));
+        assert!(text.contains("\n104,1.100000e2,1.100000e2,0.000000e0,"), "{text}");
     }
 
     #[test]

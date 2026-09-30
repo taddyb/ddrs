@@ -291,6 +291,8 @@ when subdivision is enabled), plus one at dataset open.
 | `read_reservoir_table` (runtime, dataset open) | a reservoir CSV without `COMID`/`T_days`, an unparseable row, `T_days` non-finite or `< 1/24`, a duplicate COMID, zero rows | `DataError` naming the CSV path |
 | `validate_reservoirs` (learned release) | `release_head:` without `reservoir_release: learned`; `learned` without `use_reservoirs`, `release_head` or `kan_head`; empty `release_head.input_var_names`; `reservoir_T0` lower bound below 1/24 or inverted; `reservoir_a`/`_b` inverted | `"release_head"` / `"reservoir_release: learned"` + the missing key / the range name |
 | `read_fixed_release_table` (runtime) | only one of `a`/`b`; non-finite `a`/`b` | `"`a` and `b`"` / `"row N"` |
+| `validate_reservoirs` (flood pool) | `params.reservoir_flood_pool` with `learned` or without `use_reservoirs`; either pool key with the carried dam floor; an unknown `flood_pool` mode | `"reservoir_flood_pool"` / `"release_head.flood_pool"` + `"dam_floor: carry"` |
+| dataset open / `read_fixed_release_table` (flood pool) | a pool without `inflow_mean_m3s`; `flood_control` without `purpose_flood`; `reservoir_flood_pool: true` without `kc, phi, z`; not all three of `kc, phi, z`; `kc < 0`, `phi` outside `[0, 1]`, `z < 0` | `"inflow_mean_m3s"` / `"purpose_flood"` / `"kc"` / `"all three"` |
 | `read_dam_features` (runtime, `learned`) | a listed feature column missing, a non-finite value, a duplicate COMID, zero rows | the column name / `"row N"` / `"listed twice"` |
 
 ## Adding a new routing parameter
@@ -484,6 +486,7 @@ release_head:            # top-level block, deny_unknown_fields
                          # micro-batches), added ONCE per step; >= 0
   rule_curve_penalty: 0.0  # feasibility penalty weight (off at 0); >= 0; > 0 needs rule_curve
   rule_curve_alpha: 0.9    # share of the dam's inflow the flux may store before the hinge; (0, 1]
+  flood_pool: none         # none | flood_control | all: the per-dam flood pool (law FA); needs inflow_mean_m3s
 ```
 
 **Rule curve and per-dam parameters (added 2026-09-27).** `rule_curve: true` makes the storage
@@ -654,6 +657,46 @@ test phase count negative-`c1` dam-row steps: `DamClampAccount::{c1_min, neg_c1_
 and `dam-row steps with c1 < 0 <k>/<m> (<j> dams)` in the clamp log lines;
 `metrics.release_training.dam_row_positivity`. Tests: `tests/reservoir_dam_positivity.rs`,
 `src/config.rs` (`*dam_row_positivity*`).
+
+**`flood_pool` (added 2026-09-29, v6; law FA of `experiments/reservoir/laws_v6`, report §2/§5).**
+A per-dam flood pool on top of the dam row (whatever it is: option C, the bucket, a rule curve):
+each pooled dam carries a pool `F` (m³, >= 0) and, before each solve, from its step-start inflow
+`I = (N·Q_t)_d + q'_d` (the penalty's `Qin`: routed upstream inflow plus its own `q'`, before the
+rule-curve flux), captures `Vc = min(phi·max(I − Qc, 0)·dt, Fmax − F)` and evacuates
+`Ve = min(F, max(Qc − p, 0)·dt)` at the release target (`p = I − Vc/dt`), both on the dam row's
+`q'` (`(Ve − Vc)/dt`), then `F += Vc − Ve`. `Qc = kc·Ibar`, `Fmax = z·Ibar·86400`, `Ibar` the
+table's `inflow_mean_m3s` (required, detached). Mass is conserved by construction (captures only
+what enters, evacuates only what it holds; `F >= 0` exactly in f32) and the discharge floor is
+never used (one-year flood test: balance residual 6e-7 of inflow, zero clamps). A, the CSR pattern
+and the backward are unchanged (`src/routing/mmc.rs` `FloodPool`). `none` (default) routes bitwise
+as before; `flood_control` pools the dams whose table row has `purpose_flood` (the raw 0/1 column,
+read whether or not the head uses it; required at dataset open); `all` pools every dam. `kc`,
+`phi`, `z` are per-dam free parameters (`src/nn/dam_params.rs` `pool` `[n_dams, 3]`, raw 0 at
+init) trained with the other per-dam parameters (row-sparse Adam, `per_dam_lr`, `per_dam_l2`
+anchors at the init): `kc = clamp(3·exp(r), 0.5, 20)`, `phi = sigmoid(r)`,
+`z = 120·sigmoid(4·r + logit(0.05/120))` days (0.05 d at init: off in effect but with a gradient
+through the cap; the logistic rate 4 lets ~1.5 raw units of per-dam Adam travel span 0.05 to ~20
+d). GRADIENT: `F` stays on the tape across a window; `I` is NOT detached (the pool's response to
+its inflow reaches upstream routing parameters, gradchecked on an upstream reach's `n`). `F`
+starts at 0 every training window and runs across the test phase's chunks
+(`training::forward::carry_dam_state`, `DamClampSums::merge_pool`/`pool_f_for`; a 15-day-chunked
+period equals one engine bitwise); a dam not yet completed has no pool. The pool's timescale is
+~60 days: pool configs use `experiment.rho: 180`, `warmup: 30`, and `testing.warmup: 5` (the test
+overlay otherwise inherits 30 and the test metrics would skip 25 more days than every earlier
+arm). A `fixed` table sets it with `params.reservoir_flood_pool: true | false` (absent = false) and
+the columns `kc`, `phi`, `z` (days; all three or none; `z = 0` = no pool at that dam) plus
+`inflow_mean_m3s`; true without the columns fails at dataset open, columns without it are logged
+and not routed. The key is rejected with `learned` and without `use_reservoirs`; either key is
+rejected with the carried dam floor (`carry` repays out of the same inflow). The resolved test
+table carries `kc, phi, z` (z = 0 at dams training does not pool) and `release_params.csv` gains
+`kc,phi,z` (before `inflow_mean_m3s`). Logs: dataset open `reservoirs: flood pool on (...): <k> of
+<m> table dams pooled`; each training step ` flood_pool_median kc=… phi=… z=…d (<k> dams with
+gradient)` on the `mb=` line and a `flood pool, step <N>: …` line (fill F/Fmax at the end and
+peak, pool size, most held, captured/evacuated/held volumes); test phase `flood pool (test phase):
+…`, `<run>/release_pool.csv` (`COMID,captured_m3,evacuated_m3,F_end_m3,max_F_days,Fmax_days,
+inflow_mean_m3s,inflow_m3,steps`) and `metrics.release_pool`; `metrics.release_training.flood_pool`.
+Tests: `tests/reservoir_flood_pool.rs`, `src/config.rs` (`*flood_pool*`), `src/nn/dam_params.rs`,
+`src/training/lazy_adam.rs`, `src/data/store/reservoirs.rs`, `src/training/release_eval.rs`.
 
 **Release-only training (added 2026-09-27).** `routing_checkpoint` is a checkpoint DIRECTORY
 whose `head.mpk` initialises the ROUTING head: weights only, never its `optim.mpk` or

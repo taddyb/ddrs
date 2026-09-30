@@ -154,17 +154,36 @@ where
                 .and_then(|d| d.reservoirs.as_ref())
                 .expect("use_reservoirs requires data_sources.reservoirs (validated at load)");
             let n = crate::data::store::read_dam_features(path, &section.input_var_names)?.comids.len();
-            let params = crate::nn::dam_params::DamParams::<Autodiff<I>>::zeros(
+            let pool = section.flood_pool != crate::config::FloodPoolMode::None;
+            let params = crate::nn::dam_params::DamParams::<Autodiff<I>>::zeros_with_pool(
                 n,
                 section.rule_curve,
                 section.per_dam_t0,
+                pool,
                 device,
             );
             eprintln!(
                 "release head: per-dam parameters for {n} table dams (rule_curve: {}, per_dam_t0: {}, \
-                 lr {} constant, l2 {})",
-                section.rule_curve, section.per_dam_t0, section.per_dam_lr, section.per_dam_l2
+                 flood_pool: {}, lr {} constant, l2 {})",
+                section.rule_curve,
+                section.per_dam_t0,
+                section.flood_pool.name(),
+                section.per_dam_lr,
+                section.per_dam_l2
             );
+            if pool {
+                use crate::nn::dam_params as dp;
+                eprintln!(
+                    "flood pool: init kc {} (box [{}, {}]), phi 0.5, z {} d (bound {} d, logistic rate {}), \
+                     Ibar = inflow_mean_m3s",
+                    dp::POOL_KC_INIT,
+                    dp::POOL_KC_RANGE[0],
+                    dp::POOL_KC_RANGE[1],
+                    dp::POOL_Z_INIT_DAYS,
+                    dp::POOL_Z_MAX_DAYS,
+                    dp::POOL_Z_RATE
+                );
+            }
             let optimizer = crate::training::lazy_adam::LazyAdam::new(&params);
             Some(DamTrainer::<I> { params, optimizer })
         } else {

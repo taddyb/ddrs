@@ -131,6 +131,10 @@ cargo test --test reservoir_dam_floor      # dam_floor: carry == forgive bitwise
                                            # owed carried across 15-day test-phase chunks, set_dam_owed checks
 cargo test --test reservoir_dam_positivity # dam_row_positivity (S19p/B19p): bitwise where the cap does not bind, c1 >= 0 at low flow,
                                            # gradchecks with the cap inactive/active (+ ddr_match, T_t/T_t+1), the debt pump stopped, carried balance
+cargo test --test reservoir_flood_pool     # flood pool (law FA): z = 0 bitwise no pool, one-year flood mass balance (no clamp),
+                                           # gradcheck kc/phi/z/T0/upstream n in the capture, cap and evacuation regimes,
+                                           # 15-day chunks = one engine, input checks, training = resolved table,
+                                           # dataset-open refusals, frozen-routing training moves the pool + resume
 cargo test --lib -- reservoir release_head lazy_adam release_eval dam_params dam_terms   # incl. the row-sparse Adam (untouched rows bitwise at init, bitwise = dense Adam on an always-touched row, bitwise save/restore) and the per-step terms (L2 and feasibility penalty bitwise independent of the micro-batch split; penalty = hand value, gradient = central differences)
 cargo test --release --test juniata_acceptance   # holds juniata_learned_release_trains_t0_and_writes_release_params
 ```
@@ -223,6 +227,7 @@ line citation outright rather than trusting it to stay pinned.
 | Subdivision | `subdivide`, `subdivision_integration`, `gauge_mass_conservation`; `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Reservoirs (option C) | `reservoir_override` (linear-reservoir recurrence, off is bit-identical, mass balance, gradcheck, zero dam-row gradient, row validation), `cargo test --lib reservoir` (table reader, COMID mapping, `use_reservoirs` load guards), `juniata_acceptance`'s `juniata_reservoir_is_matched_logged_and_changes_the_gauge_series` (release-only end-to-end); `compare_ddr_sandbox` must still report ABSOLUTE MATCH |
 | Learned / seasonal dam release | `reservoir_release` (a = b = 0 is bitwise option C, seasonal recurrence at the end-hour phase, clamp, phase table, untouched upstream rows, validation), `reservoir_release_gradcheck` (T0, a, b, head weight, gamma op, clamp), `reservoir_release_training` (training = resolved test path bitwise on NdArray, no-head refusal, checkpoint + optimizer restore), `cargo test --lib release_head` (init, log-space T0), `juniata_acceptance`'s learned run |
+| Flood pool (law FA) | `reservoir_flood_pool` (z = 0 bitwise, one-year mass balance, regime gradcheck incl. an upstream `n`, chunked = one engine, training = resolved table, dataset-open refusals, frozen training + resume), `cargo test --lib -- flood_pool pool dam_params lazy_adam release_eval reservoirs` |
 | Adjacency | `adjacency_parity` (managed builder byte-identical to the petgraph engine on `order`/`indices_0`/`indices_1`), `adjacency_build`, `data_zarr_store::conus_adjacency_loads_real_merit_zarr` (invariant 3 on real CONUS data) |
 | CLI / data | `data_dataset`, `data_static`, `cli_manifest`, `cli_lockfile`, `cli_json_contract` |
 | Checkpointing | `checkpoint_resume` (**not** `cargo test --lib training::checkpoint` — that module has zero tests) |
