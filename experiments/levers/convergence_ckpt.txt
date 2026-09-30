@@ -1,0 +1,9 @@
+seed 42, WY1996-2000 (1826 d): epoch 50 median NSE 0.7475 KGE 0.7557
+  common days 1825; epoch 50 on them: median NSE 0.7474
+epoch 25: median NSE 0.7445 KGE 0.7528; change from epoch 25 to 50:
+  epoch 25 vs epoch 50                                           NSE median 0.7445 -> 0.7474  pop +0.0030 [+0.0006,+0.0053]  paired +0.0002  up 55.6% down 44.4%
+  epoch 25 vs epoch 50                                           KGE median 0.7528 -> 0.7557  pop +0.0029 [+0.0010,+0.0065]  paired +0.0002  up 58.3% down 41.7%
+  common days 1825; epoch 50 on them: median NSE 0.7474
+epoch 40: median NSE 0.7462 KGE 0.7547; change from epoch 40 to 50:
+  epoch 40 vs epoch 50                                           NSE median 0.7462 -> 0.7474  pop +0.0013 [-0.0006,+0.0028]  paired +0.0002  up 57.3% down 42.7%
+  epoch 40 vs epoch 50                                           KGE median 0.7547 -> 0.7557  pop +0.0010 [-0.0007,+0.0033]  paired +0.0000  up 52.8% down 47.2%

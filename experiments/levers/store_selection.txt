@@ -1,0 +1,18 @@
+summed Q' (routing-free), population 2,365 gauges; training WY1986-1995 1985-10-01..1995-09-30, test 1995-10-01..2010-09-30
+set                          train NSE  test NSE
+UH                              0.7529    0.6771
+DIST                            0.7465    0.6744
+LSTM                            0.6429    0.5573
+LUMPED                          0.1987    0.0838
+HYDRODL                         0.4730    0.4361
+UH+DIST                         0.7608    0.6867
+UH+LSTM                         0.7529    0.6974
+UH+LUMPED                       0.5953    0.5186
+UH+HYDRODL                      0.6945    0.6514
+UH+DIST+LSTM                    0.7695    0.7153
+UH+DIST+LSTM+LUMPED+HYDRODL     0.6892    0.6426
+  forward selection adds DIST: training median 0.7608
+  forward selection adds LSTM: training median 0.7695
+selected on training years: UH+DIST+LSTM (training summed-Q' median 0.7695)
+  routed, selected set UH+DIST+LSTM                              NSE median 0.7391 -> 0.7637  pop +0.0246 [+0.0207,+0.0302]  paired +0.0182  up 68.8% down 31.2%
+  routed, selected set UH+DIST+LSTM                              KGE median 0.7591 -> 0.7590  pop -0.0001 [-0.0055,+0.0056]  paired -0.0049  up 46.2% down 53.8%

@@ -1,0 +1,151 @@
+{
+ "equal weights": {
+  "nse": {
+   "name": "equal weights",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7637246086706723,
+   "pop_change": 0.024612679015180494,
+   "ci_lo": 0.020693974722918007,
+   "ci_hi": 0.030240594177926763,
+   "paired_median": 0.018249131686172038,
+   "share_up": 0.6879492600422833,
+   "share_down": 0.3120507399577167,
+   "n": 2365
+  },
+  "kge": {
+   "name": "equal weights",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7589774818376963,
+   "pop_change": -9.600073191540215e-05,
+   "ci_lo": -0.005520645122841802,
+   "ci_hi": 0.005638673855147163,
+   "paired_median": -0.004901936882512392,
+   "share_up": 0.4617336152219873,
+   "share_down": 0.5382663847780127,
+   "n": 2365
+  },
+  "weights": null
+ },
+ "global weights fitted on training years": {
+  "nse": {
+   "name": "global weights fitted on training years",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7649768652043961,
+   "pop_change": 0.025864935548904344,
+   "ci_lo": 0.02206001459873204,
+   "ci_hi": 0.030915864015272927,
+   "paired_median": 0.019415054112409846,
+   "share_up": 0.7471458773784355,
+   "share_down": 0.2528541226215645,
+   "n": 2365
+  },
+  "kge": {
+   "name": "global weights fitted on training years",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7633614497110366,
+   "pop_change": 0.0042879671414248755,
+   "ci_lo": -0.0006220253054938452,
+   "ci_hi": 0.009297880291999384,
+   "paired_median": -8.304315622198466e-05,
+   "share_up": 0.4989429175475687,
+   "share_down": 0.5010570824524313,
+   "n": 2365
+  },
+  "weights": [
+   0.5,
+   0.25,
+   0.25
+  ]
+ },
+ "per-HUC2 weights fitted on training years": {
+  "nse": {
+   "name": "per-HUC2 weights fitted on training years",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7638077504123799,
+   "pop_change": 0.024695820756888143,
+   "ci_lo": 0.020845043334294922,
+   "ci_hi": 0.029945852110988918,
+   "paired_median": 0.01817213942603102,
+   "share_up": 0.7251585623678647,
+   "share_down": 0.2748414376321353,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-HUC2 weights fitted on training years",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7629072882810495,
+   "pop_change": 0.0038338057114377655,
+   "ci_lo": -0.0012677699849487744,
+   "ci_hi": 0.00886625570809677,
+   "paired_median": -3.558994034535967e-05,
+   "share_up": 0.4993657505285412,
+   "share_down": 0.5006342494714587,
+   "n": 2365
+  },
+  "weights": null
+ },
+ "per-gauge NNLS weights on training years (gauged ceiling)": {
+  "nse": {
+   "name": "per-gauge NNLS weights on training years (gauged ceiling)",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7754428281174335,
+   "pop_change": 0.03633089846194171,
+   "ci_lo": 0.031358293576487103,
+   "ci_hi": 0.0415575750555941,
+   "paired_median": 0.025282061958373014,
+   "share_up": 0.7818181818181819,
+   "share_down": 0.21818181818181817,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge NNLS weights on training years (gauged ceiling)",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7767306029063488,
+   "pop_change": 0.017657120336737053,
+   "ci_lo": 0.01162278380441636,
+   "ci_hi": 0.02406971453686728,
+   "paired_median": 0.009018058649809979,
+   "share_up": 0.5627906976744186,
+   "share_down": 0.4372093023255814,
+   "n": 2365
+  },
+  "weights": null
+ },
+ "equal weights x global scalar 1.0259": {
+  "nse": {
+   "name": "equal weights x global scalar 1.0259",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.762639734315865,
+   "pop_change": 0.023527804660373186,
+   "ci_lo": 0.019342551347199064,
+   "ci_hi": 0.028837574351374087,
+   "paired_median": 0.01757952219387482,
+   "share_up": 0.6871035940803383,
+   "share_down": 0.3128964059196617,
+   "n": 2365
+  },
+  "kge": {
+   "name": "equal weights x global scalar 1.0259",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.762505397636188,
+   "pop_change": 0.003431915066576252,
+   "ci_lo": -0.002397801743105632,
+   "ci_hi": 0.008517044348082621,
+   "paired_median": -0.0004308408876577685,
+   "share_up": 0.49556025369978857,
+   "share_down": 0.5044397463002114,
+   "n": 2365
+  },
+  "weights": null
+ }
+}

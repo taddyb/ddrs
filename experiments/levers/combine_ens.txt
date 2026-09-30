@@ -1,0 +1,14 @@
+  NONLY                                                          NSE median 0.7391 -> 0.7409  pop +0.0018 [-0.0005,+0.0049]  paired +0.0004  up 58.0% down 42.0%
+  NONLY                                                          KGE median 0.7591 -> 0.7612  pop +0.0021 [+0.0000,+0.0043]  paired +0.0002  up 57.2% down 42.8%
+  G0                                                             NSE median 0.7391 -> 0.7453  pop +0.0062 [+0.0035,+0.0103]  paired +0.0006  up 57.3% down 42.7%
+  G0                                                             KGE median 0.7591 -> 0.7623  pop +0.0032 [+0.0010,+0.0057]  paired +0.0002  up 54.8% down 45.2%
+  UH42+DIST+LSTM                                                 NSE median 0.7391 -> 0.7637  pop +0.0246 [+0.0207,+0.0302]  paired +0.0182  up 68.8% down 31.2%
+  UH42+DIST+LSTM                                                 KGE median 0.7591 -> 0.7590  pop -0.0001 [-0.0055,+0.0056]  paired -0.0049  up 46.2% down 53.8%
+  NONLY+DIST+LSTM                                                NSE median 0.7391 -> 0.7647  pop +0.0256 [+0.0213,+0.0312]  paired +0.0183  up 68.5% down 31.5%
+  NONLY+DIST+LSTM                                                KGE median 0.7591 -> 0.7596  pop +0.0005 [-0.0055,+0.0061]  paired -0.0049  up 46.2% down 53.8%
+  G0+DIST+LSTM                                                   NSE median 0.7391 -> 0.7683  pop +0.0292 [+0.0246,+0.0346]  paired +0.0200  up 69.3% down 30.7%
+  G0+DIST+LSTM                                                   KGE median 0.7591 -> 0.7598  pop +0.0008 [-0.0044,+0.0065]  paired -0.0041  up 46.9% down 53.1%
+  UH42+UH43+DIST+LSTM                                            NSE median 0.7391 -> 0.7643  pop +0.0252 [+0.0215,+0.0303]  paired +0.0195  up 74.0% down 26.0%
+  UH42+UH43+DIST+LSTM                                            KGE median 0.7591 -> 0.7632  pop +0.0041 [-0.0009,+0.0091]  paired -0.0010  up 49.3% down 50.7%
+  G0+NONLY+DIST+LSTM                                             NSE median 0.7391 -> 0.7688  pop +0.0297 [+0.0257,+0.0347]  paired +0.0212  up 75.8% down 24.2%
+  G0+NONLY+DIST+LSTM                                             KGE median 0.7591 -> 0.7642  pop +0.0051 [+0.0005,+0.0105]  paired +0.0006  up 50.6% down 49.4%

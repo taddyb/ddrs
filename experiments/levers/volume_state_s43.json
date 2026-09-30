@@ -1,0 +1,170 @@
+{
+ "power law a=1.0 b=1.0": {
+  "nse": {
+   "name": "power law a=1.0 b=1.0",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7341072383216394,
+   "pop_change": -1.1102230246251565e-16,
+   "ci_lo": -6.661338147750939e-16,
+   "ci_hi": 2.220446049250313e-16,
+   "paired_median": -1.1102230246251565e-16,
+   "share_up": 0.0,
+   "share_down": 0.0,
+   "n": 2365
+  },
+  "kge": {
+   "name": "power law a=1.0 b=1.0",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7587949000037071,
+   "pop_change": 0.0,
+   "ci_lo": -1.1102230246251565e-16,
+   "ci_hi": 0.0,
+   "paired_median": 0.0,
+   "share_up": 0.0,
+   "share_down": 0.0,
+   "n": 2365
+  }
+ },
+ "trailing-year state multiplier c=0.0": {
+  "nse": {
+   "name": "trailing-year state multiplier c=0.0",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7341072383216395,
+   "pop_change": 0.0,
+   "ci_lo": 0.0,
+   "ci_hi": 0.0,
+   "paired_median": 0.0,
+   "share_up": 0.0,
+   "share_down": 0.0,
+   "n": 2365
+  },
+  "kge": {
+   "name": "trailing-year state multiplier c=0.0",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7587949000037071,
+   "pop_change": 0.0,
+   "ci_lo": 0.0,
+   "ci_hi": 0.0,
+   "paired_median": 0.0,
+   "share_up": 0.0,
+   "share_down": 0.0,
+   "n": 2365
+  }
+ },
+ "  sensitivity: state multiplier c=0.2 (not fitted)": {
+  "nse": {
+   "name": "  sensitivity: state multiplier c=0.2 (not fitted)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7259650635484285,
+   "pop_change": -0.008142174773210997,
+   "ci_lo": -0.01136704583582585,
+   "ci_hi": -0.005756398636913876,
+   "paired_median": -0.005245187789434502,
+   "share_up": 0.3230443974630021,
+   "share_down": 0.6769556025369979,
+   "n": 2365
+  },
+  "kge": {
+   "name": "  sensitivity: state multiplier c=0.2 (not fitted)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7611749724155825,
+   "pop_change": 0.0023800724118754335,
+   "ci_lo": -0.00328288909525242,
+   "ci_hi": 0.005125891618384833,
+   "paired_median": 0.004693831986358199,
+   "share_up": 0.5813953488372093,
+   "share_down": 0.4186046511627907,
+   "n": 2365
+  }
+ },
+ "  sensitivity: state multiplier c=0.4 (not fitted)": {
+  "nse": {
+   "name": "  sensitivity: state multiplier c=0.4 (not fitted)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.705687022932169,
+   "pop_change": -0.028420215389470482,
+   "ci_lo": -0.033090738672867014,
+   "ci_hi": -0.02421083388825819,
+   "paired_median": -0.022177596388774368,
+   "share_up": 0.19830866807610995,
+   "share_down": 0.8016913319238901,
+   "n": 2365
+  },
+  "kge": {
+   "name": "  sensitivity: state multiplier c=0.4 (not fitted)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7431002052696534,
+   "pop_change": -0.015694694734053716,
+   "ci_lo": -0.02248334906575715,
+   "ci_hi": -0.01088004329819386,
+   "paired_median": -0.0007717345108442242,
+   "share_up": 0.492600422832981,
+   "share_down": 0.507399577167019,
+   "n": 2365
+  }
+ },
+ "per-gauge quantile mapping (gauged ceiling)": {
+  "nse": {
+   "name": "per-gauge quantile mapping (gauged ceiling)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7307504196435757,
+   "pop_change": -0.003356818678063811,
+   "ci_lo": -0.007706443524997561,
+   "ci_hi": 0.002211089520133029,
+   "paired_median": -0.00107734010881666,
+   "share_up": 0.4799154334038055,
+   "share_down": 0.5200845665961945,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge quantile mapping (gauged ceiling)",
+   "metric": "KGE",
+   "median_base": 0.759074685078559,
+   "median_new": 0.7995393818234833,
+   "pop_change": 0.040464696744924256,
+   "ci_lo": 0.03301960968300646,
+   "ci_hi": 0.046429539674802955,
+   "paired_median": 0.03469210289034258,
+   "share_up": 0.6983925549915397,
+   "share_down": 0.30160744500846026,
+   "n": 2364
+  }
+ },
+ "global quantile mapping on p / pbar": {
+  "nse": {
+   "name": "global quantile mapping on p / pbar",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.683964945720151,
+   "pop_change": -0.0501422926014885,
+   "ci_lo": -0.05783074754014096,
+   "ci_hi": -0.04333746450287676,
+   "paired_median": -0.04246661884187952,
+   "share_up": 0.23002114164904863,
+   "share_down": 0.7699788583509514,
+   "n": 2365
+  },
+  "kge": {
+   "name": "global quantile mapping on p / pbar",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7323998381712952,
+   "pop_change": -0.026395061832411915,
+   "ci_lo": -0.03453191975663622,
+   "ci_hi": -0.01888327462967276,
+   "paired_median": -0.003860152247207038,
+   "share_up": 0.4896405919661734,
+   "share_down": 0.5103594080338266,
+   "n": 2365
+  }
+ }
+}

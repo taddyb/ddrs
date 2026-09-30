@@ -1,0 +1,8 @@
+/home/tbindas/projects/ddrs/.claude/worktrees/agent-a92e512a7c47c97b4/experiments/levers/volume_by_year.py:22: RuntimeWarning: divide by zero encountered in divide
+  r = np.where(ok, np.where(m, P, 0).sum(1) / np.where(m, O, 0).sum(1), np.nan)
+/home/tbindas/projects/ddrs/.claude/worktrees/agent-a92e512a7c47c97b4/experiments/levers/volume_by_year.py:22: RuntimeWarning: invalid value encountered in divide
+  r = np.where(ok, np.where(m, P, 0).sum(1) / np.where(m, O, 0).sum(1), np.nan)
+/home/tbindas/projects/ddrs/.claude/worktrees/agent-a92e512a7c47c97b4/experiments/levers/volume_by_year.py:22: RuntimeWarning: divide by zero encountered in divide
+  r = np.where(ok, np.where(m, P, 0).sum(1) / np.where(m, O, 0).sum(1), np.nan)
+/home/tbindas/projects/ddrs/.claude/worktrees/agent-a92e512a7c47c97b4/experiments/levers/volume_by_year.py:22: RuntimeWarning: invalid value encountered in divide
+  r = np.where(ok, np.where(m, P, 0).sum(1) / np.where(m, O, 0).sum(1), np.nan)

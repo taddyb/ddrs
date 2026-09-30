@@ -1,0 +1,11 @@
+2026-09-30T13:50:59Z start s43_trainyears
+2026-09-30T14:01:08Z queue replaced: waiting on 280886 (s43), then lstm_trainyears dist_trainyears s42_e25_test5y s42_e40_test5y
+2026-09-30T14:30:08Z start lstm_trainyears
+2026-09-30T14:56:59Z done lstm_trainyears exit=0
+2026-09-30T14:56:59Z start dist_trainyears
+2026-09-30T15:22:36Z done dist_trainyears exit=0
+2026-09-30T15:22:36Z start s42_e25_test5y
+2026-09-30T15:35:31Z done s42_e25_test5y exit=0
+2026-09-30T15:35:31Z start s42_e40_test5y
+2026-09-30T15:48:10Z done s42_e40_test5y exit=0
+2026-09-30T15:48:10Z queue finished

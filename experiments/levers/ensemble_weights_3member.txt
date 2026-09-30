@@ -1,0 +1,17 @@
+members ['UH42', 'DIST', 'LSTM']; training 1985-11-01..1995-09-29 (3620 d); test WY1996-2010
+   UH42: training median NSE 0.7861, test 0.7391
+   DIST: training median NSE 0.7801, test 0.7300
+   LSTM: training median NSE 0.7079, test 0.6359
+  equal weights                                                  NSE median 0.7391 -> 0.7637  pop +0.0246 [+0.0207,+0.0302]  paired +0.0182  up 68.8% down 31.2%
+  equal weights                                                  KGE median 0.7591 -> 0.7590  pop -0.0001 [-0.0055,+0.0056]  paired -0.0049  up 46.2% down 53.8%
+   global weights (max training median NSE 0.8043): UH42 0.50, DIST 0.25, LSTM 0.25
+  global weights fitted on training years                        NSE median 0.7391 -> 0.7650  pop +0.0259 [+0.0221,+0.0309]  paired +0.0194  up 74.7% down 25.3%
+  global weights fitted on training years                        KGE median 0.7591 -> 0.7634  pop +0.0043 [-0.0006,+0.0093]  paired -0.0001  up 49.9% down 50.1%
+  per-HUC2 weights fitted on training years                      NSE median 0.7391 -> 0.7638  pop +0.0247 [+0.0208,+0.0299]  paired +0.0182  up 72.5% down 27.5%
+  per-HUC2 weights fitted on training years                      KGE median 0.7591 -> 0.7629  pop +0.0038 [-0.0013,+0.0089]  paired -0.0000  up 49.9% down 50.1%
+   per-gauge NNLS weights: median UH42 0.32, DIST 0.28, LSTM 0.32; median sum 1.031
+  per-gauge NNLS weights on training years (gauged ceiling)      NSE median 0.7391 -> 0.7754  pop +0.0363 [+0.0314,+0.0416]  paired +0.0253  up 78.2% down 21.8%
+  per-gauge NNLS weights on training years (gauged ceiling)      KGE median 0.7591 -> 0.7767  pop +0.0177 [+0.0116,+0.0241]  paired +0.0090  up 56.3% down 43.7%
+   equal-weight ensemble, training median per-gauge LS k* = 1.0259
+  equal weights x global scalar 1.0259                           NSE median 0.7391 -> 0.7626  pop +0.0235 [+0.0193,+0.0288]  paired +0.0176  up 68.7% down 31.3%
+  equal weights x global scalar 1.0259                           KGE median 0.7591 -> 0.7625  pop +0.0034 [-0.0024,+0.0085]  paired -0.0004  up 49.6% down 50.4%

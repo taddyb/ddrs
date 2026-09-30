@@ -1,0 +1,31 @@
+2026-09-30T14:33:48Z start volume.py 42 2026-09-30T13-13-59Z-train-and-test
+2026-09-30T14:35:32Z done volume.py 42 2026-09-30T13-13-59Z-train-and-test exit=0
+2026-09-30T14:35:32Z start volume.py 43 2026-09-30T13-50-59Z-train-and-test
+2026-09-30T14:37:17Z done volume.py 43 2026-09-30T13-50-59Z-train-and-test exit=0
+2026-09-30T14:37:17Z start timing.py 42 2026-09-30T13-13-59Z-train-and-test
+2026-09-30T14:37:47Z done timing.py 42 2026-09-30T13-13-59Z-train-and-test exit=0
+2026-09-30T14:37:47Z start timing.py 43 2026-09-30T13-50-59Z-train-and-test
+2026-09-30T14:38:18Z done timing.py 43 2026-09-30T13-50-59Z-train-and-test exit=0
+2026-09-30T14:38:18Z start volume_state.py 42 2026-09-30T13-13-59Z-train-and-test
+2026-09-30T14:39:47Z done volume_state.py 42 2026-09-30T13-13-59Z-train-and-test exit=0
+2026-09-30T14:39:47Z start volume_state.py 43 2026-09-30T13-50-59Z-train-and-test
+2026-09-30T14:41:16Z done volume_state.py 43 2026-09-30T13-50-59Z-train-and-test exit=0
+2026-09-30T14:41:16Z start volume_by_year.py 2026-09-27T07-29-47Z-train-and-test 2026-09-30T13-13-59Z-train-and-test
+2026-09-30T14:41:17Z done volume_by_year.py 2026-09-27T07-29-47Z-train-and-test 2026-09-30T13-13-59Z-train-and-test exit=0
+2026-09-30T14:41:17Z start volume_by_year.py 2026-09-27T10-31-30Z-train-and-test 2026-09-30T13-50-59Z-train-and-test
+2026-09-30T14:41:18Z done volume_by_year.py 2026-09-27T10-31-30Z-train-and-test 2026-09-30T13-50-59Z-train-and-test exit=0
+2026-09-30T14:41:18Z start variance.py
+2026-09-30T14:41:30Z done variance.py exit=0
+2026-09-30T14:41:30Z start variance_gamma.py
+2026-09-30T14:41:36Z done variance_gamma.py exit=0
+2026-09-30T14:41:36Z start store_ensembles.py
+2026-09-30T14:41:42Z done store_ensembles.py exit=0
+2026-09-30T14:41:42Z start ens_detail.py
+2026-09-30T14:41:50Z done ens_detail.py exit=0
+2026-09-30T14:41:50Z start store_selection.py
+2026-09-30T14:42:01Z done store_selection.py exit=0
+2026-09-30T14:42:01Z start combine_ens.py
+2026-09-30T14:42:06Z done combine_ens.py exit=0
+2026-09-30T14:42:06Z start combine.py s42=2026-09-27T07-29-47Z-train-and-test:2026-09-30T13-13-59Z-train-and-test s43=2026-09-27T10-31-30Z-train-and-test:2026-09-30T13-50-59Z-train-and-test g0=2026-09-12T03-53-34Z-train-and-test:- nonly=2026-09-12T23-39-06Z-train-and-test:-
+2026-09-30T14:42:21Z done combine.py s42=2026-09-27T07-29-47Z-train-and-test:2026-09-30T13-13-59Z-train-and-test s43=2026-09-27T10-31-30Z-train-and-test:2026-09-30T13-50-59Z-train-and-test g0=2026-09-12T03-53-34Z-train-and-test:- nonly=2026-09-12T23-39-06Z-train-and-test:- exit=0
+2026-09-30T14:42:21Z all done

@@ -1,0 +1,21 @@
+basin-median gamma: seed42 median 0.071, seed43 0.273; share of gauges where seed43 gamma is higher 0.929
+basin-median n: seed42 0.0651, seed43 0.0599
+Spearman(seed43 - seed42 NSE, dg) = -0.107 (n=2365)
+Spearman(seed43 - seed42 NSE, dlnn) = -0.067 (n=2365)
+Spearman(seed43 - seed42 NSE, g43) = -0.042 (n=2365)
+Spearman(seed43 - seed42 NSE, g42) = +0.115 (n=2365)
+seed43 - seed42 NSE by tercile of the basin gamma difference (median d, share down):
+   low  dg median +0.067: d NSE median -0.0003, share down 0.593
+   mid  dg median +0.207: d NSE median -0.0007, share down 0.582
+   high dg median +0.243: d NSE median -0.0017, share down 0.618
+by area bin: median basin gamma s42 | s43, and d NSE:
+        0-300       0.087 | 0.270   -0.0004
+      300-1000      0.071 | 0.272   -0.0007
+     1000-3000      0.067 | 0.275   -0.0006
+     3000-10000     0.066 | 0.274   -0.0010
+    10000-10000000.0 0.065 | 0.275   -0.0025
+constant-gamma sweep (seed 42, n+p+q learned): gamma -> population median NSE / KGE
+   0.000: 0.7453 / 0.7623
+   0.100: 0.7455 / 0.7621
+   0.183: 0.7416 / 0.7617
+   0.350: 0.7364 / 0.7586

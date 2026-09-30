@@ -1,0 +1,14 @@
+== seed 42: timing blend, fit WY1982-1995, score WY1996-2010; base test median NSE 0.7391
+   training median NSE by w: -0.9:0.6081 -0.8:0.6412 -0.7:0.6722 -0.6:0.7006 -0.5:0.7250 -0.4:0.7426 -0.3:0.7599 -0.2:0.7735 -0.1:0.7819 -0.0:0.7847 +0.1:0.7834 +0.2:0.7771 +0.3:0.7666 +0.4:0.7513 +0.5:0.7318 +0.6:0.7132 +0.7:0.6917 +0.8:0.6647 +0.9:0.6351
+  global w -0.0                                                  NSE median 0.7391 -> 0.7391  pop +0.0000 [+0.0000,+0.0000]  paired +0.0000  up 0.0% down 0.0%
+  global w -0.0                                                  KGE median 0.7591 -> 0.7591  pop +0.0000 [+0.0000,+0.0000]  paired +0.0000  up 0.0% down 0.0%
+  per-HUC2 w                                                     NSE median 0.7391 -> 0.7400  pop +0.0009 [-0.0008,+0.0029]  paired +0.0000  up 24.3% down 19.1%
+  per-HUC2 w                                                     KGE median 0.7591 -> 0.7583  pop -0.0008 [-0.0020,+0.0012]  paired +0.0000  up 17.8% down 25.5%
+   per-gauge w: share delay 0.416, advance 0.302, none 0.282; median |w| 0.20
+   attribute GBM on per-gauge w, out-of-fold R2 0.088
+  attribute GBM w (10-fold by gauge)                             NSE median 0.7391 -> 0.7405  pop +0.0014 [-0.0013,+0.0042]  paired +0.0000  up 41.2% down 35.6%
+  attribute GBM w (10-fold by gauge)                             KGE median 0.7591 -> 0.7565  pop -0.0025 [-0.0048,-0.0001]  paired +0.0000  up 28.6% down 48.3%
+  per-gauge w fitted on training years (gauged ceiling)          NSE median 0.7391 -> 0.7473  pop +0.0082 [+0.0056,+0.0126]  paired +0.0008  up 53.2% down 18.6%
+  per-gauge w fitted on training years (gauged ceiling)          KGE median 0.7591 -> 0.7617  pop +0.0027 [+0.0004,+0.0060]  paired +0.0000  up 36.0% down 35.9%
+  per-gauge (w, k) jointly, training years (gauged ceiling)      NSE median 0.7391 -> 0.7551  pop +0.0160 [+0.0118,+0.0207]  paired +0.0076  up 65.4% down 34.5%
+  per-gauge (w, k) jointly, training years (gauged ceiling)      KGE median 0.7591 -> 0.7715  pop +0.0124 [+0.0065,+0.0183]  paired +0.0029  up 54.6% down 45.3%

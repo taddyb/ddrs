@@ -1,0 +1,161 @@
+NON-DAM LEVERS ON THE 2,365-GAUGE POPULATION MEDIAN (Phase A, offline). 2026-09-30.
+
+Base: seed-42 no-dam run 2026-09-27T07-29-47Z, test WY1996-2010, median NSE 0.7391 / KGE 0.7591, 2,365 gauges.
+Target +0.03 = 0.7691. "pop" = change of the population median vs 0.7391 with a 95 % gauge-bootstrap interval; "paired" =
+median per-gauge change; "up" = share of gauges that improve. Every fitted quantity is fitted on training years
+(WY1982-1995, or WY1986-1995 where stated) and scored on WY1996-2010. The gauge bootstrap does not include training-seed
+noise: the two no-dam seeds differ by 0.005 at the median, so treat any single-seed recipe difference below ~0.005 as
+unresolved. Scripts, outputs and configs: experiments/levers/ (pre-registration in prereg.txt, written before any
+training-year output existed).
+
+BOTTOM LINE
+- The runoff multiplier is not a lever. The model's volume is unbiased on the training years (pred/obs 1.004 at the
+  median gauge, seed 42; 1.001 seed 43); the +4.5 % test-period excess is a Q' drift that 1982-1995 cannot see. Honest
+  multipliers move the median by +0.0005 to +0.0008; the earlier +0.005 for a 0.95 scalar was chosen on test years.
+- Head variance is real but small at the median: the seed gap (0.005) is gamma wandering; fixing gamma = 0 is worth
+  about +0.002 vs seed 42 (+0.004 vs the two-seed mean); a two-seed ensemble adds only +0.001 over its members' mean.
+  Training is near a skill plateau: epoch 40 -> 50 adds +0.0013 (interval includes 0) on fixed test years.
+- The lever that moves the median is a multi-product Q' ensemble: route the working recipe on UH, dHBV2-distributed and
+  the daily CudaLSTM Q' and average with weights fitted on the training years: 0.7650, +0.0259 [+0.0221,+0.0309],
+  75 % of gauges up, KGE +0.0043. Member choice was test-free (forward selection on training-year summed Q').
+- Together: ensemble +0.026, gamma = 0 (and optionally learned p, q) +0.001 to +0.005 inside the ensemble, dams +0.003
+  gives +0.029 to +0.033. +0.03 is reachable only with the ensemble; without it the honest non-dam levers sum to
+  <= +0.007 and, with dams, reach about +0.01 at most.
+
+1. RUNOFF VOLUME (Q') MULTIPLIERS
+
+Training-year predictions: zero-step replays of each seed's last checkpoint (epoch_50_mb_9; the Phase-2 fallback in
+src/cli/run.rs tests the resumed checkpoint when Phase 1 takes no step), testing window 1981-10-01..1996-09-30, binary
+/home/tbindas/.claude/jobs/dacd6d8c/tmp/bin/ddrs-v6-77aa4a0, CPU, main workspace. Runs 2026-09-30T13-13-59Z (seed 42,
+median NSE 0.7781 over the window) and 2026-09-30T13-50-59Z (seed 43, 0.7741). Configs replay_trainyears_s42.yaml,
+replay_s43_trainyears.yaml. Validation on the WY1996 overlap (replay_check_*.txt): the replay differs from the source
+run only by the source run's cold-start transient, median relative difference 7.7e-3 on 1995-10-02, 1.2e-4 in
+January, 8.8e-8 in September; Jan-Sep 1996 volume ratio replay/source median 1.00000; same for seed 43.
+
+Why a multiplier cannot work (volume_s42.txt, volume_by_year_*.txt): predicted/observed volume at the median gauge is
+1.004 on WY1982-1995 (51.8 % of gauges over) against 1.046 on WY1996-2010 (64.9 % over); seed 43 1.001 / 1.042. Routing
+conserves mass, so this is the Q' product. By water year the bias tracks wetness and drifts upward after 2000: dry
+years over-predicted (1988 1.02, 1992 1.06, 2000-2002 1.08 to 1.10 at 0.69-0.74 of normal flow), wet years
+under-predicted (1983-84 0.97, 1996 1.00), 2003-2010 still 1.03-1.08 in near-normal years. The Q' model (and the
+routing head) were fitted on roughly the training years, so their training-year volume is calibrated by construction
+(hypothesis for UH; verified for the daily CudaLSTM, trained 1980-10..1995-09). Per-gauge scalars transfer only partly
+between periods (Spearman train vs test 0.55).
+
+Results, seed 42 | seed 43 (NSE pop change; KGE pop change):
+  global scalar = median per-gauge LS k* (0.9964 | 0.9982), pre-registered   +0.0005 [-0.0006,+0.0016] up 63 % | +0.0005; KGE +0.0004 | +0.0006
+  global scalar maximizing training median NSE (0.96 | 1.0025)              +0.0026 | -0.0005 (the choice flips between seeds: noise)
+  per-HUC2 median k*, pre-registered                                        +0.0006 [-0.0008,+0.0030] up 52 % | +0.0008; KGE +0.0002 | +0.0005
+  attribute-conditioned (ridge / GBM on log k*, 17 catchment attributes incl. the 10 head inputs, aridity, snow;
+    10-fold by gauge | leave-one-HUC2-out)                                   out-of-fold R2 0.015 / -0.047 (seed 42); NSE -0.0008 to +0.0005 (10-fold),
+                                                                             -0.0015 to -0.0039 (by HUC2); KGE down to -0.009
+  state-dependent (volume_state_*.txt): power law, trailing-year state       training years pick b = 1 and c = 0.1 (seed 42: NSE -0.0031, KGE +0.0042)
+                                                                             or no correction at all (seed 43); global quantile mapping -0.047
+  per-gauge LS k* on training years (gauged calibration only)               +0.0078 [+0.0042,+0.0123] up 59 % | +0.0094; KGE +0.0116 | +0.0119
+  per-gauge quantile mapping on training years (gauged only)                NSE -0.0038 | -0.0034, KGE +0.0425 | +0.0405
+  per-gauge k* fitted ON TEST YEARS (in-sample oracle, not a lever)         +0.0286 | +0.0289; KGE +0.0406 | +0.0391
+  reference: fixed 0.95 (chosen on test years earlier)                      +0.0047 | +0.0029; KGE -0.0049 | -0.0071
+Extra lever, daily timing blend p' = (1-|w|) p(t) + |w| p(t -/+ 1) (timing_*.txt): training years pick w = 0 globally
+(no change, both seeds); per-HUC2 +0.0009 | +0.0004; attribute GBM +0.0014 | +0.0021 (KGE -0.0025); per-gauge w (gauged)
++0.0082 | +0.0102; per-gauge (w, k) jointly (gauged) +0.0160 | +0.0193, KGE +0.0124.
+
+2. ROUTING-HEAD CONVERGENCE AND VARIANCE (variance.txt, variance_gamma.txt, loss_robust.txt, convergence_ckpt.txt)
+
+Convergence. The run.log loss is flat from about epoch 5-10: seed 42 slope over epochs 41-50 +0.0019 +- 0.0035 per
+epoch at a level of 0.298 (gauge-weighted mean of micro-batch losses); robust per-epoch median, Theil-Sen +0.0024
+[-0.0068,+0.0083] per epoch. The micro-batch noise (random gauges and 90-day windows) is about +-12 % of the level over
+ten epochs, so the log cannot certify convergence at the precision that matters. The parameters are not converged:
+seed-42 median gamma 0.233 (epoch 10) -> 0.151 (25) -> 0.067 (50), median n 0.086 -> 0.074 -> 0.058, median reach
+|ln n| change 0.18 from epoch 10 to 25 and 0.23 from 25 to 50. Direct test on fixed data (seed-42 checkpoints
+epoch_25_mb_9 and epoch_40_mb_9 replayed on WY1996-2000 with the source run's cold-start date, runs
+2026-09-30T15-22-40Z and 2026-09-30T15-35-31Z; epoch 50 read from the source run): median NSE 0.7445 (epoch 25) ->
+0.7462 (40) -> 0.7474 (50); 25 -> 50 +0.0030 [+0.0006,+0.0053], 40 -> 50 +0.0013 [-0.0006,+0.0028], paired +0.0002,
+57 % up; KGE 0.7528 -> 0.7547 -> 0.7557. Test skill is still creeping up by about +0.001 per 10 epochs at lr 0.001, and
+it moves with gamma falling (0.15 -> 0.07 over the same epochs), which the constant-gamma sweep says is the direction
+that helps. Verdict: not converged in parameters; in skill, near a plateau, with about +0.001 to +0.003 left for longer
+training on this seed, and it depends on which way gamma drifts (seed 43 ended at 0.27, worse). The epoch-10 checkpoint
+was not replayed (dropped for time).
+
+Seed variance is gamma. Seeds 42 / 43: NSE 0.7391 / 0.7341, KGE 0.7591 / 0.7588. Basin-median gamma 0.071 / 0.273,
+higher in seed 43 at 93 % of gauges; reach-level Spearman between the seeds' gamma fields -0.12 (n: 0.49). The per-gauge
+seed loss grows with the gamma gap (tercile medians -0.0003 / -0.0007 / -0.0017) and with area (-0.0025 above
+10,000 km2, 64 % down). The constant-gamma sweep (n, p, q learned, seed 42) gives 0.7453 / 0.7455 / 0.7416 / 0.7364 at
+gamma 0 / 0.1 / 0.183 / 0.35, which predicts about -0.006 for the seeds' gamma gap, the size of the observed gap.
+
+Recipe (single seed each):
+  n only (gamma fixed at 0, channel fixed as now), 2026-09-12T23-39-06Z   0.7409, +0.0018 [-0.0005,+0.0049] up 58 %; KGE +0.0021
+  gamma = 0 with p and q learned, 2026-09-12T03-53-34Z                    0.7453, +0.0062 [+0.0035,+0.0103] up 57 %; KGE +0.0032
+Seed-42 runs draw identical gauge batches and 90-day windows, so their training losses compare pairwise: on identical
+micro-batches the n-only head is 0.2-0.7 % lower than the working n0 + gamma head, and the gamma = 0, n+p+q head 1.2-1.5 %
+lower at 72-75 % of micro-batches in every epoch block. Adding gamma to the n-only head makes the training fit worse:
+an optimization problem along an unidentified direction, not missing capacity.
+
+Near-median gauges (174 within 0.03 below 0.7391): smaller (534 vs 872 km2), shorter longest flow path (60 vs 80 km;
+0.69 vs 0.92 d at a nominal 1 m/s), more GAGES-II Ref (31 % vs 21 %), fewer NID dams >= 10 MCM (25 % vs 39 %). Seed 43
+costs them -0.0006 at the median (58 % down); the quarter that lose most (44) are low-snow (snow fraction 0.04 vs 0.09),
+609 km2, 0.86 d, in HUC2 02, 07 and 03. At the median line seed 43 drops 54 gauges below it and lifts 18 above. Across
+the population the size of the seed difference rises with travel time (Spearman +0.26) and area (+0.17) and falls with
+snow fraction (-0.37).
+
+Ensembles of heads (equal weights): two seeds 0.7376 (-0.0015 vs seed 42, +0.0010 over the members' mean 0.7366, KGE
++0.0016); all ten UH-store 50-epoch nse-batch variants 0.7436 (+0.0045, +0.0035 over their mean). Head variance
+reduction is worth about +0.001 to +0.0035.
+
+2b. MULTI-PRODUCT Q' ENSEMBLE (store_selection.txt, ensemble_weights_3member.txt, ens_detail.txt, combine_ens.txt)
+
+The working recipe (seed-42 config, only the Q' store changed) was trained on five other stores on 2026-09-13. Member
+selection was test-free: greedy forward selection on TRAINING-year (WY1986-1995) summed-Q' baselines, from UH, adds
+dHBV2-distributed AORC (0.7529 -> 0.7608) then the daily CudaLSTM (-> 0.7695) and stops; the dHBV2-lumped and HydroDL
+stores are rejected (the hourly LSTM was not a candidate: its baseline was too heavy to compute here). All products are
+out of sample in time on WY1996-2010. Weights were fitted on routed training-year replays (2026-09-30T14-30-08Z LSTM,
+2026-09-30T14-56-59Z DIST, WY1986-1995).
+  equal weights UH + DIST + LSTM                         0.7637, +0.0246 [+0.0207,+0.0302] up 69 %; KGE -0.0001
+  training-year weights UH 0.50, DIST 0.25, LSTM 0.25    0.7650, +0.0259 [+0.0221,+0.0309] up 75 %; KGE 0.7634 (+0.0043)
+  per-HUC2 training-year weights                         +0.0247; KGE +0.0038
+  training-year weights UH 0.70, LSTM 0.30 (two stores)  0.7637, +0.0246 [+0.0206,+0.0292] up 71 %; KGE +0.0012
+  per-gauge NNLS weights on training years (gauged only) 0.7754, +0.0363; KGE +0.0177
+  unselected: all six stores, equal weights              0.7338, -0.0053; KGE -0.0760
+The gain is also present in-sample (training-year median 0.8043 for the weighted ensemble vs 0.7861 for UH).
+Mechanism: the LSTM's errors are weakly correlated with UH's (median residual correlation 0.62, against 0.93 for DIST and
+0.997 between the UH seeds); r rises 0.880 -> 0.892; the test-period volume biases partly cancel (beta 1.045 UH, 1.065
+DIST, 0.965 LSTM, 1.024 equal-weight ensemble); alpha falls 0.914 -> 0.869, which NSE rewards and KGE does not.
+
+3. COMBINED, AND WHETHER +0.03 IS REACHABLE (vs 0.7391; single seeds where noted)
+  (a) best honest runoff multiplier (global or per-HUC2)                          +0.0005 to +0.0008 (both seeds)
+      per-gauge calibration, gauged sites only                                     +0.008 to +0.009
+  (b) variance / convergence: gamma = 0 (n only)                                  +0.0018 (single seed; +0.004 vs the two-seed mean)
+      gamma = 0 with p, q learned                                                  +0.0062 (single seed)
+      two-seed head ensemble                                                       +0.001 over the members' mean
+      multi-product Q' ensemble, training-year weights                             +0.0259 (KGE +0.0043)
+  (c) dam recipe (per-dam release, research/findings/2026-09-28-per-dam-release-calibration-findings.md)  about +0.003
+  Stacked on per-gauge predictions, equal weights (combine_ens.txt): n-only + DIST + LSTM 0.7647 (+0.0256);
+  gamma0 n+p+q + DIST + LSTM 0.7683 (+0.0292, KGE +0.0008); gamma0 + n-only + DIST + LSTM 0.7688 (+0.0297 [+0.0257,
+  +0.0347], 76 % up, KGE +0.0051). Adding the dam recipe's +0.003 to the ensemble alone or to the stacked arms gives +0.029 to +0.033 (0.768 to 0.772). The
+  recipe part inside the ensemble (+0.001 to +0.005) is within the seed noise; the ensemble part is five times it.
+  Verdict: +0.03 is reachable only with the multi-product ensemble; it is at the margin, and its KGE gain is small.
+
+4. WHAT TO IMPLEMENT FIRST
+First: multi-product Q' forcing. Cheapest form (no engine change): train the working recipe on UH, DIST and daily-LSTM
+(already done for seed 42) and average the routed test outputs with the training-year weights (0.50 / 0.25 / 0.25).
+Engine form: let data_sources.streamflow take a weighted list of stores and average Q' per divide and day at read time
+(average only over stores that cover the divide: the LSTM store has 288,421 divides vs 197,088, and absent divides are
+filled with 0.001 today, which would dilute the mean), then train one routing head jointly on the blended Q'. Expected
++0.02 to +0.026 median NSE, KGE about +0.004. Risks: routing is mildly nonlinear in Q (depth, gamma), so input blending
+is not identical to output averaging and must be measured with one training run against the output ensemble; part of
+the test gain is the members' opposite volume drifts cancelling in 1996-2010 (the training years support the weights,
+but the cancellation may not hold in other periods); smoother hydrographs (alpha 0.87) mean KGE barely moves; three
+stores must exist for any new domain or period (not for the global runs today); each store's head learns a different n,
+so an output ensemble has no single parameter field for the paper, whereas the input blend keeps one head.
+Second, together with the first: fix gamma = 0 (learnable_parameters: [n], config only). About +0.002 and it removes the
+seed-to-seed drift; a narrow gamma box ([0, 0.1]) or a prior toward 0 is the alternative if gamma must stay. Learning p
+and q as well adds about +0.004 more (single seed) but conflicts with the fixed-channel design chosen for
+identifiability (q is flat at 85 % of well-fit gauges), so that is the user's call.
+Do not implement a learned per-reach runoff multiplier: trained on 1982-1995 it will learn about 1 (the honest global
+scalar is worth +0.0005) and, being free per reach, it would absorb timing and routing errors (the review's warning) with
+no test-period benefit to show for it. Compare any future volume term against the plain scalar null (+0.0005) and the
+ensemble, not against 0.95. Longer training or a flatter lr schedule alone: about +0.001 per 10 epochs on seed 42 and
+riding on gamma's drift, so fix gamma first and only then judge whether more epochs pay.
+
+Queue/infra notes: all replays ran one at a time, detached, on CPU with RAYON_NUM_THREADS=8 and DDRS_JOURNAL_OFF=1;
+`ddrs run`/`plan` relocked .ddrs/sources.lock several times (streamflow, reservoirs drift), as every run in the shared
+workspace does. No Rust code was edited; nothing was committed. One caveat in variance.txt: a single exploding
+micro-batch loss (seed 42, epochs 1-10) dominates that block's mean paired difference; read the median column there.

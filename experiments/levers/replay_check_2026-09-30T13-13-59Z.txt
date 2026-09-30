@@ -1,0 +1,16 @@
+overlap 1995-10-02..1996-09-29 (364 d)
+  1995-10-02: median rel diff 7.66e-03, p90 1.28e-01, p99 5.99e-01, share > 1e-3 0.731
+  1995-10-15: median rel diff 4.32e-04, p90 4.37e-03, p99 2.59e-02, share > 1e-3 0.316
+  1995-11-01: median rel diff 3.48e-04, p90 3.19e-03, p99 1.62e-02, share > 1e-3 0.314
+  1995-12-01: median rel diff 2.27e-04, p90 1.65e-03, p99 7.28e-03, share > 1e-3 0.182
+  1996-01-01: median rel diff 1.18e-04, p90 1.43e-03, p99 7.79e-03, share > 1e-3 0.147
+  1996-03-01: median rel diff 1.25e-04, p90 2.55e-03, p99 1.16e-02, share > 1e-3 0.215
+  1996-06-01: median rel diff 3.55e-07, p90 2.39e-04, p99 4.48e-03, share > 1e-3 0.046
+  1996-09-01: median rel diff 8.83e-08, p90 4.94e-05, p99 9.87e-04, share > 1e-3 0.010
+  Jan-Sep 1996 volume replay/source: median 1.00000, p1 0.9986, p99 1.0017, share |r-1| > 1e-3 0.033
+  Jan-Sep 1996 NSE |source - replay|: median 2.19e-05, p99 1.15e-02, max 1.04e+02, gauges > 0.01: 25
+    08177500 area 1295 km2 NSE source -12655.304 replay -12758.926; mean flow source 0.895 replay 0.899
+    08198500 area 624 km2 NSE source -758.779 replay -758.969; mean flow source 0.206 replay 0.206
+    07195500 area 1630 km2 NSE source 0.410 replay 0.258; mean flow source 11.396 replay 11.088
+    07196500 area 2454 km2 NSE source 0.310 replay 0.224; mean flow source 14.879 replay 14.680
+    09169500 area 5233 km2 NSE source -196.222 replay -196.299; mean flow source 6.307 replay 6.307

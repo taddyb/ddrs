@@ -1,0 +1,16 @@
+members ['UH42', 'LSTM']; training 1985-11-01..1995-09-29 (3620 d); test WY1996-2010
+   UH42: training median NSE 0.7861, test 0.7391
+   LSTM: training median NSE 0.7079, test 0.6359
+  equal weights                                                  NSE median 0.7391 -> 0.7525  pop +0.0134 [+0.0087,+0.0204]  paired +0.0067  up 55.1% down 44.9%
+  equal weights                                                  KGE median 0.7591 -> 0.7395  pop -0.0196 [-0.0263,-0.0130]  paired -0.0189  up 39.9% down 60.1%
+   global weights (max training median NSE 0.8003): UH42 0.70, LSTM 0.30
+  global weights fitted on training years                        NSE median 0.7391 -> 0.7637  pop +0.0246 [+0.0206,+0.0292]  paired +0.0161  up 70.6% down 29.4%
+  global weights fitted on training years                        KGE median 0.7591 -> 0.7603  pop +0.0012 [-0.0041,+0.0065]  paired -0.0020  up 48.3% down 51.7%
+  per-HUC2 weights fitted on training years                      NSE median 0.7391 -> 0.7625  pop +0.0234 [+0.0194,+0.0282]  paired +0.0146  up 71.7% down 28.3%
+  per-HUC2 weights fitted on training years                      KGE median 0.7591 -> 0.7602  pop +0.0012 [-0.0039,+0.0063]  paired -0.0005  up 49.0% down 51.0%
+   per-gauge NNLS weights: median UH42 0.66, LSTM 0.36; median sum 1.031
+  per-gauge NNLS weights on training years (gauged ceiling)      NSE median 0.7391 -> 0.7701  pop +0.0310 [+0.0265,+0.0367]  paired +0.0189  up 75.2% down 24.8%
+  per-gauge NNLS weights on training years (gauged ceiling)      KGE median 0.7591 -> 0.7736  pop +0.0146 [+0.0087,+0.0209]  paired +0.0064  up 54.6% down 45.4%
+   equal-weight ensemble, training median per-gauge LS k* = 1.0374
+  equal weights x global scalar 1.0374                           NSE median 0.7391 -> 0.7524  pop +0.0133 [+0.0086,+0.0198]  paired +0.0058  up 55.1% down 44.9%
+  equal weights x global scalar 1.0374                           KGE median 0.7591 -> 0.7503  pop -0.0088 [-0.0164,-0.0030]  paired -0.0115  up 43.4% down 56.6%
