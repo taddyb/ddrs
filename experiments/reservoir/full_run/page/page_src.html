@@ -1,0 +1,1115 @@
+<title>Learned Dam Release</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --bg: #f3f5f4; --surface: #ffffff; --ink: #1b2528; --muted: #56666a; --rule: #d3dbd9; --soft: #e6ecea;
+  --land: #e4eae8; --coast: #9aaaa8;
+  --nodam: #0080a8; --dam: #b0651c; --base: #7d7b75; --obs: #1b2528; --good: #2f7a4a; --bad: #a3432b;
+  --dv0: #006484; --dv1: #2287ad; --dv2: #5aaacd; --dv3: #f0efec; --dv4: #d08d57; --dv5: #af6827; --dv6: #874903;
+  --sq0: #d89c6d; --sq1: #c47e44; --sq2: #ad6217; --sq3: #8d4c02; --sq4: #6c3902;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111719; --surface: #182023; --ink: #e1e8e6; --muted: #9babaa; --rule: #2b3639; --soft: #1e292c;
+    --land: #223034; --coast: #4a5c60;
+    --nodam: #1ea2b8; --dam: #c27a26; --base: #a3a29b; --obs: #e1e8e6; --good: #6cc08a; --bad: #e0826a;
+    --dv0: #4dc3da; --dv1: #2ca1b6; --dv2: #117f91; --dv3: #383835; --dv4: #9d621e; --dv5: #c47f34; --dv6: #e99f50;
+    --sq0: #8e5303; --sq1: #af6906; --sq2: #cb8231; --sq3: #e29f5b; --sq4: #f4bf8b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111719; --surface: #182023; --ink: #e1e8e6; --muted: #9babaa; --rule: #2b3639; --soft: #1e292c;
+  --land: #223034; --coast: #4a5c60;
+  --nodam: #1ea2b8; --dam: #c27a26; --base: #a3a29b; --obs: #e1e8e6; --good: #6cc08a; --bad: #e0826a;
+  --dv0: #4dc3da; --dv1: #2ca1b6; --dv2: #117f91; --dv3: #383835; --dv4: #9d621e; --dv5: #c47f34; --dv6: #e99f50;
+  --sq0: #8e5303; --sq1: #af6906; --sq2: #cb8231; --sq3: #e29f5b; --sq4: #f4bf8b;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); padding-inline: 16px; padding-block: 28px 56px; }
+.wrap { max-width: 1040px; margin: 0 auto; display: grid; gap: 52px; }
+.prose { max-width: 70ch; }
+h1, h2 { font-family: var(--display); font-weight: 700; letter-spacing: 0.01em; text-wrap: balance; margin: 0; line-height: 1.1; }
+h1 { font-size: clamp(36px, 6vw, 54px); }
+h2 { font-size: 29px; }
+h3 { font-size: 15px; font-weight: 600; margin: 0; }
+p { margin: 0; }
+section { display: grid; gap: 16px; }
+.eyebrow { font: 500 12px/1.4 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 17px; max-width: 70ch; }
+.muted { color: var(--muted); }
+.m { font-family: var(--mono); font-size: 0.92em; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 16px; }
+.cols.two { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.card ul, .card ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); gap: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.tile .lab { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+.tile .val { font: 600 34px/1.1 var(--body); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.tile .note { font-size: 13px; color: var(--muted); }
+.tag { display: inline-block; font: 500 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; padding: 4px 7px; border-radius: 3px; background: var(--soft); color: var(--muted); }
+.brief { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px 24px; }
+.brief div { display: grid; gap: 4px; align-content: start; }
+.brief b, .claim b.k { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 10px; position: relative; min-width: 0; }
+.figbox { position: relative; overflow-x: auto; overflow-y: hidden; }
+.figbox svg { display: block; width: 100%; height: auto; }
+.figbox svg.wide { min-width: 640px; }
+.figbox svg.map { min-width: 540px; }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 18px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend svg { vertical-align: middle; margin-right: 5px; overflow: visible; }
+.sw { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+.sw.dash { background: repeating-linear-gradient(90deg, var(--base) 0 5px, transparent 5px 8px) !important; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; margin-right: 6px; }
+.box { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: middle; margin-right: 5px; border: 1px solid var(--muted); }
+.gridline { stroke: var(--rule); stroke-width: 1; }
+.zero { stroke: var(--muted); stroke-width: 1.2; }
+.refl { stroke: var(--muted); stroke-width: 1; opacity: 0.55; }
+.axis { fill: var(--muted); font: 400 11px var(--mono); }
+.axlab { fill: var(--muted); font: 500 11.5px var(--body); }
+.dl { font: 500 12px var(--body); fill: var(--ink); }
+.dls { font: 400 11px var(--mono); fill: var(--muted); }
+.cross { stroke: var(--muted); stroke-width: 1; }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 6px 9px; font: 12px/1.5 var(--mono); color: var(--ink); white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.16); z-index: 2; }
+.tip b { font-family: var(--body); font-weight: 600; }
+.tip i { display: inline-block; width: 10px; height: 3px; margin-right: 5px; vertical-align: middle; }
+.stats { width: 100%; border-collapse: collapse; font-size: 14px; }
+.stats th, .stats td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.stats th { font: 500 12px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.stats th .g { text-transform: none; }
+.stats td.sub { padding-left: 14px; color: var(--muted); }
+.num { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pos { color: var(--good); }
+.neg { color: var(--bad); }
+.table-wrap { overflow-x: auto; }
+.table-wrap.tall { max-height: 620px; overflow-y: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+.table-wrap.tall .stats th, .table-wrap.tall .stats td { padding-left: 10px; }
+.table-wrap.tall thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; box-shadow: inset 0 -1px 0 var(--rule); }
+.pickers { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: end; }
+.pickers label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+select { font: 14px var(--body); color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 5px; padding: 6px 8px; max-width: 100%; }
+#gSel { max-width: min(560px, 100%); }
+.check { display: flex !important; align-items: center; gap: 6px; }
+.gmeta { display: grid; gap: 2px; font-size: 14px; }
+.gmeta .nse { font: 500 14px var(--mono); font-variant-numeric: tabular-nums; }
+.l-obs { stroke: var(--obs); stroke-width: 1.5; fill: none; opacity: 0.7; stroke-linejoin: round; }
+.l-base { stroke: var(--base); stroke-width: 1.4; fill: none; stroke-dasharray: 5 3; stroke-linejoin: round; }
+.l-nodam { stroke: var(--nodam); stroke-width: 2; fill: none; stroke-linejoin: round; }
+.l-dam { stroke: var(--dam); stroke-width: 2; fill: none; stroke-linejoin: round; }
+.reg { fill: var(--land); stroke: var(--surface); stroke-width: 1.4; }
+.nation { fill: none; stroke: var(--coast); stroke-width: 0.9; }
+.reglab { font: 500 11px var(--mono); fill: var(--muted); opacity: 0.85; pointer-events: none; }
+.gpt { stroke: var(--muted); stroke-width: 0.7; }
+.dampt { stroke: var(--surface); stroke-width: 1; }
+.pt-dam { fill: var(--dam); stroke: var(--surface); stroke-width: 1.2; }
+.pt-nodam { fill: var(--nodam); stroke: var(--surface); stroke-width: 1.5; }
+.hring { fill: none; stroke: var(--ink); stroke-width: 1.6; pointer-events: none; }
+.binline { stroke: var(--ink); stroke-width: 2; fill: none; }
+.binpt { fill: var(--ink); stroke: var(--surface); stroke-width: 1.5; }
+.ctlline { stroke: var(--nodam); stroke-width: 2; }
+.rowhit { fill: transparent; }
+.rowhit:hover { fill: var(--soft); }
+.bar-dam { fill: var(--dam); }
+.smalls { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 22px 22px; }
+.sm { display: grid; gap: 4px; align-content: start; }
+.sm .meta { font-size: 13px; color: var(--muted); }
+.sm .meta .m { color: var(--ink); }
+.sm button { justify-self: start; font: 500 12.5px var(--body); color: var(--ink); background: var(--soft); border: 1px solid var(--rule); border-radius: 4px; padding: 3px 9px; cursor: pointer; }
+.sm button:hover { border-color: var(--muted); }
+#tbl tbody tr { cursor: pointer; }
+#tbl tbody tr:hover, #tbl tbody tr.sel { background: var(--soft); }
+#tbl td { font-size: 13px; }
+#tbl th[data-k] { cursor: pointer; }
+#tbl th[data-k]:hover { color: var(--ink); }
+#tbl th .arr { opacity: 0.7; }
+.note { font-size: 13.5px; color: var(--muted); }
+.claims { display: grid; gap: 10px; counter-reset: c; }
+.claim { display: grid; grid-template-columns: 26px 1fr; gap: 2px 10px; align-items: start; }
+.claim::before { counter-increment: c; content: counter(c); font: 600 13px/22px var(--mono); color: var(--muted); border: 1px solid var(--rule); border-radius: 50%; width: 22px; height: 22px; text-align: center; }
+.claim p { grid-column: 2; }
+.claim a { color: inherit; }
+.split { display: grid; gap: 8px; }
+.timeline { display: grid; grid-template-columns: 14fr 15fr; gap: 4px; font: 500 12px var(--mono); }
+.timeline div { padding: 8px 10px; border-radius: 4px; }
+.timeline .tr { background: var(--soft); border: 1px solid var(--rule); color: var(--muted); }
+.timeline .te { background: var(--surface); border: 1px solid var(--ink); color: var(--ink); }
+.imgs { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
+.imgs figure { margin: 0; display: grid; gap: 6px; align-content: start; min-width: 0; }
+.imgs figure img { width: 100%; height: auto; border: 1px solid var(--rule); border-radius: 4px; background: #fff; }
+.imgs figcaption { font-size: 13px; color: var(--muted); }
+.imgs.one { grid-template-columns: 1fr; }
+.imgs.two { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+.gal h3 { margin-top: 6px; }
+.pending { border: 1px dashed var(--muted); border-radius: 6px; padding: 14px 16px; color: var(--muted); }
+a { color: var(--nodam); }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--nodam); outline-offset: 2px; }
+footer { font-size: 13px; color: var(--muted); display: grid; gap: 6px; border-top: 1px solid var(--rule); padding-top: 16px; }
+@media (max-width: 520px) { h2 { font-size: 25px; } .tile .val { font-size: 28px; } .timeline { font-size: 11px; } }
+</style>
+
+<div class="wrap">
+
+<header style="display:grid;gap:18px">
+  <div class="eyebrow">ddrs · learned dam release · 2,365 CONUS gauges · trained WY1982-1995, tested WY1996-2010</div>
+  <h1>Learned Dam Release</h1>
+  <p class="lede">{{LEDE}}</p>
+  <div class="tiles">
+    <div class="tile"><span class="lab"><i class="dot" style="background:var(--dam)"></i>Dammed gauges ({{N_DAMMED}}): change in test NSE</span><span class="val">{{T_DAM}}</span><span class="note">{{T_DAM_NOTE}}</span></div>
+    <div class="tile"><span class="lab"><i class="dot" style="background:var(--nodam)"></i>Undammed gauges ({{N_UNDAMMED}}): change in test NSE</span><span class="val">{{T_UND}}</span><span class="note">{{T_UND_NOTE}}</span></div>
+    <div class="tile"><span class="lab">All {{N_ALL}} gauges: median test NSE</span><span class="val">{{T_ALL}}</span><span class="note">{{T_ALL_NOTE}}</span></div>
+  </div>
+  <p class="note">Change = dam release minus no dam at the same gauge, daily NSE over the {{N_DAYS}} test days, then the median over gauges. Brackets are 95 % bootstrap intervals of that median.</p>
+  <div class="card">
+    <h3>What this run shows, and where the evidence is</h3>
+    <div class="claims">{{CLAIMS}}</div>
+  </div>
+</header>
+
+<section id="setup">
+  <div class="eyebrow">The test</div>
+  <h2>What was compared, and on which years</h2>
+  <div class="split">
+    <div class="timeline" role="img" aria-label="Training water years 1982 to 1995, test water years 1996 to 2010">
+      <div class="tr">Training · WY1982-1995 · 14 years</div>
+      <div class="te">Test · WY1996-2010 · 15 years · scored once</div>
+    </div>
+  </div>
+  <div class="cols two">
+    <div class="card">
+      <h3>Three predictions at every gauge</h3>
+      <ul>
+        <li><b>Summed Q′</b>: the dHBV2 runoff of every catchment upstream, summed each day. No routing, no learned parameters: the floor any router must clear.</li>
+        <li><b>No dam</b>: Muskingum-Cunge routing over {{REACHES}} MERIT reaches, hourly, with a KAN head that maps catchment attributes to roughness n₀ and its stage exponent γ, <span class="m">n(d) = n₀ (d / 1 m)^−γ</span>.</li>
+        <li><b>Dam release</b>: the same model, plus a storage bucket at each of the {{N_DAMS}} dam reaches.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>The split</h3>
+      <ul>
+        <li>Both arms trained on 1981-10-01 to 1995-09-30 in 90-day windows: 50 epochs, 500 Adam updates, NSE loss, seed {{SEED}}, CPU. Identical configuration except the dams.</li>
+        <li>Scored on {{WINDOW}} ({{N_DAYS}} days, water years 1996-2010) with the final checkpoint. No early stopping, no model selection on the test years.</li>
+        <li>The same {{N_ALL}} gauges appear in both periods. This is a hold-out in time, not in space.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>The release law</h3>
+      <ul>
+        <li>Each dam reach stores <span class="m">S = T(t)·Q</span> and releases Q, with <span class="m">T(t) = T₀ exp(a sin ω + b cos ω)</span>, ω = 2π · day of year / 365.25, T at least 1 hour. Storage is conserved.</li>
+        <li>T₀ (1 hour to 365 days), a and b (±2) come from a second KAN head fed 19 NID features of the dam: storage, surface, drainage area, height, year, purposes. Trained jointly with the routing head.</li>
+        <li>No dam operations data enter. The only information about any dam's behaviour is the gauge record downstream, used as the loss target in the training years.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Gauge groups</h3>
+      <ul>
+        <li><b>Dammed</b> ({{N_DAMMED}}): at least one NID dam of 10 MCM or more upstream. <b>Undammed</b> ({{N_UNDAMMED}}): none that large (smaller dams can exist).</li>
+        <li><b>Dam on the gauge reach</b> ({{N_ONREACH}}): a large dam sits on the MERIT reach that holds the gauge.</li>
+        <li><b>Degree of regulation</b>: upstream NID storage divided by a year's mean flow volume at the gauge. 1 means the reservoirs could hold a full year of flow.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="scores">
+  <div class="eyebrow">Scores</div>
+  <h2>Median skill in the test years</h2>
+  <p class="prose">Median over gauges of daily NSE and KGE, water years 1996-2010. All three columns are scored against the same observed series with the same code.</p>
+  <div class="table-wrap">
+    <table class="stats">
+      <thead><tr><th>Gauges</th><th class="num">n</th><th class="num">Summed Q′</th><th class="num">No dam</th><th class="num">Dam release</th></tr></thead>
+      <tbody>{{SCORE_ROWS}}</tbody>
+    </table>
+  </div>
+  <p class="note">Group medians are not the median of the per-gauge changes; the figures below use the per-gauge (paired) changes, which are the fair comparison.</p>
+</section>
+
+<section id="f1">
+  <div class="eyebrow">Figure 1 · Claim 1</div>
+  <h2>Routing beats summed Q′, with or without dams</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If the learned channel routing carries real information about travel time and attenuation, it should raise NSE over the unrouted sum of runoff at most gauges in years it never saw.</p></div>
+    <div><b>In plain words</b><p>For every gauge, we take the model's test NSE minus the summed-Q′ test NSE, then report the typical (median) difference for each group, with how sure we are about that median.</p></div>
+    <div><b>What is drawn</b><p>One row per gauge group. Dots: median per-gauge change in test NSE against summed Q′; whiskers: 95 % bootstrap interval of that median. Teal: no dam. Ochre: dam release. Right: the dam release's gauges up and down. Switch to KGE above. Hover a row for all numbers.</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <label for="f1met">Metric<select id="f1met"><option value="nse">NSE</option><option value="kge">KGE</option></select></label>
+      <div class="legend"><span><i class="dot" style="background:var(--nodam)"></i>No dam minus summed Q′</span><span><i class="dot" style="background:var(--dam)"></i>Dam release minus summed Q′</span></div>
+    </div>
+    <div class="figbox"><svg id="fq" class="wide" viewBox="0 0 900 420" role="img" aria-label="Median per-gauge change in test skill against summed Q prime, by gauge group"></svg><div class="tip" id="tfq" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F1_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F1_CONCLUSION}}</p></div>
+  </div>
+  <div class="table-wrap">{{F1_TABLE}}</div>
+</section>
+
+<section id="f2">
+  <div class="eyebrow">Figure 2 · Claims 2 and 3</div>
+  <h2>The dam release against the same model without dams</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If the release law captures what reservoirs do, it should raise NSE at gauges below large dams, most where the dam sits on the gauge reach and where storage is large relative to flow, and leave undammed gauges where they were.</p></div>
+    <div><b>In plain words</b><p>The same paired comparison as Figure 1, now between the two arms. Every gauge is compared with itself, so the differences between basins cancel. Positive means the dam release predicted the test years better.</p></div>
+    <div><b>What is drawn</b><p>Dots: median per-gauge change in test NSE, dam release minus no dam; whiskers: 95 % bootstrap interval. Right: gauges up and down, and the sign-test p value. The x axis is in thousandths of NSE. Switch to KGE above; hover a row for details.</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <label for="f2met">Metric<select id="f2met"><option value="nse">NSE</option><option value="kge">KGE</option></select></label>
+      <div class="legend"><span><i class="dot" style="background:var(--ink)"></i>Dam release minus no dam, seed {{SEED}}</span></div>
+    </div>
+    <div class="figbox"><svg id="fa" class="wide" viewBox="0 0 900 420" role="img" aria-label="Median per-gauge change in test skill, dam release minus no dam, by gauge group"></svg><div class="tip" id="tfa" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F2_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F2_CONCLUSION}}</p></div>
+  </div>
+  <div class="table-wrap">{{F2_TABLE}}</div>
+</section>
+
+<section id="f3">
+  <div class="eyebrow">Figure 3</div>
+  <h2>How the per-gauge changes are spread</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>A real dam effect should shift the whole distribution of changes at dammed gauges to the right, not only a few outliers, while the undammed distribution stays centred on zero.</p></div>
+    <div><b>In plain words</b><p>Each line sorts one group's per-gauge changes from worst to best. A line further right is a group that gained more. The median sits where a line crosses 50 %.</p></div>
+    <div><b>What is drawn</b><p>Across: change in test NSE, dam release minus no dam, on a symmetric log scale (linear within ±0.001, logarithmic beyond), so both the typical thousandths and the tails of ±0.1 or more are visible. Up: share of gauges at or below that change. Ochre solid: dam on the gauge reach. Ochre dashed: dam further up. Teal: undammed. Dots mark the medians. Hover for the shares.</p></div>
+  </div>
+  <div class="fig">
+    <div class="legend" id="f3leg"></div>
+    <div class="figbox"><svg id="fe" class="wide" viewBox="0 0 900 360" role="img" aria-label="Cumulative distribution of the per-gauge change in NSE"></svg><div class="tip" id="tfe" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F3_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F3_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="f4">
+  <div class="eyebrow">Figure 4</div>
+  <h2>Where skill improved or fell</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>Gains from the release should sit below the big reservoirs (the Missouri and Arkansas flood-control systems, the Southeast, California, the Pacific Northwest), and losses should show no such pattern.</p></div>
+    <div><b>In plain words</b><p>The per-gauge change put back on the map. Pick which pair of predictions to compare; the default is the dam release against the no-dam model.</p></div>
+    <div><b>What is drawn</b><p>CONUS Albers; grey shapes are the 18 HUC2 regions. Triangles: dammed gauges; circles: undammed. Colour: change in test NSE in seven classes, ochre when the first-named prediction is better, teal when the second is, grey within the smallest band. The class edges differ by comparison and are in the legend. Largest changes are drawn on top. Hover for a gauge's numbers; click to open its hydrograph.</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <label for="m1cmp">Compare<select id="m1cmp"><option value="dam_off">Dam release minus no dam</option><option value="dam_base">Dam release minus summed Q′</option><option value="off_base">No dam minus summed Q′</option></select></label>
+      <label for="m1grp">Gauges<select id="m1grp"><option value="all">All</option><option value="d">Dammed only</option><option value="u">Undammed only</option></select></label>
+    </div>
+    <div class="legend" id="m1leg"></div>
+    <div class="figbox"><svg id="m1" class="map" role="img" aria-label="Map of the per-gauge change in test NSE"></svg><div class="tip" id="tm1" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F4_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F4_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="f5">
+  <div class="eyebrow">Figure 5</div>
+  <h2>Region by region</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If the effect is real, the dammed-gauge median should sit right of the undammed median in most regions, not only in one or two regions that carry the national number.</p></div>
+    <div><b>In plain words</b><p>The typical change at dammed and at undammed gauges, side by side for each HUC2 region.</p></div>
+    <div><b>What is drawn</b><p>One row per region. Ochre dot: median change in test NSE (dam release minus no dam) at the region's dammed gauges; teal dot: at its undammed gauges. Numbers on the right: how many gauges each median rests on. The x axis uses the same symmetric log scale as Figure 3. Regions with a handful of gauges carry little weight. Hover a row for details.</p></div>
+  </div>
+  <div class="fig">
+    <div class="legend"><span><i class="dot" style="background:var(--dam)"></i>Dammed gauges, median</span><span><i class="dot" style="background:var(--nodam)"></i>Undammed gauges, median</span></div>
+    <div class="figbox"><svg id="fr" class="wide" viewBox="0 0 900 560" role="img" aria-label="Median change in NSE by region for dammed and undammed gauges"></svg><div class="tip" id="tfr" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F5_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F5_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="f6">
+  <div class="eyebrow">Figure 6</div>
+  <h2>Gain against degree of regulation</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>A bucket can only help where a dam holds enough water to reshape the flow, so the gain should grow with the degree of regulation. Where reservoirs hold years of flow and release on schedules no bucket can mimic, it may level off.</p></div>
+    <div><b>In plain words</b><p>Dammed gauges sorted from lightly regulated to heavily regulated, with the typical gain in each band.</p></div>
+    <div><b>What is drawn</b><p>Each ochre point is a dammed gauge. Across: degree of regulation, log scale. Up: change in test NSE, dam release minus no dam, symmetric log scale. The dark line joins the band medians (up to 0.1, 0.1 to 0.5, 0.5 to 1, 1 to 2, above 2) with their 95 % intervals, placed at each band's median regulation. The teal line is the median at undammed gauges. Hover a point or a band; click a point to open its hydrograph.</p></div>
+  </div>
+  <div class="fig">
+    <div class="legend"><span><i class="dot" style="background:var(--dam)"></i>Dammed gauge</span><span><i class="sw" style="background:var(--ink)"></i>Band median and 95 % interval</span><span><i class="sw" style="background:var(--nodam)"></i>Undammed, median</span></div>
+    <div class="figbox"><svg id="fd" class="wide" viewBox="0 0 900 400" role="img" aria-label="Change in NSE against degree of regulation at dammed gauges"></svg><div class="tip" id="tfd" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F6_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F6_CONCLUSION}}</p></div>
+  </div>
+  <div class="table-wrap">{{F6_TABLE}}</div>
+</section>
+
+<section id="f7">
+  <div class="eyebrow">Figure 7 · Claim 4</div>
+  <h2>What the release head learned at each dam</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If the head learned something physical from NID features and downstream gauges alone, response times should be ordered by what a hydrologist would expect: longer behind big reservoirs, longer for flood-control dams, and correlated with each reservoir's residence time.</p></div>
+    <div><b>In plain words</b><p>Every one of the {{N_DAMS}} dam reaches, coloured by the learned mean response time T₀, or by how much T swings over the year.</p></div>
+    <div><b>What is drawn</b><p>Diamonds: dam reaches (where several NID dams share a reach, the largest names it), sized by NID storage, coloured in five classes of the chosen quantity. Grey shapes are the HUC2 regions. Hover a dam for its NID record and learned law: T₀, the range of T over the year and the month T peaks.</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <label for="m2var">Colour by<select id="m2var"><option value="T0">Mean response time T₀</option><option value="swing">Seasonal swing, T max ÷ T min</option></select></label>
+    </div>
+    <div class="legend" id="m2leg"></div>
+    <div class="figbox"><svg id="m2" class="map" role="img" aria-label="Map of the learned response time at each dam"></svg><div class="tip" id="tm2" hidden></div></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F7_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F7_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="f8">
+  <div class="eyebrow">Figure 8 · Claim 4</div>
+  <h2>Do the learned response times make physical sense?</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>Two independent checks. Learned T₀ should rise with the reservoir's residence time (NID storage over mean flow), and should agree in order with a bucket fitted offline at each gauge, before this model existed (the smoke test).</p></div>
+    <div><b>In plain words</b><p>Left: learned T₀ against a physical or fitted reference, one point per dam. Right: the time of year each dam's T is longest.</p></div>
+    <div><b>What is drawn</b><p>Left, log-log: learned T₀ (days) up; across, either residence time for dams on a gauge reach (storage / mean flow at that gauge) or the seasonal bucket T₀ fitted offline on WY1983-1995 at the smoke-test dams that sit on their gauge's reach; the diagonal is 1:1. ρ is Spearman's rank correlation. Right: number of dams whose T peaks in each month (T is longest when a sin ω + b cos ω is largest).</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <label for="f8x">Across<select id="f8x"><option value="res">Residence time, storage ÷ mean flow</option><option value="fit">Offline fitted T₀ (smoke test)</option></select></label>
+    </div>
+    <div class="pair">
+      <div class="figbox"><svg id="ft" viewBox="0 0 460 360" role="img" aria-label="Learned T0 against residence time or fitted T0"></svg><div class="tip" id="tft" hidden></div></div>
+      <div class="figbox"><svg id="fm" viewBox="0 0 460 360" role="img" aria-label="Number of dams by month of longest response time"></svg><div class="tip" id="tfm" hidden></div></div>
+    </div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F8_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F8_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="f9">
+  <div class="eyebrow">Figure 9 · Claim 5</div>
+  <h2>The channel parameters: n₀ and γ in both arms</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>The dams should change the routing head's parameters only near dams. If n₀ and γ differ across the whole country, part of every per-gauge difference in Figures 2 to 6 is a different channel solution, not the dams.</p></div>
+    <div><b>In plain words</b><p>Maps of what the routing head learned in each arm, the difference between them, and how far the parameters were still moving at the end of training.</p></div>
+    <div><b>What is drawn</b><p>MERIT unit catchments coloured by the learned value (dump_parameters at the final checkpoint). The two arms share one colour scale per parameter (2nd to 98th percentile of both pooled). Difference maps: dam release minus no dam, ochre where the dam arm is higher; triangles mark dam reaches. Convergence: distribution at the end of epochs 1, 10, 25 and 50 on the declared range, and each reach's movement over the last 25 epochs.</p></div>
+  </div>
+  <div class="fig">
+    <div class="imgs two">{{IMG_PARAMS}}</div>
+    <div class="table-wrap">{{F9_TABLE}}</div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F9_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F9_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="f10">
+  <div class="eyebrow">Figure 10</div>
+  <h2>Four hydrographs</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>Where the release helps, it should do what a reservoir does: cut the model's flood peaks, hold the water and release it on the recession. Where it hurts, it should smear a release the real dam passes quickly.</p></div>
+    <div><b>In plain words</b><p>Daily flow for one water year at four gauges: a large gain below a dam, a typical dammed gauge, the largest loss below a dam, and a typical undammed gauge.</p></div>
+    <div><b>What is drawn</b><p>Daily flow in m³/s for one test water year per gauge, the year with the largest observed peak by default (each panel has its own year menu). Dark: observed. Grey dashed: summed Q′. Teal: no dam. Ochre: dam release. Hover for daily values. The first panel opens on the Hurricane Fran flood of September 1996.</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <div class="legend">
+        <span><i class="sw" style="background:var(--obs);opacity:.7"></i>Observed</span>
+        <span><i class="sw dash"></i>Summed Q′</span>
+        <span><i class="sw" style="background:var(--nodam)"></i>No dam</span>
+        <span><i class="sw" style="background:var(--dam)"></i>Dam release</span>
+      </div>
+    </div>
+    <div class="smalls" id="smalls"></div>
+  </div>
+  <div class="brief">
+    <div><b>Result</b><p>{{F10_RESULT}}</p></div>
+    <div><b>Conclusion</b><p>{{F10_CONCLUSION}}</p></div>
+  </div>
+</section>
+
+<section id="viewer">
+  <div class="eyebrow">Figure 11</div>
+  <h2>Look at any gauge</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>At a dammed gauge where the release helps, ochre should flatten teal's spikes and stretch its recessions toward the observed line. At an undammed gauge the two should nearly coincide.</p></div>
+    <div><b>In plain words</b><p>Pick any of the {{N_ALL}} gauges and any test year and compare the predictions yourself. The maps, Figure 6 and the table also select gauges.</p></div>
+    <div><b>What is drawn</b><p>Daily flow in m³/s over one water year. Dark: observed. Teal: no dam. Ochre: dam release. Series are stored to 0.5 % precision. Hover for daily values.</p></div>
+  </div>
+  <div class="fig">
+    <div class="pickers">
+      <label for="gSel">Gauge<select id="gSel"><option>Loading…</option></select></label>
+      <label for="ySel">Water year<select id="ySel"></select></label>
+      <label class="check" for="logBox"><input id="logBox" type="checkbox"> Log scale</label>
+    </div>
+    <div class="gmeta" id="gMeta"><span class="muted">Loading…</span></div>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--obs);opacity:.7"></i>Observed</span>
+      <span><i class="sw" style="background:var(--nodam)"></i>No dam</span>
+      <span><i class="sw" style="background:var(--dam)"></i>Dam release</span>
+    </div>
+    <div class="figbox"><svg id="fv" class="wide" viewBox="0 0 900 330" role="img" aria-label="Daily hydrograph for the selected gauge and water year"></svg><div class="tip" id="tfv" hidden></div></div>
+  </div>
+  <h3 style="margin-top:8px">All {{N_ALL}} gauges</h3>
+  <div class="pickers">
+    <label for="fGrp">Show<select id="fGrp"><option value="all">All gauges</option><option value="d">Dammed</option><option value="o">Dam on the gauge reach</option><option value="u">Undammed</option></select></label>
+    <label for="fHuc">Region<select id="fHuc"><option value="all">All regions</option></select></label>
+    <span class="note" id="tCount"></span>
+  </div>
+  <div class="table-wrap tall">
+    <table class="stats" id="tbl">
+      <thead><tr><th data-k="h">Region</th><th data-k="nm">Gauge</th><th data-k="dam">Largest dam upstream</th><th class="num" data-k="a">Area km²</th><th class="num" data-k="dor">Regulation</th><th class="num" data-k="nb">NSE Q′</th><th class="num" data-k="no">NSE no dam</th><th class="num" data-k="nd">NSE dam</th><th class="num" data-k="dd">Change</th></tr></thead>
+      <tbody><tr><td colspan="9" class="muted">Loading…</td></tr></tbody>
+    </table>
+  </div>
+  <p class="note">Click a column heading to sort, a row to plot it. Regulation is upstream NID storage over annual flow. Change is dam release minus no dam in test NSE.</p>
+</section>
+
+<section id="limits">
+  <div class="eyebrow">Limits</div>
+  <h2>What this does not show</h2>
+  <div class="card">
+    <ul>{{LIMITS}}</ul>
+  </div>
+</section>
+
+<section id="replicate">
+  <div class="eyebrow">Seed replicate</div>
+  <h2>{{REP_TITLE}}</h2>
+  {{REPLICATE}}
+</section>
+
+<section id="gallery" class="gal">
+  <div class="eyebrow">All evaluation figures</div>
+  <h2>The standard evaluation plots for both arms</h2>
+  <p class="prose">Produced by the ddrs-eval-plots notebooks (metrics, hydrographs, parameter maps and convergence, stage roughness) in each run's <span class="m">plots/</span> directory. Shown here at reduced resolution; click an image to open it full size. Summed Q′ is grey, no dam teal, dam release ochre.</p>
+  {{GALLERY}}
+</section>
+
+<footer>
+  <div>Runs (seed {{SEED}}, CPU, code on branch <span class="m">dam-release-head</span>): no dam <span class="m">{{RUN_OFF}}</span>, dam release <span class="m">{{RUN_DAM}}</span>, both at <span class="m">checkpoints/epoch_50_mb_9</span>{{RUNS43}}. The no-dam arm reproduces the earlier reference run <span class="m">2026-09-12T23-39-03Z</span> (median NSE 0.7391, KGE 0.7592).</div>
+  <div>Scores: daily NSE and KGE per gauge over {{WINDOW}}, days with an observation only, gauges with at least 365 observed days. Paired intervals: 2,000 bootstrap resamples of gauges; sign test on gauges that changed. Scripts: <span class="m">experiments/reservoir/full_run/</span> (<span class="m">paired_full_run.py</span>, <span class="m">page/analysis.py</span>, <span class="m">page/build_page.py</span>) on branch <span class="m">reservoir-options</span>.</div>
+  <div>Dams: USACE National Inventory of Dams, snapped to MERIT-Basins reaches (<span class="m">experiments/reservoir/nid/</span>). Observations: USGS NWIS daily discharge. Runoff: dHBV2 retrospective. Basemap: HUC2 regions from the USGS 1:2,000,000 Hydrologic Units (CAMELS <span class="m">huc_02</span>), CONUS Albers, simplified to about 3.5 km.</div>
+</footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var NS = "http://www.w3.org/2000/svg";
+  var MAP = {{MAP_JSON}};
+  var PICKS = {{PICKS_JSON}};
+  var RES = {{RES_JSON}};
+  var REP = {{REP_JSON}};
+  var HUCN = { "01": "New England", "02": "Mid-Atlantic", "03": "South Atlantic-Gulf", "04": "Great Lakes", "05": "Ohio", "06": "Tennessee",
+    "07": "Upper Mississippi", "08": "Lower Mississippi", "09": "Souris-Red-Rainy", "10": "Missouri", "11": "Arkansas-White-Red",
+    "12": "Texas-Gulf", "13": "Rio Grande", "14": "Upper Colorado", "15": "Lower Colorado", "16": "Great Basin", "17": "Pacific Northwest", "18": "California" };
+  var MONTHS = ["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"];
+  var CAL = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var GROUPS = [["all", "All gauges"], ["dammed", "Dammed"], ["undammed", "Undammed"], ["on_reach", "Dam on the gauge reach"], ["further_up", "Dam further upstream"],
+    ["dor_<=0.1", "Regulation up to 0.1"], ["dor_0.1-0.5", "Regulation 0.1 to 0.5"], ["dor_0.5-1", "Regulation 0.5 to 1"], ["dor_1-2", "Regulation 1 to 2"], ["dor_>2", "Regulation above 2"]];
+  var HK = Object.keys(HUCN).sort();
+  var RM = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var D = null, SER = null, byId = {}, bins = {}, sortKey = "h", sortDir = 1, gSel, ySel, logBox, gMeta;
+
+  function $(id) { return document.getElementById(id); }
+  function el(p, name, attrs) { var e = document.createElementNS(NS, name); for (var k in attrs) e.setAttribute(k, attrs[k]); p.appendChild(e); return e; }
+  function txt(p, x, y, s, cls, anchor) { var t = el(p, "text", { x: x, y: y, class: cls }); if (anchor) t.setAttribute("text-anchor", anchor); t.textContent = s; return t; }
+  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+  function span(text, cls) { var s = document.createElement("span"); if (cls) s.className = cls; s.textContent = text; return s; }
+  function bold(text) { var b = document.createElement("b"); b.textContent = text; return b; }
+  function fin(v) { return v != null && isFinite(v); }
+  function num(v) { if (!fin(v)) return "–"; var a = Math.abs(v); return a >= 1000 ? Math.round(v).toLocaleString("en-US") : a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : a >= 1 ? v.toFixed(2) : v.toPrecision(2); }
+  function area(v) { return fin(v) ? Math.round(v).toLocaleString("en-US") : "–"; }
+  function f3(v) { return fin(v) ? v.toFixed(3).replace("-", "−") : "–"; }
+  function sgn(v, d) { d = d == null ? 4 : d; if (!fin(v)) return "–"; if (Math.abs(v) < 0.5 * Math.pow(10, -d)) return (0).toFixed(d); return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(d); }
+  function days(v) { return !fin(v) ? "–" : v < 1 ? (v * 24).toFixed(1) + " h" : v < 10 ? v.toFixed(1) + " d" : v.toFixed(0) + " d"; }
+  function median(a) { var s = a.filter(fin).slice().sort(function (x, y) { return x - y; }); var n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : NaN; }
+  function niceStep(x) { var p = Math.pow(10, Math.floor(Math.log10(x))), f = x / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p; }
+  function vb(svg) { var b = svg.viewBox.baseVal; return [b.width, b.height]; }
+  function viewXY(evt, svg) { var r = svg.getBoundingClientRect(), w = vb(svg); return [(evt.clientX - r.left) * w[0] / r.width, (evt.clientY - r.top) * w[1] / r.height]; }
+  function scrollTo(node, block) { node.scrollIntoView({ behavior: RM ? "auto" : "smooth", block: block || "start" }); }
+  // symmetric log: linear within +-S, log beyond
+  var S = 0.001;
+  function slog(v) { return Math.asinh(v / S); }
+  function slogTicks(lo, hi) { var out = [0]; [0.001, 0.01, 0.1, 1].forEach(function (t) { if (t <= hi + 1e-12) out.push(t); if (-t >= lo - 1e-12) out.push(-t); }); return out.sort(function (a, b) { return a - b; }); }
+  function tickLab(t) { return t === 0 ? "0" : (t > 0 ? "+" : "−") + String(Math.abs(t)); }
+
+  function tipAt(tip, svg, xv, yv, lines) {
+    clear(tip); lines.forEach(function (l, i) { if (i) tip.appendChild(document.createElement("br")); tip.appendChild(l); });
+    tip.hidden = false;
+    var box = tip.parentNode, r = svg.getBoundingClientRect(), b = box.getBoundingClientRect(), w = vb(svg);
+    var px = r.left - b.left + box.scrollLeft + xv * r.width / w[0], tw = tip.offsetWidth, th = tip.offsetHeight;
+    var left = px + 14 + tw > box.scrollLeft + b.width ? px - tw - 14 : px + 14;
+    tip.style.left = Math.max(box.scrollLeft, left) + "px";
+    if (yv == null) { tip.style.top = "8px"; return; }
+    var py = r.top - b.top + yv * r.height / w[1], top = py - th - 12;
+    if (top < 0) top = py + 14;
+    if (top + th > b.height) top = Math.max(0, b.height - th - 2);
+    tip.style.top = top + "px";
+  }
+  function hideTip(tip) { tip.hidden = true; }
+  function hoverNearest(svg, tip, getPts, lines, onClick, R) {
+    var ring = el(svg, "circle", { r: 7, cx: -99, cy: -99, class: "hring" }), rr = (R || 16) * (R || 16);
+    function find(evt) {
+      var v = viewXY(evt, svg), best = null, bd = rr, pri = null;
+      getPts().forEach(function (p) {
+        var dx = p.x - v[0], dy = p.y - v[1], d = dx * dx + dy * dy;
+        if (p.band) { if (d <= p.r * p.r) pri = p; } else if (d < bd) { bd = d; best = p; }
+      });
+      return pri || best;
+    }
+    function move(evt) {
+      var p = find(evt);
+      if (!p) { hideTip(tip); ring.setAttribute("cx", -99); svg.style.cursor = ""; return; }
+      ring.setAttribute("cx", p.x); ring.setAttribute("cy", p.y); ring.setAttribute("r", p.r || 7);
+      svg.style.cursor = p.g && onClick ? "pointer" : "";
+      tipAt(tip, svg, p.x, p.y, lines(p));
+    }
+    svg.addEventListener("pointermove", move);
+    svg.addEventListener("pointerleave", function () { hideTip(tip); ring.setAttribute("cx", -99); });
+    svg.addEventListener("click", function (evt) { var p = find(evt); if (p && p.g && onClick) onClick(p.g); });
+    return ring;
+  }
+  function damText(g) { return g.d ? (g.dam ? g.dam + ", " + num(g.st) + " MCM" : "NID dam upstream") + " · regulation " + num(g.dor) + (g.o ? " · on the gauge reach" : "") : "No NID dam ≥ 10 MCM upstream"; }
+  function gaugeLines(g) {
+    return [bold(g.nm), span("USGS " + g.id + " · HUC " + g.h + " " + HUCN[g.h] + " · " + area(g.a) + " km²"), span(damText(g)),
+      span("NSE: Q′ " + f3(g.nb) + " · no dam " + f3(g.no) + " · dam " + f3(g.nd)),
+      span("dam − no dam " + sgn(g.nd - g.no) + " · dam − Q′ " + sgn(g.nd - g.nb, 3))];
+  }
+  function openGauge(g) { select(g.id); scrollTo($("viewer")); }
+
+  Promise.all([
+    fetch("data_s42.json").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+    fetch("series/index.json").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  ]).then(function (x) { init(x[0], x[1]); }).catch(function (e) { $("gMeta").textContent = "Could not load the results (" + e.message + ")."; });
+
+  function init(data, ser) {
+    D = data; SER = ser; data.gauges.forEach(function (g) { byId[g.id] = g; });
+    [forestQ, forestA, ecdf, map1, regions, dorFig, map2, t0Fig, monthFig, smalls, viewerInit, tableInit, replicateFigs].forEach(function (f) {
+      try { f(); } catch (e) { if (window.console) console.error(f.name, e); }
+    });
+  }
+
+  // ---------- forest plots ----------
+  function forest(svg, tip, series, metric, opt) {
+    clear(svg); hideTip(tip);
+    var X0 = 250, X1 = 690, Y0 = 34, RH = 34, W = 900;
+    var rows = GROUPS.map(function (g) { return { key: g[0], label: g[1] }; });
+    var lo = 0, hi = 0;
+    series.forEach(function (s) { rows.forEach(function (r) { var p = s.get(r.key, metric); if (p && p.n) { lo = Math.min(lo, p.ci[0], p.median); hi = Math.max(hi, p.ci[1], p.median); } }); });
+    var pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
+    var st = niceStep((hi - lo) / 6); lo = Math.floor(lo / st) * st; hi = Math.ceil(hi / st) * st;
+    var sx = function (v) { return X0 + (X1 - X0) * (v - lo) / (hi - lo); };
+    var Y1 = Y0 + RH * rows.length, H = Y1 + 52;
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    var dec = st >= 0.01 ? 2 : st >= 0.001 ? 3 : 4;
+    for (var x = lo; x <= hi + st / 2; x += st) {
+      var xx = Math.abs(x) < st / 1e3 ? 0 : x;
+      el(svg, "line", { x1: sx(xx), x2: sx(xx), y1: Y0 - 8, y2: Y1, class: xx === 0 ? "zero" : "gridline" });
+      txt(svg, sx(xx), Y1 + 18, xx === 0 ? "0" : (xx > 0 ? "+" : "−") + Math.abs(xx).toFixed(dec), "axis", "middle");
+    }
+    txt(svg, (X0 + X1) / 2, Y1 + 42, opt.xlabel.replace("{M}", metric.toUpperCase()), "axlab", "middle");
+    txt(svg, X1 + 16, Y0 - 14, opt.rightHead, "dls");
+    rows.forEach(function (r, i) {
+      var y = Y0 + RH * i + RH / 2;
+      if (r.key === "on_reach" || r.key === "dor_<=0.1") el(svg, "line", { x1: 0, x2: W, y1: y - RH / 2, y2: y - RH / 2, class: "gridline" });
+      var hit = el(svg, "rect", { x: 0, y: y - RH / 2, width: W, height: RH, class: "rowhit" });
+      var n = series[0].get(r.key, metric).n;
+      txt(svg, r.key.indexOf("dor_") === 0 || r.key === "on_reach" || r.key === "further_up" ? 22 : 8, y + 4, r.label, "dl");
+      txt(svg, X0 - 12, y + 4, "n " + n, "dls", "end");
+      series.forEach(function (s, k) {
+        var p = s.get(r.key, metric); if (!p || !p.n) return;
+        var yy = y + (series.length > 1 ? (k - (series.length - 1) / 2) * 9 : 0);
+        el(svg, "line", { x1: sx(p.ci[0]), x2: sx(p.ci[1]), y1: yy, y2: yy, stroke: s.color, "stroke-width": 2.2, "stroke-linecap": "round" });
+        el(svg, "circle", { cx: sx(p.median), cy: yy, r: 4.6, fill: s.color, stroke: "var(--surface)", "stroke-width": 1.5 });
+      });
+      var pr = series[series.length - 1].get(r.key, metric);
+      txt(svg, X1 + 16, y + 4, opt.right(pr), "dls");
+      function show() {
+        var lines = [bold(r.label + " (" + n + " gauges)")];
+        series.forEach(function (s) { var p = s.get(r.key, metric); var d = document.createElement("span"), sw = document.createElement("i"); sw.style.background = s.color; d.appendChild(sw);
+          d.appendChild(document.createTextNode(s.name + ": " + sgn(p.median) + " [" + sgn(p.ci[0]) + ", " + sgn(p.ci[1]) + "], " + p.n_up + " up / " + p.n_down + " down")); lines.push(d); });
+        tipAt(tip, svg, sx(pr.median), y, lines);
+      }
+      hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show);
+      hit.addEventListener("pointerleave", function () { hideTip(tip); });
+    });
+  }
+  function forestQ() {
+    var sel = $("f1met");
+    function draw() {
+      forest($("fq"), $("tfq"), [
+        { name: "No dam − Q′", color: "var(--nodam)", get: function (k, m) { return RES.paired.off_minus_base[m][k]; } },
+        { name: "Dam release − Q′", color: "var(--dam)", get: function (k, m) { return RES.paired.dam_minus_base[m][k]; } }
+      ], sel.value, { xlabel: "Median per-gauge change in test {M} against summed Q′", rightHead: "dam release: up / down", right: function (p) { return p.n_up + " / " + p.n_down; } });
+    }
+    sel.addEventListener("change", draw); draw();
+  }
+  function forestA() {
+    var sel = $("f2met");
+    function pv(p) { return p == null ? "" : p < 0.001 ? "p < 0.001" : "p " + p.toFixed(p < 0.1 ? 3 : 2); }
+    function draw() {
+      forest($("fa"), $("tfa"), [
+        { name: "Dam release − no dam", color: "var(--ink)", get: function (k, m) { return RES.paired.dam_minus_off[m][k]; } }
+      ], sel.value, { xlabel: "Median per-gauge change in test {M}, dam release minus no dam", rightHead: "up / down · sign test", right: function (p) { return p.n_up + " / " + p.n_down + " · " + pv(p.sign_p); } });
+    }
+    sel.addEventListener("change", draw); draw();
+  }
+
+  // ---------- Figure 3: ECDF on a symmetric log axis ----------
+  function ecdf() {
+    var svg = $("fe"), tip = $("tfe"), X0 = 64, X1 = 650, Y0 = 20, Y1 = 300, LO = -1, HI = 1;
+    var sx = function (v) { return X0 + (X1 - X0) * (slog(Math.max(LO, Math.min(HI, v))) - slog(LO)) / (slog(HI) - slog(LO)); };
+    var sy = function (p) { return Y1 - (Y1 - Y0) * p; };
+    var defs = [[function (g) { return g.d && g.o; }, "var(--dam)", "Dam on the gauge reach", ""],
+      [function (g) { return g.d && !g.o; }, "var(--dam)", "Dam further up", "6 4"],
+      [function (g) { return !g.d; }, "var(--nodam)", "Undammed", ""]];
+    var groups = defs.map(function (d) {
+      var v = D.gauges.filter(function (g) { return d[0](g) && fin(g.nd) && fin(g.no); }).map(function (g) { return g.nd - g.no; }).sort(function (a, b) { return a - b; });
+      return { color: d[1], label: d[2], dash: d[3], v: v, med: median(v) };
+    });
+    var L = $("f3leg"); clear(L);
+    groups.forEach(function (g) {
+      var s = document.createElement("span"), v = document.createElementNS(NS, "svg");
+      v.setAttribute("width", 22); v.setAttribute("height", 8); v.setAttribute("viewBox", "0 0 22 8");
+      el(v, "line", { x1: 1, x2: 21, y1: 4, y2: 4, stroke: g.color, "stroke-width": 3, "stroke-dasharray": g.dash || "none" });
+      s.appendChild(v); s.appendChild(document.createTextNode(g.label + " (" + g.v.length + ")")); L.appendChild(s);
+    });
+    for (var p = 0; p <= 1.0001; p += 0.25) { el(svg, "line", { x1: X0, x2: X1, y1: sy(p), y2: sy(p), class: "gridline" }); txt(svg, X0 - 8, sy(p) + 4, Math.round(p * 100) + "%", "axis", "end"); }
+    slogTicks(LO, HI).forEach(function (t) { el(svg, "line", { x1: sx(t), x2: sx(t), y1: Y0, y2: Y1, class: t === 0 ? "zero" : "gridline" }); txt(svg, sx(t), Y1 + 18, tickLab(t), "axis", "middle"); });
+    txt(svg, (X0 + X1) / 2, Y1 + 40, "Change in test NSE, dam release minus no dam (symmetric log scale)", "axlab", "middle");
+    groups.forEach(function (g, gi) {
+      var n = g.v.length, d = "M" + X0 + " " + sy(0);
+      g.v.forEach(function (v, k) { d += "H" + sx(v).toFixed(1) + "V" + sy((k + 1) / n).toFixed(1); });
+      el(svg, "path", { d: d + "H" + X1, fill: "none", stroke: g.color, "stroke-width": 2, "stroke-dasharray": g.dash || "none" });
+      el(svg, "circle", { cx: sx(g.med), cy: sy(0.5), r: 5, fill: g.color, stroke: "var(--surface)", "stroke-width": 2 });
+      var ly = sy(0.86) + gi * 44;
+      el(svg, "line", { x1: X1 + 16, x2: X1 + 34, y1: ly - 4, y2: ly - 4, stroke: g.color, "stroke-width": 3, "stroke-dasharray": g.dash ? "4 3" : "none" });
+      txt(svg, X1 + 42, ly, g.label, "dl");
+      var up = g.v.filter(function (v) { return v > 0; }).length;
+      txt(svg, X1 + 42, ly + 16, "median " + sgn(g.med) + " · " + up + " of " + n + " up", "axis");
+    });
+    var cross = el(svg, "line", { x1: -10, x2: -10, y1: Y0, y2: Y1, class: "cross" });
+    var ov = el(svg, "rect", { x: X0, y: Y0, width: X1 - X0, height: Y1 - Y0, fill: "transparent" });
+    function move(evt) {
+      var xv = Math.max(X0, Math.min(X1, viewXY(evt, svg)[0])), x = S * Math.sinh(slog(LO) + (xv - X0) / (X1 - X0) * (slog(HI) - slog(LO)));
+      cross.setAttribute("x1", xv); cross.setAttribute("x2", xv);
+      var lines = [span("change ≤ " + sgn(x))];
+      groups.forEach(function (g) { var k = g.v.filter(function (v) { return v <= x; }).length; lines.push(span(g.label + ": " + Math.round(100 * k / g.v.length) + "% (" + k + " of " + g.v.length + ")")); });
+      tipAt(tip, svg, xv, null, lines);
+    }
+    ov.addEventListener("pointermove", move); ov.addEventListener("pointerdown", move);
+    ov.addEventListener("pointerleave", function () { hideTip(tip); cross.setAttribute("x1", -10); cross.setAttribute("x2", -10); });
+  }
+
+  // ---------- maps ----------
+  function base(svg) {
+    svg.setAttribute("viewBox", "0 0 " + MAP.w + " " + MAP.h);
+    var g = el(svg, "g", {});
+    MAP.regions.forEach(function (r) { el(g, "path", { d: r.d, class: "reg" }); });
+    el(g, "path", { d: MAP.outline, class: "nation" });
+    MAP.regions.forEach(function (r) { txt(g, r.lx, r.ly + 4, r.huc, "reglab", "middle"); });
+  }
+  function diamond(x, y, s) { return "M" + x + " " + (y - s) + "L" + (x + s) + " " + y + "L" + x + " " + (y + s) + "L" + (x - s) + " " + y + "Z"; }
+  function triUp(x, y, s) { var h = s * 0.55, w = s * 0.95; return "M" + x.toFixed(1) + " " + (y - s).toFixed(1) + "L" + (x + w).toFixed(1) + " " + (y + h).toFixed(1) + "L" + (x - w).toFixed(1) + " " + (y + h).toFixed(1) + "Z"; }
+  var CMP = {
+    dam_off: { f: function (g) { return g.nd - g.no; }, e: [0.0005, 0.005, 0.02], a: "dam release", b: "no dam" },
+    dam_base: { f: function (g) { return g.nd - g.nb; }, e: [0.005, 0.05, 0.2], a: "dam release", b: "summed Q′" },
+    off_base: { f: function (g) { return g.no - g.nb; }, e: [0.005, 0.05, 0.2], a: "no dam", b: "summed Q′" }
+  };
+  function cls7(v, e) { if (!fin(v)) return 3; var a = Math.abs(v), k = a < e[0] ? 0 : a < e[1] ? 1 : a < e[2] ? 2 : 3; return k === 0 ? 3 : v > 0 ? 3 + k : 3 - k; }
+  function fmtE(v) { return String(v); }
+  function map1() {
+    var svg = $("m1"), tip = $("tm1"), cs = $("m1cmp"), gs = $("m1grp");
+    base(svg);
+    var layer = el(svg, "g", {}), pts = [];
+    function legend(c) {
+      var L = $("m1leg"), e = c.e; clear(L);
+      var labs = ["< −" + fmtE(e[2]), "−" + fmtE(e[2]) + " to −" + fmtE(e[1]), "−" + fmtE(e[1]) + " to −" + fmtE(e[0]), "within ±" + fmtE(e[0]),
+        "+" + fmtE(e[0]) + " to +" + fmtE(e[1]), "+" + fmtE(e[1]) + " to +" + fmtE(e[2]), "> +" + fmtE(e[2])];
+      labs.forEach(function (l, k) { var s = document.createElement("span"), b = document.createElement("i"); b.className = "box"; b.style.background = "var(--dv" + k + ")"; s.appendChild(b); s.appendChild(document.createTextNode(l)); L.appendChild(s); });
+      var s1 = document.createElement("span"); s1.textContent = "ochre: " + c.a + " better · teal: " + c.b + " better"; L.appendChild(s1);
+      var s2 = document.createElement("span"), v2 = document.createElementNS(NS, "svg"); v2.setAttribute("width", 34); v2.setAttribute("height", 12); v2.setAttribute("viewBox", "-6 -6 34 12");
+      el(v2, "path", { d: triUp(0, 1, 5), class: "gpt", fill: "var(--dv3)" }); el(v2, "circle", { cx: 18, cy: 0, r: 4, class: "gpt", fill: "var(--dv3)" });
+      s2.appendChild(v2); s2.appendChild(document.createTextNode("dammed · undammed")); L.appendChild(s2);
+    }
+    function draw() {
+      clear(layer); pts = [];
+      var c = CMP[cs.value], grp = gs.value;
+      D.gauges.filter(function (g) { return (grp === "all" || (grp === "d" ? g.d : !g.d)) && fin(c.f(g)); })
+        .sort(function (a, b) { return Math.abs(c.f(a)) - Math.abs(c.f(b)); })
+        .forEach(function (g) {
+          var v = c.f(g), k = cls7(v, c.e), fill = "var(--dv" + k + ")";
+          if (g.d) el(layer, "path", { d: triUp(g.x, g.y, 5.2), class: "gpt", fill: fill });
+          else el(layer, "circle", { cx: g.x, cy: g.y, r: 3.6, class: "gpt", fill: fill });
+          pts.push({ x: g.x, y: g.y, g: g, r: 7 });
+        });
+      legend(c);
+    }
+    draw();
+    hoverNearest(svg, tip, function () { return pts; }, function (p) { return gaugeLines(p.g); }, openGauge, 12);
+    cs.addEventListener("change", draw); gs.addEventListener("change", draw);
+  }
+  var T0B = [0.2, 0.5, 1, 3], SWB = [1.15, 1.3, 1.5, 2];
+  function cls5(v, e) { return v < e[0] ? 0 : v < e[1] ? 1 : v < e[2] ? 2 : v < e[3] ? 3 : 4; }
+  function peakMonth(d) { var w = Math.atan2(d.a, d.b); if (w < 0) w += 2 * Math.PI; var doy = w * 365.25 / (2 * Math.PI); return Math.min(11, Math.floor(doy / 365.25 * 12)); }
+  function damLines(d) {
+    var out = [bold(d.nm + (d.nd > 1 ? " (+" + (d.nd - 1) + " more on this reach)" : "")), span(num(d.st) + " MCM" + (d.yr ? " · built " + d.yr : "") + (d.pu ? " · " + d.pu : ""))];
+    if (d.ps && d.ps !== d.pu) out.push(span("purposes: " + d.ps.split(";").slice(0, 4).join(", ")));
+    out.push(span("T₀ " + days(d.T0) + " · T over the year " + days(d.tmin) + " to " + days(d.tmax) + " · longest in " + CAL[peakMonth(d)]));
+    if (fin(d.res)) out.push(span("residence time (storage ÷ mean flow at " + d.g + ") " + num(d.res) + " d"));
+    if (fin(d.fit)) out.push(span("offline fitted T₀ (smoke test) " + days(d.fit)));
+    return out;
+  }
+  function map2() {
+    var svg = $("m2"), tip = $("tm2"), sel = $("m2var");
+    base(svg);
+    var layer = el(svg, "g", {}), pts = [];
+    function size(st) { return 2.6 + 2.2 * Math.max(0, Math.log10(Math.max(st, 10)) - 1); }
+    function draw() {
+      clear(layer); pts = [];
+      var v = sel.value, e = v === "T0" ? T0B : SWB;
+      D.dams.slice().sort(function (a, b) { return b.st - a.st; }).forEach(function (d) {
+        var q = v === "T0" ? d.T0 : d.tmax / d.tmin, k = cls5(q, e);
+        el(layer, "path", { d: diamond(d.x, d.y, size(d.st)), class: "dampt", fill: "var(--sq" + k + ")" });
+        pts.push({ x: d.x, y: d.y, d: d, r: Math.max(6, size(d.st) + 2) });
+      });
+      var L = $("m2leg"); clear(L);
+      var labs = v === "T0" ? ["under 5 h", "5 to 12 h", "12 h to 1 d", "1 to 3 d", "over 3 d"] : ["under 1.15×", "1.15 to 1.3×", "1.3 to 1.5×", "1.5 to 2×", "over 2×"];
+      labs.forEach(function (l, k) {
+        var n = D.dams.filter(function (d) { return cls5(v === "T0" ? d.T0 : d.tmax / d.tmin, e) === k; }).length;
+        var s = document.createElement("span"), b = document.createElement("i"); b.className = "box"; b.style.background = "var(--sq" + k + ")"; s.appendChild(b); s.appendChild(document.createTextNode(l + " (" + n + ")")); L.appendChild(s);
+      });
+      var s3 = document.createElement("span"), v3 = document.createElementNS(NS, "svg"); v3.setAttribute("width", 70); v3.setAttribute("height", 22); v3.setAttribute("viewBox", "0 -11 70 22");
+      [[8, 10], [28, 1000], [54, 30000]].forEach(function (q) { el(v3, "path", { d: diamond(q[0], 0, size(q[1])), class: "dampt", fill: "var(--muted)" }); });
+      s3.appendChild(v3); s3.appendChild(document.createTextNode("10 · 1,000 · 30,000 MCM")); L.appendChild(s3);
+    }
+    draw();
+    hoverNearest(svg, tip, function () { return pts; }, function (p) { return damLines(p.d); }, null, 12);
+    sel.addEventListener("change", draw);
+  }
+
+  // ---------- Figure 5: regions ----------
+  function regions() {
+    var svg = $("fr"), tip = $("tfr"), X0 = 250, X1 = 740, Y0 = 30, RH = 28, LO = -0.1, HI = 0.1;
+    var rows = HK.filter(function (h) { return RES.huc2[h]; }).map(function (h) { var r = RES.huc2[h]; return { h: h, d: r.dammed || null, u: r.undammed || null }; });
+    var sx = function (v) { return X0 + (X1 - X0) * (slog(Math.max(LO, Math.min(HI, v))) - slog(LO)) / (slog(HI) - slog(LO)); };
+    var Y1 = Y0 + RH * rows.length; svg.setAttribute("viewBox", "0 0 900 " + (Y1 + 50));
+    slogTicks(LO, HI).forEach(function (t) { el(svg, "line", { x1: sx(t), x2: sx(t), y1: Y0 - 6, y2: Y1, class: t === 0 ? "zero" : "gridline" }); txt(svg, sx(t), Y1 + 18, tickLab(t), "axis", "middle"); });
+    txt(svg, (X0 + X1) / 2, Y1 + 40, "Median change in test NSE, dam release minus no dam (symmetric log scale)", "axlab", "middle");
+    txt(svg, X1 + 14, Y0 - 12, "dammed · undammed", "dls");
+    rows.forEach(function (r, i) {
+      var y = Y0 + RH * i + RH / 2;
+      var hit = el(svg, "rect", { x: 0, y: y - RH / 2, width: 900, height: RH, class: "rowhit" });
+      txt(svg, 8, y + 4, r.h + " " + HUCN[r.h], "dl");
+      if (r.d && r.u) el(svg, "line", { x1: sx(r.d.median), x2: sx(r.u.median), y1: y, y2: y, stroke: "var(--rule)", "stroke-width": 2 });
+      if (r.u) el(svg, "circle", { cx: sx(r.u.median), cy: y, r: 5.5, class: "pt-nodam" });
+      if (r.d) el(svg, "circle", { cx: sx(r.d.median), cy: y, r: 5.5, class: "pt-dam" });
+      txt(svg, X1 + 14, y + 4, (r.d ? r.d.n : 0) + " · " + (r.u ? r.u.n : 0), "dls");
+      function show() {
+        var l = [bold(r.h + " " + HUCN[r.h])];
+        if (r.d) l.push(span("dammed: " + r.d.n + ", median " + sgn(r.d.median) + ", " + r.d.n_up + " up"));
+        if (r.u) l.push(span("undammed: " + r.u.n + ", median " + sgn(r.u.median) + ", " + r.u.n_up + " up"));
+        tipAt(tip, svg, 560, y, l);
+      }
+      hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show);
+      hit.addEventListener("pointerleave", function () { hideTip(tip); });
+    });
+  }
+
+  // ---------- Figure 6: regulation ----------
+  function dorFig() {
+    var svg = $("fd"), tip = $("tfd"), X0 = 70, X1 = 870, Y0 = 18, Y1 = 330, XL = -3, XH = 2, YL = -1, YH = 1;
+    var pts = D.gauges.filter(function (g) { return g.d && fin(g.nd) && fin(g.no) && g.dor > 0; });
+    var sx = function (v) { return X0 + (X1 - X0) * (Math.max(XL, Math.min(XH, Math.log10(v))) - XL) / (XH - XL); };
+    var sy = function (v) { return Y1 - (Y1 - Y0) * (slog(Math.max(YL, Math.min(YH, v))) - slog(YL)) / (slog(YH) - slog(YL)); };
+    for (var p = XL; p <= XH; p++) { var v = Math.pow(10, p); el(svg, "line", { x1: sx(v), x2: sx(v), y1: Y0, y2: Y1, class: "gridline" }); txt(svg, sx(v), Y1 + 18, String(v), "axis", "middle"); }
+    slogTicks(YL, YH).forEach(function (t) { el(svg, "line", { x1: X0, x2: X1, y1: sy(t), y2: sy(t), class: t === 0 ? "zero" : "gridline" }); txt(svg, X0 - 8, sy(t) + 4, tickLab(t), "axis", "end"); });
+    txt(svg, (X0 + X1) / 2, Y1 + 40, "Degree of regulation: upstream NID storage ÷ annual flow (log)", "axlab", "middle");
+    var um = RES.paired.dam_minus_off.nse.undammed.median;
+    el(svg, "line", { x1: X0, x2: X1, y1: sy(um), y2: sy(um), class: "ctlline", opacity: 0.85 });
+    txt(svg, X1 - 6, sy(um) + 16, "undammed, median " + sgn(um), "axis", "end");
+    var hp = [];
+    pts.forEach(function (g) { el(svg, "circle", { cx: sx(g.dor), cy: sy(g.nd - g.no), r: 3.4, class: "pt-dam", "fill-opacity": 0.8 }); hp.push({ x: sx(g.dor), y: sy(g.nd - g.no), g: g }); });
+    var edges = [0, 0.1, 0.5, 1, 2, 1e9], keys = ["dor_<=0.1", "dor_0.1-0.5", "dor_0.5-1", "dor_1-2", "dor_>2"], names = ["up to 0.1", "0.1 to 0.5", "0.5 to 1", "1 to 2", "above 2"], bx = [];
+    keys.forEach(function (k, i) {
+      var inb = pts.filter(function (g) { return g.dor > edges[i] && g.dor <= edges[i + 1]; });
+      var x = median(inb.map(function (g) { return g.dor; })), b = RES.paired.dam_minus_off.nse[k];
+      bx.push([x, b]);
+      el(svg, "line", { x1: sx(x), x2: sx(x), y1: sy(b.ci[0]), y2: sy(b.ci[1]), stroke: "var(--ink)", "stroke-width": 2.4 });
+      hp.push({ x: sx(x), y: sy(b.median), band: { b: b, name: names[i] }, r: 9 });
+    });
+    el(svg, "path", { d: bx.map(function (q, j) { return (j ? "L" : "M") + sx(q[0]).toFixed(1) + " " + sy(q[1].median).toFixed(1); }).join(""), class: "binline" });
+    bx.forEach(function (q) { el(svg, "circle", { cx: sx(q[0]), cy: sy(q[1].median), r: 5.5, class: "binpt" }); });
+    hoverNearest(svg, tip, function () { return hp; }, function (p) {
+      if (p.band) { var b = p.band.b; return [bold("Regulation " + p.band.name), span(b.n + " gauges, " + b.n_up + " up / " + b.n_down + " down"), span("median " + sgn(b.median) + " [" + sgn(b.ci[0]) + ", " + sgn(b.ci[1]) + "]")]; }
+      return gaugeLines(p.g);
+    }, openGauge, 10);
+  }
+
+  // ---------- Figure 8 ----------
+  function t0Fig() {
+    var sel = $("f8x");
+    function draw() {
+      var svg = $("ft"), tip = $("tft"); clear(svg); hideTip(tip);
+      var X0 = 58, X1 = 440, Y0 = 16, Y1 = 300, mode = sel.value;
+      var pts = D.dams.filter(function (d) { return fin(mode === "res" ? d.res : d.fit) && (mode === "res" ? d.res : d.fit) > 0; });
+      var XL = mode === "res" ? -1 : -2, XH = mode === "res" ? 4 : 3, YL = -2, YH = 2;
+      var sx = function (v) { return X0 + (X1 - X0) * (Math.max(XL, Math.min(XH, Math.log10(v))) - XL) / (XH - XL); };
+      var sy = function (v) { return Y1 - (Y1 - Y0) * (Math.max(YL, Math.min(YH, Math.log10(v))) - YL) / (YH - YL); };
+      for (var p = XL; p <= XH; p++) { var v = Math.pow(10, p); el(svg, "line", { x1: sx(v), x2: sx(v), y1: Y0, y2: Y1, class: "gridline" }); txt(svg, sx(v), Y1 + 16, String(v), "axis", "middle"); }
+      for (var q = YL; q <= YH; q++) { var w = Math.pow(10, q); el(svg, "line", { x1: X0, x2: X1, y1: sy(w), y2: sy(w), class: "gridline" }); txt(svg, X0 - 6, sy(w) + 4, String(w), "axis", "end"); }
+      var a = Math.max(XL, YL), b = Math.min(XH, YH);
+      el(svg, "line", { x1: sx(Math.pow(10, a)), y1: sy(Math.pow(10, a)), x2: sx(Math.pow(10, b)), y2: sy(Math.pow(10, b)), class: "zero" });
+      txt(svg, sx(Math.pow(10, b)) - 4, sy(Math.pow(10, b)) + 14, "1:1", "axis", "end");
+      txt(svg, (X0 + X1) / 2, Y1 + 36, mode === "res" ? "Residence time, NID storage ÷ mean flow (days, log)" : "Offline fitted seasonal T₀ (days, log)", "axlab", "middle");
+      var yl = txt(svg, 14, (Y0 + Y1) / 2, "Learned T₀ (days, log)", "axlab", "middle"); yl.setAttribute("transform", "rotate(-90 14 " + (Y0 + Y1) / 2 + ")");
+      var hp = [];
+      pts.forEach(function (d) { var x = sx(mode === "res" ? d.res : d.fit), y = sy(d.T0); el(svg, "circle", { cx: x, cy: y, r: 3.6, class: "pt-dam", "fill-opacity": 0.8 }); hp.push({ x: x, y: y, d: d }); });
+      var r = mode === "res" ? RES.release.rho_residence : RES.release.rho_fit;
+      txt(svg, X0 + 8, Y0 + 14, "ρ = " + r.rho.toFixed(2) + " · n = " + r.n, "dl");
+      hoverNearest(svg, tip, function () { return hp; }, function (p) { return damLines(p.d); }, null, 10);
+    }
+    sel.addEventListener("change", draw); draw();
+  }
+  function monthFig() {
+    var svg = $("fm"), tip = $("tfm"), X0 = 50, X1 = 440, Y0 = 16, Y1 = 300;
+    var c = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; D.dams.forEach(function (d) { c[peakMonth(d)]++; });
+    var mx = Math.max.apply(null, c), st = niceStep(mx / 5), top = Math.ceil(mx / st) * st;
+    var sy = function (v) { return Y1 - (Y1 - Y0) * v / top; }, bw = (X1 - X0) / 12;
+    for (var t = 0; t <= top; t += st) { el(svg, "line", { x1: X0, x2: X1, y1: sy(t), y2: sy(t), class: "gridline" }); txt(svg, X0 - 6, sy(t) + 4, String(t), "axis", "end"); }
+    c.forEach(function (v, i) {
+      var x = X0 + i * bw + 2, w = bw - 4, h = Y1 - sy(v);
+      if (v > 0) el(svg, "path", { d: "M" + x + " " + Y1 + "V" + (sy(v) + Math.min(4, h)) + "q0 -4 4 -4H" + (x + w - 4) + "q4 0 4 4V" + Y1 + "Z", class: "bar-dam" });
+      txt(svg, x + w / 2, Y1 + 16, CAL[i], "axis", "middle");
+      if (v > 0) txt(svg, x + w / 2, sy(v) - 5, String(v), "dls", "middle");
+      var hit = el(svg, "rect", { x: X0 + i * bw, y: Y0, width: bw, height: Y1 - Y0, fill: "transparent" });
+      hit.addEventListener("pointermove", function () { tipAt(tip, svg, x + w / 2, sy(v), [bold(CAL[i]), span(v + " dams have their longest T in " + CAL[i])]); });
+      hit.addEventListener("pointerleave", function () { hideTip(tip); });
+    });
+    txt(svg, (X0 + X1) / 2, Y1 + 36, "Month in which T is longest", "axlab", "middle");
+  }
+
+  // ---------- series ----------
+  function inflate(b64) {
+    var bin = atob(b64.trim()), u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    var ds = new DecompressionStream("gzip");
+    return new Response(new Blob([u8]).stream().pipeThrough(ds)).arrayBuffer().then(function (buf) {
+      var b = new Uint8Array(buf), n = b.length >> 1, N = SER.n_days, rows = n / N, out = new Int32Array(n);
+      for (var r = 0; r < rows; r++) { var acc = 0, o = r * N; for (var k = 0; k < N; k++) { acc = (acc + (b[o + k] | (b[n + o + k] << 8))) & 65535; out[o + k] = acc; } }
+      return out;
+    });
+  }
+  function loadFile(f) { if (!bins[f]) bins[f] = fetch(f).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.text(); }).then(inflate); return bins[f]; }
+  function val(c) { return c === 65535 ? null : c === 0 ? 0 : Math.pow(10, SER.lo + (c - 1) * SER.step); }
+  function rowsOf(u, gi, per) {
+    var N = SER.n_days, o = gi * per * N, obs = new Array(N), off = new Array(N), dam = new Array(N), bas = per > 3 ? new Array(N) : null;
+    for (var k = 0; k < N; k++) {
+      var c0 = u[o + N + k], dd = u[o + 2 * N + k]; if (dd >= 32768) dd -= 65536;
+      obs[k] = val(u[o + k]); off[k] = val(c0); dam[k] = c0 === 65535 ? null : val(c0 + dd);
+      if (bas) bas[k] = val(u[o + 3 * N + k]);
+    }
+    return [obs, off, dam, bas];
+  }
+  function series(id) { var g = byId[id], L = SER.layout[g.h]; return loadFile(L.file).then(function (u) { return rowsOf(u, L.gauges.indexOf(id), 3); }); }
+  function pickSeries(id) { return loadFile("series/picks.b64.txt").then(function (u) { return rowsOf(u, SER.picks.indexOf(id), 4); }); }
+  function wyWindow(wy) {
+    var base = Date.parse(SER.start + "T00:00:00Z"), s0 = Date.UTC(wy - 1, 9, 1);
+    return { s0: s0, off: Math.round((s0 - base) / 864e5), n: Math.round((Date.UTC(wy, 9, 1) - s0) / 864e5) };
+  }
+  function cut(arr, w) { var out = new Array(w.n); for (var i = 0; i < w.n; i++) { var k = w.off + i; out[i] = arr && k >= 0 && k < arr.length ? arr[k] : null; } return out; }
+  function flowTick(v) { return v >= 1000 ? Math.round(v).toLocaleString("en-US") : v >= 1 ? String(+v.toFixed(1)) : String(+v.toPrecision(1)); }
+  function nseOf(p, o) { var a = [], b = []; for (var i = 0; i < o.length; i++) if (fin(o[i]) && fin(p[i])) { a.push(p[i]); b.push(o[i]); } if (a.length < 30) return NaN; var m = b.reduce(function (s, v) { return s + v; }, 0) / b.length, num_ = 0, den = 0; for (var j = 0; j < a.length; j++) { num_ += (a[j] - b[j]) * (a[j] - b[j]); den += (b[j] - m) * (b[j] - m); } return 1 - num_ / den; }
+  function hydro(svg, tip, S4, wy, o) {
+    var w = wyWindow(wy), n = w.n, X0 = o.X0, X1 = o.X1, Y0 = o.Y0, Y1 = o.Y1, log = !!o.log;
+    var obs = cut(S4[0], w), mod = cut(S4[1], w), rel = cut(S4[2], w), bas = S4[3] ? cut(S4[3], w) : null;
+    clear(svg); svg.setAttribute("viewBox", "0 0 " + o.W + " " + o.H);
+    var all = obs.concat(mod, rel, bas || []).filter(fin);
+    var vmax = Math.max.apply(null, all.concat([1e-3])), pos = all.filter(function (v) { return v > 0; }), vmin = pos.length ? Math.min.apply(null, pos) : 1e-3, lo, hi, sy;
+    if (log) {
+      lo = Math.pow(10, Math.floor(Math.log10(Math.max(vmin, 1e-3)))); hi = Math.pow(10, Math.ceil(Math.log10(vmax))); if (hi <= lo) hi = lo * 10;
+      sy = function (v) { return Y1 - (Y1 - Y0) * (Math.log10(Math.max(v, lo)) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)); };
+      for (var p = Math.log10(lo); p <= Math.log10(hi) + 1e-9; p++) { var v = Math.pow(10, p); el(svg, "line", { x1: X0, x2: X1, y1: sy(v), y2: sy(v), class: "gridline" }); txt(svg, X0 - 8, sy(v) + 4, flowTick(v), "axis", "end"); }
+    } else {
+      var st = niceStep(vmax / (o.nTicks || 5)); hi = Math.ceil(vmax / st - 1e-9) * st;
+      sy = function (v) { return Y1 - (Y1 - Y0) * v / hi; };
+      for (var t = 0; t <= hi + 1e-9; t += st) { el(svg, "line", { x1: X0, x2: X1, y1: sy(t), y2: sy(t), class: "gridline" }); txt(svg, X0 - 8, sy(t) + 4, flowTick(t), "axis", "end"); }
+    }
+    txt(svg, X0 - 8, Y0 - 10, "m³/s", "axis", "end");
+    var sx = function (i) { return X0 + (X1 - X0) * i / (n - 1); };
+    for (var k = 0; k < 12; k += (o.monthStep || 1)) { var di = Math.round((Date.UTC(wy - 1, 9 + k, 1) - w.s0) / 864e5); el(svg, "line", { x1: sx(di), x2: sx(di), y1: Y1, y2: Y1 + 4, class: "zero" }); txt(svg, sx(di) + 3, Y1 + 17, MONTHS[k], "axis"); }
+    function path(arr, cls) { if (!arr) return; var d = "", pen = false; for (var i = 0; i < arr.length; i++) { var v = arr[i]; if (!fin(v) || (log && v <= 0)) { pen = false; continue; } d += (pen ? "L" : "M") + sx(i).toFixed(1) + " " + sy(v).toFixed(1); pen = true; } if (d) el(svg, "path", { d: d, class: cls }); }
+    path(obs, "l-obs"); path(bas, "l-base"); path(mod, "l-nodam"); path(rel, "l-dam");
+    var cross = el(svg, "line", { x1: -10, x2: -10, y1: Y0, y2: Y1, class: "cross" }), ov = el(svg, "rect", { x: X0, y: Y0, width: X1 - X0, height: Y1 - Y0, fill: "transparent" });
+    function move(evt) {
+      var i = Math.max(0, Math.min(n - 1, Math.round((viewXY(evt, svg)[0] - X0) / (X1 - X0) * (n - 1))));
+      cross.setAttribute("x1", sx(i)); cross.setAttribute("x2", sx(i));
+      var lines = [span(new Date(w.s0 + i * 864e5).toISOString().slice(0, 10))];
+      var rs = [["Observed", obs[i], "var(--obs)"]]; if (bas) rs.push(["Summed Q′", bas[i], "var(--base)"]); rs.push(["No dam", mod[i], "var(--nodam)"], ["Dam release", rel[i], "var(--dam)"]);
+      rs.forEach(function (r) { var d = document.createElement("span"), sw = document.createElement("i"); sw.style.background = r[2]; d.appendChild(sw); d.appendChild(document.createTextNode(r[0] + " " + num(r[1]) + " m³/s")); lines.push(d); });
+      tipAt(tip, svg, sx(i), null, lines);
+    }
+    ov.addEventListener("pointermove", move); ov.addEventListener("pointerdown", move);
+    ov.addEventListener("pointerleave", function () { hideTip(tip); cross.setAttribute("x1", -10); cross.setAttribute("x2", -10); });
+    return { obs: obs, off: mod, dam: rel, base: bas };
+  }
+  function fillYears(sel, def) { for (var y = 1996; y <= 2010; y++) { var o = document.createElement("option"); o.value = y; o.textContent = "WY" + y; sel.appendChild(o); } sel.value = String(def); }
+
+  // ---------- Figure 10 ----------
+  function smalls() {
+    var box = $("smalls"), panels = [];
+    PICKS.gauges.forEach(function (pk, pi) {
+      var g = byId[pk.id]; if (!g) return;
+      var div = document.createElement("div"); div.className = "sm";
+      var h = document.createElement("h3"); h.appendChild(span(pk.label, "tag")); div.appendChild(h);
+      var nm = document.createElement("div"); nm.appendChild(bold(g.nm)); div.appendChild(nm);
+      var meta = document.createElement("div"); meta.className = "meta";
+      meta.appendChild(document.createTextNode(damText(g) + " · HUC " + g.h + " · " + area(g.a) + " km² · test NSE Q′ " + f3(g.nb) + ", no dam " + f3(g.no) + ", dam "));
+      meta.appendChild(span(f3(g.nd), "m")); div.appendChild(meta);
+      var lab = document.createElement("label"); lab.className = "check"; lab.setAttribute("for", "smY" + pi); lab.appendChild(document.createTextNode("Water year "));
+      var ys = document.createElement("select"); ys.id = "smY" + pi; fillYears(ys, pk.wy || PICKS.year); lab.appendChild(ys); div.appendChild(lab);
+      var yr = document.createElement("div"); yr.className = "meta"; div.appendChild(yr);
+      var fb = document.createElement("div"); fb.className = "figbox";
+      var svg = document.createElementNS(NS, "svg"); svg.setAttribute("viewBox", "0 0 440 230"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "Hydrograph at " + g.nm);
+      var tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true;
+      fb.appendChild(svg); fb.appendChild(tip); div.appendChild(fb);
+      var b = document.createElement("button"); b.type = "button"; b.textContent = "Open in the viewer"; b.addEventListener("click", function () { openGauge(g); }); div.appendChild(b);
+      box.appendChild(div);
+      var pnl = { g: g, svg: svg, tip: tip, yr: yr, ys: ys };
+      panels.push(pnl);
+      ys.addEventListener("change", function () { draw(pnl); });
+    });
+    function draw(p) {
+      pickSeries(p.g.id).then(function (S4) {
+        var r = hydro(p.svg, p.tip, S4, +p.ys.value, { W: 440, H: 230, X0: 52, X1: 430, Y0: 22, Y1: 200, monthStep: 3, nTicks: 4 });
+        p.yr.textContent = "NSE within WY" + p.ys.value + ": Q′ " + f3(nseOf(r.base, r.obs)) + " · no dam " + f3(nseOf(r.off, r.obs)) + " · dam " + f3(nseOf(r.dam, r.obs));
+      }).catch(function (e) { clear(p.svg); txt(p.svg, 20, 40, "Could not load series (" + e.message + ")", "axis"); });
+    }
+    panels.forEach(draw);
+  }
+
+  // ---------- Figure 11: viewer + table ----------
+  function viewerInit() {
+    gSel = $("gSel"); ySel = $("ySel"); logBox = $("logBox"); gMeta = $("gMeta");
+    clear(gSel);
+    HK.forEach(function (h) {
+      var gs = D.gauges.filter(function (g) { return g.h === h; }).sort(function (a, b) { return a.d === b.d ? a.nm.localeCompare(b.nm) : a.d ? -1 : 1; });
+      if (!gs.length) return;
+      var og = document.createElement("optgroup"); og.label = "HUC " + h + " " + HUCN[h];
+      gs.forEach(function (g) { var o = document.createElement("option"); o.value = g.id; o.textContent = (g.d ? "Dam: " + (g.dam || "NID") : "No dam") + " · " + g.nm; og.appendChild(o); });
+      gSel.appendChild(og);
+    });
+    fillYears(ySel, PICKS.viewer_year || PICKS.year);
+    gSel.value = PICKS.viewer && byId[PICKS.viewer] ? PICKS.viewer : D.gauges[0].id;
+    [gSel, ySel, logBox].forEach(function (c) { c.addEventListener("change", drawViewer); });
+    drawViewer();
+  }
+  function select(id) { if (!gSel) return; gSel.value = id; drawViewer(); }
+  function drawViewer() {
+    var id = gSel.value, g = byId[id];
+    clear(gMeta);
+    var l1 = document.createElement("div"); l1.appendChild(bold(g.nm)); l1.appendChild(span(" · USGS " + g.id + " · HUC " + g.h + " " + HUCN[g.h] + " · " + area(g.a) + " km²", "muted")); gMeta.appendChild(l1);
+    gMeta.appendChild(span(damText(g), "muted"));
+    gMeta.appendChild(span("Test NSE 1996-2010: summed Q′ " + f3(g.nb) + " · no dam " + f3(g.no) + " · dam release " + f3(g.nd) + " (" + sgn(g.nd - g.no) + ")", "nse"));
+    var tb = document.querySelector("#tbl tbody"); if (tb) Array.prototype.forEach.call(tb.children, function (tr) { tr.classList.toggle("sel", tr.dataset.id === id); });
+    series(id).then(function (S3) { if (gSel.value !== id) return; hydro($("fv"), $("tfv"), S3, +ySel.value, { W: 900, H: 330, X0: 70, X1: 880, Y0: 28, Y1: 296, log: logBox.checked }); })
+      .catch(function (e) { gMeta.appendChild(span(" Could not load series (" + e.message + ").", "neg")); });
+  }
+  function tableInit() {
+    var fh = $("fHuc");
+    HK.forEach(function (h) { if (D.gauges.some(function (g) { return g.h === h; })) { var o = document.createElement("option"); o.value = h; o.textContent = h + " " + HUCN[h]; fh.appendChild(o); } });
+    $("fGrp").addEventListener("change", renderTable); fh.addEventListener("change", renderTable);
+    Array.prototype.forEach.call(document.querySelectorAll("#tbl th[data-k]"), function (th) {
+      th.setAttribute("tabindex", "0");
+      function go() { var k = th.dataset.k; sortDir = k === sortKey ? -sortDir : (th.classList.contains("num") ? -1 : 1); sortKey = k; renderTable(); }
+      th.addEventListener("click", go); th.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+    });
+    renderTable();
+  }
+  function key(g, k) { return k === "dd" ? (fin(g.nd) && fin(g.no) ? g.nd - g.no : null) : g[k]; }
+  function renderTable() {
+    var grp = $("fGrp").value, huc = $("fHuc").value, tb = document.querySelector("#tbl tbody");
+    var rows = D.gauges.filter(function (g) { return (grp === "all" || (grp === "d" ? g.d : grp === "o" ? g.o : !g.d)) && (huc === "all" || g.h === huc); });
+    rows.sort(function (a, b) { var x = key(a, sortKey), y = key(b, sortKey); if (x == null && y == null) return 0; if (x == null) return 1; if (y == null) return -1; return (x < y ? -1 : x > y ? 1 : 0) * sortDir; });
+    Array.prototype.forEach.call(document.querySelectorAll("#tbl th[data-k]"), function (th) { var a = th.querySelector(".arr"); if (a) th.removeChild(a); if (th.dataset.k === sortKey) th.appendChild(span(sortDir > 0 ? " ▲" : " ▼", "arr")); });
+    $("tCount").textContent = rows.length + " gauges";
+    clear(tb);
+    var frag = document.createDocumentFragment();
+    rows.forEach(function (g) {
+      var tr = document.createElement("tr"); tr.dataset.id = g.id; if (gSel && gSel.value === g.id) tr.className = "sel";
+      function td(c, cls) { var x = document.createElement("td"); if (cls) x.className = cls; if (typeof c === "string") x.textContent = c; else x.appendChild(c); tr.appendChild(x); }
+      td(g.h);
+      var nm = document.createElement("div"); nm.appendChild(span(g.nm)); nm.appendChild(document.createElement("br")); nm.appendChild(span(g.id, "muted m")); td(nm);
+      var dm = document.createElement("div"), dt = document.createElement("i"); dt.className = "dot"; dt.style.background = g.d ? "var(--dam)" : "var(--nodam)"; dm.appendChild(dt);
+      dm.appendChild(span(g.d ? (g.dam || "NID dam") + " " : "none", g.d ? "" : "muted")); if (g.d) { dm.appendChild(document.createElement("br")); dm.appendChild(span(num(g.st) + " MCM" + (g.o ? " · on reach" : ""), "muted")); } td(dm);
+      var dd = key(g, "dd");
+      td(area(g.a), "num"); td(g.d ? num(g.dor) : "0", "num"); td(f3(g.nb), "num"); td(f3(g.no), "num"); td(f3(g.nd), "num");
+      td(sgn(dd), "num " + (dd > 0.0005 ? "pos" : dd < -0.0005 ? "neg" : ""));
+      tr.addEventListener("click", function () { select(g.id); scrollTo($("gSel"), "center"); });
+      frag.appendChild(tr);
+    });
+    tb.appendChild(frag);
+  }
+
+  // ---------- replicate (filled when the seed-43 runs are in) ----------
+  function replicateFigs() {
+    if (!REP || !$("fs")) return;
+    var svg = $("fs"), tip = $("tfs"), sel = $("fsmet");
+    function draw() {
+      forest(svg, tip, [
+        { name: "Seed 42", color: "var(--ink)", get: function (k, m) { return RES.paired.dam_minus_off[m][k]; } },
+        { name: "Seed 43", color: "var(--dam)", get: function (k, m) { return REP.res43.paired.dam_minus_off[m][k]; } }
+      ], sel.value, { xlabel: "Median per-gauge change in test {M}, dam release minus no dam", rightHead: "seed 43: up / down", right: function (p) { return p.n_up + " / " + p.n_down; } });
+    }
+    sel.addEventListener("change", draw); draw();
+    repScatter();
+  }
+  function repScatter() {
+    var svg = $("fx"), tip = $("tfx"), grpSel = $("fxgrp"); if (!svg) return;
+    function draw() {
+      clear(svg); hideTip(tip);
+      var X0 = 70, X1 = 560, Y0 = 16, Y1 = 506, LO = -1, HI = 1, grp = grpSel.value;
+      svg.setAttribute("viewBox", "0 0 760 560");
+      var sx = function (v) { return X0 + (X1 - X0) * (slog(Math.max(LO, Math.min(HI, v))) - slog(LO)) / (slog(HI) - slog(LO)); };
+      var sy = function (v) { return Y1 - (Y1 - Y0) * (slog(Math.max(LO, Math.min(HI, v))) - slog(LO)) / (slog(HI) - slog(LO)); };
+      slogTicks(LO, HI).forEach(function (t) {
+        el(svg, "line", { x1: sx(t), x2: sx(t), y1: Y0, y2: Y1, class: t === 0 ? "zero" : "gridline" }); txt(svg, sx(t), Y1 + 18, tickLab(t), "axis", "middle");
+        el(svg, "line", { x1: X0, x2: X1, y1: sy(t), y2: sy(t), class: t === 0 ? "zero" : "gridline" }); txt(svg, X0 - 8, sy(t) + 4, tickLab(t), "axis", "end");
+      });
+      el(svg, "line", { x1: sx(LO), y1: sy(LO), x2: sx(HI), y2: sy(HI), class: "refl" });
+      txt(svg, (X0 + X1) / 2, Y1 + 40, "Change in test NSE, dam release minus no dam, seed 42", "axlab", "middle");
+      var yl = txt(svg, 16, (Y0 + Y1) / 2, "Same change, seed 43", "axlab", "middle"); yl.setAttribute("transform", "rotate(-90 16 " + (Y0 + Y1) / 2 + ")");
+      var pts = [], q = [[0, 0], [0, 0]];
+      D.gauges.slice().sort(function (a, b) { return a.d - b.d; }).forEach(function (g) {
+        var r = REP.g43[g.id]; if (!r || !fin(r[0]) || !fin(r[1]) || !fin(g.nd) || !fin(g.no)) return;
+        if (grp === "d" && !g.d) return; if (grp === "u" && g.d) return;
+        var a = g.nd - g.no, b = r[1] - r[0], x = sx(a), y = sy(b);
+        if (g.d) el(svg, "path", { d: triUp(x, y, 4.2), class: "pt-dam", "fill-opacity": 0.8 });
+        else el(svg, "circle", { cx: x, cy: y, r: 3, class: "pt-nodam", "fill-opacity": 0.75 });
+        pts.push({ x: x, y: y, g: g, a: a, b: b });
+        if (a !== 0 && b !== 0) q[a > 0 ? 0 : 1][b > 0 ? 0 : 1]++;
+      });
+      var tot = q[0][0] + q[0][1] + q[1][0] + q[1][1];
+      function pc(v) { return tot ? Math.round(100 * v / tot) + "%" : "–"; }
+      txt(svg, X1 + 20, Y0 + 20, "Both seeds up: " + q[0][0] + " (" + pc(q[0][0]) + ")", "dls");
+      txt(svg, X1 + 20, Y0 + 38, "Both seeds down: " + q[1][1] + " (" + pc(q[1][1]) + ")", "dls");
+      txt(svg, X1 + 20, Y0 + 56, "Up in 42, down in 43: " + q[0][1], "dls");
+      txt(svg, X1 + 20, Y0 + 74, "Down in 42, up in 43: " + q[1][0], "dls");
+      hoverNearest(svg, tip, function () { return pts; }, function (p) { var l = gaugeLines(p.g); l.push(span("seed 42 " + sgn(p.a) + " · seed 43 " + sgn(p.b))); return l; }, openGauge, 10);
+    }
+    grpSel.addEventListener("change", draw); draw();
+  }
+})();
+</script>

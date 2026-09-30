@@ -1,0 +1,31 @@
+{
+ "dams_ge10mcm_in_eval_networks": 1099,
+ "built_after_1981": 78,
+ "built_after_1995": 19,
+ "no_year": 32,
+ "gauges_with_dam": 917,
+ "gauges_with_any_no_year_dam": 61,
+ "by_group": {
+  "all dams built by 1981": {
+   "n": 764,
+   "median_d42": 0.0014,
+   "median_d43": 0.0034,
+   "up42": 440,
+   "up43": 473
+  },
+  "dam built during test": {
+   "n": 41,
+   "median_d42": 0.0017,
+   "median_d43": 0.0086,
+   "up42": 22,
+   "up43": 28
+  },
+  "dam built during train": {
+   "n": 112,
+   "median_d42": 0.0013,
+   "median_d43": 0.0059,
+   "up42": 70,
+   "up43": 72
+  }
+ }
+}
