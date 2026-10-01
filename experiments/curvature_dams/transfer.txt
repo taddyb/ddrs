@@ -1,0 +1,13 @@
+gain init -> training optimum along the slice (other parameters fitted): train vs test
+  key      median train gain  median test gain  ratio  test gain > 0   test NSE lost vs test-optimal
+  L2:T0    +0.0146            +0.0129           0.88   78%            0.0033
+  L4:T0    +0.0190            +0.0148           0.78   80%            0.0031
+  L4:amp   +0.0192            +0.0036           0.19   70%            0.0016
+  FA:T0    +0.0099            +0.0126           1.27   78%            0.0043
+  FA:z     +0.0247            +0.0277           1.12   88%            0.0047
+  FA:kc    +0.0423            +0.0316           0.75   75%            0.0058
+  FA:phi   +0.0107            +0.0043           0.40   68%            0.0002
+
+rule-curve amplitude: test-optimal s < 0.25 (test years prefer no rule curve) at 16%; test-optimal s within 0.25 of 1 at 36%; split-half optimum s_h1 1.01, s_h2 0.99, |s_h1 - s_h2| median 0.43
+pool z: test-optimal z / training-optimal z, median 1.06, |log10| median 0.23 decades; test optimum at the grid top (120 d) 6%
+kc: test-optimal / training-optimal median 1.03, |log10| median 0.064 decades; local minima per slice (prominence 0.002) median 2, IQR 2-3

@@ -1,0 +1,29 @@
+class shares per parameter (sloppy / plateau-at-init / stiff), window-unstable share, path ratio median
+  L2:T0   n=214  sloppy 44%  plateau 13%  stiff 43%   window-unstable 59%   path ratio 0.811; init ratio 0.836
+  L4:T0   n=214  sloppy 40%  plateau 18%  stiff 42%   window-unstable 58%   path ratio 0.749; init ratio 0.808
+  L4:amp  n=214  sloppy 19%  plateau 1%  stiff 80%   window-unstable 44%   path ratio 1.000; init ratio 2.000
+  FA:T0   n= 69  sloppy 48%  plateau 7%  stiff 45%   window-unstable 49%   path ratio 0.855; init ratio 0.881
+  FA:z    n= 69  sloppy 17%  plateau 72%  stiff 10%   window-unstable 54%   path ratio 0.017; init ratio 0.071
+  FA:kc   n= 69  sloppy 4%  plateau 71%  stiff 25%   window-unstable 71%   path ratio 0.710; init ratio 0.080
+  FA:phi  n= 69  sloppy 22%  plateau 68%  stiff 10%   window-unstable 39%   path ratio 1.000; init ratio 0.027
+
+T0 (L4) split by its training optimum T0*
+  T0* < 0.5 d  n= 90  H 0.0001  factor-2 dL/L* 0.0003  0.02 band 2.75 dec (open 98%)  sloppy 80% plateau 0% stiff 20%  init in 0.005 band 70%  path ratio 1.070  flood-control 26%  median DOR 0.39
+  0.5-2 d      n= 46  H 0.0401  factor-2 dL/L* 0.0294  0.02 band 1.05 dec (open 37%)  sloppy 26% plateau 0% stiff 74%  init in 0.005 band 30%  path ratio 0.713  flood-control 41%  median DOR 0.39
+  > 2 d        n= 78  H 0.1005  factor-2 dL/L* 0.0593  0.02 band 0.50 dec (open 4%)  sloppy 1% plateau 50% stiff 49%  init in 0.005 band 0%  path ratio 0.249  flood-control 42%  median DOR 0.88
+
+class shares by DOR bin and purpose (L4:T0, L4:amp, FA:z, FA:kc)
+  L4:T0   DOR<0.5  n= 97 sloppy 46% plateau 6% stiff 47%
+  L4:T0   DOR>0.5  n=117 sloppy 34% plateau 28% stiff 38%
+  L4:T0   flood    n= 75 sloppy 28% plateau 21% stiff 51%
+  L4:T0   other    n=139 sloppy 46% plateau 17% stiff 37%
+  L4:amp  DOR<0.5  n= 97 sloppy 24% plateau 2% stiff 74%
+  L4:amp  DOR>0.5  n=117 sloppy 15% plateau 1% stiff 85%
+  L4:amp  flood    n= 75 sloppy 20% plateau 1% stiff 79%
+  L4:amp  other    n=139 sloppy 18% plateau 1% stiff 81%
+  FA:z    DOR<0.5  n= 30 sloppy 20% plateau 73% stiff 7%
+  FA:z    DOR>0.5  n= 39 sloppy 15% plateau 72% stiff 13%
+  FA:z    flood    n= 69 sloppy 17% plateau 72% stiff 10%
+  FA:kc   DOR<0.5  n= 30 sloppy 3% plateau 73% stiff 23%
+  FA:kc   DOR>0.5  n= 39 sloppy 5% plateau 69% stiff 26%
+  FA:kc   flood    n= 69 sloppy 4% plateau 71% stiff 25%
