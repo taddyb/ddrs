@@ -1,0 +1,42 @@
+
+== working recipe, seed 42  (s42)
+  working recipe, seed 42 | none                                 NSE median 0.7391 -> 0.7391  pop +0.0000 [-0.0000,+0.0000]  paired +0.0000  up 0.0% down 0.0%
+  working recipe, seed 42 | none                                 KGE median 0.7591 -> 0.7591  pop -0.0000 [-0.0000,+0.0000]  paired +0.0000  up 0.0% down 0.0%
+  working recipe, seed 42 | global_k                             NSE median 0.7391 -> 0.7396  pop +0.0005 [-0.0006,+0.0016]  paired +0.0004  up 62.9% down 37.1%
+  working recipe, seed 42 | global_k                             KGE median 0.7591 -> 0.7595  pop +0.0004 [-0.0016,+0.0022]  paired -0.0003  up 46.8% down 53.2%
+  working recipe, seed 42 | huc2_k                               NSE median 0.7391 -> 0.7400  pop +0.0009 [-0.0007,+0.0030]  paired +0.0001  up 51.9% down 48.1%
+  working recipe, seed 42 | huc2_k                               KGE median 0.7591 -> 0.7591  pop -0.0000 [-0.0025,+0.0032]  paired +0.0004  up 51.4% down 48.6%
+  working recipe, seed 42 | gauge_k                              NSE median 0.7391 -> 0.7469  pop +0.0078 [+0.0042,+0.0123]  paired +0.0018  up 58.9% down 40.8%
+  working recipe, seed 42 | gauge_k                              KGE median 0.7591 -> 0.7706  pop +0.0116 [+0.0064,+0.0178]  paired +0.0022  up 54.8% down 44.9%
+
+== working recipe, seed 43  (s43)
+  working recipe, seed 43 | none                                 NSE median 0.7391 -> 0.7341  pop -0.0050 [-0.0074,-0.0018]  paired -0.0007  up 40.2% down 59.8%
+  working recipe, seed 43 | none                                 KGE median 0.7591 -> 0.7588  pop -0.0003 [-0.0018,+0.0030]  paired -0.0002  up 44.6% down 55.4%
+  working recipe, seed 43 | global_k                             NSE median 0.7391 -> 0.7346  pop -0.0045 [-0.0071,-0.0015]  paired -0.0006  up 42.4% down 57.6%
+  working recipe, seed 43 | global_k                             KGE median 0.7591 -> 0.7594  pop +0.0003 [-0.0017,+0.0033]  paired -0.0007  up 44.0% down 56.0%
+  working recipe, seed 43 | huc2_k                               NSE median 0.7391 -> 0.7349  pop -0.0042 [-0.0073,-0.0009]  paired -0.0014  up 41.6% down 58.4%
+  working recipe, seed 43 | huc2_k                               KGE median 0.7591 -> 0.7593  pop +0.0002 [-0.0032,+0.0033]  paired -0.0017  up 44.6% down 55.4%
+  working recipe, seed 43 | gauge_k                              NSE median 0.7391 -> 0.7435  pop +0.0044 [-0.0001,+0.0090]  paired +0.0005  up 51.8% down 48.2%
+  working recipe, seed 43 | gauge_k                              KGE median 0.7591 -> 0.7707  pop +0.0116 [+0.0060,+0.0177]  paired +0.0009  up 51.7% down 48.3%
+
+== working recipe, two-seed ensemble  (s42+s43)
+  working recipe, two-seed ensemble | none                       NSE median 0.7391 -> 0.7376  pop -0.0015 [-0.0036,+0.0009]  paired -0.0001  up 46.4% down 53.6%
+  working recipe, two-seed ensemble | none                       KGE median 0.7591 -> 0.7607  pop +0.0016 [-0.0007,+0.0038]  paired -0.0001  up 46.4% down 53.6%
+  working recipe, two-seed ensemble | global_k                   NSE median 0.7391 -> 0.7378  pop -0.0013 [-0.0033,+0.0014]  paired -0.0000  up 49.8% down 50.2%
+  working recipe, two-seed ensemble | global_k                   KGE median 0.7591 -> 0.7604  pop +0.0013 [-0.0010,+0.0038]  paired -0.0004  up 44.6% down 55.4%
+  working recipe, two-seed ensemble | huc2_k                     NSE median 0.7391 -> 0.7373  pop -0.0018 [-0.0034,+0.0017]  paired -0.0003  up 47.9% down 52.1%
+  working recipe, two-seed ensemble | huc2_k                     KGE median 0.7591 -> 0.7602  pop +0.0011 [-0.0020,+0.0040]  paired -0.0007  up 47.2% down 52.8%
+  working recipe, two-seed ensemble | gauge_k                    NSE median 0.7391 -> 0.7462  pop +0.0071 [+0.0033,+0.0117]  paired +0.0017  up 56.0% down 44.0%
+  working recipe, two-seed ensemble | gauge_k                    KGE median 0.7591 -> 0.7708  pop +0.0117 [+0.0065,+0.0177]  paired +0.0018  up 53.3% down 46.7%
+
+== gamma = 0, p and q learned (g0), seed 42  (g0)
+  gamma = 0, p and q learned (g0), seed 42 | none                NSE median 0.7391 -> 0.7453  pop +0.0062 [+0.0035,+0.0103]  paired +0.0006  up 57.3% down 42.7%
+  gamma = 0, p and q learned (g0), seed 42 | none                KGE median 0.7591 -> 0.7623  pop +0.0032 [+0.0010,+0.0057]  paired +0.0002  up 54.8% down 45.2%
+
+== g0 + working recipe s42 + s43 (3-member ensemble)  (g0+s42+s43)
+  g0 + working recipe s42 + s43 (3-member ensemble) | none       NSE median 0.7391 -> 0.7425  pop +0.0034 [+0.0017,+0.0066]  paired +0.0005  up 61.1% down 38.9%
+  g0 + working recipe s42 + s43 (3-member ensemble) | none       KGE median 0.7591 -> 0.7611  pop +0.0020 [+0.0003,+0.0045]  paired +0.0001  up 53.8% down 46.2%
+
+== n only (gamma = 0, channel fixed), seed 42  (nonly)
+  n only (gamma = 0, channel fixed), seed 42 | none              NSE median 0.7391 -> 0.7409  pop +0.0018 [-0.0005,+0.0049]  paired +0.0004  up 58.0% down 42.0%
+  n only (gamma = 0, channel fixed), seed 42 | none              KGE median 0.7591 -> 0.7612  pop +0.0021 [+0.0000,+0.0043]  paired +0.0002  up 57.2% down 42.8%

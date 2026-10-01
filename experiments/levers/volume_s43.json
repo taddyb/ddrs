@@ -1,0 +1,713 @@
+{
+ "replay_check": {
+  "rel_median": 0.006943255562261034,
+  "rel_p99": 0.6795701618465986,
+  "rel_max": 71.18772885587532,
+  "nse_absdiff_max": 77.031767078146
+ },
+ "global scalar 1.0025 (max training median NSE)": {
+  "nse": {
+   "name": "global scalar 1.0025 (max training median NSE)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7335949770373908,
+   "pop_change": -0.0005122612842486385,
+   "ci_lo": -0.0011967715709417792,
+   "ci_hi": 0.00043836231629129055,
+   "paired_median": -0.00027227469752832967,
+   "share_up": 0.3704016913319239,
+   "share_down": 0.6295983086680761,
+   "n": 2365
+  },
+  "kge": {
+   "name": "global scalar 1.0025 (max training median NSE)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7585904090479152,
+   "pop_change": -0.0002044909557918917,
+   "ci_lo": -0.0016424766985472239,
+   "ci_hi": 0.001380789535770699,
+   "paired_median": 0.00021283313229991663,
+   "share_up": 0.533615221987315,
+   "share_down": 0.46638477801268496,
+   "n": 2365
+  },
+  "mult_median": 1.0025,
+  "mult_p10": 1.0025,
+  "mult_p90": 1.0025
+ },
+ "global scalar 0.9982 (median per-gauge LS k*)": {
+  "nse": {
+   "name": "global scalar 0.9982 (median per-gauge LS k*)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7345811473121389,
+   "pop_change": 0.0004739089904993721,
+   "ci_lo": -0.00037816044162031215,
+   "ci_hi": 0.0010443298490886278,
+   "paired_median": 0.0001842058891234899,
+   "share_up": 0.6228329809725158,
+   "share_down": 0.3771670190274841,
+   "n": 2365
+  },
+  "kge": {
+   "name": "global scalar 0.9982 (median per-gauge LS k*)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7594027614377876,
+   "pop_change": 0.0006078614340805366,
+   "ci_lo": -0.0011126848524963817,
+   "ci_hi": 0.0015273420361759937,
+   "paired_median": -0.00019661249938840442,
+   "share_up": 0.45792811839323466,
+   "share_down": 0.5420718816067653,
+   "n": 2365
+  },
+  "mult_median": 0.9982203412717038,
+  "mult_p10": 0.9982203412717038,
+  "mult_p90": 0.9982203412717038
+ },
+ "global scalar 0.9989 (median volume ratio)": {
+  "nse": {
+   "name": "global scalar 0.9989 (median volume ratio)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7342286545259319,
+   "pop_change": 0.00012141620429240163,
+   "ci_lo": -0.00029110804571907956,
+   "ci_hi": 0.0007089606715883481,
+   "paired_median": 0.00011651922937350179,
+   "share_up": 0.6245243128964059,
+   "share_down": 0.3754756871035941,
+   "n": 2365
+  },
+  "kge": {
+   "name": "global scalar 0.9989 (median volume ratio)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.759475024508336,
+   "pop_change": 0.0006801245046289539,
+   "ci_lo": -0.0009270449958271504,
+   "ci_hi": 0.0010895760441764768,
+   "paired_median": -0.00012121049982749543,
+   "share_up": 0.45961945031712476,
+   "share_down": 0.5403805496828753,
+   "n": 2365
+  },
+  "mult_median": 0.9988856215882379,
+  "mult_p10": 0.9988856215882379,
+  "mult_p90": 0.9988856215882379
+ },
+ "fixed 0.95 (reference; chosen on test years earlier)": {
+  "nse": {
+   "name": "fixed 0.95 (reference; chosen on test years earlier)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.737024021998081,
+   "pop_change": 0.002916783676441548,
+   "ci_lo": 0.0004201789057842742,
+   "ci_hi": 0.007453334568319125,
+   "paired_median": 0.001966860315145036,
+   "share_up": 0.5463002114164904,
+   "share_down": 0.4536997885835095,
+   "n": 2365
+  },
+  "kge": {
+   "name": "fixed 0.95 (reference; chosen on test years earlier)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.751709473980767,
+   "pop_change": -0.0070854260229400445,
+   "ci_lo": -0.012824714107983342,
+   "ci_hi": -0.0036466066858152815,
+   "paired_median": -0.016836319296809732,
+   "share_up": 0.3758985200845666,
+   "share_down": 0.6241014799154334,
+   "n": 2365
+  },
+  "mult_median": 0.95,
+  "mult_p10": 0.95,
+  "mult_p90": 0.95
+ },
+ "huc2_scalars": {
+  "01": {
+   "n": 104,
+   "k_med": 0.99,
+   "k_ls": 0.9949955658699408,
+   "k_v": 1.0158936355818016
+  },
+  "02": {
+   "n": 294,
+   "k_med": 1.03,
+   "k_ls": 1.0066932467030871,
+   "k_v": 1.009232894096105
+  },
+  "03": {
+   "n": 309,
+   "k_med": 0.9825,
+   "k_ls": 0.9933368574712973,
+   "k_v": 0.9870344520471348
+  },
+  "04": {
+   "n": 152,
+   "k_med": 0.985,
+   "k_ls": 0.9844187622397835,
+   "k_v": 1.0003549561782965
+  },
+  "05": {
+   "n": 240,
+   "k_med": 1.0375,
+   "k_ls": 1.0080751597993935,
+   "k_v": 1.011680538816929
+  },
+  "06": {
+   "n": 31,
+   "k_med": 1.0825,
+   "k_ls": 0.9974372929123604,
+   "k_v": 1.0058322030423332
+  },
+  "07": {
+   "n": 191,
+   "k_med": 0.9775,
+   "k_ls": 0.9807168035428439,
+   "k_v": 0.9904652670682033
+  },
+  "08": {
+   "n": 24,
+   "k_med": 1.055,
+   "k_ls": 1.045834707686344,
+   "k_v": 1.0618180654758937
+  },
+  "09": {
+   "n": 21,
+   "k_med": 0.8925,
+   "k_ls": 1.015776080044117,
+   "k_v": 1.0230609354840388
+  },
+  "10L": {
+   "n": 101,
+   "k_med": 0.9825,
+   "k_ls": 1.0076179120878674,
+   "k_v": 0.9933899021811521
+  },
+  "10U": {
+   "n": 76,
+   "k_med": 0.9825,
+   "k_ls": 1.015984266058946,
+   "k_v": 1.0149609453169437
+  },
+  "11": {
+   "n": 74,
+   "k_med": 0.9025,
+   "k_ls": 1.010954539044529,
+   "k_v": 0.9909674769475516
+  },
+  "12": {
+   "n": 57,
+   "k_med": 1.09,
+   "k_ls": 1.0597146594212423,
+   "k_v": 1.00441228996226
+  },
+  "13": {
+   "n": 39,
+   "k_med": 1.0525,
+   "k_ls": 0.9861001818672267,
+   "k_v": 0.9821016470066273
+  },
+  "14": {
+   "n": 103,
+   "k_med": 0.99,
+   "k_ls": 0.9271540165536332,
+   "k_v": 0.9231108312595118
+  },
+  "15": {
+   "n": 54,
+   "k_med": 1.0325,
+   "k_ls": 1.0491621622497356,
+   "k_v": 1.0132604907453113
+  },
+  "16": {
+   "n": 60,
+   "k_med": 0.935,
+   "k_ls": 0.9755988669116993,
+   "k_v": 1.0484944721022322
+  },
+  "17": {
+   "n": 254,
+   "k_med": 0.99,
+   "k_ls": 0.9903890677516949,
+   "k_v": 0.9885160553197256
+  },
+  "18": {
+   "n": 181,
+   "k_med": 1.0375,
+   "k_ls": 1.030448153501519,
+   "k_v": 0.9988856215882379
+  }
+ },
+ "per-HUC2 scalar (max training median NSE in the HUC2)": {
+  "nse": {
+   "name": "per-HUC2 scalar (max training median NSE in the HUC2)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7343476703401838,
+   "pop_change": 0.00024043201854428986,
+   "ci_lo": -0.0023725021921530975,
+   "ci_hi": 0.0025044199519785836,
+   "paired_median": 3.1844142431181055e-05,
+   "share_up": 0.5044397463002114,
+   "share_down": 0.49556025369978857,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-HUC2 scalar (max training median NSE in the HUC2)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7588913494890004,
+   "pop_change": 9.6449485293304e-05,
+   "ci_lo": -0.0047190136538947545,
+   "ci_hi": 0.0032280087934378455,
+   "paired_median": -0.0013631254026766904,
+   "share_up": 0.47610993657505285,
+   "share_down": 0.5238900634249471,
+   "n": 2365
+  },
+  "mult_median": 0.99,
+  "mult_p10": 0.9775,
+  "mult_p90": 1.0375
+ },
+ "per-HUC2 scalar (median per-gauge LS k* in the HUC2)": {
+  "nse": {
+   "name": "per-HUC2 scalar (median per-gauge LS k* in the HUC2)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7348711283539724,
+   "pop_change": 0.0007638900323329034,
+   "ci_lo": -0.0015100022588337952,
+   "ci_hi": 0.002056629198189497,
+   "paired_median": 0.00014340079362717972,
+   "share_up": 0.5243128964059197,
+   "share_down": 0.47568710359408034,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-HUC2 scalar (median per-gauge LS k* in the HUC2)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7592859998050534,
+   "pop_change": 0.0004910998013463175,
+   "ci_lo": -0.0035563425524797574,
+   "ci_hi": 0.0024469015012179352,
+   "paired_median": 0.0005484365939938396,
+   "share_up": 0.5171247357293869,
+   "share_down": 0.4828752642706131,
+   "n": 2365
+  },
+  "mult_median": 0.9949955658699408,
+  "mult_p10": 0.9807168035428439,
+  "mult_p90": 1.030448153501519
+ },
+ "per-HUC2 scalar (median volume ratio in the HUC2)": {
+  "nse": {
+   "name": "per-HUC2 scalar (median volume ratio in the HUC2)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7341752334503799,
+   "pop_change": 6.79951287404501e-05,
+   "ci_lo": -0.001449133457791102,
+   "ci_hi": 0.0018721268861606744,
+   "paired_median": -3.3360542208704658e-06,
+   "share_up": 0.4985200845665962,
+   "share_down": 0.5014799154334038,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-HUC2 scalar (median volume ratio in the HUC2)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.75997468938792,
+   "pop_change": 0.001179789384212926,
+   "ci_lo": -0.0020198707671033045,
+   "ci_hi": 0.003055099309611414,
+   "paired_median": 0.00024179423017489654,
+   "share_up": 0.5167019027484143,
+   "share_down": 0.4832980972515856,
+   "n": 2365
+  },
+  "mult_median": 0.9988856215882379,
+  "mult_p10": 0.9870344520471348,
+  "mult_p90": 1.0149609453169437
+ },
+ "attr ridge on log LS k*, 10-fold by gauge": {
+  "nse": {
+   "name": "attr ridge on log LS k*, 10-fold by gauge",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7338449659696893,
+   "pop_change": -0.00026227235195019905,
+   "ci_lo": -0.0020136144729260954,
+   "ci_hi": 0.0014797543819042404,
+   "paired_median": 2.128272742962789e-05,
+   "share_up": 0.5069767441860465,
+   "share_down": 0.4930232558139535,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr ridge on log LS k*, 10-fold by gauge",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7577466451190764,
+   "pop_change": -0.0010482548846306727,
+   "ci_lo": -0.0052765581149896825,
+   "ci_hi": 0.0007147099905158161,
+   "paired_median": -0.000261732222958333,
+   "share_up": 0.4832980972515856,
+   "share_down": 0.5167019027484143,
+   "n": 2365
+  },
+  "mult_median": 0.9988460964598619,
+  "mult_p10": 0.9657945913151693,
+  "mult_p90": 1.0294733727466254
+ },
+ "attr ridge on log LS k*, leave-one-HUC2-out": {
+  "nse": {
+   "name": "attr ridge on log LS k*, leave-one-HUC2-out",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7326478875242197,
+   "pop_change": -0.0014593507974197673,
+   "ci_lo": -0.0035105468633315927,
+   "ci_hi": 0.00040030238569555807,
+   "paired_median": -0.00013308737958250827,
+   "share_up": 0.4689217758985201,
+   "share_down": 0.5310782241014799,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr ridge on log LS k*, leave-one-HUC2-out",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7563155705434864,
+   "pop_change": -0.0024793294602206695,
+   "ci_lo": -0.0066884294145984815,
+   "ci_hi": -0.00047166892652099194,
+   "paired_median": -0.0009349289880661305,
+   "share_up": 0.4520084566596195,
+   "share_down": 0.5479915433403806,
+   "n": 2365
+  },
+  "mult_median": 1.0003452123965477,
+  "mult_p10": 0.9692818265514738,
+  "mult_p90": 1.0342019007190928
+ },
+ "attr GBM on log LS k*, 10-fold by gauge": {
+  "nse": {
+   "name": "attr GBM on log LS k*, 10-fold by gauge",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7333073422693638,
+   "pop_change": -0.0007998960522757059,
+   "ci_lo": -0.004028913018732805,
+   "ci_hi": 0.0021204023325562395,
+   "paired_median": 8.820398797526607e-05,
+   "share_up": 0.5120507399577167,
+   "share_down": 0.4879492600422833,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr GBM on log LS k*, 10-fold by gauge",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7548890360066642,
+   "pop_change": -0.0039058639970428466,
+   "ci_lo": -0.008807634550609358,
+   "ci_hi": -0.00042376967214951573,
+   "paired_median": -0.0009191794074976389,
+   "share_up": 0.4739957716701903,
+   "share_down": 0.5260042283298098,
+   "n": 2365
+  },
+  "mult_median": 0.9946641514151541,
+  "mult_p10": 0.9289398356059099,
+  "mult_p90": 1.0835668523103779
+ },
+ "attr GBM on log LS k*, leave-one-HUC2-out": {
+  "nse": {
+   "name": "attr GBM on log LS k*, leave-one-HUC2-out",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7302066192020988,
+   "pop_change": -0.003900619119540649,
+   "ci_lo": -0.006731103660182841,
+   "ci_hi": -0.0005079997095086445,
+   "paired_median": -0.000411506941681572,
+   "share_up": 0.4608879492600423,
+   "share_down": 0.5391120507399577,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr GBM on log LS k*, leave-one-HUC2-out",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7500364496636897,
+   "pop_change": -0.008758450340017432,
+   "ci_lo": -0.014848961406510383,
+   "ci_hi": -0.004659097366420913,
+   "paired_median": -0.003305335811772059,
+   "share_up": 0.4372093023255814,
+   "share_down": 0.5627906976744186,
+   "n": 2365
+  },
+  "mult_median": 1.0045008460066902,
+  "mult_p10": 0.9275519051429157,
+  "mult_p90": 1.0829668049549526
+ },
+ "attr ridge on log volume ratio, 10-fold by gauge": {
+  "nse": {
+   "name": "attr ridge on log volume ratio, 10-fold by gauge",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.734045507383883,
+   "pop_change": -6.173093775652116e-05,
+   "ci_lo": -0.0015035231579117153,
+   "ci_hi": 0.0017637937233212263,
+   "paired_median": -3.5135963095678235e-06,
+   "share_up": 0.4980972515856237,
+   "share_down": 0.5019027484143763,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr ridge on log volume ratio, 10-fold by gauge",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7578826722335891,
+   "pop_change": -0.0009122277701180126,
+   "ci_lo": -0.004819246097788226,
+   "ci_hi": 0.0007530644627049766,
+   "paired_median": -0.00036769400090341797,
+   "share_up": 0.4536997885835095,
+   "share_down": 0.5463002114164904,
+   "n": 2365
+  },
+  "mult_median": 0.9986305233517504,
+  "mult_p10": 0.982848629467848,
+  "mult_p90": 1.0179578985940547
+ },
+ "attr ridge on log volume ratio, leave-one-HUC2-out": {
+  "nse": {
+   "name": "attr ridge on log volume ratio, leave-one-HUC2-out",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7334618222132578,
+   "pop_change": -0.0006454161083816468,
+   "ci_lo": -0.0026116087403049936,
+   "ci_hi": 0.0009283272777794606,
+   "paired_median": -0.00012280099973493996,
+   "share_up": 0.4621564482029598,
+   "share_down": 0.5378435517970401,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr ridge on log volume ratio, leave-one-HUC2-out",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7566608359331579,
+   "pop_change": -0.0021340640705491687,
+   "ci_lo": -0.00547295214126064,
+   "ci_hi": 6.313189288631908e-05,
+   "paired_median": -0.0010131384590346126,
+   "share_up": 0.42959830866807613,
+   "share_down": 0.5704016913319239,
+   "n": 2365
+  },
+  "mult_median": 1.0003026461460547,
+  "mult_p10": 0.978620712496221,
+  "mult_p90": 1.0307819427228004
+ },
+ "attr GBM on log volume ratio, 10-fold by gauge": {
+  "nse": {
+   "name": "attr GBM on log volume ratio, 10-fold by gauge",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7330556333574422,
+   "pop_change": -0.0010516049641973169,
+   "ci_lo": -0.004729722545963877,
+   "ci_hi": 0.001304438522998962,
+   "paired_median": -0.0004410985502523168,
+   "share_up": 0.44820295983086683,
+   "share_down": 0.5517970401691332,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr GBM on log volume ratio, 10-fold by gauge",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7535780071753865,
+   "pop_change": -0.005216892828320607,
+   "ci_lo": -0.010647738245888144,
+   "ci_hi": -0.001508024874412558,
+   "paired_median": -0.001168771452657702,
+   "share_up": 0.4604651162790698,
+   "share_down": 0.5395348837209303,
+   "n": 2365
+  },
+  "mult_median": 1.001084232555811,
+  "mult_p10": 0.9209985810586676,
+  "mult_p90": 1.0761361612639457
+ },
+ "attr GBM on log volume ratio, leave-one-HUC2-out": {
+  "nse": {
+   "name": "attr GBM on log volume ratio, leave-one-HUC2-out",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.728499864518585,
+   "pop_change": -0.005607373803054538,
+   "ci_lo": -0.00807887886569097,
+   "ci_hi": -0.0019080924518206205,
+   "paired_median": -0.0011161368535137495,
+   "share_up": 0.41014799154334036,
+   "share_down": 0.5898520084566596,
+   "n": 2365
+  },
+  "kge": {
+   "name": "attr GBM on log volume ratio, leave-one-HUC2-out",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7448313038039174,
+   "pop_change": -0.013963596199789707,
+   "ci_lo": -0.019795253908271575,
+   "ci_hi": -0.009176911937576223,
+   "paired_median": -0.003012851550646234,
+   "share_up": 0.4266384778012685,
+   "share_down": 0.5733615221987315,
+   "n": 2365
+  },
+  "mult_median": 1.0073467484363086,
+  "mult_p10": 0.9296262715861923,
+  "mult_p90": 1.0982865334808563
+ },
+ "per-gauge LS k* fitted on training years": {
+  "nse": {
+   "name": "per-gauge LS k* fitted on training years",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7435280434438835,
+   "pop_change": 0.00942080512224397,
+   "ci_lo": 0.004745246272691342,
+   "ci_hi": 0.012857445750366521,
+   "paired_median": 0.0017729460543969289,
+   "share_up": 0.5873150105708245,
+   "share_down": 0.41014799154334036,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge LS k* fitted on training years",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7706808243919856,
+   "pop_change": 0.011885924388278513,
+   "ci_lo": 0.005544740295107131,
+   "ci_hi": 0.016875469235780524,
+   "paired_median": 0.002153963547978699,
+   "share_up": 0.5403805496828753,
+   "share_down": 0.45708245243128964,
+   "n": 2365
+  },
+  "mult_median": 0.9983700463722947,
+  "mult_p10": 0.8685671416105984,
+  "mult_p90": 1.1519991543412538
+ },
+ "per-gauge volume ratio fitted on training years": {
+  "nse": {
+   "name": "per-gauge volume ratio fitted on training years",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7381636565069305,
+   "pop_change": 0.004056418185291011,
+   "ci_lo": -3.149214304861701e-05,
+   "ci_hi": 0.00803839684594667,
+   "paired_median": -3.490597532673778e-05,
+   "share_up": 0.49471458773784355,
+   "share_down": 0.5027484143763213,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge volume ratio fitted on training years",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7694007666827638,
+   "pop_change": 0.010605866679056719,
+   "ci_lo": 0.004308200573777343,
+   "ci_hi": 0.015050794747095872,
+   "paired_median": 0.0023632956157073615,
+   "share_up": 0.5408033826638478,
+   "share_down": 0.45665961945031713,
+   "n": 2365
+  },
+  "mult_median": 0.9992651817789322,
+  "mult_p10": 0.8732669304519776,
+  "mult_p90": 1.1493241379159713
+ },
+ "per-gauge LS k*, shrunk halfway in log space": {
+  "nse": {
+   "name": "per-gauge LS k*, shrunk halfway in log space",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7412117514780874,
+   "pop_change": 0.007104513156447889,
+   "ci_lo": 0.004175206675193879,
+   "ci_hi": 0.01018545758020695,
+   "paired_median": 0.0018069087822136787,
+   "share_up": 0.639323467230444,
+   "share_down": 0.3581395348837209,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge LS k*, shrunk halfway in log space",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7706568589922437,
+   "pop_change": 0.011861958988536592,
+   "ci_lo": 0.006612305755949929,
+   "ci_hi": 0.015041673982775198,
+   "paired_median": 0.003502149329644988,
+   "share_up": 0.6101479915433404,
+   "share_down": 0.3873150105708245,
+   "n": 2365
+  },
+  "mult_median": 0.9991846908216192,
+  "mult_p10": 0.9319694880443888,
+  "mult_p90": 1.0733121912282029
+ },
+ "per-gauge LS k* fitted ON TEST YEARS (in-sample oracle)": {
+  "nse": {
+   "name": "per-gauge LS k* fitted ON TEST YEARS (in-sample oracle)",
+   "metric": "NSE",
+   "median_base": 0.7341072383216395,
+   "median_new": 0.7629756610753798,
+   "pop_change": 0.028868422753740353,
+   "ci_lo": 0.02497215179794495,
+   "ci_hi": 0.033083530663621866,
+   "paired_median": 0.012528457809182436,
+   "share_up": 0.9995771670190274,
+   "share_down": 0.0,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge LS k* fitted ON TEST YEARS (in-sample oracle)",
+   "metric": "KGE",
+   "median_base": 0.7587949000037071,
+   "median_new": 0.7979413732641474,
+   "pop_change": 0.039146473260440295,
+   "ci_lo": 0.03113358781707016,
+   "ci_hi": 0.043470685626859365,
+   "paired_median": 0.00986913452724103,
+   "share_up": 0.6173361522198731,
+   "share_down": 0.38266384778012685,
+   "n": 2365
+  },
+  "mult_median": 0.9604134360835244,
+  "mult_p10": 0.7807372255033203,
+  "mult_p90": 1.1949161075715375
+ }
+}

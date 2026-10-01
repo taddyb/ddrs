@@ -1,0 +1,18 @@
+single dhbv2 distributed aorc2f     NSE 0.7300 KGE 0.7557
+single dhbv2 lumped aorc2f          NSE 0.5822 KGE 0.5939
+single daily lstm                   NSE 0.6359 KGE 0.6579
+single hourly lstm                  NSE 0.5993 KGE 0.5152
+single hydrodl lstm aorc2f          NSE 0.5689 KGE 0.5320
+  UH + dhbv2 distributed aorc2f                                  NSE median 0.7391 -> 0.7430  pop +0.0039 [+0.0008,+0.0086]  paired +0.0044  up 61.0% down 39.0%
+  UH + dhbv2 distributed aorc2f                                  KGE median 0.7591 -> 0.7631  pop +0.0040 [-0.0001,+0.0079]  paired +0.0009  up 51.8% down 48.2%
+  UH + dhbv2 lumped aorc2f                                       NSE median 0.7391 -> 0.7108  pop -0.0283 [-0.0332,-0.0216]  paired -0.0264  up 29.7% down 70.3%
+  UH + dhbv2 lumped aorc2f                                       KGE median 0.7591 -> 0.7203  pop -0.0388 [-0.0459,-0.0318]  paired -0.0449  up 31.2% down 68.8%
+  UH + daily lstm                                                NSE median 0.7391 -> 0.7525  pop +0.0134 [+0.0087,+0.0204]  paired +0.0067  up 55.1% down 44.9%
+  UH + daily lstm                                                KGE median 0.7591 -> 0.7395  pop -0.0196 [-0.0263,-0.0130]  paired -0.0189  up 39.9% down 60.1%
+  UH + hourly lstm                                               NSE median 0.7391 -> 0.7401  pop +0.0009 [-0.0040,+0.0077]  paired -0.0043  up 47.3% down 52.7%
+  UH + hourly lstm                                               KGE median 0.7591 -> 0.6708  pop -0.0883 [-0.0961,-0.0798]  paired -0.0835  up 25.8% down 74.2%
+  UH + hydrodl lstm aorc2f                                       NSE median 0.7391 -> 0.7170  pop -0.0221 [-0.0274,-0.0149]  paired -0.0255  up 32.7% down 67.3%
+  UH + hydrodl lstm aorc2f                                       KGE median 0.7591 -> 0.6951  pop -0.0640 [-0.0717,-0.0567]  paired -0.0674  up 27.3% down 72.7%
+  UH + all five stores (6 members)                               NSE median 0.7391 -> 0.7338  pop -0.0053 [-0.0106,+0.0019]  paired -0.0129  up 42.0% down 58.0%
+  UH + all five stores (6 members)                               KGE median 0.7591 -> 0.6831  pop -0.0760 [-0.0843,-0.0677]  paired -0.0792  up 27.3% down 72.7%
+  UH + dhbv2 distributed + daily lstm                            NSE median 0.7391 -> 0.7637  pop +0.0246 [+0.0207,+0.0302]  paired +0.0182  up 68.8% down 31.2%

@@ -1,0 +1,63 @@
+== seed 42: source 2026-09-27T07-29-47Z-train-and-test, replay 2026-09-30T13-13-59Z-train-and-test
+replay check, WY1996 from 1995-11-01 (334 days): per-gauge max relative difference median 6.33e-03, p99 6.93e-01, max 8.87e+01; |NSE diff| max 1.00e+02; obs identical True
+training window 1981-11-01..1995-09-30 (5082 d); test 1995-10-02..2010-09-29 (5477 d)
+test-year median NSE 0.7391 KGE 0.7591 (n=2365); training-year median NSE 0.7847 KGE 0.8087 (n=2365 with >= 365 valid days)
+predicted/observed volume (1/v): training median 1.0044 (share > 1: 0.518); test median 1.0455 (share > 1: 0.649)
+per-gauge LS scalar k*: training median 0.9964, test median 0.9587; Spearman(train k*, test k*) 0.552; Spearman(train vol ratio, test vol ratio) 0.654
+
+-- global scalars (fit on training years)
+   scalar maximizing training median NSE: 0.96 (training median 0.7855 vs 0.7847)
+  global scalar 0.96 (max training median NSE)                   NSE median 0.7391 -> 0.7418  pop +0.0026 [+0.0008,+0.0066]  paired +0.0023  up 57.2% down 42.8%
+  global scalar 0.96 (max training median NSE)                   KGE median 0.7591 -> 0.7584  pop -0.0006 [-0.0060,+0.0032]  paired -0.0106  up 41.1% down 58.9%
+  global scalar 0.9964 (median per-gauge LS k*)                  NSE median 0.7391 -> 0.7396  pop +0.0005 [-0.0006,+0.0016]  paired +0.0004  up 62.9% down 37.1%
+  global scalar 0.9964 (median per-gauge LS k*)                  KGE median 0.7591 -> 0.7595  pop +0.0004 [-0.0016,+0.0022]  paired -0.0003  up 46.8% down 53.2%
+  global scalar 0.9956 (median volume ratio)                     NSE median 0.7391 -> 0.7397  pop +0.0006 [-0.0005,+0.0017]  paired +0.0005  up 62.8% down 37.2%
+  global scalar 0.9956 (median volume ratio)                     KGE median 0.7591 -> 0.7590  pop -0.0001 [-0.0017,+0.0022]  paired -0.0004  up 46.8% down 53.2%
+  fixed 0.95 (reference; chosen on test years earlier)           NSE median 0.7391 -> 0.7438  pop +0.0047 [+0.0019,+0.0084]  paired +0.0021  up 55.5% down 44.5%
+  fixed 0.95 (reference; chosen on test years earlier)           KGE median 0.7591 -> 0.7542  pop -0.0049 [-0.0097,+0.0001]  paired -0.0154  up 39.1% down 60.9%
+
+-- per-HUC2 scalars (fit on training years within each HUC2)
+   01:0.995(n104) 02:1.005(n294) 03:0.989(n309) 04:0.985(n152) 05:1.006(n240) 06:0.993(n31) 07:0.988(n191) 08:1.046(n24) 09:1.012(n21) 10L:1.013(n101) 10U:1.015(n76) 11:1.003(n74) 12:1.037(n57) 13:0.982(n39) 14:0.927(n103) 15:1.018(n54) 16:0.975(n60) 17:0.989(n254) 18:1.029(n181)
+  per-HUC2 scalar (max training median NSE in the HUC2)          NSE median 0.7391 -> 0.7373  pop -0.0018 [-0.0036,+0.0005]  paired -0.0007  up 42.7% down 57.3%
+  per-HUC2 scalar (max training median NSE in the HUC2)          KGE median 0.7591 -> 0.7566  pop -0.0025 [-0.0060,+0.0010]  paired -0.0021  up 43.9% down 56.1%
+  per-HUC2 scalar (median per-gauge LS k* in the HUC2)           NSE median 0.7391 -> 0.7397  pop +0.0006 [-0.0008,+0.0030]  paired +0.0001  up 51.8% down 48.2%
+  per-HUC2 scalar (median per-gauge LS k* in the HUC2)           KGE median 0.7591 -> 0.7593  pop +0.0002 [-0.0024,+0.0032]  paired +0.0004  up 51.3% down 48.7%
+  per-HUC2 scalar (median volume ratio in the HUC2)              NSE median 0.7391 -> 0.7397  pop +0.0006 [-0.0008,+0.0025]  paired +0.0001  up 52.9% down 47.1%
+  per-HUC2 scalar (median volume ratio in the HUC2)              KGE median 0.7591 -> 0.7604  pop +0.0013 [-0.0011,+0.0040]  paired +0.0005  up 52.9% down 47.1%
+
+-- attribute-conditioned multiplier: predict log training k* from catchment attributes, out-of-fold by gauge
+   gauges usable for fitting: 2359 (training NSE finite, 0.2 < k* < 5); features: 17
+   target LS k*, ridge, 10-fold by gauge: out-of-fold R2 of log target 0.015
+  attr ridge on log LS k*, 10-fold by gauge                      NSE median 0.7391 -> 0.7396  pop +0.0005 [-0.0016,+0.0028]  paired +0.0002  up 54.5% down 45.5%
+  attr ridge on log LS k*, 10-fold by gauge                      KGE median 0.7591 -> 0.7586  pop -0.0005 [-0.0035,+0.0022]  paired -0.0000  up 49.3% down 50.7%
+   target LS k*, ridge, leave-one-HUC2-out: out-of-fold R2 of log target -0.006
+  attr ridge on log LS k*, leave-one-HUC2-out                    NSE median 0.7391 -> 0.7376  pop -0.0015 [-0.0032,+0.0010]  paired +0.0001  up 51.5% down 48.5%
+  attr ridge on log LS k*, leave-one-HUC2-out                    KGE median 0.7591 -> 0.7583  pop -0.0008 [-0.0043,+0.0019]  paired -0.0005  up 47.2% down 52.8%
+   target LS k*, GBM, 10-fold by gauge: out-of-fold R2 of log target -0.047
+  attr GBM on log LS k*, 10-fold by gauge                        NSE median 0.7391 -> 0.7387  pop -0.0004 [-0.0033,+0.0031]  paired +0.0000  up 50.8% down 49.2%
+  attr GBM on log LS k*, 10-fold by gauge                        KGE median 0.7591 -> 0.7566  pop -0.0025 [-0.0074,+0.0022]  paired -0.0012  up 46.0% down 54.0%
+   target LS k*, GBM, leave-one-HUC2-out: out-of-fold R2 of log target -0.119
+  attr GBM on log LS k*, leave-one-HUC2-out                      NSE median 0.7391 -> 0.7376  pop -0.0015 [-0.0053,+0.0016]  paired -0.0003  up 47.0% down 53.0%
+  attr GBM on log LS k*, leave-one-HUC2-out                      KGE median 0.7591 -> 0.7501  pop -0.0090 [-0.0141,-0.0035]  paired -0.0025  up 45.0% down 55.0%
+   target volume ratio, ridge, 10-fold by gauge: out-of-fold R2 of log target -0.007
+  attr ridge on log volume ratio, 10-fold by gauge               NSE median 0.7391 -> 0.7398  pop +0.0007 [-0.0004,+0.0028]  paired +0.0002  up 57.3% down 42.7%
+  attr ridge on log volume ratio, 10-fold by gauge               KGE median 0.7591 -> 0.7594  pop +0.0004 [-0.0022,+0.0023]  paired -0.0004  up 45.8% down 54.2%
+   target volume ratio, ridge, leave-one-HUC2-out: out-of-fold R2 of log target -0.031
+  attr ridge on log volume ratio, leave-one-HUC2-out             NSE median 0.7391 -> 0.7391  pop -0.0001 [-0.0020,+0.0016]  paired +0.0002  up 54.9% down 45.1%
+  attr ridge on log volume ratio, leave-one-HUC2-out             KGE median 0.7591 -> 0.7591  pop +0.0000 [-0.0025,+0.0024]  paired -0.0004  up 46.8% down 53.2%
+   target volume ratio, GBM, 10-fold by gauge: out-of-fold R2 of log target -0.065
+  attr GBM on log volume ratio, 10-fold by gauge                 NSE median 0.7391 -> 0.7375  pop -0.0016 [-0.0046,+0.0017]  paired -0.0003  up 46.6% down 53.4%
+  attr GBM on log volume ratio, 10-fold by gauge                 KGE median 0.7591 -> 0.7542  pop -0.0049 [-0.0093,-0.0006]  paired -0.0011  up 46.7% down 53.3%
+   target volume ratio, GBM, leave-one-HUC2-out: out-of-fold R2 of log target -0.145
+  attr GBM on log volume ratio, leave-one-HUC2-out               NSE median 0.7391 -> 0.7355  pop -0.0036 [-0.0070,-0.0008]  paired -0.0010  up 42.0% down 58.0%
+  attr GBM on log volume ratio, leave-one-HUC2-out               KGE median 0.7591 -> 0.7463  pop -0.0128 [-0.0180,-0.0079]  paired -0.0026  up 43.0% down 57.0%
+
+-- per-gauge scalars (gauged calibration; the ceiling of any regionalized multiplier)
+  per-gauge LS k* fitted on training years                       NSE median 0.7391 -> 0.7469  pop +0.0078 [+0.0042,+0.0123]  paired +0.0018  up 58.9% down 40.8%
+  per-gauge LS k* fitted on training years                       KGE median 0.7591 -> 0.7706  pop +0.0116 [+0.0064,+0.0178]  paired +0.0022  up 54.8% down 44.9%
+  per-gauge volume ratio fitted on training years                NSE median 0.7391 -> 0.7439  pop +0.0047 [+0.0011,+0.0089]  paired +0.0000  up 50.2% down 49.5%
+  per-gauge volume ratio fitted on training years                KGE median 0.7591 -> 0.7713  pop +0.0122 [+0.0056,+0.0173]  paired +0.0024  up 54.4% down 45.3%
+  per-gauge LS k*, shrunk halfway in log space                   NSE median 0.7391 -> 0.7459  pop +0.0068 [+0.0042,+0.0105]  paired +0.0017  up 64.3% down 35.5%
+  per-gauge LS k*, shrunk halfway in log space                   KGE median 0.7591 -> 0.7726  pop +0.0135 [+0.0084,+0.0176]  paired +0.0036  up 61.0% down 38.8%
+  per-gauge LS k* fitted ON TEST YEARS (in-sample oracle)        NSE median 0.7391 -> 0.7677  pop +0.0286 [+0.0242,+0.0335]  paired +0.0124  up 100.0% down 0.0%
+  per-gauge LS k* fitted ON TEST YEARS (in-sample oracle)        KGE median 0.7591 -> 0.7997  pop +0.0406 [+0.0349,+0.0466]  paired +0.0112  up 62.3% down 37.7%

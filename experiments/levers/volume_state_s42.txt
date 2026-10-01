@@ -1,0 +1,16 @@
+== seed 42: state-dependent corrections, fit WY1982-1995, score WY1996-2010 (base 0.7391 / 0.7591)
+   power law fit: a 0.96, b 1.0 (training median 0.7855 vs 0.7847)
+  power law a=0.96 b=1.0                                         NSE median 0.7391 -> 0.7418  pop +0.0026 [+0.0008,+0.0066]  paired +0.0023  up 57.2% down 42.8%
+  power law a=0.96 b=1.0                                         KGE median 0.7591 -> 0.7584  pop -0.0006 [-0.0060,+0.0032]  paired -0.0106  up 41.1% down 58.9%
+   trailing-year state exponent c = 0.1 (training median 0.7847)
+  trailing-year state multiplier c=0.1                           NSE median 0.7391 -> 0.7360  pop -0.0031 [-0.0049,-0.0004]  paired -0.0013  up 40.4% down 59.6%
+  trailing-year state multiplier c=0.1                           KGE median 0.7591 -> 0.7633  pop +0.0042 [+0.0009,+0.0065]  paired +0.0034  up 61.1% down 38.9%
+    sensitivity: state multiplier c=0.2 (not fitted)             NSE median 0.7391 -> 0.7306  pop -0.0085 [-0.0119,-0.0048]  paired -0.0054  up 32.3% down 67.7%
+    sensitivity: state multiplier c=0.2 (not fitted)             KGE median 0.7591 -> 0.7620  pop +0.0029 [-0.0022,+0.0065]  paired +0.0043  up 57.3% down 42.7%
+    sensitivity: state multiplier c=0.4 (not fitted)             NSE median 0.7391 -> 0.7100  pop -0.0291 [-0.0342,-0.0241]  paired -0.0227  up 20.1% down 79.9%
+    sensitivity: state multiplier c=0.4 (not fitted)             KGE median 0.7591 -> 0.7419  pop -0.0171 [-0.0225,-0.0112]  paired -0.0026  up 48.2% down 51.8%
+  per-gauge quantile mapping (gauged ceiling)                    NSE median 0.7391 -> 0.7353  pop -0.0038 [-0.0085,+0.0015]  paired -0.0006  up 48.9% down 51.1%
+  per-gauge quantile mapping (gauged ceiling)                    KGE median 0.7591 -> 0.8016  pop +0.0425 [+0.0354,+0.0484]  paired +0.0356  up 69.5% down 30.5%
+   global normalized quantiles (pred -> obs): q05 0.073->0.025, q50 0.574->0.513, q95 3.181->3.434
+  global quantile mapping on p / pbar                            NSE median 0.7391 -> 0.6918  pop -0.0474 [-0.0538,-0.0420]  paired -0.0399  up 22.8% down 77.2%
+  global quantile mapping on p / pbar                            KGE median 0.7591 -> 0.7352  pop -0.0239 [-0.0308,-0.0154]  paired -0.0049  up 48.7% down 51.3%

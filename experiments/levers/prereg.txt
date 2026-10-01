@@ -1,0 +1,16 @@
+Pre-registration, written 2026-09-30 ~13:35Z, BEFORE any training-year replay output existed (the seed-42 replay
+2026-09-30T13-13-59Z was still in Phase 2). The smoke tests of volume.py / timing.py used an overlapping stand-in window
+(WY1996-2000 as "training") and are code tests only.
+
+Primary runoff multipliers for the combined estimate (fit on WY1982-1995, score on WY1996-2010):
+  global  : the median over gauges of the per-gauge least-squares scalar k* = sum(p o) / sum(p^2)
+  regional: per-HUC2, the median of k* within the HUC2
+  attribute-conditioned: GBM on log k*, 10-fold by gauge (secondary: leave-one-HUC2-out as the stricter transfer test)
+  ceiling : per-gauge k* (gauged calibration only)
+All other variants (max-training-median scalar, volume-ratio targets, ridge) are reported as sensitivity, not selected.
+
+Primary variance lever: equal-weight two-seed ensemble (s42 + s43); no weights fitted.
+Primary recipe lever: gamma fixed at 0 (n-only head, 2026-09-12T23-39-06Z, same channel as the working model) and, as a
+  separate arm, gamma = 0 with p and q learned (2026-09-12T03-53-34Z), both single-seed.
+Decision rule for "can reach +0.03": the sum of the primary honest levers' population-median changes (vs 0.7391),
+  checked by applying them jointly to per-gauge predictions where possible.

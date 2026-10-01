@@ -1,0 +1,24 @@
+warning: data source drift since last plan: ["streamflow"] — relocking
+summed Q' gauge filter: dropped 513 headwater (matches training's dataset filter)
+summed Q': 2698 gauges × 79889 unique upstream divides × 3652 days
+workflow TrainAndTest
+drift    ["streamflow"]
+adjacency
+  network /home/tbindas/projects/ddr/data/merit_conus_adjacency.zarr
+  gauges  /home/tbindas/projects/ddr/data/merit_gages_conus_adjacency.zarr
+  cache  (explicit paths — no managed build)
+
+================================================================================
+                           SUMMED Q' METRICS SUMMARY                            
+================================================================================
+Total Gauges Evaluated: 2698
+--------------------------------------------------------------------------------
+METRIC          MEDIAN      MEAN       Q25       Q75   VALID
+--------------------------------------------------------------------------------
+Bias             0.986     3.155     0.251     2.638    2698
+FLV (%)          45.16   6988.63     12.13    136.38    2633
+FHV (%)           2.56     32.66     -6.66     14.35    2698
+KGE              0.762     0.112     0.600     0.846    2698
+NSE              0.730   -69.635     0.527     0.824    2698
+================================================================================
+baseline computed → /home/tbindas/projects/ddrs/.ddrs/baselines/196652afd33a6fda

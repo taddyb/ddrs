@@ -1,0 +1,170 @@
+{
+ "power law a=0.96 b=1.0": {
+  "nse": {
+   "name": "power law a=0.96 b=1.0",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7417588072521619,
+   "pop_change": 0.0026468775966701497,
+   "ci_lo": 0.0008046265136342629,
+   "ci_hi": 0.0066369264633769675,
+   "paired_median": 0.0023251397781485217,
+   "share_up": 0.5720930232558139,
+   "share_down": 0.42790697674418604,
+   "n": 2365
+  },
+  "kge": {
+   "name": "power law a=0.96 b=1.0",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7584449991238991,
+   "pop_change": -0.0006284834457126465,
+   "ci_lo": -0.006013478475187589,
+   "ci_hi": 0.0031536293990692154,
+   "paired_median": -0.010649857984882383,
+   "share_up": 0.41057082452431287,
+   "share_down": 0.5894291754756871,
+   "n": 2365
+  }
+ },
+ "trailing-year state multiplier c=0.1": {
+  "nse": {
+   "name": "trailing-year state multiplier c=0.1",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7359820843113118,
+   "pop_change": -0.0031298453441799268,
+   "ci_lo": -0.004941113158876237,
+   "ci_hi": -0.0004350331759627253,
+   "paired_median": -0.001278026726900694,
+   "share_up": 0.40380549682875266,
+   "share_down": 0.5961945031712473,
+   "n": 2365
+  },
+  "kge": {
+   "name": "trailing-year state multiplier c=0.1",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7632815193848514,
+   "pop_change": 0.004208036815239735,
+   "ci_lo": 0.0009192809717952444,
+   "ci_hi": 0.006516819588001204,
+   "paired_median": 0.0033724987095145043,
+   "share_up": 0.6109936575052854,
+   "share_down": 0.3890063424947146,
+   "n": 2365
+  }
+ },
+ "  sensitivity: state multiplier c=0.2 (not fitted)": {
+  "nse": {
+   "name": "  sensitivity: state multiplier c=0.2 (not fitted)",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7306314035591972,
+   "pop_change": -0.008480526096294572,
+   "ci_lo": -0.011908249991319009,
+   "ci_hi": -0.004783248465052079,
+   "paired_median": -0.005447714496204514,
+   "share_up": 0.32346723044397463,
+   "share_down": 0.6765327695560254,
+   "n": 2365
+  },
+  "kge": {
+   "name": "  sensitivity: state multiplier c=0.2 (not fitted)",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7619661826755945,
+   "pop_change": 0.0028927001059827484,
+   "ci_lo": -0.002218156021173592,
+   "ci_hi": 0.006500920268556788,
+   "paired_median": 0.0042874520074797084,
+   "share_up": 0.572938689217759,
+   "share_down": 0.427061310782241,
+   "n": 2365
+  }
+ },
+ "  sensitivity: state multiplier c=0.4 (not fitted)": {
+  "nse": {
+   "name": "  sensitivity: state multiplier c=0.4 (not fitted)",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7099762453613981,
+   "pop_change": -0.029135684294093633,
+   "ci_lo": -0.03423242409409916,
+   "ci_hi": -0.024050104831563137,
+   "paired_median": -0.022663429171815186,
+   "share_up": 0.20084566596194503,
+   "share_down": 0.7991543340380549,
+   "n": 2365
+  },
+  "kge": {
+   "name": "  sensitivity: state multiplier c=0.4 (not fitted)",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.7419364747405517,
+   "pop_change": -0.017137007829060025,
+   "ci_lo": -0.02249918499920909,
+   "ci_hi": -0.011214290904320155,
+   "paired_median": -0.0026341571026100574,
+   "share_up": 0.4824524312896406,
+   "share_down": 0.5175475687103595,
+   "n": 2365
+  }
+ },
+ "per-gauge quantile mapping (gauged ceiling)": {
+  "nse": {
+   "name": "per-gauge quantile mapping (gauged ceiling)",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.7353406672520629,
+   "pop_change": -0.0037712624034288433,
+   "ci_lo": -0.008461165065746318,
+   "ci_hi": 0.0015463202944585401,
+   "paired_median": -0.0005684344638307026,
+   "share_up": 0.4887949260042283,
+   "share_down": 0.5112050739957716,
+   "n": 2365
+  },
+  "kge": {
+   "name": "per-gauge quantile mapping (gauged ceiling)",
+   "metric": "KGE",
+   "median_base": 0.7591488667927256,
+   "median_new": 0.8016172290251325,
+   "pop_change": 0.04246836223240691,
+   "ci_lo": 0.0354016569917804,
+   "ci_hi": 0.04840913740074113,
+   "paired_median": 0.035620809559510136,
+   "share_up": 0.6954314720812182,
+   "share_down": 0.30456852791878175,
+   "n": 2364
+  }
+ },
+ "global quantile mapping on p / pbar": {
+  "nse": {
+   "name": "global quantile mapping on p / pbar",
+   "metric": "NSE",
+   "median_base": 0.7391119296554918,
+   "median_new": 0.6917523186990105,
+   "pop_change": -0.047359610956481224,
+   "ci_lo": -0.053759979384448375,
+   "ci_hi": -0.04195892620181558,
+   "paired_median": -0.0398964670721772,
+   "share_up": 0.22832980972515857,
+   "share_down": 0.7716701902748414,
+   "n": 2365
+  },
+  "kge": {
+   "name": "global quantile mapping on p / pbar",
+   "metric": "KGE",
+   "median_base": 0.7590734825696117,
+   "median_new": 0.735208579123646,
+   "pop_change": -0.0238649034459657,
+   "ci_lo": -0.030767823038077652,
+   "ci_hi": -0.01544526840506627,
+   "paired_median": -0.004901993875675248,
+   "share_up": 0.48668076109936576,
+   "share_down": 0.5133192389006342,
+   "n": 2365
+  }
+ }
+}

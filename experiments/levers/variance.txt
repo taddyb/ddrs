@@ -1,0 +1,118 @@
+== A. training loss (nse-batch, gauge-weighted mean over each epoch's micro-batches; random 90-day windows)
+  seed42 n0+gamma (07-29-47Z)          epochs 50: mean loss ep1-5 0.2841, ep11-20 0.3038, ep31-40 0.2999, ep41-50 0.2980
+                                       slope/epoch ep11-20 +0.00363+-0.00323; ep31-40 +0.00160+-0.00290; ep41-50 +0.00194+-0.00352 (= +6.50% of the level over 10 epochs); epoch-to-epoch sd ep41-50 0.0307
+                                       median n by epoch: e1:0.1171 e5:0.0471 e10:0.0964 e20:0.0759 e30:0.0765 e40:0.0607 e45:0.0594 e50:0.0588
+  seed43 n0+gamma (10-31-30Z)          epochs 50: mean loss ep1-5 0.2846, ep11-20 0.2917, ep31-40 0.3085, ep41-50 0.5956
+                                       slope/epoch ep11-20 -0.00567+-0.00262; ep31-40 -0.00373+-0.00333; ep41-50 -0.09350+-0.10607 (= -156.98% of the level over 10 epochs); epoch-to-epoch sd ep41-50 0.9514
+                                       median n by epoch: e1:0.1109 e5:0.0607 e10:0.0467 e20:0.0656 e30:0.0714 e40:0.0572 e45:0.0632 e50:0.0629
+  gamma=0, n+p+q (09-12T03-53-34Z)     epochs 50: mean loss ep1-5 0.2786, ep11-20 0.2978, ep31-40 0.2945, ep41-50 0.2913
+                                       slope/epoch ep11-20 +0.00350+-0.00312; ep31-40 +0.00212+-0.00308; ep41-50 +0.00173+-0.00351 (= +5.94% of the level over 10 epochs); epoch-to-epoch sd ep41-50 0.0305
+                                       median n by epoch: e1:0.1178 e5:0.0525 e10:0.0726 e20:0.0829 e30:0.0845 e40:0.0727 e45:0.0665 e50:0.0672
+  n only (09-12T23-39-06Z)             epochs 50: mean loss ep1-5 0.2847, ep11-20 0.3008, ep31-40 0.2986, ep41-50 0.2964
+                                       slope/epoch ep11-20 +0.00376+-0.00322; ep31-40 +0.00196+-0.00305; ep41-50 +0.00213+-0.00353 (= +7.18% of the level over 10 epochs); epoch-to-epoch sd ep41-50 0.0309
+                                       median n by epoch: e1:0.1030 e5:0.0539 e10:0.0559 e20:0.0741 e30:0.0675 e40:0.0705 e45:0.0620 e50:0.0643
+
+== A2. paired training loss on identical micro-batches (seed-42 runs draw the same gauges and windows)
+  gamma=0, n+p+q (09-12T03-53-34Z)         ep 1-10 mean(loss - s42) -6470.2677 +- 6461.5155, median rel -0.012, share lower 0.692 (n=370)
+  gamma=0, n+p+q (09-12T03-53-34Z)         ep11-20 mean(loss - s42) -0.0060 +- 0.0009, median rel -0.014, share lower 0.751 (n=370)
+  gamma=0, n+p+q (09-12T03-53-34Z)         ep21-40 mean(loss - s42) -0.0054 +- 0.0006, median rel -0.015, share lower 0.720 (n=740)
+  gamma=0, n+p+q (09-12T03-53-34Z)         ep41-50 mean(loss - s42) -0.0067 +- 0.0008, median rel -0.012, share lower 0.738 (n=370)
+  gamma=0.1, n+p+q (09-12T20-38-08Z)       ep 1-10 mean(loss - s42) -6470.2701 +- 6461.5156, median rel -0.015, share lower 0.741 (n=370)
+  gamma=0.1, n+p+q (09-12T20-38-08Z)       ep11-20 mean(loss - s42) -0.0034 +- 0.0013, median rel -0.010, share lower 0.665 (n=370)
+  gamma=0.1, n+p+q (09-12T20-38-08Z)       ep21-40 mean(loss - s42) -0.0047 +- 0.0006, median rel -0.011, share lower 0.723 (n=740)
+  gamma=0.1, n+p+q (09-12T20-38-08Z)       ep41-50 mean(loss - s42) -0.0060 +- 0.0007, median rel -0.011, share lower 0.730 (n=370)
+  learned gamma, n+p+q (09-12T16-30-14Z)   ep 1-10 mean(loss - s42) -6470.2672 +- 6461.5156, median rel -0.007, share lower 0.635 (n=370)
+  learned gamma, n+p+q (09-12T16-30-14Z)   ep11-20 mean(loss - s42) -0.0020 +- 0.0008, median rel -0.005, share lower 0.641 (n=370)
+  learned gamma, n+p+q (09-12T16-30-14Z)   ep21-40 mean(loss - s42) -0.0022 +- 0.0006, median rel -0.006, share lower 0.645 (n=740)
+  learned gamma, n+p+q (09-12T16-30-14Z)   ep41-50 mean(loss - s42) -0.0032 +- 0.0007, median rel -0.007, share lower 0.662 (n=370)
+  n only (09-12T23-39-06Z)                 ep 1-10 mean(loss - s42) -6470.2652 +- 6461.5156, median rel -0.007, share lower 0.643 (n=370)
+  n only (09-12T23-39-06Z)                 ep11-20 mean(loss - s42) -0.0030 +- 0.0006, median rel -0.006, share lower 0.668 (n=370)
+  n only (09-12T23-39-06Z)                 ep21-40 mean(loss - s42) -0.0012 +- 0.0004, median rel -0.003, share lower 0.612 (n=740)
+  n only (09-12T23-39-06Z)                 ep41-50 mean(loss - s42) -0.0016 +- 0.0005, median rel -0.002, share lower 0.584 (n=370)
+
+== B. reach-level parameter drift (KAN forward over all 346,321 CONUS reaches)
+  seed42 median n e10 0.0863 e25 0.0738 e50 0.0579; gamma e10 0.2333 e25 0.1513 e50 0.0665
+  seed43 median n e50 0.0612; gamma e50 0.2722 (only the final field was kept)
+  median |ln n ratio|: seed42 e10->e25 0.176, e25->e50 0.225; seed42 vs seed43 at e50 0.337
+  median |gamma change|: seed42 e10->e25 0.0815, e25->e50 0.0771; seed42 vs seed43 at e50 0.1978
+  Spearman(n) seed42 vs seed43 at e50 0.490; Spearman(gamma) -0.120
+
+== C. ensembles on the test years (equal-weight mean of routed predictions), paired against seed 42 (0.7391)
+  single 2026-09-10T21-21-48Z                                    NSE median 0.7391 -> 0.7376  pop -0.0015 [-0.0042,+0.0012]  paired +0.0001  up 51.9% down 48.1%
+  single 2026-09-10T21-21-48Z                                    KGE median 0.7591 -> 0.7600  pop +0.0009 [-0.0017,+0.0032]  paired -0.0000  up 49.0% down 51.0%
+  single 2026-09-11T06-38-49Z                                    NSE median 0.7391 -> 0.7383  pop -0.0008 [-0.0033,+0.0030]  paired -0.0001  up 47.9% down 52.1%
+  single 2026-09-11T06-38-49Z                                    KGE median 0.7591 -> 0.7610  pop +0.0019 [-0.0009,+0.0045]  paired -0.0002  up 46.0% down 54.0%
+  single 2026-09-12T03-53-34Z                                    NSE median 0.7391 -> 0.7453  pop +0.0062 [+0.0035,+0.0103]  paired +0.0006  up 57.3% down 42.7%
+  single 2026-09-12T03-53-34Z                                    KGE median 0.7591 -> 0.7623  pop +0.0032 [+0.0010,+0.0057]  paired +0.0002  up 54.8% down 45.2%
+  single 2026-09-12T06-06-19Z                                    NSE median 0.7391 -> 0.7364  pop -0.0027 [-0.0051,+0.0004]  paired -0.0001  up 46.7% down 53.3%
+  single 2026-09-12T06-06-19Z                                    KGE median 0.7591 -> 0.7586  pop -0.0005 [-0.0036,+0.0017]  paired -0.0003  up 42.0% down 58.0%
+  single 2026-09-12T16-30-14Z                                    NSE median 0.7391 -> 0.7416  pop +0.0025 [+0.0002,+0.0063]  paired +0.0002  up 52.9% down 47.1%
+  single 2026-09-12T16-30-14Z                                    KGE median 0.7591 -> 0.7624  pop +0.0034 [+0.0004,+0.0059]  paired -0.0002  up 45.8% down 54.2%
+  single 2026-09-12T20-36-00Z                                    NSE median 0.7391 -> 0.7416  pop +0.0024 [+0.0002,+0.0060]  paired +0.0002  up 53.4% down 46.6%
+  single 2026-09-12T20-36-00Z                                    KGE median 0.7591 -> 0.7617  pop +0.0026 [-0.0001,+0.0047]  paired -0.0001  up 47.1% down 52.9%
+  single 2026-09-12T20-38-08Z                                    NSE median 0.7391 -> 0.7455  pop +0.0064 [+0.0037,+0.0099]  paired +0.0007  up 58.0% down 42.0%
+  single 2026-09-12T20-38-08Z                                    KGE median 0.7591 -> 0.7621  pop +0.0030 [+0.0010,+0.0059]  paired +0.0000  up 50.9% down 49.1%
+  single 2026-09-12T23-39-06Z                                    NSE median 0.7391 -> 0.7409  pop +0.0018 [-0.0005,+0.0049]  paired +0.0004  up 58.0% down 42.0%
+  single 2026-09-12T23-39-06Z                                    KGE median 0.7591 -> 0.7612  pop +0.0021 [+0.0000,+0.0043]  paired +0.0002  up 57.2% down 42.8%
+  single 2026-09-27T07-29-47Z                                    NSE median 0.7391 -> 0.7391  pop +0.0000 [+0.0000,+0.0000]  paired +0.0000  up 0.0% down 0.0%
+  single 2026-09-27T07-29-47Z                                    KGE median 0.7591 -> 0.7591  pop +0.0000 [+0.0000,+0.0000]  paired +0.0000  up 0.0% down 0.0%
+  single 2026-09-27T10-31-30Z                                    NSE median 0.7391 -> 0.7341  pop -0.0050 [-0.0074,-0.0018]  paired -0.0007  up 40.2% down 59.8%
+  single 2026-09-27T10-31-30Z                                    KGE median 0.7591 -> 0.7588  pop -0.0003 [-0.0018,+0.0030]  paired -0.0002  up 44.6% down 55.4%
+  single 2026-09-13T17-22-30Z                                    NSE median 0.7391 -> 0.7300  pop -0.0091 [-0.0138,-0.0039]  paired -0.0062  up 41.5% down 58.5%
+  single 2026-09-13T17-22-30Z                                    KGE median 0.7591 -> 0.7557  pop -0.0033 [-0.0091,+0.0018]  paired -0.0067  up 44.1% down 55.9%
+
+  ens two seeds of the working recipe (s42+s43)                  NSE median 0.7391 -> 0.7376  pop -0.0015 [-0.0036,+0.0009]  paired -0.0001  up 46.4% down 53.6%
+  ens two seeds of the working recipe (s42+s43)                  KGE median 0.7591 -> 0.7607  pop +0.0016 [-0.0007,+0.0038]  paired -0.0001  up 46.4% down 53.6%
+      mean of the members' own medians 0.7366; ensemble minus that +0.0010
+  ens working recipe on two Q' stores (UH + dhbv2-dist aorc2f)   NSE median 0.7391 -> 0.7430  pop +0.0039 [+0.0008,+0.0086]  paired +0.0044  up 61.0% down 39.0%
+  ens working recipe on two Q' stores (UH + dhbv2-dist aorc2f)   KGE median 0.7591 -> 0.7631  pop +0.0040 [-0.0001,+0.0079]  paired +0.0009  up 51.8% down 48.2%
+      mean of the members' own medians 0.7346; ensemble minus that +0.0085
+  ens two seeds + dhbv2-dist aorc2f (3 members)                  NSE median 0.7391 -> 0.7438  pop +0.0047 [+0.0015,+0.0088]  paired +0.0048  up 65.8% down 34.2%
+  ens two seeds + dhbv2-dist aorc2f (3 members)                  KGE median 0.7591 -> 0.7646  pop +0.0055 [+0.0019,+0.0092]  paired +0.0015  up 53.3% down 46.7%
+      mean of the members' own medians 0.7344; ensemble minus that +0.0094
+  ens all 10 UH-store 50-epoch nse-batch variants                NSE median 0.7391 -> 0.7436  pop +0.0045 [+0.0025,+0.0080]  paired +0.0007  up 62.2% down 37.8%
+  ens all 10 UH-store 50-epoch nse-batch variants                KGE median 0.7591 -> 0.7616  pop +0.0026 [+0.0006,+0.0052]  paired +0.0000  up 50.4% down 49.6%
+      mean of the members' own medians 0.7400; ensemble minus that +0.0035
+  ens UH variants without the three constant-gamma arms (7)      NSE median 0.7391 -> 0.7431  pop +0.0040 [+0.0019,+0.0074]  paired +0.0007  up 63.6% down 36.4%
+  ens UH variants without the three constant-gamma arms (7)      KGE median 0.7591 -> 0.7617  pop +0.0026 [+0.0007,+0.0051]  paired +0.0001  up 52.6% down 47.4%
+      mean of the members' own medians 0.7396; ensemble minus that +0.0035
+
+  per-gauge |dNSE| distribution: seed43-seed42 median |d| 0.0034, p90 0.0270; gamma0/n+p+q minus s42 median |d| 0.0047, p90 0.0368
+  sign test gamma0/n+p+q vs s42: up 0.573; seed43 vs s42: up 0.402
+
+== D. gauges within 0.03 below the seed-42 population median
+  n near = 174; in them seed43-seed42 median -0.0006, share down 0.575; |d| median 0.0043 (population |d| 0.0034)
+  crossings at the median: s42-below-and-near gauges that seed43 lifts above the s42 median: 17; s42-above gauges seed43 drops below: 54; s42-below that s43 lifts above: 18
+  medians: population | near-median | near-median losing most (bottom quartile of seed43-seed42 there, n=44)
+    DRAIN_SQKM            871.675 |    534.460 |    609.292
+    up_aridity              1.035 |      1.038 |      1.055
+    up_snow_fraction        0.098 |      0.093 |      0.042
+    tt_days_1ms             0.924 |      0.690 |      0.862
+    longest_path_km        79.824 |     59.579 |     74.484
+    n_reach                19.000 |     13.000 |     12.000
+    nid_dor                 0.009 |      0.001 |      0.002
+    beta42                  1.045 |      1.042 |      1.058
+    alpha42                 0.914 |      0.868 |      0.890
+    r42                     0.880 |      0.866 |      0.863
+  near-median share Ref class 0.305 vs population 0.211; share with a NID dam >= 10 MCM 0.247 vs 0.388
+  near-median HUC02 counts (top 6): 03:29, 07:21, 17:20, 02:19, 04:18, 18:13
+  near-median losing-most HUC02 counts: 02:9, 07:7, 03:7, 05:4, 17:3, 04:3
+  Spearman of |seed43-seed42 NSE| with attributes (population):
+    DRAIN_SQKM         +0.174
+    up_aridity         +0.043
+    up_snow_fraction   -0.366
+    tt_days_1ms        +0.257
+    n_reach            +0.162
+    nid_dor            -0.038
+    nse42              -0.080
+  Spearman of signed (seed43-seed42) NSE with attributes (population):
+    DRAIN_SQKM         -0.049
+    up_aridity         +0.014
+    up_snow_fraction   +0.009
+    tt_days_1ms        -0.062
+  seed43-seed42 by drainage-area bin (median d, share down, n):
+         0-300      -0.0004  0.578  491
+       300-1000     -0.0007  0.606  776
+      1000-3000     -0.0006  0.590  617
+      3000-10000    -0.0010  0.603  343
+     10000-10000000.0 -0.0025  0.645  138
