@@ -1,0 +1,226 @@
+<title>Multi-Product Runoff Forcing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Series look (the dam-release results pages): one reading column, cards for the running experiments, one chart. */
+:root {
+  --bg: #f3f5f4; --surface: #ffffff; --ink: #1b2528; --muted: #56666a; --rule: #d3dbd9; --soft: #e6ecea;
+  --uh: #0080a8; --dist: #2f7a4a; --lstm: #b0651c; --blend: #1b2528; --target: #a3432b; --est: #7d7b75; --meas: #b0651c;
+  --good: #2f7a4a;
+  --display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111719; --surface: #182023; --ink: #e1e8e6; --muted: #9babaa; --rule: #2b3639; --soft: #1e292c;
+    --uh: #1ea2b8; --dist: #6cc08a; --lstm: #c27a26; --blend: #e1e8e6; --target: #e0826a; --est: #a3a29b; --meas: #c27a26;
+    --good: #6cc08a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111719; --surface: #182023; --ink: #e1e8e6; --muted: #9babaa; --rule: #2b3639; --soft: #1e292c;
+  --uh: #1ea2b8; --dist: #6cc08a; --lstm: #c27a26; --blend: #e1e8e6; --target: #e0826a; --est: #a3a29b; --meas: #c27a26;
+  --good: #6cc08a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); padding-inline: 16px; padding-block: 28px 56px; }
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 48px; }
+.prose { max-width: 70ch; }
+h1, h2 { font-family: var(--display); font-weight: 700; letter-spacing: 0.01em; text-wrap: balance; margin: 0; line-height: 1.1; }
+h1 { font-size: clamp(34px, 6vw, 50px); }
+h2 { font-size: 28px; }
+h3 { font-size: 15px; font-weight: 600; margin: 0; }
+p { margin: 0; }
+section { display: grid; gap: 16px; }
+.eyebrow { font: 500 12px/1.4 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 17px; max-width: 70ch; }
+.m { font-family: var(--mono); font-size: 0.9em; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.note { font-size: 13.5px; color: var(--muted); }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.card ol, .card ul { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; font: 500 11px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; padding: 5px 8px; border-radius: 999px; background: var(--soft); color: var(--muted); width: fit-content; }
+.pill .d { width: 7px; height: 7px; border-radius: 50%; background: var(--good); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) { .pill .d { animation: none; } }
+.kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 12px; font-size: 14px; }
+.kv b { font: 500 11px/1.9 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.flow { display: grid; grid-template-columns: minmax(0, 1.1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 0.8fr); gap: 10px; align-items: center; }
+.box { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; display: grid; gap: 6px; min-width: 0; }
+.box .t { font: 600 13px var(--body); }
+.box .s { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.src { display: grid; gap: 6px; }
+.src div { border-left: 4px solid var(--c); padding: 4px 8px; font-size: 13px; background: var(--soft); border-radius: 0 4px 4px 0; }
+.arrow { font: 600 20px var(--mono); color: var(--muted); text-align: center; }
+@media (max-width: 760px) {
+  .flow { grid-template-columns: 1fr; }
+  .arrow { transform: rotate(90deg); }
+}
+.formula { font: 500 15px/1.6 var(--mono); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 16px; overflow-x: auto; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 500 12px var(--mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.brief { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px 24px; }
+.brief div { display: grid; gap: 4px; align-content: start; }
+.brief b { font: 500 11px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.fig { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 10px; min-width: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); align-items: center; }
+.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.legend i.line { width: 16px; height: 0; border-top: 2px dashed var(--target); border-radius: 0; }
+.row { display: grid; grid-template-columns: minmax(0, 42%) 1fr; gap: 12px; align-items: center; min-height: 42px; }
+.row .lab { font-size: 14px; line-height: 1.3; }
+.row .lab .m { display: block; color: var(--muted); font-size: 12px; }
+.track { position: relative; height: 30px; }
+.track .z, .track .t { position: absolute; top: 0; bottom: 0; width: 0; }
+.track .z { border-left: 1px solid var(--muted); }
+.track .t { border-left: 2px dashed var(--target); }
+.track .w { position: absolute; top: 50%; height: 2px; transform: translateY(-50%); }
+.track .p { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%; transform: translate(-50%, -50%); box-shadow: 0 0 0 2px var(--surface); }
+.axis { position: relative; height: 22px; margin-left: calc(42% + 12px); font: 400 11px var(--mono); color: var(--muted); }
+.axis span { position: absolute; transform: translateX(-50%); top: 4px; white-space: nowrap; }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr; gap: 0; } .axis { margin-left: 0; } }
+.caveats { display: grid; gap: 10px; counter-reset: c; }
+.cv { display: grid; grid-template-columns: 26px 1fr; gap: 2px 10px; align-items: start; }
+.cv::before { counter-increment: c; content: counter(c); font: 600 13px/22px var(--mono); color: var(--muted); border: 1px solid var(--rule); border-radius: 50%; width: 22px; height: 22px; text-align: center; }
+.cv p { grid-column: 2; max-width: 75ch; }
+</style>
+
+<div class="wrap">
+<header style="display:grid;gap:14px">
+  <div class="eyebrow">ddrs · 30 September 2026 · what is running and why</div>
+  <h1>Multi-Product Runoff Forcing</h1>
+  <p class="lede">Two experiments are running. One builds a new way to feed runoff into the routing: a weighted blend of three runoff products instead of one, the only lever we found that can lift the population median NSE by about +0.03. The other measures how well the gauges can pin down each dam parameter. This page explains both.</p>
+</header>
+
+<section>
+  <div class="eyebrow">Running now</div>
+  <h2>Two experiments</h2>
+  <div class="cols">
+    <div class="card">
+      <span class="pill"><span class="d"></span>building, then full-population runs</span>
+      <h3>Multi-product runoff forcing, with γ fixed at 0</h3>
+      <div class="kv">
+        <b>Question</b><span>Does routing a blend of three runoff products, with the roughness exponent γ fixed at 0, lift the median NSE of all 2,365 evaluation gauges by about +0.03?</span>
+        <b>Steps</b><span>Teach the engine to read several runoff stores and average them per catchment; pass the regression gates; then train on the full population: blend with γ = 0 at seeds 42 and 43, and the blend alone at seed 42.</span>
+        <b>Compared to</b><span>The existing no-dam runs with the same training setup (<span class="m">2026-09-27T07-29-47Z</span> seed 42, <span class="m">10-31-30Z</span> seed 43), paired gauge by gauge.</span>
+        <b>Expect</b><span>About +0.026 at the population median from the blend with γ = 0 (offline estimate); KGE about flat.</span>
+        <b>When</b><span>Gates in about 1 to 2 hours, then about 2.5 hours of training and testing.</span>
+      </div>
+    </div>
+    <div class="card">
+      <span class="pill"><span class="d"></span>offline landscapes, then engine checks</span>
+      <h3>How learnable is each dam parameter?</h3>
+      <div class="kv">
+        <b>Question</b><span>For each dam parameter (residence time, seasonal rule curve, flood pool size, release target, capture share), can the downstream gauge pin it down, and why could training not grow the flood pools?</span>
+        <b>Steps</b><span>Map the training loss along each parameter at every on-reach dam gauge; measure its curvature at the optimum, how wide the good region is, and the slope at the value training starts from; confirm the flood-pool plateau with a few engine runs.</span>
+        <b>Output</b><span>A verdict per parameter: stiff (learnable), sloppy (flat), or learnable only from a good start, on the same scale as the routing parameters in the paper.</span>
+        <b>When</b><span>About 3 hours.</span>
+      </div>
+    </div>
+  </div>
+  <p class="note">Also open: pull request #52, the records from after #51 merged (no code changes). Its checks are running; it merges when you say so.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Background</div>
+  <h2>What runoff forcing is</h2>
+  <p class="prose">ddrs does not make runoff. For each of the 346,321 MERIT unit catchments it takes the runoff that drains into that reach, called Q′ (lateral inflow, m³/s), from a hydrologic model run beforehand, and routes it down the river network with Muskingum-Cunge. Routing can delay and smooth that water, and the dam law can store and release it, but whatever is wrong in Q′ reaches the gauge. Today every run uses one Q′ product: dHBV2 with a unit hydrograph (UH).</p>
+  <div class="flow" role="img" aria-label="Three runoff products are averaged per catchment into one blended runoff, which is routed down the river network to the gauges.">
+    <div class="box"><div class="t">Runoff products</div><div class="src">
+      <div style="--c:var(--uh)">UH · weight 0.50</div>
+      <div style="--c:var(--dist)">DIST · weight 0.25</div>
+      <div style="--c:var(--lstm)">LSTM · weight 0.25</div>
+    </div></div>
+    <div class="arrow">→</div>
+    <div class="box"><div class="t">Blend per catchment and day</div><div class="s">Weighted average over the products that cover the catchment</div></div>
+    <div class="arrow">→</div>
+    <div class="box"><div class="t">Routing</div><div class="s">Muskingum-Cunge on the MERIT network; one learned roughness head; dams</div></div>
+    <div class="arrow">→</div>
+    <div class="box"><div class="t">2,365 gauges</div><div class="s">Scored on water years 1996 to 2010</div></div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">The idea</div>
+  <h2>Three products, averaged</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Product</th><th>What it is</th><th class="num">Weight</th><th class="num">Error correlation with UH</th><th class="num">Test-period volume, predicted / observed</th></tr></thead>
+    <tbody>
+      <tr><td><span class="sw" style="background:var(--uh)"></span>UH</td><td>dHBV2 with a unit hydrograph; today's forcing</td><td class="num">0.50</td><td class="num">1.00</td><td class="num">1.045</td></tr>
+      <tr><td><span class="sw" style="background:var(--dist)"></span>DIST</td><td>dHBV2, distributed version, AORC forcing</td><td class="num">0.25</td><td class="num">0.93</td><td class="num">1.065</td></tr>
+      <tr><td><span class="sw" style="background:var(--lstm)"></span>LSTM</td><td>A daily NeuralHydrology CudaLSTM, trained on October 1980 to September 1995</td><td class="num">0.25</td><td class="num">0.62</td><td class="num">0.965</td></tr>
+      <tr><td><b>Equal-weight blend</b></td><td>For reference</td><td class="num"></td><td class="num"></td><td class="num">1.024</td></tr>
+    </tbody>
+  </table></div>
+  <div class="formula">Q′<sub>blend</sub>(catchment, day) = Σ<sub>i</sub> w<sub>i</sub> · Q′<sub>i</sub>(catchment, day) / Σ<sub>i covers the catchment</sub> w<sub>i</sub></div>
+  <p class="prose"><b>Why it helps.</b> This is the standard multi-model ensemble gain (the ambiguity decomposition of Krogh and Vedelsby, 1995), not a routing result. At every gauge, exactly: blend NSE = weighted mean of the members' NSEs + how much the members disagree (their spread around the blend, divided by the variance of observed flow). The weaker members cost 0.026 against UH; their disagreement removes 0.051 of squared error; net +0.019 per gauge, +0.026 at the population median. 76 % of that disagreement is at the event scale (under 30 days), 16 % seasonal, and only 6 % year-to-year volume. So the products mostly miss different storms, and averaging cancels those misses. The LSTM helps because its errors correlate only 0.62 with UH's, not because it is good (alone it scores 0.636). Weighted, 75 % of gauges improve.</p>
+  <p class="prose"><b>How the members and weights were chosen, without looking at the test years.</b> Starting from UH, products were added one at a time while they improved the training-year (1986 to 1995) summed-runoff score: DIST, then LSTM, then no further product helped (dHBV2 lumped and HydroDL were rejected). The weights 0.50 / 0.25 / 0.25 were fitted on routed training-year runs (1986 to 1995). The test years played no part in either choice.</p>
+  <p class="prose"><b>What the engine build changes.</b> The offline estimate averaged three separately routed runs. The engine version averages the runoff first and trains one routing head on the blend, so there is still one set of channel parameters. Routing is mildly nonlinear, so these two can differ; the new runs measure that.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Where it stands against the target</div>
+  <h2>Every lever against +0.03</h2>
+  <div class="brief">
+    <div><b>Hypothesis</b><p>If the population median is limited by runoff errors that no routing or dam law can fix, only a lever that changes the runoff itself can move the median by about +0.03, while the dam and routing levers stay in the thousandths.</p></div>
+    <div><b>Plain English</b><p>Each row is one change and the median NSE change it brings over all 2,365 gauges. Rows marked measured come from full training runs; the others are offline estimates, fitted on training years and scored on test years.</p></div>
+    <div><b>Graph</b><p>The dot is the change in the population median, the whisker its 95 % interval, or for the dam recipe the two seeds. The dashed line is the +0.03 target. Orange rows are measured, grey rows are offline estimates.</p></div>
+  </div>
+  <div class="fig">
+    <div class="legend"><span><i style="background:var(--meas)"></i>Measured, full training runs</span><span><i style="background:var(--est)"></i>Offline estimate</span><span><i class="line"></i>Target +0.03</span></div>
+    <div id="lev"></div>
+  </div>
+  <p class="prose"><b>Result.</b> The dam recipe moves the population median by about +0.004 (two seeds, +0.009 and −0.002). A runoff multiplier fitted honestly gives +0.0005, and fixing γ at 0 about +0.002. The blend gives +0.026 on its own. Inside the blend, γ = 0 adds about +0.001 with p and q fixed (as in the running experiment), and about +0.005 if p and q are learned too. <b>Conclusion.</b> The blend is the only change that gets near +0.03. With p and q fixed it needs the dam recipe's few thousandths on top to get there. The running experiment will show whether the engine version, one head trained on the blended runoff, matches these offline estimates.</p>
+</section>
+
+<section>
+  <div class="eyebrow">Before relying on it</div>
+  <h2>What to watch for</h2>
+  <div class="caveats">
+    <div class="cv"><p><b>KGE barely moves.</b> The blend smooths the hydrographs (variability ratio 0.914 to 0.869), which NSE rewards and KGE penalises. The weighted blend lifts the median KGE by +0.004 (interval includes 0) and leaves it unchanged gauge by gauge; the equal-weight blend loses 0.005 gauge by gauge.</p></div>
+    <div class="cv"><p><b>A little of the gain may be period-specific.</b> The blend gains +0.018 on the training years and +0.026 on the test years. In 1996 to 2010, DIST runs high and the LSTM low on volume, but year-to-year volume differences make up only 6 % of the members' disagreement, so most of the gain is not drift cancelling.</p></div>
+    <div class="cv"><p><b>All three stores must exist</b> for any new domain or period, which rules out the global runs today.</p></div>
+    <div class="cv"><p><b>The model changes meaning.</b> One routing head trained on a blend of three products is not the same as a head trained on one product. For the paper's inflow-product comparisons, the single-product runs remain the reference.</p></div>
+    <div class="cv"><p><b>One seed each so far</b> for the offline estimates; the two no-dam seeds differ by 0.005 at the median, which the new two-seed runs will account for.</p></div>
+  </div>
+  <p class="note">Sources: <span class="m">experiments/levers/report.txt</span>, <span class="m">combine_ens.txt</span>, <span class="m">blend_mechanism.txt</span>, <span class="m">store_selection.txt</span>; the full-population dam runs in <span class="m">experiments/reservoir/full_run/paired_full_run_full_s7_s{42,43}.json</span>; branch <span class="m">multi-product-forcing</span>.</p>
+</section>
+</div>
+
+<script>
+(function () {
+  const rows = [
+    { lab: "Dam recipe (per-dam release, joint training)", sub: "measured, two seeds", m: 0.0039, lo: -0.0016, hi: 0.0093, c: "var(--meas)" },
+    { lab: "Runoff multiplier fitted on training years", sub: "offline, pre-registered", m: 0.0005, lo: -0.0006, hi: 0.0016, c: "var(--est)" },
+    { lab: "γ fixed at 0", sub: "offline, one seed", m: 0.0018, lo: -0.0005, hi: 0.0049, c: "var(--est)" },
+    { lab: "Blend of three products", sub: "offline, training-year weights", m: 0.0259, lo: 0.0221, hi: 0.0309, c: "var(--est)" },
+    { lab: "Blend, UH member with γ = 0, p and q fixed", sub: "offline, equal weights", m: 0.0256, lo: 0.0213, hi: 0.0312, c: "var(--est)" },
+    { lab: "Blend, UH member with γ = 0, p and q learned", sub: "offline, equal weights", m: 0.0292, lo: 0.0246, hi: 0.0346, c: "var(--est)" },
+  ];
+  const x0 = -0.005, x1 = 0.035;
+  const P = v => (v - x0) / (x1 - x0) * 100;
+  const sg = v => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(4);
+  const host = document.getElementById("lev");
+  rows.forEach(r => {
+    const row = document.createElement("div"); row.className = "row";
+    row.innerHTML = `<div class="lab">${r.lab}<span class="m">${sg(r.m)} [${sg(r.lo)}, ${sg(r.hi)}] · ${r.sub}</span></div>`;
+    const tr = document.createElement("div"); tr.className = "track";
+    tr.innerHTML = `<div class="z" style="left:${P(0)}%"></div><div class="t" style="left:${P(0.03)}%"></div>` +
+      `<div class="w" style="left:${P(r.lo)}%;width:${P(r.hi) - P(r.lo)}%;background:${r.c}"></div>` +
+      `<div class="p" style="left:${P(r.m)}%;background:${r.c}" title="${r.lab}: ${sg(r.m)}"></div>`;
+    row.appendChild(tr); host.appendChild(row);
+  });
+  const ax = document.createElement("div"); ax.className = "axis";
+  [0, 0.01, 0.02, 0.03].forEach(v => { const s = document.createElement("span"); s.style.left = P(v) + "%"; s.textContent = v === 0 ? "0" : "+" + v.toFixed(2); ax.appendChild(s); });
+  host.appendChild(ax);
+  const cap = document.createElement("div"); cap.className = "note"; cap.style.textAlign = "right"; cap.textContent = "change in the median NSE of all 2,365 gauges"; host.appendChild(cap);
+})();
+</script>

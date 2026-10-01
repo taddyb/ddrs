@@ -1,0 +1,24 @@
+test WY1996-2010, equal weights, 2365 gauges (medians over gauges)
+  member NSE: UH 0.7391  DIST 0.7300  LSTM 0.6359
+  weighted mean of member NSEs 0.6957 + spread 0.0590 = blend; blend median 0.7637; blend - UH: median +0.0246, paired +0.0182
+  paired per gauge: blend - UH = (wmean - UH) + spread: median -0.0352 + +0.0590
+  spread by time scale, median share: year-to-year volume 0.06, seasonal/monthly 0.16, event (< 30 d) 0.76; band sum / spread median 0.975
+
+test WY1996-2010, training-year weights, 2365 gauges (medians over gauges)
+  member NSE: UH 0.7391  DIST 0.7300  LSTM 0.6359
+  weighted mean of member NSEs 0.7064 + spread 0.0511 = blend; blend median 0.7650; blend - UH: median +0.0259, paired +0.0194
+  paired per gauge: blend - UH = (wmean - UH) + spread: median -0.0264 + +0.0511
+  spread by time scale, median share: year-to-year volume 0.06, seasonal/monthly 0.16, event (< 30 d) 0.76; band sum / spread median 0.975
+
+training WY1986-1995, equal weights, 2365 gauges (medians over gauges)
+  member NSE: UH 0.7861  DIST 0.7801  LSTM 0.7079
+  weighted mean of member NSEs 0.7528 + spread 0.0439 = blend; blend median 0.8038; blend - UH: median +0.0177, paired +0.0148
+  paired per gauge: blend - UH = (wmean - UH) + spread: median -0.0241 + +0.0439
+  spread by time scale, median share: year-to-year volume 0.06, seasonal/monthly 0.18, event (< 30 d) 0.74; band sum / spread median 0.972
+
+training WY1986-1995, training-year weights, 2365 gauges (medians over gauges)
+  member NSE: UH 0.7861  DIST 0.7801  LSTM 0.7079
+  weighted mean of member NSEs 0.7605 + spread 0.0381 = blend; blend median 0.8043; blend - UH: median +0.0182, paired +0.0153
+  paired per gauge: blend - UH = (wmean - UH) + spread: median -0.0180 + +0.0381
+  spread by time scale, median share: year-to-year volume 0.06, seasonal/monthly 0.18, event (< 30 d) 0.74; band sum / spread median 0.972
+
