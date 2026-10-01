@@ -1,0 +1,293 @@
+CURVATURE OF THE DAM PARAMETERS: WHICH ARE IDENTIFIABLE FROM THE DOWNSTREAM GAUGE (2026-09-30, final 2026-10-01)
+Directory: experiments/curvature_dams/ (worktree agent-a92e512a7c47c97b4). No Rust edited, nothing committed, nothing
+trained. Phase 1 offline (laws_v6 harness on the smoke no-dam routed flow, train WY1983-1995, test WY1996-2010);
+Phase 2 four new fixed-table engine replays at z = 0.05, 1, 5, 20 d (binary ddrs-v6-77aa4a0, CPU, zero-step resume,
+test phase only), scored together with the existing fitted-z and pool-off replays of the same table.
+
+VERDICT
+The instrument separates three questions that the indirect evidence had mixed up: is the parameter curved at its
+optimum (identifiable in principle), can gradient descent reach that optimum from the engine's init (plateau), and does
+the training-year optimum hold on other years (stationarity). Per parameter:
+
+  parameter            curved at optimum?                 reachable from init?          transfers to test years?   verdict
+  T0 (per-dam)         yes where T0* >= 0.5 d (58 % of     yes for T0* <= 2 d; half of  mostly (78 % of the train  as is where T0* is 0.5-2 d;
+                       on-reach dams); flat below 0.5 d   the T0* > 2 d dams sit on    gain), but the optimum     good init needed where T0* > 2 d;
+                       (daily loss cannot see it)         the pass-through shelf       wanders between windows    not identifiable (harmless)
+                                                                                                                  below 0.5 d
+  rule-curve amplitude yes (as curved as routing n)       yes (quadratic bowl)         NO: 19 % of the training   learnable as is, but what it
+                                                                                       gain survives             learns is year-specific
+  pool size z          yes, between ~1 and ~30 d          NO: a shelf, gradient 7 %    yes (112 %)                learnable only with a good init
+                       (as curved as routing n)           of halfway, sign noisy
+  release target kc    very (10x routing n), but         NO from a shut pool (8 %);   75 %, rugged, window-      learnable only with a good init
+                       rugged: 2-3 minima at 97 %         yes once the pool is open    unstable (71 %)            (open pool, right basin)
+  capture share phi    no interior optimum at 67 %:       NO (dead, 3 % of halfway,    trivially (phi = 1)        not identifiable (boundary
+                       wants phi = 1; fixing it costs 0   and points the wrong way)                               optimum, band phi 0.65-1)
+
+  what ddrs should do (section 7):
+  T0                   learn per dam, per_dam_l2 0 (or <= 1e-5), init near 1-2 d (or a storage / inflow prior), not 4.5 h
+  rule-curve amplitude drop (or shrink hard): +0.004 test NSE for 4 coefficients per dam
+  pool size z          do not learn from off; init open (5-20 d, or NID flood storage / Ibar) or calibrate per gauged dam
+  release target kc    calibrate per gauged flood-control dam (grid) or prescribe from a physical capacity
+  capture share phi    fix at 1 and drop the parameter
+
+Why the pool cannot be learned from off (section 5): at z = 0.05 d the pool is full on 97-99 % of flood days, so kc
+and phi never enter the forward and get no gradient; z's own gradient is proportional to the volume the pool moves
+(slope 1 in z), so on the shelf it is 7 % of its halfway value and its sign agrees in only 69 % of training years; at
+32 updates per pooled dam and per_dam_lr 0.02 even a perfectly consistent sign could only reach 0.65 d; and a per-dam
+L2 of 1e-3 (summed over dams, against a data loss averaged over ~250 gauges) balances the init gradient at
+r_z = 0.002, i.e. z x 1.01. The engine agrees on every point it can check. Decoded checkpoints: z stayed at a median
+0.050 d at the 69 after 200 steps without L2 (none above 5 d) and at 0.0499 d (max 0.054 d) under L2 1e-3. Fixed-table
+replays (section 6) show the shelf itself in the hourly engine: a 0.05-d pool is indistinguishable from no pool
+(+0.0002 test NSE, at most 0.0011 at any gauge), a 1-d pool recovers 13 % of the fitted pool's test gain, 5 d 60 %,
+and 20 d all of it, matching the offline harness at every z (the pool's own gain within 0.0006 NSE at the median,
+per-gauge Spearman 0.92-0.98).
+
+1. INSTRUMENT (landscapes.py, lawgrad.c, summarise.py, classify.py, transfer.py)
+- Harness: experiments/reservoir/laws_v6/v6.py + laws.c (reproduces the rulecurve_offline L2/L4 fits to 4e-14).
+  Laws: L4 = bucket T0 + harmonic rule curve (fits_by_gauge.csv), L2 = plain bucket, FA = flood pool + bucket
+  (laws_by_gauge.csv). 214 on-reach dam gauges (T0, amplitude); the 69 on-reach flood-control dams of
+  experiments/reservoir/smoke/fixed_FA.csv (pool; the same 69 as the engine replays).
+- Objective: the engine's training loss nse-batch, L = mean (Q - O)^2 / (sigma + 0.1)^2 on the training days, sigma =
+  the gauge's observed std over WY1982-1995. L is 1 - NSE_train up to sigma^2/(sigma+0.1)^2 (median 0.99), so loss
+  and NSE units coincide, as in the routing census.
+- Coordinates = the engine's raw coordinates (src/nn/dam_params.rs): ln T0 (delta = ln T0/T0_head, head init
+  4.5 h), rule-curve amplitude s (fitted coefficients x s, init s = 0), ln z (r_z ~ ln z / 4 below 30 d, init
+  0.05 d), ln kc (init 3), logit phi (init 0.5). Curvature H = d2L/dx2 at the 1-D training optimum (quadratic fit
+  over +-0.2 units; three-point FD agrees). Bands: contiguous range around the optimum within 0.02 / 0.005 of the best
+  training (or test) NSE, in decades for T0, z, kc. Flat = a factor-2 move costs < 1 % of L*, the routing census rule
+  (research/why-analysis/A-flat-q.md), evaluated at the optimum. Multimodal = >= 2 local minima of prominence 0.002.
+- Gradients at the engine init and halfway (raw-coordinate midpoint) to the optimum: 1-D for T0 and amplitude; for
+  the pool JOINT (T0 0.1875 d, kc 3, phi 0.5, z 0.05 d all at once, as the engine starts) with a pathwise gradient
+  (lawgrad.c, forward-mode through the branch each min/max takes, i.e. what autodiff sees; it matches tiny-step FD
+  of laws.c exactly away from kinks, check_pgrad.py).
+- Transfer: test NSE at the training optimum vs the test optimum, the gain from init to optimum on train vs test
+  years, and split-half stability (optima on WY1983-89 vs WY1990-95).
+- 2-D planes (41 x 41) at the 69: (log T0, log z) and (log z, log kc).
+- Routing on the same scale: the 5-year all-gauge census (landscape-p21-all-5yr, 2,124 well-fit gauges), H_nn and
+  H_qq at the optimum rebuilt from the stored eigenpairs.
+
+2. MEASURES PER PARAMETER (medians [IQR]; summary_tables.txt, classification.txt, transfer.txt)
+                     H at optimum        factor-2  0.02 band (train)     0.005 band  init in    |g init|/  multi-  train->test     split-half
+                     (ln units)          flat      decades / units       (train)     0.005 band |g half|   modal   gain ratio      unstable
+  T0, L4 (214)       0.023 [6e-4, 0.08]  40 %      2.1 (50 % open)       0.55        36 %       0.81       1 %     0.78            58 %
+    T0* < 0.5 d (90) 0.0001              80 %      2.75 (98 % open)      -           70 %       -          -       -               -
+    T0* 0.5-2 d (46) 0.040               26 %      1.05 (37 % open)      -           30 %       -          -       -               -
+    T0* > 2 d (78)   0.10                1 %       0.50 (4 % open)       -           0 %        path 0.25  -       -               -
+  rule-curve amp     0.041 [0.009, 0.17] 19 %      1.94 s (53 % open)    0.95 s      28 %       2.0        0 %     0.19            44 %
+  pool z (69)        0.045 [0.017, 0.10] 17 %      1.75 (86 % open)      0.73        14 %       0.07 joint 7 %     1.12            54 %
+  pool kc (69)       0.54 [0.19, 0.86]   4 %       0.28 (41 % open)      0.07        20 %       0.08 joint 97 %    0.75            71 %
+  pool phi (69)      boundary (phi* 0.999 at 67 %); 0.005 band phi 0.65-1   35 %     0.03 joint 13 %    0.40            39 %
+  routing n (2,124)  0.047 [0.008, 0.15] 28 %      0.80 (quadratic)      0.40        -          -          -       -               -
+  routing q (2,124)  0.0004              80 %      8.6 (quadratic)       4.3         -          -          -       -               -
+Notes. "init in 0.005 band": the engine's init value is within 0.005 training NSE of the optimum, i.e. the gauge
+cannot tell the fitted value from the init. "path" ratio: |g(init)| / max |g| between init and optimum (for T0 the
+halfway point is itself on the shelf, so the halfway ratio understates the plateau). The routing census's own
+trained-point rule (gradient term included) gives n flat at 11 %, q at 85 %; at the optimum it is 28 % / 80 %.
+Classes (classify.py; sloppy = flat, plateau-at-init = curved but |g init| < 25 % of halfway, stiff = neither):
+  T0 (L4) sloppy 40 % / plateau 18 % / stiff 42 %   (T0* > 2 d: plateau 50 % / stiff 49 %)
+  rule-curve amplitude 19 / 1 / 80   pool z 17 / 72 / 10   pool kc 4 / 71 / 25   pool phi 22 / 68 / 10
+By DOR and purpose: T0's curvature rises with DOR (H 0.011 at DOR < 0.1, 0.008 at 0.1-0.5, 0.034 at 0.5-1, 0.050 at
+> 1) and is five times higher at flood-control dams (0.055) than at the rest (0.011); the amplitude is curved at all
+DOR but least transferable at DOR > 1 (63 % window-unstable); the pool's z curvature rises with DOR (0.031 to 0.13);
+kc is stiff everywhere. 2-D planes (interior optima, 53 and 64 of 69): T0 and z are nearly separable (coupling -0.19,
+anisotropy 3.6, 2 % indefinite), so the pool and the bucket are not trading the same attenuation; in (z, kc) kc is 20x
+stiffer than z (anisotropy 23, coupling 0.04). Test NSE lost by using the 2-D training optimum: 0.009 (T0, z),
+0.016 (z, kc).
+
+3. PER PARAMETER
+T0, per-dam residence time (fig 1 col 1, fig 2).
+- The 1-D landscape in ln T0 is a shelf and a wall: below ~0.3-0.5 d the daily bucket is pass-through and the loss
+  is flat (the daily objective cannot see sub-daily storage, the same mechanism as routing n below one day of travel
+  time); above the optimum the loss rises steeply. Whether T0 is identifiable therefore depends on where T0* sits.
+- T0* < 0.5 d (42 % of on-reach dams): flat at 80 %, band open to the pass-through limit. Learning T0 there learns
+  nothing and costs nothing. T0* 0.5-2 d (21 %): stiff, 0.02 band about one decade (this is the "band spans a decade"
+  of the indirect evidence). T0* > 2 d (36 %, mostly DOR > 0.5 and flood-control): the stiffest group, H 0.10, 0.02
+  band 0.5 decades, stiffer than the median routing n; but the head's 4.5 h init sits on the shelf, so half of them
+  start with a gradient under 25 % of the steepest gradient on the way.
+- Transfer: 78 % of the training gain survives on test years; the test-year optimum is 0.2 decades from the training
+  one; using the other half's optimum costs 0.005 NSE (split halves disagree beyond half the 0.005 band at 58 %).
+- Verdict: learnable from the gauge as is where T0* is 0.5-2 d; learnable only with a good init where T0* is days
+  (start at ~1-2 d or from storage / inflow, not 4.5 h); not identifiable below 0.5 d, where it can be left at the
+  head or fixed small.
+- Side finding (checkpoint decode, read_dams_mpk.py): under per_dam_l2 1e-3 the per-dam delta never moved (S4 run
+  2026-09-27T23-36-04Z: |delta| median 0.005, p90 0.07; rule-curve theta median 0.016, i.e. c ~ 0.008), as the L2
+  balance below predicts (equilibrium |delta| ~ |dL/d delta| / (2 lambda G) ~ 0.02). The per-dam terms of that run
+  stayed near zero (offline fits have |c| median 0.054), so most of its +0.0168 must have come from the shared release
+  head (inferred from the decode, not tested by an ablation). Without the L2 (2026-09-30T02-46-23Z)
+  delta moved (median |delta| 0.30) and the trained T0 tracks the offline FA T0 (Spearman 0.68 at the 69).
+
+Rule-curve amplitude (fig 1 col 2).
+- Curved at the optimum (H 0.041 in ln s, as curved as routing n), flat at only 19 %, no plateau (the landscape is a
+  near-quadratic bowl in s, so the gradient at s = 0 is twice the halfway gradient), no multimodality.
+- But the training optimum does not hold: the gain from s = 0 to the training optimum is +0.019 on training years and
+  +0.0036 on test years (ratio 0.19; 30 % of dams lose on test years); split halves of the training period disagree
+  by 0.43 in s. The gauge identifies the training years' seasonal operation precisely, and that operation changes
+  from year to year (the 30-120 d band is operator decisions, laws_v6 section 1).
+- Verdict: learnable from the gauge as is, but not worth learning: what it identifies is not stationary. Drop it,
+  or keep it only behind shrinkage strong enough to cut its training gain to the +0.004 it keeps out of sample.
+  (Also note the engine's rule_curve_max 0.5 caps coefficients that the offline fits put above 0.5 at 11 % of dams.)
+
+Pool size z (fig 1 col 3, fig 3, fig 5).
+- Sigmoid in ln z: a lower shelf (z < ~1 d, the pool fills in the first hours of every flood and moves almost no
+  volume), a rise between ~1 and ~20 d, and an upper plateau where the pool never fills and z has exactly zero
+  gradient. The optimum (median 17 d offline) sits on the knee.
+- At the optimum: curved (H 0.045, same as routing n), flat at 17 %, 0.005 band 0.73 decades; the fitted pool is
+  outside the 0.005 band of the init at 86 % of dams, so the gauge can tell a real pool from no pool.
+- Transfer: the best of all dam parameters (test gain 1.12x the training gain, test optimum within 0.23 decades,
+  ratio 1.06), though split halves still disagree (54 %; a pool's value rests on the few largest floods of each half).
+- From the init: the joint pathwise gradient at the engine init is 7 % [3 %, 12 %] of the halfway gradient and 1.7 %
+  of the steepest gradient on the path; 72 % plateau-at-init.
+- In the engine the same shape holds on test years (section 6): opening the pool from 0.05 d to 1 d gains +0.004
+  (13 % of the fitted pool's gain), to 5 d +0.015 (60 %), to 20 d +0.027 (all of it).
+- Verdict: learnable only with a good init. Started at 5-20 d it stays and transfers; started at 0.05 d it does not
+  move.
+
+Release target kc (fig 1 col 4).
+- The stiffest dam parameter at its optimum: H 0.54, ten times routing n; 0.005 band 0.07 decades (17 %).
+- Rugged: 2-3 local minima at 97 % of dams, because each value of Qc = kc Ibar admits or excludes discrete flood events.
+  The test optimum is close (factor 1.03) but the split-half optima differ beyond the band at 71 %, and the training
+  optimum costs 0.006 test NSE against the test optimum (the largest of the five).
+- From a shut pool kc gets 8 % of its halfway gradient (it enters only on the 1-3 % of flood days where the 0.05-d
+  pool is not full). Once the pool is open its gradient at kc = 3 is healthy (path ratio 0.71).
+- Verdict: learnable only with a good init: an open pool and kc near the right basin. Treat as per-dam calibration
+  (grid search, as the offline fits did) or tie it to a physical quantity (spillway or downstream channel capacity
+  over mean inflow), not gradient descent from 3.
+
+Capture share phi (fig 1 col 5).
+- No interior optimum at 67 % of dams: the training loss wants phi = 1 (capture everything above the target); the
+  0.005 band spans phi 0.65 to 1 at the median. Fixing phi = 1 costs 0.0000 test NSE at the median (p75 0.0006).
+- At the engine init its gradient is dead (3.7e-6 in logit units, 3 % of halfway) and points to SMALLER phi at 65 %
+  of dams (with a nonzero gradient); the engine-trained phi did fall (0.50 to 0.467; direction agrees with the
+  offline init gradient at 64 %).
+- Verdict: not identifiable (the optimum is the boundary phi = 1 and the gauge cannot separate 0.65 from 1), and not
+  needed. Fix phi = 1 and drop the parameter.
+
+4. DAM AND ROUTING PARAMETERS ON ONE SCALE (fig 2)
+Ordered by curvature at the optimum, in ln units of the parameter, nse-batch loss, same flatness rule:
+  kc 0.54 (flat 4 %)  >  T0 with T0* > 2 d 0.10 (1 %)  >  routing n 0.047 (28 %)  ~  pool z 0.045 (17 %)
+  ~  rule-curve amplitude 0.041 (19 %)  >  T0 overall 0.023 (40 %)  >  routing q 0.0004 (80 %)  ~  T0 with
+  T0* < 0.5 d 0.0001 (80 %)  ~  phi (boundary).
+So curvature at the optimum alone would call every dam parameter except phi and short T0 "at least as identifiable
+as roughness". The two extra axes of the instrument are what separate them: the pool parameters fail on
+reachability (plateau at init), the rule curve fails on stationarity, phi fails on having no interior optimum. The
+routing analogue: n passes all three above one day of travel time; q fails curvature and stationarity (its optimum
+flips sign between windows). The paper's rule then reads the same for both families: learn a parameter only if it
+is curved at the gauge's optimum, reachable from the init, and stationary across windows.
+
+5. WHY THE POOL CANNOT BE LEARNED FROM OFF (fig 3, fig 5)
+(a) kc and phi are absent from the forward. At z = 0.05 d (72 minutes of mean inflow) capture is capacity-limited on
+    97 % of training flood days (99 % at the fitted kc, phi) and evacuation is pool-limited on 90-93 % of
+    evacuation days: c = Fmax - F and e = F, neither involves kc or phi. Pathwise |dL/dr_phi| at the init is 3.7e-6
+    (halfway 1.1e-4); |dL/dr_kc| 9e-4 (halfway 0.011).
+(b) z's own gradient is proportional to the volume it moves. dL/d ln z rises with slope ~1 in z from 0.05 to ~3 d
+    (fig 3b), so at the init it is 7 % of the halfway value. Over the shelf the training NSE rises by 0.0035 from
+    z = 0.05 to 1 d at the median dam (under 0.005 at 64 % of dams), against 0.010 to 5 d and 0.017 to 20 d. The
+    hourly engine shows the same shelf on test years: +0.0042 to 1 d (under 0.005 at 58 % of gauges), +0.0145 to
+    5 d, +0.0272 to 20 d, against offline test +0.0041, +0.0142, +0.0267 (section 6).
+(c) Its sign is noisy. At the init, the 13-year gradient wants a larger pool at 77 % of dams, but per water year only
+    69 % of years agree (median). Adam moves a parameter by about lr x (consistency), so the drift is a fraction
+    of per_dam_lr.
+(d) The step budget is short. In the S6pool run (2026-09-30T02-46-23Z, per_dam_lr 0.02, l2 0, 200 steps) a pooled dam
+    received 32 updates on average (7,505 dam-updates over 233 pooled dams), so even a perfectly consistent sign
+    caps z at 0.05 e^(4 x 0.02 x 32) = 0.65 d; reaching 17 d needs r_z = 1.50, at least 75 consistent updates.
+    Observed: at the 69 dams the trained z has median 0.050 d (IQR 0.019-0.175), 6 % above 1 d, none above 5 d,
+    against the offline median of 17 d; how far z moved tracks the per-year sign consistency (Spearman 0.64,
+    fig 5b), and its direction agrees with the offline init gradient at 71 % of dams.
+(e) The per-dam L2 holds it shut. The engine adds lambda sum_d |r_d|^2 once per step to a data loss that is a mean
+    over ~250 gauges' days, so one dam's data gradient is |dL_gauge/dr| / 250. Balancing gives r_eq =
+    |dL/dr| / (2 lambda G): at lambda = 1e-3 and the median init gradient, r_z = 0.0024 (z x 1.01). Decoded from the
+    L2 = 1e-3 S6pool checkpoint (2026-09-30T01-53-15Z, epoch 13): z median 0.0499 d, max 0.054 d at the 69. For the
+    L2 to let z reach 17 d, lambda must be below ~2e-6 (init gradient) to ~3e-5 (halfway gradient), fig 5c. At the
+    optimum the data curvature in r_z per step (16 x 0.045 / 250 = 0.003) is only comparable to 2 lambda = 0.002, so
+    1e-3 is also a strong prior there; at the init the data curvature is ~zero or negative (the shelf bends down into
+    the rise), which is what "more curvature at the init than the data" meant.
+Net: the plateau is not a gradient bug. It is the forward model: a pool that is full on every flood passes no
+information about kc or phi and moves too little volume for z to matter, so the loss is a shelf until z reaches
+about a day. The engine replays confirm the shelf is in the engine's forward too, not an artefact of the daily
+offline harness.
+
+6. PHASE 2: ENGINE SPOT CHECK (engine_score.py, engine_summary.txt, engine_z.csv; fig 3a violet points)
+Same 69 on-reach flood-control dams, fixed table, T0 = FA fit, kc and phi at the FA fit, z set to 0.05, 1, 5, 20 d
+(in the gauge's offline Ibar, converted to the table's dam-inflow units as replay_flood_pool.py does), test
+WY1996-2010, against the fair no-pool twin 2026-09-30T02-16-02Z (plain-bucket T0, no pool); offline analogue is
+FA(z) minus offline L2. The engine realised pools of median 0.048, 0.96, 4.80 and 19.2 d of its own dam inflow (the
+fitted-z replay 14.5 d), so the tables did what they were meant to. Median paired dNSE [95 % bootstrap CI]:
+
+  z (d)    engine vs twin               up/down  offline vs L2                pool's own gain, NSE(z) - NSE(0.05 d)
+                                                                              engine    offline   <0.005 eng/off  share of fitted gain eng/off
+  0.05     -0.0053 [-0.0118, -0.0011]   22/47    -0.0077 [-0.0121, -0.0032]   (ref)     (ref)
+  1        -0.0008 [-0.0048, +0.0008]   30/39    -0.0015 [-0.0054, +0.0000]   +0.0042   +0.0041   58 % / 58 %     0.13 / 0.15
+  5        +0.0065 [+0.0008, +0.0104]   47/22    +0.0053 [+0.0021, +0.0092]   +0.0145   +0.0142   17 % / 16 %     0.60 / 0.62
+  20       +0.0150 [+0.0065, +0.0278]   49/20    +0.0149 [+0.0076, +0.0202]   +0.0272   +0.0267   25 % / 23 %     1.00 / 1.00
+  fitted   +0.0146 [+0.0091, +0.0265]   57/12    +0.0139 [+0.0086, +0.0196]   +0.0283   +0.0277   20 % / 17 %     1
+  pool off at the FA T0 (2026-09-30T01-52-45Z): engine -0.0055 [-0.0120, -0.0010]
+  z = 0.05 minus pool off, same T0: engine +0.0002 [+0.0001, +0.0003], max |d| 0.0011 over the 69 gauges
+  per-gauge Spearman, engine vs offline dNSE: 0.95 (0.05 d), 0.92 (1 d), 0.94 (5 d), 0.98 (20 d), 0.98 (fitted)
+  (share of fitted gain = median over gauges whose fitted pool gains > 0.005 test NSE: engine 55, offline 57)
+
+Reading: the hourly engine reproduces the offline plateau point for point: the pool's own gain agrees with the
+offline harness within 0.0006 NSE at the median at every z, and the gains against the no-pool baselines within
+0.0024 (0.0012 from 1 d up). A 0.05-d pool does nothing: it differs from switching the pool off by +0.0002 at the
+median and 0.0011 at most, and its -0.005 against the twin is the FA T0 (co-fitted with an open pool) being too
+short once the pool is shut, as offline (-0.008). Opening the pool to 1 d is still on the shelf: +0.004, 13 % of the
+fitted pool's gain, below 0.005 at 58 % of gauges, and the replay is not distinguishable from the no-pool twin
+(-0.0008 [-0.0048, +0.0008], 30 up / 39 down). The rise sits between 1 and 20 d: 5 d recovers 60 % of the gain and
+20 d all of it (+0.0272 against +0.0283 for the fitted pools, whose median is 17 d). So the engine's forward has the
+same shelf, and a gradient method started at 0.05 d sees, over the first 1.3 decades of z (0.05 to 1 d), a loss
+surface that barely moves.
+
+7. WHAT DDRS SHOULD DO WITH EACH
+- T0: learn per dam (keep per_dam_t0), with per_dam_l2 0 or <= 1e-5, initialised near the right decade (1-2 d, or a
+  storage/inflow prior) instead of the head's 4.5 h; accept that below 0.5 d it is unidentified and harmless.
+- Rule curve: drop (or shrink hard). It is identifiable on training years and not stationary; +0.004 out of sample
+  for 4 coefficients per dam.
+- Flood pool z: do not learn from off. Initialise it open (5-20 d, the offline median 17 d, or NID flood storage /
+  Ibar) and let it learn from there with no per-dam L2 toward 0.05 d, or calibrate it per gauged flood-control dam.
+  Do not initialise at the engine's 120-d cap either: a pool larger than the largest flood never fills and z has
+  zero gradient there (10 of the 69 offline fits sit above 120 d, up to 3,650 d, on that upper plateau).
+- kc: calibrate per gauged flood-control dam (grid) or prescribe from a physical capacity; if learned, only with the
+  pool already open and kc started in the right basin.
+- phi: fix at 1 (drop).
+- Ungauged dams: none of this applies; every verdict above is per gauge (the coefficients were not predictable from
+  NID features, RF R2 <= 0.15, earlier work).
+
+8. CAVEATS
+- Offline and daily: the engine is hourly and its capture uses the previous step's inflow; the offline sits on the
+  routed gauge series (the dam reach is double-counted). The engine replays reproduce the offline pool landscape at
+  every z tested (pool's own gain within 0.0006 NSE, Spearman across gauges 0.92-0.98), so the z shelf is not a daily-step
+  artefact. The T0 shelf below 0.5 d was not replayed in the engine and is partly a daily-step property.
+- The engine check is of the forward (test-year skill along z with the other parameters fixed), not of the engine's
+  gradient along z; the gradient side rests on the offline pathwise gradient plus the trained-checkpoint decode
+  (z did not move, direction agreement 71 %, Spearman 0.64 with per-year sign consistency).
+- 1-D slices hold the other parameters at their JOINT fit, so slice gains are conditional (the FA T0 was co-fitted
+  with the pool; with the pool shut it is no longer optimal, which is why the offline z = 0.05 sits -0.008 below L2
+  and the engine z = 0.05 replay -0.005 below the twin).
+- G = 250 gauges per step is from the S6 runs (n = 37,740 valid gauge-days per step at 150 scored days); the L2 balance
+  scales with it.
+- The routing numbers are from a different window (WY1996-2000, test years) and a different model (p = 21 census);
+  the comparison is of curvature per ln unit in loss units that are NSE units in both.
+- Split-half stability is noisy for the pool: a 6-7 year half has few big floods.
+- One no-dam model seed; on-reach dams only. The twin, fitted-z and pool-off replays were made earlier the same day by
+  the reservoir study (their manifests stamp git 1c7e2e3, which is read from .git at run time, not from the binary);
+  the four new replays agree with them where they overlap (z = 0.05 vs pool off: max 0.0011 at any gauge).
+
+FILES (all under experiments/curvature_dams/)
+- landscapes.py (Phase 1 driver), lawgrad.c / liblawgrad.so (pathwise gradient of law FA), check_pgrad.py,
+  summarise.py, classify.py, transfer.py, pick_gauges.py, figures.py, read_dams_mpk.py (minimal MessagePack decoder
+  for release_dams.mpk), engine_training_check.py, engine_score.py.
+- Reproduce (DDR venv python; liblawgrad.so and laws_v6/liblaws.so are gitignored builds):
+    cc -O2 -shared -fPIC -o liblawgrad.so lawgrad.c        (and laws_v6: cc -O2 -shared -fPIC -o liblaws.so laws.c)
+    python landscapes.py ; python summarise.py ; python classify.py ; python transfer.py ; python pick_gauges.py
+    python engine_training_check.py ; python engine_score.py ; python figures.py      (about 1 min in total)
+- Data: per_gauge_slices.csv / per_gauge_slices_derived.csv / classification.csv (one row per gauge x parameter),
+  slices.npz (every 1-D slice incl. split halves), planes.npz / planes.csv (2-D), joint_init.csv (engine-init
+  gradients), pool_regime.csv, year_grad.csv, zprofile.csv, engine_z.csv (per-gauge test NSE of every replay and
+  the offline analogue at the same z).
+- Text: summary_tables.txt, classification.txt, transfer.txt, engine_summary.txt, engine_training_check.txt.
+- Engine: engine/make_tables.py, engine/fixed_FA_z{0p05,1,5,20}.csv, engine/replay_FA_z*.yaml, engine/z*.log;
+  runs (workspace .ddrs/runs/, all -train-and-test): z 0.05 d 2026-09-30T23-44-38Z, z 1 d 2026-10-01T00-03-22Z,
+  z 5 d 2026-10-01T00-03-32Z, z 20 d 2026-09-30T23-44-50Z; existing: fitted z 2026-09-30T01-52-25Z, pool off
+  2026-09-30T01-52-45Z, no-pool twin 2026-09-30T02-16-02Z. Each new run's config.yaml was checked to name its table.
+- Figures: fig1_landscapes_3gauges.png (Pactola 06411500, Carlyle 05593000, Broken Bow 07339000: 25th/50th/75th
+  percentile of z curvature), fig2_curvature_bands_by_parameter.png, fig3_pool_plateau_offline_engine.png (engine
+  replays at all four z), fig4_planes_T0z_zkc.png, fig5_why_pool_stays_shut.png.

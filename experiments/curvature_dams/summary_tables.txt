@@ -1,0 +1,177 @@
+==============================================================================================================
+PER-PARAMETER LANDSCAPE MEASURES, training loss = nse-batch on WY1983-1995, test = WY1996-2010
+medians [IQR] across gauges; curvature H = d2L/dx2 at the slice optimum, x = ln T0 / ln z / ln kc / logit phi / ln s
+==============================================================================================================
+
+L2:T0  (n = 214; band unit: decades)
+  curvature at optimum H            [0.000186, 0.0171, 0.0689]   (ln-s units for amp: [0.000186, 0.0171, 0.0689])
+  factor-2 move dL/L*               [0.000608, 0.0161, 0.0503]   flat (< 1 %): 44%
+  0.02 NSE band (train)             [0.65, 2.4, 2.75]  open-ended 55%; init inside: train 55%, test 47%
+  0.005 NSE band (train)            [0.3, 0.675, 2.4]  open-ended 42%; init inside: train 37%, test 28%
+  0.005 NSE band (test)             [0.25, 0.5, 2.04]
+  optimum on grid edge 21%; multimodal (prominence 0.002 / 0.0005): 4% / 4%
+  |g(init)| / |g(halfway)| (FD h=0.05) [0.405, 0.836, 8.55]; init gradient points to optimum 100%
+  train->test: |argmin shift| [0.05, 0.2, 0.677]; test NSE lost at train-optimum [0.000187, 0.00329, 0.0166]; shift > half test 0.005 band: 51%
+  NSE gain init -> train-optimum: train [0.00233, 0.0146, 0.0621], test [0.000613, 0.0129, 0.0715]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0.1, 0.325, 1.09]; shift > half the 0.005 band 59%; loss paid at the other half's optimum [0.000469, 0.00546, 0.0267]
+
+L4:T0  (n = 214; band unit: decades)
+  curvature at optimum H            [0.000568, 0.0234, 0.0819]   (ln-s units for amp: [0.000568, 0.0234, 0.0819])
+  factor-2 move dL/L*               [0.000893, 0.0249, 0.0581]   flat (< 1 %): 40%
+  0.02 NSE band (train)             [0.6, 2.12, 2.75]  open-ended 50%; init inside: train 50%, test 44%
+  0.005 NSE band (train)            [0.25, 0.55, 2.4]  open-ended 40%; init inside: train 36%, test 26%
+  0.005 NSE band (test)             [0.2, 0.4, 2]
+  optimum on grid edge 19%; multimodal (prominence 0.002 / 0.0005): 1% / 1%
+  |g(init)| / |g(halfway)| (FD h=0.05) [0.348, 0.808, 3.61]; init gradient points to optimum 100%
+  train->test: |argmin shift| [0.0711, 0.2, 0.6]; test NSE lost at train-optimum [0.000228, 0.00315, 0.0198]; shift > half test 0.005 band: 53%
+  NSE gain init -> train-optimum: train [0.00279, 0.019, 0.0863], test [0.00137, 0.0148, 0.0873]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0.1, 0.275, 0.75]; shift > half the 0.005 band 58%; loss paid at the other half's optimum [0.000504, 0.00468, 0.0243]
+
+L4:amp  (n = 214; band unit: s (x fitted coefs))
+  curvature at optimum H            [0.00962, 0.0414, 0.173]   (ln-s units for amp: [0.00939, 0.0414, 0.173])
+  factor-2 move dL/L*               [0.0146, 0.0587, 0.173]   flat (< 1 %): 19%
+  0.02 NSE band (train)             [1, 1.94, 2]  open-ended 53%; init inside: train 51%, test 61%
+  0.005 NSE band (train)            [0.45, 0.95, 1.99]  open-ended 29%; init inside: train 28%, test 43%
+  0.005 NSE band (test)             [0.425, 0.838, 1.65]
+  optimum on grid edge 0%; multimodal (prominence 0.002 / 0.0005): 0% / 0%
+  |g(init)| / |g(halfway)| (FD h=0.05) [2, 2, 2.03]; init gradient points to optimum 100%
+  train->test: |argmin shift| [0.15, 0.387, 0.725]; test NSE lost at train-optimum [0.000413, 0.00159, 0.011]; shift > half test 0.005 band: 40%
+  NSE gain init -> train-optimum: train [0.0041, 0.0192, 0.077], test [-0.000658, 0.00364, 0.033]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0.15, 0.425, 0.794]; shift > half the 0.005 band 44%; loss paid at the other half's optimum [0.000438, 0.00278, 0.0124]
+
+FA:T0  (n = 69; band unit: decades)
+  curvature at optimum H            [0.0012, 0.0132, 0.0445]   (ln-s units for amp: [0.0012, 0.0132, 0.0445])
+  factor-2 move dL/L*               [0.00122, 0.0136, 0.038]   flat (< 1 %): 48%
+  0.02 NSE band (train)             [0.85, 2.5, 3]  open-ended 59%; init inside: train 67%, test 48%
+  0.005 NSE band (train)            [0.35, 0.9, 2.55]  open-ended 43%; init inside: train 36%, test 23%
+  0.005 NSE band (test)             [0.25, 0.4, 0.85]
+  optimum on grid edge 16%; multimodal (prominence 0.002 / 0.0005): 3% / 3%
+  |g(init)| / |g(halfway)| (FD h=0.05) [0.5, 0.881, 2.74]; init gradient points to optimum 100%
+  pathwise |g(init)| / |g(halfway)| [0.5, 0.88, 2.75]; |g(init)| [0.00138, 0.00446, 0.0127]; |g(mid)| [0.000361, 0.00358, 0.0221]; toward 100%; exactly zero 0%
+  train->test: |argmin shift| [0.1, 0.253, 0.851]; test NSE lost at train-optimum [0.000816, 0.00435, 0.0102]; shift > half test 0.005 band: 61%
+  NSE gain init -> train-optimum: train [0.00091, 0.00986, 0.0404], test [0.000754, 0.0126, 0.0716]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0.05, 0.3, 1.25]; shift > half the 0.005 band 49%; loss paid at the other half's optimum [0.000335, 0.00247, 0.0094]
+
+FA:z  (n = 69; band unit: decades)
+  curvature at optimum H            [0.0174, 0.0448, 0.096]   (ln-s units for amp: [0.0174, 0.0448, 0.096])
+  factor-2 move dL/L*               [0.0141, 0.0306, 0.0579]   flat (< 1 %): 17%
+  0.02 NSE band (train)             [0.845, 1.75, 3.38]  open-ended 86%; init inside: train 42%, test 35%
+  0.005 NSE band (train)            [0.282, 0.732, 1.3]  open-ended 57%; init inside: train 14%, test 12%
+  0.005 NSE band (test)             [0.338, 0.62, 1.01]
+  optimum on grid edge 7%; multimodal (prominence 0.002 / 0.0005): 7% / 9%
+  |g(init)| / |g(halfway)| (FD h=0.05) [0.044, 0.0682, 0.115]; init gradient points to optimum 87%
+  pathwise |g(init)| / |g(halfway)| [0.0441, 0.0693, 0.115]; |g(init)| [6.84e-05, 0.000204, 0.000446]; |g(mid)| [0.00109, 0.0025, 0.00667]; toward 87%; exactly zero 4%
+  train->test: |argmin shift| [0.113, 0.225, 0.451]; test NSE lost at train-optimum [0.000796, 0.00465, 0.00999]; shift > half test 0.005 band: 46%
+  NSE gain init -> train-optimum: train [0.0101, 0.0247, 0.0727], test [0.0105, 0.0277, 0.0856]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0.169, 0.338, 0.62]; shift > half the 0.005 band 54%; loss paid at the other half's optimum [0.00166, 0.0149, 0.041]
+
+FA:kc  (n = 69; band unit: decades)
+  curvature at optimum H            [0.193, 0.544, 0.858]   (ln-s units for amp: [0.193, 0.544, 0.858])
+  factor-2 move dL/L*               [0.083, 0.153, 0.314]   flat (< 1 %): 4%
+  0.02 NSE band (train)             [0.142, 0.283, 0.85]  open-ended 41%; init inside: train 29%, test 33%
+  0.005 NSE band (train)            [0.0354, 0.0708, 0.177]  open-ended 16%; init inside: train 20%, test 23%
+  0.005 NSE band (test)             [0.0354, 0.106, 0.177]
+  optimum on grid edge 0%; multimodal (prominence 0.002 / 0.0005): 97% / 100%
+  |g(init)| / |g(halfway)| (FD h=0.05) [0.487, 1.09, 1.63]; init gradient points to optimum 87%
+  pathwise |g(init)| / |g(halfway)| [0.429, 0.97, 1.68]; |g(init)| [0.016, 0.0359, 0.168]; |g(mid)| [0.0174, 0.0581, 0.186]; toward 87%; exactly zero 1%
+  train->test: |argmin shift| [0.0354, 0.0643, 0.181]; test NSE lost at train-optimum [0.00164, 0.0058, 0.0158]; shift > half test 0.005 band: 54%
+  NSE gain init -> train-optimum: train [0.00913, 0.0423, 0.115], test [0.00016, 0.0316, 0.0876]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0.0354, 0.106, 0.283]; shift > half the 0.005 band 71%; loss paid at the other half's optimum [0.00292, 0.0131, 0.0345]
+
+FA:phi  (n = 69; band unit: logit)
+  curvature at optimum H            [9.73e-06, 3.14e-05, 0.000462]   (ln-s units for amp: [9.73e-06, 3.14e-05, 0.000462])
+  factor-2 move dL/L*               [0.0135, 0.029, 0.0745]   flat (< 1 %): 22%
+  0.02 NSE band (train)             [6.2, 8.2, 12]  open-ended 93%; init inside: train 67%, test 74%
+  0.005 NSE band (train)            [4.8, 5.8, 7.2]  open-ended 87%; init inside: train 35%, test 49%
+  0.005 NSE band (test)             [4.4, 5.8, 7.8]
+  optimum on grid edge 67%; multimodal (prominence 0.002 / 0.0005): 13% / 19%
+  |g(init)| / |g(halfway)| (FD h=0.05) [3.04, 16.5, 28.1]; init gradient points to optimum 96%
+  pathwise |g(init)| / |g(halfway)| [2.93, 16.5, 27.9]; |g(init)| [0.00228, 0.00806, 0.0214]; |g(mid)| [0.000155, 0.000488, 0.00146]; toward 96%; exactly zero 4%
+  train->test: |argmin shift| [0, 0.447, 4.92]; test NSE lost at train-optimum [0, 0.000164, 0.00212]; shift > half test 0.005 band: 36%
+  NSE gain init -> train-optimum: train [0.00319, 0.0107, 0.0288], test [-0.000219, 0.00427, 0.0158]
+  split-half training windows (WY83-89 vs WY90-95): |optimum shift| [0, 0.4, 4.8]; shift > half the 0.005 band 39%; loss paid at the other half's optimum [0, 0.000397, 0.00653]
+  phi units: optimum [0.832, 0.999, 0.999]; 0.02 band [0.309, 0.768, 0.992], 0.005 band [0.118, 0.268, 0.549] (lower end [0.31, 0.646, 0.832]); test NSE given up by fixing phi = 1: [0, 0, 0.000602]
+
+==============================================================================================================
+BY DOR AND PURPOSE: median H (curvature), median 0.02 train band, share flat, share non-transferable
+  L4:T0   dor_bin <0.1     n= 25  H=0.01101  band0.02=2.35  flat=44%  nontransfer=32%  test gain=+0.0142
+  L4:T0   dor_bin 0.1-0.5  n= 72  H=0.008403  band0.02=2.55  flat=47%  nontransfer=46%  test gain=+0.0087
+  L4:T0   dor_bin 0.5-1    n= 57  H=0.0336  band0.02=1.2  flat=35%  nontransfer=56%  test gain=+0.0206
+  L4:T0   dor_bin >1       n= 60  H=0.05035  band0.02=0.775  flat=33%  nontransfer=68%  test gain=+0.0242
+  L4:T0   fc      flood    n= 75  H=0.05548  band0.02=0.75  flat=28%  nontransfer=64%  test gain=+0.0585
+  L4:T0   fc      other    n=139  H=0.01099  band0.02=2.45  flat=46%  nontransfer=47%  test gain=+0.0096
+  L4:amp  dor_bin <0.1     n= 25  H=0.006757  band0.02=2  flat=36%  nontransfer=16%  test gain=+0.0014
+  L4:amp  dor_bin 0.1-0.5  n= 72  H=0.03948  band0.02=1.98  flat=19%  nontransfer=31%  test gain=+0.0068
+  L4:amp  dor_bin 0.5-1    n= 57  H=0.03027  band0.02=2  flat=21%  nontransfer=37%  test gain=+0.0030
+  L4:amp  dor_bin >1       n= 60  H=0.09341  band0.02=1.35  flat=8%  nontransfer=63%  test gain=+0.0070
+  L4:amp  fc      flood    n= 75  H=0.04101  band0.02=1.93  flat=20%  nontransfer=37%  test gain=+0.0070
+  L4:amp  fc      other    n=139  H=0.04173  band0.02=1.95  flat=18%  nontransfer=41%  test gain=+0.0030
+  FA:z    dor_bin <0.1     n=  7  H=0.03113  band0.02=1.07  flat=29%  nontransfer=29%  test gain=+0.0963
+  FA:z    dor_bin 0.1-0.5  n= 23  H=0.0342  band0.02=2.25  flat=17%  nontransfer=39%  test gain=+0.0277
+  FA:z    dor_bin 0.5-1    n= 21  H=0.04845  band0.02=1.46  flat=19%  nontransfer=33%  test gain=+0.0211
+  FA:z    dor_bin >1       n= 18  H=0.1313  band0.02=1.21  flat=11%  nontransfer=78%  test gain=+0.0233
+  FA:z    fc      flood    n= 69  H=0.04483  band0.02=1.75  flat=17%  nontransfer=46%  test gain=+0.0277
+  FA:kc   dor_bin <0.1     n=  7  H=1.709  band0.02=0.106  flat=0%  nontransfer=57%  test gain=+0.1653
+  FA:kc   dor_bin 0.1-0.5  n= 23  H=0.4153  band0.02=0.425  flat=4%  nontransfer=61%  test gain=+0.0227
+  FA:kc   dor_bin 0.5-1    n= 21  H=0.5445  band0.02=0.319  flat=5%  nontransfer=33%  test gain=+0.0326
+  FA:kc   dor_bin >1       n= 18  H=0.6267  band0.02=0.248  flat=6%  nontransfer=67%  test gain=+0.0286
+  FA:kc   fc      flood    n= 69  H=0.5445  band0.02=0.283  flat=4%  nontransfer=54%  test gain=+0.0316
+  FA:phi  dor_bin <0.1     n=  7  H=1.287e-05  band0.02=6.6  flat=14%  nontransfer=29%  test gain=+0.0257
+  FA:phi  dor_bin 0.1-0.5  n= 23  H=1.64e-05  band0.02=10  flat=30%  nontransfer=26%  test gain=+0.0043
+  FA:phi  dor_bin 0.5-1    n= 21  H=2.272e-05  band0.02=8.4  flat=14%  nontransfer=33%  test gain=+0.0032
+  FA:phi  dor_bin >1       n= 18  H=0.005666  band0.02=6.7  flat=22%  nontransfer=56%  test gain=+0.0011
+  FA:phi  fc      flood    n= 69  H=3.141e-05  band0.02=8.2  flat=22%  nontransfer=36%  test gain=+0.0043
+
+==============================================================================================================
+ROUTING PARAMETERS ON THE SAME SCALE (landscape-p21-all-5yr census, WY1996-2000, NSE > 0.3 at trained point)
+  routing n: n=2124  H [0.00779, 0.0468, 0.151]  factor-2 dL/L* [0.00699, 0.0549, 0.185]  flat 28%  quadratic 0.02 band [0.447, 0.803, 1.97] decades, 0.005 band [0.223, 0.401, 0.984]; H <= 0 at 11%
+  routing q: n=2124  H [1.62e-05, 0.000411, 0.00484]  factor-2 dL/L* [2e-05, 0.000426, 0.00578]  flat 80%  quadratic 0.02 band [2.5, 8.57, 43.2] decades, 0.005 band [1.25, 4.28, 21.6]; H <= 0 at 21%
+  dam parameters, quadratic-approximation 0.02 band (decades or s/logit units) for the same comparison:
+    L2:T0   [0.662, 1.33, 12.7]   H>0 at optimum: 100%
+    L4:T0   [0.607, 1.14, 7.4]   H>0 at optimum: 100%
+    L4:amp  [0.961, 1.97, 4.08]   H>0 at optimum: 100%
+    FA:T0   [0.823, 1.51, 5.01]   H>0 at optimum: 100%
+    FA:z    [0.561, 0.82, 1.32]   H>0 at optimum: 96%
+    FA:kc   [0.188, 0.235, 0.395]   H>0 at optimum: 100%
+    FA:phi  [18.6, 71.4, 128]   H>0 at optimum: 100%
+
+==============================================================================================================
+FLOOD POOL AT INIT: which constraint binds on training flood days (69 on-reach flood-control dams)
+  fitted_kc_phi  z=  0.05 d: capture capacity-limited on 99% of flood days (median; mean 93%), evacuation pool-limited 93%; flood days/gauge 57
+  fitted_kc_phi  z=  0.20 d: capture capacity-limited on 95% of flood days (median; mean 89%), evacuation pool-limited 75%; flood days/gauge 57
+  fitted_kc_phi  z=  1.00 d: capture capacity-limited on 81% of flood days (median; mean 75%), evacuation pool-limited 45%; flood days/gauge 57
+  fitted_kc_phi  z=  5.00 d: capture capacity-limited on 49% of flood days (median; mean 48%), evacuation pool-limited 27%; flood days/gauge 57
+  fitted_kc_phi  z= 20.00 d: capture capacity-limited on 9% of flood days (median; mean 22%), evacuation pool-limited 20%; flood days/gauge 57
+  init_kc_phi    z=  0.05 d: capture capacity-limited on 97% of flood days (median; mean 96%), evacuation pool-limited 90%; flood days/gauge 257
+  init_kc_phi    z=  0.20 d: capture capacity-limited on 92% of flood days (median; mean 89%), evacuation pool-limited 68%; flood days/gauge 257
+  init_kc_phi    z=  1.00 d: capture capacity-limited on 74% of flood days (median; mean 71%), evacuation pool-limited 42%; flood days/gauge 257
+  init_kc_phi    z=  5.00 d: capture capacity-limited on 42% of flood days (median; mean 42%), evacuation pool-limited 25%; flood days/gauge 257
+  init_kc_phi    z= 20.00 d: capture capacity-limited on 12% of flood days (median; mean 18%), evacuation pool-limited 19%; flood days/gauge 257
+
+JOINT engine-init gradient, raw engine coordinates (delta = ln T0/T0_head, r_kc, r_phi, r_z), pathwise:
+  init  |dL/d delta| [0.00234, 0.0102, 0.0252]  |dL/dr_kc| [0.00039, 0.000893, 0.00192]  |dL/dr_phi| [6.91e-07, 3.73e-06, 1.23e-05]  |dL/dr_z| [0.00028, 0.00122, 0.00376];  share wanting larger z 77%, larger phi 35%, larger kc 65%
+  mid   |dL/d delta| [0.00155, 0.00884, 0.0318]  |dL/dr_kc| [0.00376, 0.0109, 0.021]  |dL/dr_phi| [3.14e-05, 0.000111, 0.000289]  |dL/dr_z| [0.00605, 0.0223, 0.0546];  share wanting larger z 74%, larger phi 32%, larger kc 51%
+  opt   |dL/d delta| [1.91e-05, 0.000136, 0.000619]  |dL/dr_kc| [0.00043, 0.00291, 0.0105]  |dL/dr_phi| [1.22e-05, 0.000108, 0.000365]  |dL/dr_z| [0, 4.94e-08, 0.0013];  share wanting larger z 17%, larger phi 72%, larger kc 25%
+  joint |g_init|/|g_mid| pg_z: [0.0262, 0.0707, 0.121]
+  joint |g_init|/|g_mid| pg_kc: [0.0322, 0.08, 0.259]
+  joint |g_init|/|g_mid| pg_phi: [0.00209, 0.0228, 0.105]
+  joint |g_init|/|g_mid| pg_T0: [0.516, 1.09, 2.01]
+
+PER-DAM L2 (lambda = 1e-3, sum over dams) vs data curvature at init, engine step with G = 250 gauges:
+  L2 curvature per raw unit^2 = 2 lambda = 0.002; data curvature per raw unit^2 = H_gauge(raw) / G
+  H_z: gauge curvature at init (raw units, FD h 0.02) [-0.0135, -0.00234, -3.23e-05]; data/L2 ratio [-0.027, -0.00468, -6.47e-05]; L2 dominates at 100%
+  H_kc: gauge curvature at init (raw units, FD h 0.02) [-0.0435, -0.00193, 0.0206]; data/L2 ratio [-0.087, -0.00387, 0.0412]; L2 dominates at 100%
+  H_phi: gauge curvature at init (raw units, FD h 0.02) [4.28e-08, 2.37e-07, 4.1e-07]; data/L2 ratio [8.55e-08, 4.75e-07, 8.2e-07]; L2 dominates at 100%
+  H_T0: gauge curvature at init (raw units, FD h 0.02) [-0.0165, -0.00524, -0.00012]; data/L2 ratio [-0.0331, -0.0105, -0.00024]; L2 dominates at 100%
+
+PER-TRAINING-YEAR SIGN OF dL/d ln z (pathwise), 13 water years per gauge:
+  fitted_z0.05  share of years wanting a larger pool [0.462, 0.692, 0.846]; gauges whose 13-yr sum wants larger 87%; |mean|/sd*sqrt(13) [1.63, 2.33, 3.61]
+  fitted_zmid   share of years wanting a larger pool [0.385, 0.615, 0.846]; gauges whose 13-yr sum wants larger 93%; |mean|/sd*sqrt(13) [1.28, 2.06, 3.07]
+  init          share of years wanting a larger pool [0.385, 0.692, 0.923]; gauges whose 13-yr sum wants larger 77%; |mean|/sd*sqrt(13) [1.2, 2.37, 4.14]
+
+==============================================================================================================
+2-D PLANES (69 flood-control dams): quadratic fit at the grid optimum, ln units
+  T0_z: interior optimum 53/69; H11 [0.00517, 0.029, 0.0651] H22 [0.0202, 0.0339, 0.0691]; coupling -H12/sqrt(H11 H22) [-0.266, -0.188, -0.153]; anisotropy [2.44, 3.63, 8.21]; indefinite 2%; test NSE lost at train-optimum [0.00492, 0.00931, 0.027]
+     train-opt vs test-opt axis-a shift (decades) [0.1, 0.3, 0.7], axis-b [0.0845, 0.254, 0.423]
+  z_kc: interior optimum 64/69; H11 [0.0062, 0.0222, 0.0479] H22 [0.212, 0.435, 0.968]; coupling -H12/sqrt(H11 H22) [-0.133, 0.0427, 0.192]; anisotropy [10.4, 23.4, 52.3]; indefinite 6%; test NSE lost at train-optimum [0.00638, 0.0163, 0.0404]
+     train-opt vs test-opt axis-a shift (decades) [0.0845, 0.254, 0.507], axis-b [0.0531, 0.106, 0.212]

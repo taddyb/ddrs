@@ -1,0 +1,6 @@
+z: trained median 0.050 (IQR 0.019-0.175); moved at 99%; direction agrees with the offline init gradient at 71% of movers (n=68)
+kc: trained median 3.037 (IQR 2.655-3.466); moved at 99%; direction agrees with the offline init gradient at 63% of movers (n=68)
+phi: trained median 0.467 (IQR 0.436-0.501); moved at 96%; direction agrees with the offline init gradient at 64% of movers (n=66)
+z: Spearman(ln z_trained/0.05, share of training years whose init gradient wants a larger pool) = 0.64
+z: offline fitted z median 17.0 d; trained z > 1 d at 6%, > 5 d at 0%
+T0: Spearman(trained T0, offline FA T0) = 0.68

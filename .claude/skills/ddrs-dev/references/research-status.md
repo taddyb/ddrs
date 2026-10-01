@@ -765,6 +765,14 @@ was reverted in #143 and never evaluated at gauges.
   dams gain about four times any other purpose. +0.03 not reached; the per-dam coefficients are not predictable from
   NID features (RF R2 <= 0.15), so the gain needs gauged calibration. Results page
   https://claude.ai/artifact/YELrGtjwb5qjhq9JEjLs2u; findings `2026-09-28-per-dam-release-calibration-findings.md`.
+- **Dam-parameter curvature (2026-10-01, `experiments/curvature_dams/report.txt`, smoke set, offline + engine
+  replays):** the flood pool cannot be learned from its off init (z 0.05 d): the forward is flat over z 0.05 to 1 d
+  (pool full on 97-99 % of flood days, so kc and phi get no gradient; engine replays reproduce the offline shelf,
+  pool gain +0.004 at 1 d, +0.015 at 5 d, +0.027 at 20 d). Do: initialise z open (5-20 d, never at the 120-d cap) or
+  calibrate z and kc per gauged dam; fix phi = 1 (boundary optimum, costs 0.0000); drop or hard-shrink the rule curve
+  (curved but only 19 % of its training gain survives on test years); learn per-dam T0 with per_dam_l2 0 (or
+  <= 1e-5) from a 1-2 d init (flat below T0* 0.5 d; half of the T0* > 2 d dams start on the shelf at 4.5 h). A
+  per-dam L2 of 1e-3 holds every per-dam parameter at its init.
 - **Open:** whether masking the DOR > 0.5 gauges from the loss moves learned `n` elsewhere
   (option A); an observed-release boundary condition (option B, up to 216 of the 347); the
   routed-inflow release law inside ddrs with a gradient on `T` (stage 1), then a shared release
