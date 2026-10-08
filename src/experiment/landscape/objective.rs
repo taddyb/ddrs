@@ -181,6 +181,7 @@ where
         deriv_weight: f32,
         axes: &[String; 3],
         additive: [Option<f32>; 3],
+        frozen: &[String],
     ) -> Result<Self, BoxError> {
         let device = &ctx.device;
         for a in axes {
@@ -225,7 +226,7 @@ where
                         `params.stage_roughness.gamma` is a constant, not a field to perturb."
                 .into());
         }
-        let active: [bool; 3] = std::array::from_fn(|k| learns(&axes[k]));
+        let active: [bool; 3] = std::array::from_fn(|k| axis_active(learns(&axes[k]), &axes[k], frozen));
         // The routed daily series `forward_loss` compares `obs` against has
         // length `window_days - 2` regardless of `tau`: `n_hourly =
         // (window_days - 1) * 24` (`RhoWindow::n_hourly`,
@@ -737,6 +738,13 @@ fn has_valid_observation(obs: &[f32], warmup: usize, d: usize) -> bool {
     (warmup..d).any(|i| i < obs.len() && obs[i].is_finite() && obs[i] >= 0.0)
 }
 
+/// Whether an axis slot is swept: the head learns it and it is not listed in
+/// `LandscapeSpec::frozen`. A frozen learnable parameter keeps its trained
+/// per-reach field (`trained_field` still reads the head output).
+fn axis_active(learnable: bool, name: &str, frozen: &[String]) -> bool {
+    learnable && !frozen.iter().any(|f| f == name)
+}
+
 /// Trained physical field for one channel parameter, length `n_active`.
 /// `Some(head_out)` denormalizes the KAN head's `[0,1]` output to the
 /// physical range (the parameter is in `kan_head.learnable_parameters`);
@@ -996,6 +1004,16 @@ pub fn solve3(a: [[f32; 3]; 3], b: [f32; 3]) -> Option<[f32; 3]> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn axis_active_requires_learnable_and_not_frozen() {
+        let none: Vec<String> = vec![];
+        let frozen = vec!["p_spatial".to_string()];
+        assert!(axis_active(true, "p_spatial", &none));
+        assert!(!axis_active(false, "p_spatial", &none));
+        assert!(!axis_active(true, "p_spatial", &frozen));
+        assert!(axis_active(true, "n", &frozen));
+    }
+
     use super::*;
     use burn::backend::NdArray;
     use std::collections::HashMap;

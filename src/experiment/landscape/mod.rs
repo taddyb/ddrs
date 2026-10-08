@@ -96,6 +96,14 @@ pub struct LandscapeSpec {
     /// of `axes`. Default empty (every axis a log multiplier).
     #[serde(default)]
     pub additive_axes: std::collections::HashMap<String, f32>,
+    /// Axis parameters to hold at their trained field even though the arm's
+    /// head learns them: a listed parameter keeps its slot in `axes` but is
+    /// inactive (never perturbed, no Newton step, dropped from the Hessian
+    /// eigendecomposition), exactly as a parameter the run did not learn.
+    /// Must be a subset of `axes`. Default empty: every learnable axis is
+    /// active, which is the behaviour of every earlier study.
+    #[serde(default)]
+    pub frozen: Vec<String>,
     /// Also compute per-reach `g_i = dL/d ln x_i` (x in n, p, q) at α = 0 and
     /// α*, plus `dist_to_gauge_m`, for the "perturbations in a watershed"
     /// study: where in the network the gauge still constrains parameters,
@@ -264,6 +272,11 @@ impl LandscapeSpec {
             }
             if !(*hw > 0.0) {
                 return Err(format!("landscape additive_axes half-width for `{name}` must be > 0, got {hw}").into());
+            }
+        }
+        for f in &self.frozen {
+            if !self.axes.contains(f) {
+                return Err(format!("landscape `frozen` entry `{f}` is not one of the axes {:?}", self.axes).into());
             }
         }
         Ok(())
@@ -550,7 +563,7 @@ where
     // Physical units per unit alpha for each additively swept slot; `None`
     // keeps the log-multiplier convention. See `LandscapeSpec::additive_axes`.
     let additive: [Option<f32>; 3] = std::array::from_fn(|k| spec.additive_axes.get(&spec.axes[k]).map(|hw| hw / spec.alpha_max));
-    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight, &spec.axes, additive)?;
+    let obj = Objective::<I>::build(ctx, &staid, starts, window_days, &spec.objective, spec.deriv_weight, &spec.axes, additive, &spec.frozen)?;
     let h = spec.fd_step;
     let active = obj.active();
     let n_active_params = active.iter().filter(|&&a| a).count();
@@ -1082,6 +1095,17 @@ mod tests {
         assert!(a.validate_axes().is_err());
         let b: LandscapeSpec = serde_yaml::from_str("gauges: {}\naxes: [n, n, q_spatial]\n").unwrap();
         assert!(b.validate_axes().is_err());
+    }
+
+    #[test]
+    fn frozen_defaults_empty_and_must_be_a_subset_of_axes() {
+        let d: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert!(d.frozen.is_empty());
+        assert!(d.validate_axes().is_ok());
+        let ok: LandscapeSpec = serde_yaml::from_str("gauges: {}\nfrozen: [p_spatial]\n").unwrap();
+        assert!(ok.validate_axes().is_ok());
+        let bad: LandscapeSpec = serde_yaml::from_str("gauges: {}\nfrozen: [gamma]\n").unwrap();
+        assert!(bad.validate_axes().is_err());
     }
 
     #[test]
