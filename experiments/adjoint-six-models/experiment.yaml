@@ -1,0 +1,28 @@
+# E-09: adjoint influence maps on the six fixed-channel (n0 + gamma) models, over
+# the GAGES-II nested-reference population. Same functionals and settings as
+# experiments/adjoint-conus; only the arms change. Canonical run ids from
+# research/findings/2026-09-30-paper-model-lineage.md (paper/e01-lineage@e8e7d3b).
+# Arms are read-only; latest directory checkpoint (epoch_50_mb_9).
+#   <worktree>/target/release/ddrs --workspace /home/tbindas/projects/ddrs/.ddrs experiment adjoint-six-models --backend cpu
+study: adjoint
+arms:
+  - { name: uh-fixed-channel,   run: 2026-09-12T23-39-03Z-train-and-test }
+  - { name: dhbv2-lumped,       run: 2026-09-13T13-56-50Z-train-and-test }
+  - { name: dhbv2-distributed,  run: 2026-09-13T17-22-30Z-train-and-test }
+  - { name: hydrodl-lstm,       run: 2026-09-13T17-21-58Z-train-and-test }
+  - { name: nh-daily-lstm,      run: 2026-09-13T13-55-03Z-train-and-test }
+  - { name: nh-hourly-mts-lstm, run: 2026-09-13T14-14-46Z-train-and-test }
+
+adjoint:
+  gauges:
+    source: nested-reference
+    gages_ii_dbf: /mnt/ssd1/data/gage_shp_files/gagesII_9322_sept30_2011.dbf
+  window_days: 365
+  anchors: { high: 2, low: 2 }
+  anchor_min_gap_days: 60
+  lag_days: 30
+  tail_days: 7
+  water_year: 2000
+  functionals: [kernel, volume, residual]
+  fd_perturb_fraction: 0.05
+  fd_rel_tol: 0.05
