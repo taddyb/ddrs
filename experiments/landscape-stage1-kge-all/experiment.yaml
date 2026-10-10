@@ -1,0 +1,25 @@
+# E-02 Stage 1 census: UH free-channel model (n, p, q learned, gamma = 0, 500 updates,
+# batch-NSE trained), run 2026-09-12T03-53-34Z-train-and-test (bitwise twin of
+# 2026-09-11T23-24-04Z; lineage: paper/e01-lineage@e8e7d3b research/findings/2026-09-30-paper-model-lineage.md).
+# Census objective is KGE (decision D-6, 2026-10-01) on every gauge the evaluator scores
+# (2,365; no NSE floor, no flow floor). Axes n, p, q; h = 0.025; WY1996-2000; Newton + eigen.
+# grid 0: Newton + Hessian eigendecomposition only; the 25x25 figure grids are a separate stratified bundle.
+# Latest directory checkpoint (no `checkpoint:` key). Shard with scripts/landscape_shards.sh.
+study: landscape
+arms:
+  - { name: uh-free-channel, run: 2026-09-12T03-53-34Z-train-and-test }
+landscape:
+  axes: [n, p_spatial, q_spatial]
+  gauges:
+    source: all
+  period: testing
+  window_days: 1826   # five water years
+  water_year: 1996    # window starts 1995-10-01
+  n_windows: 1
+  alpha_max: 2.3025851
+  fd_step: 0.025
+  newton_iters: 12
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  grid: 0
+  objective: kge

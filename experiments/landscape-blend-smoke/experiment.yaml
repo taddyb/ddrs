@@ -1,0 +1,24 @@
+# SMOKE TEST ONLY (two gauges, not a census). Checks that the landscape reads the blend run's weighted
+# inflow list (UH retrospective 0.50, dHBV2 distributed 0.25, NH daily LSTM 0.25) and returns finite
+# curvatures on the (n_0, gamma) axes of the three-product blend model. The census itself uses all 2,365
+# gauges (user decision 2026-10-01) and is a separate task.
+# Modelled on experiments/landscape-p21c-strat400/experiment.yaml and landscape-n0-gamma/experiment.yaml.
+study: landscape
+arms:
+  - { name: blend, run: 2026-10-05T13-32-00Z-train-and-test, checkpoint: epoch_50_mb_9 }
+landscape:
+  axes: [n, gamma, q_spatial]    # slot 1 is gamma; q_spatial (fixed at 0.65) occupies slot 2 and is carried, never perturbed
+  gauges:
+    source: list
+    staids: ["01563500", "01567000"]    # Juniata River at Mapleton Depot and Newport
+  period: testing
+  window_days: 1826
+  water_year: 1996
+  n_windows: 1
+  alpha_max: 1.0986123
+  fd_step: 0.025
+  newton_iters: 0
+  grid: 0
+  tolerances: [0.05, 0.10]
+  max_clamped: 0.05
+  series: false

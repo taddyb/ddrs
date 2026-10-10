@@ -5,7 +5,7 @@
 # Usage: scripts/landscape_shards.sh <bundle> <K> [backend]
 #
 # Starts K processes:
-#   target/release/ddrs --workspace .ddrs experiment <bundle> --backend <backend> --shard i/K
+#   target/release/ddrs --workspace $LANDSCAPE_WORKSPACE (default .ddrs) experiment <bundle> --backend <backend> --shard i/K
 # for i in 0..K-1, each as its own `systemd-run --user --unit=ddrs-<bundle>-shard-i
 # --collect --quiet` unit. Each shard's stdout+stderr is logged to
 # /home/tbindas/.claude/jobs/d68b0903/tmp/<bundle>.shard-i.log; once a shard's
@@ -20,7 +20,8 @@ backend="${3:-cpu}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ddrs_bin="${repo_root}/target/release/ddrs"
-log_dir="/home/tbindas/.claude/jobs/d68b0903/tmp"
+log_dir="${LANDSCAPE_LOG_DIR:-/home/tbindas/.claude/jobs/d68b0903/tmp}"
+nice_level="${LANDSCAPE_NICE:-0}"
 mkdir -p "$log_dir"
 
 if [[ ! -x "$ddrs_bin" ]]; then
@@ -37,9 +38,9 @@ for ((i = 0; i < K; i++)); do
     unit="ddrs-${bundle}-shard-${i}"
     log="${log_dir}/${bundle}.shard-${i}.log"
     : >"$log"
-    systemd-run --user --unit="$unit" --collect --quiet \
+    systemd-run --user --unit="$unit" --collect --quiet --nice="${nice_level}" \
         --working-directory="$repo_root" \
-        -- bash -c "exec '${ddrs_bin}' --workspace .ddrs experiment '${bundle}' --backend '${backend}' --shard '${i}/${K}' >'${log}' 2>&1"
+        -- bash -c "exec '${ddrs_bin}' --workspace '${LANDSCAPE_WORKSPACE:-.ddrs}' experiment '${bundle}' --backend '${backend}' --shard '${i}/${K}' >'${log}' 2>&1"
     echo "  shard ${i}/${K}: unit ${unit}, log ${log}" >&2
 done
 
