@@ -385,9 +385,28 @@ pub(crate) fn cpu_forward_primitive<B: Backend>(
     (out, x)
 }
 
+thread_local! {
+    /// Number of `primitive_to_vec` calls made on this thread. Test aid only.
+    static HOST_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of host copies (`primitive_to_vec` calls) made on this thread so far.
+///
+/// Test aid. A test reads it before and after a call and compares the two
+/// values. It counts only the copies in `primitive_to_vec`, the helper that
+/// the sparse solver and the timestep backward use to move a tensor to the
+/// host. The counter is per thread: the tests run in parallel threads, and
+/// burn's autodiff backward runs in the calling thread. The cost is one `Cell`
+/// increment per host copy. No result changes.
+#[doc(hidden)]
+pub fn host_reads_on_this_thread() -> u64 {
+    HOST_READS.with(|c| c.get())
+}
+
 /// Wrap a raw `FloatTensorPrimitive` in a `Tensor` wrapper just long enough to
 /// call `.to_data()` synchronously, then yield a `Vec<f32>`.
 pub(crate) fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
+    HOST_READS.with(|c| c.set(c.get() + 1));
     let t: Tensor<B, 1> = Tensor::from_primitive(TensorPrimitive::Float(prim));
     t.to_data().to_vec::<f32>().expect("expected f32 tensor")
 }

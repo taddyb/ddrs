@@ -35,6 +35,8 @@
 //! * **Part C** — non-vacuity guards, evaluated *on the CUDA backend*, so a
 //!   fixture that went degenerate only on GPU would be caught.
 //! * **Part D** — the transitive `enforce_positivity ⟹ !use_cuda_graphs` guard.
+//! * **Part E** — the `gA` gradient of the timestep backward stays on the
+//!   device (no host copy), and it is right on a confluence network.
 //!
 //! Every numeric helper below is generic in the inner backend `I` and is called
 //! with BOTH `NdArray<f32>` and `Cuda<f32, i32>`. That is deliberate: a parity
@@ -1246,4 +1248,217 @@ fn enforce_positivity_can_never_reach_the_cuda_graph_path() {
     let cfg = load_params_yaml("ddrs_ep_default.yaml", "  ddr_match: false\n")
         .expect("plain ddr_match:false must load");
     assert!(!cfg.params.enforce_positivity, "enforce_positivity must default to false");
+}
+
+// ===========================================================================
+// Part E — the gA gradient of the timestep backward stays on the device.
+//
+// `timestep_backward_core` computes `gA[k] = -gb_rhs[row[k]] * x_sol[col[k]]`.
+// With `sparse_solver: cuda` this must run on the device. The old code copied
+// `gb_rhs` and `x_sol` to the host, looped over nnz and uploaded the result.
+// That is 2 device-to-host copies, 1 upload and a stream sync per timestep op.
+//
+// E1 counts the host copies in one backward. E2 checks that the device gA is
+// right on a network with confluences, where some rows have 2 off-diagonal
+// entries and `row_for_nnz` repeats. The chain fixture of Parts A to D has one
+// off-diagonal entry per row, so it cannot show a wrong gather on those rows.
+// ===========================================================================
+
+/// What one forward and one backward of a timestep op cost in host copies.
+struct BackwardTrace {
+    /// Host copies (`primitive_to_vec`) made by the forward.
+    forward_reads: u64,
+    /// Host copies made by `backward()`. This is the number E1 checks.
+    backward_reads: u64,
+    /// Gradient of `n`, to prove the backward really ran through the op.
+    grad_n: Vec<f32>,
+}
+
+/// Run one timestep forward and its backward on `Gpu` with `cfg`, and count the
+/// host copies on this thread. The counter is per thread. Burn's autodiff
+/// backward runs in the calling thread, so the count is exact even when other
+/// tests run at the same time.
+fn trace_backward_reads(cfg: &Config) -> BackwardTrace {
+    let f = grad_fixture();
+    let adj = chain(&f);
+    let dev = device::<Gpu>();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<Gpu>::new(&pattern, &dev);
+    // The weights come from a CPU run. Compute them before the first read of
+    // the counter, so their host copies do not count.
+    let weights = conditioning_weights(true);
+
+    let reads_start = ddrs::sparse::host_reads_on_this_thread();
+    let (loss, parents) = run_forward_loss::<Gpu>(
+        cfg, &pattern, &assembler, &dev, &f.n, &f.qsp, &f.psp, &f.qt, &f.qpt, &f.length, &f.slope,
+        &weights, Some(Parent::N),
+    );
+    let reads_after_forward = ddrs::sparse::host_reads_on_this_thread();
+    let grads = loss.sum().backward();
+    let reads_after_backward = ddrs::sparse::host_reads_on_this_thread();
+
+    let grad_n = parents
+        .n
+        .grad(&grads)
+        .expect("grad on n")
+        .into_data()
+        .convert::<f32>()
+        .into_vec::<f32>()
+        .unwrap();
+    BackwardTrace {
+        forward_reads: reads_after_forward - reads_start,
+        backward_reads: reads_after_backward - reads_after_forward,
+        grad_n,
+    }
+}
+
+/// E1. With `sparse_solver: cuda` the timestep backward makes no host copy.
+///
+/// Falsifiability. On the code before the fix this fails: the backward made 2
+/// host copies per timestep op (`gb_rhs` and `x_sol`). The control run below
+/// uses the host solver on the same device and must show copies. If it showed
+/// none, the counter would not see the backward and this test would be vacuous.
+#[test]
+fn cusparse_backward_keeps_ga_on_the_device() {
+    // Control: the host solver copies to the host, and the counter must see it.
+    let host = trace_backward_reads(&stress_cfg(true));
+    println!(
+        "host solver on Gpu: forward reads = {}, backward reads = {}",
+        host.forward_reads, host.backward_reads
+    );
+    assert!(
+        host.backward_reads > 0,
+        "the control run (sparse_solver: cpu) shows no host copy in the backward, \
+         so the counter does not see the backward and E1 would be vacuous"
+    );
+    assert!(
+        host.grad_n.iter().any(|g| *g != 0.0),
+        "the control run made an all-zero gradient: the backward did not run through the op"
+    );
+
+    let mut cfg = stress_cfg(true);
+    cfg.params.sparse_solver = ddrs::config::SparseSolver::Cuda;
+    let cuda = trace_backward_reads(&cfg);
+    println!(
+        "cuSPARSE solver on Gpu: forward reads = {}, backward reads = {}",
+        cuda.forward_reads, cuda.backward_reads
+    );
+    assert!(
+        cuda.grad_n.iter().any(|g| *g != 0.0),
+        "the cuSPARSE run made an all-zero gradient: the backward did not run through the op"
+    );
+    assert_eq!(
+        cuda.backward_reads, 0,
+        "the timestep backward copied to the host {} time(s) with sparse_solver: cuda; \
+         gA must stay on the device",
+        cuda.backward_reads
+    );
+}
+
+/// A river network with two confluences, on the reaches of `grad_fixture()`.
+///
+/// Edges are `(downstream, upstream)`. Reach 4 takes reaches 2 and 3. Reach 7
+/// takes reaches 5 and 6. Reaches 3 and 6 are headwaters. The order is
+/// topological, so the matrix is lower triangular. Rows 4 and 7 have 2
+/// off-diagonal entries each, so `row_for_nnz` repeats 3 times on them.
+fn confluence(f: &Fixture) -> SparseAdjacency {
+    let n = f.length.len();
+    let mut dense = vec![0.0_f32; n * n];
+    for (down, up) in [(1, 0), (2, 1), (4, 2), (4, 3), (5, 4), (7, 5), (7, 6), (8, 7), (9, 8)] {
+        dense[down * n + up] = 1.0;
+    }
+    SparseAdjacency::from_dense(n, &dense, f.length.clone(), f.slope.clone())
+}
+
+/// Analytic gradient of `Σ w·q_next` on the confluence network, for backend `I`
+/// and the solver in `cfg`.
+fn confluence_grad<I: Backend + 'static>(cfg: &Config, parent: Parent, weights: &[f32]) -> Vec<f32>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let f = grad_fixture();
+    let adj = confluence(&f);
+    let dev = device::<I>();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &dev);
+    let (loss, parents) = run_forward_loss::<I>(
+        cfg, &pattern, &assembler, &dev, &f.n, &f.qsp, &f.psp, &f.qt, &f.qpt, &f.length, &f.slope,
+        weights, Some(parent),
+    );
+    let grads = loss.sum().backward();
+    let g = match parent {
+        Parent::N => parents.n.grad(&grads).expect("grad on n"),
+        Parent::QSpatial => parents.qsp.grad(&grads).expect("grad on q_spatial"),
+        Parent::PSpatial => parents.psp.grad(&grads).expect("grad on p_spatial"),
+        Parent::QT => parents.qt.grad(&grads).expect("grad on q_t"),
+    };
+    g.into_data().convert::<f32>().into_vec::<f32>().unwrap()
+}
+
+/// E2. On a confluence network, the gradients with the cuSPARSE solver and the
+/// device gA match the gradients of the CPU backend with the host solver.
+///
+/// The loss weights `1/max(q_next, 1)` come from a CPU forward on the
+/// confluence network. Both sides use the same weights bit for bit, as in
+/// Part B. E2 passes on the code before the fix too: it pins the new device
+/// gather, it does not show the host copies.
+#[test]
+fn cusparse_ga_matches_cpu_on_a_confluence() {
+    let f = grad_fixture();
+    let adj = confluence(&f);
+    let pattern = CsrPattern::from_sparse(&adj);
+
+    // Non-vacuity: the network must have rows with 2 off-diagonal entries,
+    // or `row_for_nnz` never repeats on an off-diagonal slot.
+    let off_diag: Vec<i32> = (0..pattern.n)
+        .map(|i| pattern.crow[i + 1] - pattern.crow[i] - 1)
+        .collect();
+    let wide_rows = off_diag.iter().filter(|&&k| k >= 2).count();
+    println!("off-diagonal entries per row: {off_diag:?}");
+    assert!(
+        wide_rows >= 2,
+        "the confluence network needs at least 2 rows with 2 off-diagonal entries, got {wide_rows}"
+    );
+
+    // Both physics configs. Without the clamp every reach carries gradient, so
+    // all 10 components are compared. With the clamp the short reaches are
+    // masked to zero, as in Part B.
+    for enforce_positivity in [false, true] {
+        // Loss weights from the CPU forward on this network.
+        let cpu_cfg = stress_cfg(enforce_positivity);
+        let ones = vec![1.0_f32; f.length.len()];
+        let q_next = {
+            let dev = device::<Cpu>();
+            let pat = Arc::new(CsrPattern::from_sparse(&adj));
+            let asm = AValuesAssembler::<Cpu>::new(&pat, &dev);
+            let (loss, _) = run_forward_loss::<Cpu>(
+                &cpu_cfg, &pat, &asm, &dev, &f.n, &f.qsp, &f.psp, &f.qt, &f.qpt, &f.length,
+                &f.slope, &ones, None,
+            );
+            loss.into_data().convert::<f32>().into_vec::<f32>().unwrap()
+        };
+        let weights: Vec<f32> = q_next.iter().map(|&q| 1.0 / q.max(1.0)).collect();
+
+        let mut gpu_cfg = stress_cfg(enforce_positivity);
+        gpu_cfg.params.sparse_solver = ddrs::config::SparseSolver::Cuda;
+
+        let mut worst = 0.0f32;
+        for p in ALL_PARENTS {
+            let cpu = confluence_grad::<Cpu>(&cpu_cfg, p, &weights);
+            let gpu = confluence_grad::<Gpu>(&gpu_cfg, p, &weights);
+            worst = worst.max(compare_backends(
+                &format!(
+                    "confluence d(loss)/d({}) [enforce_positivity={enforce_positivity}, \
+                     cuSPARSE + device gA vs CPU]",
+                    p.name()
+                ),
+                &cpu,
+                &gpu,
+            ));
+        }
+        println!(
+            "WORST confluence cross-backend rel (enforce_positivity={enforce_positivity}) = {worst:.3e}"
+        );
+    }
 }
