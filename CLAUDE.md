@@ -599,6 +599,16 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
   unification was explicitly rejected.
 - **The sparse path uses a single `Arc<CsrPattern>` per network**, built once at
   `setup_inputs` and reused for every timestep. Don't rebuild per step.
+- **The timestep backward keeps gA on the device.** With `sparse_solver: cuda`,
+  `src/routing/mmc_op.rs::timestep_backward_core` computes gA with
+  `dispatch::grada_primitive` and makes no host copy. Do not put a host loop
+  back. `src/sparse/mod.rs::host_reads_on_this_thread_for_test` counts the host
+  copies (`primitive_to_vec`) made on the calling thread. Part E of
+  `tests/cuda_backward_parity.rs` uses it.
+- **On a host with CUDA 13.3, set `CUDARC_CUDA_VERSION=13020` at build time.**
+  `cudarc` 0.19.7 panics on `nvcc` 13.3. Put it in the gitignored
+  `.cargo/config.toml` `[env]` block, or export it. A fresh worktree needs that
+  file copied (trap T12 in `.claude/skills/ddrs-dev/references/traps.md`).
 - **Configs are YAML to match DDR's tooling**, deserialized via `serde_yaml`.
 - **Cite symbols, not lines, inside `src/`.** Write
   `src/config.rs::validate_subdivision_reaches_the_builder`, never
