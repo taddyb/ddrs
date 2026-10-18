@@ -1403,6 +1403,12 @@ where
 /// confluence network. Both sides use the same weights bit for bit, as in
 /// Part B. E2 passes on the code before the fix too: it pins the new device
 /// gather, it does not show the host copies.
+///
+/// Falsifiability (checked by hand, then reverted). In `cusparse_grada`, swap
+/// the row and col indices of the gather: E2 and
+/// `cusparse_solver_path_carries_the_same_gradients` fail. Index `gradb` by
+/// `min(row, col + 1)` instead of `row`: this equals `row` on a chain, and only
+/// E2 fails. The chain fixture alone cannot see that fault.
 #[test]
 fn cusparse_ga_matches_cpu_on_a_confluence() {
     let f = grad_fixture();
