@@ -6,7 +6,7 @@
 
 ## Motivation
 
-The 2026-06-19 routing journal pinned three layered findings:
+The 2026-06-19 routing analysis pinned three layered findings:
 
 1. The **loss** was never the limiter (L1, NNSE-KGE, component-KGE → same flat result).
 2. The flat `repeat-24` daily→hourly interpolation (`icechunk.rs::daily_to_hourly_trim`)
@@ -37,7 +37,7 @@ to the trusted daily Q′ (per catchment per day).
 - **Mass preservation:** softmax-over-24h × 24, unchanged from Exp-3 (already unit-tested).
 - **Precip normalization: pre-head, in the data-batching layer** (not inside the head).
 - **No smoothness regularizer** (revisit only if overfitting reappears).
-- **Loss: L1** (do not reuse kge/nnse) — clean comparison against the journal's runs.
+- **Loss: L1** (do not reuse kge/nnse) — clean comparison against the 2026-06-19 runs.
 - **Integration: extend `DisaggHead` in place** — reuse all `KanHead.disagg` /
   checkpoint / eval / forward / mass-preservation plumbing; opt-in; precip-off path is
   byte-identical to today.
@@ -100,9 +100,9 @@ existing `mass_is_conserved_*` tests remain the guard.
   already-smoothed daily Q′'s true sub-daily shape; the MLP learns a transfer, but if the
   UH already encodes the within-day response, precip adds noise. *Mitigation:* compare vs
   precip-off disagg + early-stop sweep.
-- **Structural ceiling (journal finding 3) is not removed by better forcing timing.**
+- **Structural ceiling (2026-06-19 finding 3) is not removed by better forcing timing.**
   Precip may unstick the gradient yet still not beat baseline on held-out daily metrics. A
-  null result is itself the answer the journal asked for.
+  null result is itself the answer the 2026-06-19 analysis asked for.
 - **Coverage gap (55k reaches)** → 0.0 fill → flat precip → daily-Q fallback. Log covered fraction.
 - **Read cost:** catchment-major `(290878,48)` chunks; a window read decompresses full-width
   chunks. Matches `zarr_qprime` behavior; benchmark, cache if hot.

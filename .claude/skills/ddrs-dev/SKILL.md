@@ -277,11 +277,9 @@ reader now sniffs the axis order (traps.md T11).
 
 ## Maintenance
 
-Four skills live in this repo: this one (build / code / configure / test / debug),
+Three skills live in this repo: this one (build / code / configure / test / debug),
 `ddrs-run` (launch, watch, resume, and audit runs; the full `ddrs` command
-reference), `ddrs-eval-plots` (visualize and interpret run output), and
-`ddrs-journal` (the running record in `research/journal/`, wired into `ddrs run` and
-`ddrs experiment` via `.claude/settings.json` hooks calling `scripts/journal.py`).
+reference), and `ddrs-eval-plots` (visualize and interpret run output).
 When a run, eval, or export completes, update the relevant section here in the
 same session that produced the knowledge — do not leave it only in a findings
 doc. If a rule here is superseded, correct it in place with the new nuance

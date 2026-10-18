@@ -2043,7 +2043,7 @@ it is statistically significant on a paired test, and it is not responsible for 
 led with.
 
 Not settled: whether that improvement is worth its cost. §20 bounds the entire roughness channel at about 0.09
-NSE, the derivative model scored a null on skill (+0.0007 NSE, +0.0012 KGE, journal entry for
+NSE, the derivative model scored a null on skill (+0.0007 NSE, +0.0012 KGE, run
 `2026-09-11T06-38-49Z`), and §29 showed it drove `q` to its bounds at 64 % of reaches. A better-identified
 roughness that buys no skill and wrecks the width exponent is not obviously a good trade. The recommendation in
 PR #42 stands: do not make `nse-batch-deriv` the default.

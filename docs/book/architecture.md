@@ -413,7 +413,7 @@ the CPU path — so capture is never attempted on a backend that would
    the underlying buffers. See [Graph objects](usage/graph-objects.md).
 6. **CUDA Graphs require the cubecl fork's `flush_no_sync` patch.**
    Naive capture deadlocks on cubecl's stock host-sync inside `flush`.
-   See the SP-10 journal in `.claude/ARCHITECTURE.md` and
+   See the SP-10 section of `.claude/ARCHITECTURE.md` and
    [Performance & CUDA Graphs](reference/perf.md).
 
 ## Reference

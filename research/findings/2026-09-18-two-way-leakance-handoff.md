@@ -104,19 +104,16 @@ centre 1e-7); and skill improved while the partial correlation did not.
 2. **Write `research/findings/2026-09-18-two-way-leakance-findings.md`**, citing the
    pre-registration commit `8e96886`, and state the failure plainly. Update the
    `ddrs-dev` do-not-use list.
-3. **Fill the journal entries** for the landscape runs (`python3 scripts/journal.py --mode status`).
-   NOTE: `--mode backfill` corrupted the journal on 2026-09-16; do not run it.
-4. **Decide on leakance.** The evidence now says the term does not learn a water table.
+3. **Decide on leakance.** The evidence now says the term does not learn a water table.
    The interesting residue is that `d_gw` occupies a different information channel from
    roughness, which is a *structural* result worth reporting even though the *parameter*
    is not recovered.
-5. If more work is wanted: restore the Concrete noise or switch to a straight-through
+4. If more work is wanted: restore the Concrete noise or switch to a straight-through
    estimator so gate decisions are not frozen by the schedule.
 
 ## Suggested skills
 
 - `/ddrs-eval-plots` — reading the finished run's parameter maps and eval output
-- `/ddrs-journal` — the landscape runs have open entries; rules for writing them
 - `/ddrs-dev` — `references/research-status.md` before citing any number externally
 - `/explain-plot` — the user wants hypothesis / plain-English / graph / result / conclusion, in that order, for every figure
 

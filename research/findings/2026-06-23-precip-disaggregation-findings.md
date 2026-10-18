@@ -22,17 +22,17 @@ run's own summed-Q′ baseline**, identical metric code, common test window
 - Trained **ties/slightly regresses on KGE** (−0.007; 47% improve).
 - 2365/2365 gauges finite; predictions 0% NaN.
 - Training loss **descended** (epoch-mean L1 9.15→8.30→7.89) then rose
-  (8.60→9.36) — the disaggregation unsticks the gradient (the journal's
+  (8.60→9.36) — the disaggregation unsticks the gradient (the 2026-06-19 analysis's
   predicted effect), with epoch-4/5 the same overfitting Exp-3/4 showed.
 
 ## Interpretation
 
-This **reproduces the exact signature the 2026-06-19 journal diagnosed**:
+This **reproduces the exact signature the 2026-06-19 analysis diagnosed**:
 routing improves NSE but loses on KGE via the variance-ratio term, because the
 **L1 objective rewards a simulated variance below observed** (over-attenuation;
 NSE's optimum sits at α<1). Real precip *timing* unstuck the gradient and
 delivered a clean NSE win, but did **not** break the KGE ceiling — the binding
-constraint there is the *loss*, not the forcing. The journal's prescription for
+constraint there is the *loss*, not the forcing. The 2026-06-19 analysis's prescription for
 KGE (the `kge`/`nnse-kge` α-restoring loss) was deliberately excluded here for a
 clean L1 comparison; combining precip timing **with** that loss is the natural
 next experiment.
@@ -40,7 +40,7 @@ next experiment.
 ## Precip-off control (run `2026-06-23T13-03-35Z-train-and-test`)
 
 Identical config except `use_precip: false` + no `aorc_precip` (daily-Q-only
-disagg, the journal's Exp-3 mechanism); same seed → **same gauge batches**, so
+disagg, the 2026-06-19 analysis's Exp-3 mechanism); same seed → **same gauge batches**, so
 it's a paired comparison. Three-way, 2365 matched gauges, same metric code:
 
 | config | median NSE | median KGE |
@@ -66,7 +66,7 @@ both metrics, not median noise.
 - **Real precip timing helps on BOTH metrics** (+0.020 NSE, +0.018 KGE). It is
   not just the disaggregation mechanism doing the work.
 - **The bare daily-Q disaggregation trades KGE for NSE** (−0.025 KGE / +0.018
-  NSE vs baseline) — the journal's exact over-attenuation signature, from an
+  NSE vs baseline) — the 2026-06-19 analysis's exact over-attenuation signature, from an
   *invented* within-day shape.
 - **Precip rescues the KGE the bare disagg destroys** (0.6926 → 0.7106, +0.018),
   bringing net KGE to within −0.007 of baseline. So the residual KGE gap is
@@ -121,14 +121,14 @@ earn its keep on either metric.
 (at least not with balanced nnse-kge) — it is **baseline-dominated / structural**:
 the summed-Q′ reference already has the highest KGE (0.717) of any config, and
 *any* routing trades a large NSE gain (+0.032…+0.038) for a small KGE give-back.
-This is the journal's "structural ceiling" showing up on the KGE axis: routing
+This is the 2026-06-19 analysis's "structural ceiling" showing up on the KGE axis: routing
 already-dHBV-UH-smoothed Q′ cannot beat the no-routing baseline's KGE. The win
 that *is* real and robust is **NSE via precip-driven timing** (+0.037), with the
 learned roughness rising 0.050→0.068 (precip-off→on) to attenuate precip's
 sharper sub-daily pulses.
 
 The one untested loss lever is the **α-weighted `kge` component loss**
-(`alpha_weight: 2`, the journal's Exp-1 setting) — now that the gradient actually
+(`alpha_weight: 2`, the 2026-06-19 analysis's Exp-1 setting) — now that the gradient actually
 flows (precip), it *might* push α/KGE where balanced nnse-kge could not. But the
 evidence leans toward the KGE ceiling being structural, not objective-driven.
 

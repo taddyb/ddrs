@@ -153,11 +153,11 @@ needed because the leakance-OFF cells already exist.
 |---|---|---|---|
 | hourly (precip-disagg) | OFF | existing — 2026-06-23 precip+L1 | hourly control |
 | hourly (precip-disagg) | **ON** | **NEW #1** | the candidate |
-| daily (repeat-24) | OFF | existing — pre-disagg trained daily routing run (2026-06-19 journal), leakance OFF | daily control |
+| daily (repeat-24) | OFF | existing — pre-disagg trained daily routing run (2026-06-19 runs), leakance OFF | daily control |
 | daily (repeat-24) | **ON** | **NEW #2** | reproduces DDR's failure regime in ddrs |
 
 Note: the daily-OFF cell is the **trained daily routing** run (the 2026-06-19
-journal runs where Muskingum X stuck at init), *not* the summed-Q′ no-routing
+2026-06-19 runs where Muskingum X stuck at init), *not* the summed-Q′ no-routing
 baseline.
 
 - **NEW #1** = the precip+L1 config + `use_leakance: true`, **same seed** → same

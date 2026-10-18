@@ -9,7 +9,7 @@
 **Outputs:** `output/huc_leakance/` (per-gauge CSV, tables, summary figures, four curvature
 landscapes under `landscapes/`)
 **Prior reads this extends:** the Juniata leakance frame
-(`experiments/landscape-jrb-leakance`, journal 2026-09-19) and the curvature landscapes of
+(`experiments/landscape-jrb-leakance`) and the curvature landscapes of
 2026-09-21 on three Juniata gauges, where roughness was 100 to 300x stiffer than either
 leakance parameter at the trained point and the loss was a plateau in `K_D` and `d_gw`.
 

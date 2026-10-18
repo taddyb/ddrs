@@ -70,5 +70,3 @@ ddrs.yaml
 # …same exception for the gridded Juniata example's committed config.
 !examples/juniata_gridded/ddrs.yaml
 
-# Personal research journal (local only)
-JOURNAL.md

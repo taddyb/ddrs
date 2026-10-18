@@ -556,36 +556,9 @@ Subsequent plans on the same input set are cache hits and instant for both.
 Implementation: `src/baseline/`. Mirrors
 `~/projects/ddr/scripts/summed_q_prime.py`.
 
-## Research journal (`research/journal/`, added 2026-09-10)
+## Paper TODO tracker (artifact, added 2026-09-25)
 
-One file per month, append-only, recording what we tried and what came of it.
-Two parts per month: a **ledger** with one row per completed run or experiment
-(including smoke tests and shards, so nothing is lost), and **entries** carrying
-four judgement fields — Question, What we did, Result, Conclusion.
-
-`scripts/journal.py` writes the facts, scraped from `.ddrs/runs/<id>/manifest.json`
-and `.ddrs/experiments/<name>/<ts>/manifest.json`. **It never writes judgement**,
-and neither should you invent it: an entry for a run whose purpose is unrecoverable
-says so. Hooks in `.claude/settings.json` run it after `ddrs run` / `ddrs experiment`
-(ledger row always; a `_TODO_` stub for anything that is not a smoke test), at
-session start (reports runs finished outside a session, writes nothing), and at
-turn end (blocks only on stubs the current session opened). `DDRS_JOURNAL_OFF=1`
-disables it for one command.
-
-```bash
-python3 scripts/journal.py --mode status     # what is pending
-python3 scripts/journal.py --mode backfill   # ledger rows for anything missed
-python3 scripts/test_journal.py              # stdlib only; no tier gate needed
-```
-
-A hook only sees commands Claude runs. A run started in your own terminal is
-caught at the next session start, not immediately. Entries before 2026-09-10 are
-ledger-only by construction.
-
-The journal is the index of the research, not a replacement for it: long-form
-results still earn a `research/findings/YYYY-MM-DD-<topic>-findings.md`, and a durable fact
-still belongs in the skill library in the same session that produced it. Rules for
-writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
+Runs that serve the equifinality paper carry an ID from `~/papers/ddr_equifinality/outline_2026-09-25.md` (E-xx). When you start or finish one, update its row in the Equifinality Paper Tracker artifact, https://claude.ai/artifact/VRoYVfYbLuwvCeDGEtADjc, in the same session with the `updating-equifinality-tracker` skill (user-level): `ArtifactData` on collection `todos`, `doc_id` = the ID; set status, owner (session and branch), evidence as `branch@commit:path §` of the findings doc, and the `.ddrs/` artifact path. `done` requires a committed findings doc; the tracker holds pointers, never numbers. Fields and an example call: `~/papers/ddr_equifinality/TRACKER.md`.
 
 ## Conventions specific to this repo
 
@@ -620,11 +593,10 @@ writing an entry: `.claude/skills/ddrs-journal/SKILL.md`.
 
 ## When in doubt
 
-- **Four skills cover this repo.** `ddrs-dev`: building, coding, configuring,
+- **Three skills cover this repo.** `ddrs-dev`: building, coding, configuring,
   testing, running, debugging; its `references/` carry the full config reference,
   the change→gate matrix, the trap catalog, and the authoritative research-status
   numbers. `ddrs-eval-plots` — evaluating and visualizing run output.
-  `ddrs-journal` — recording what an experiment concluded (see §Research journal).
   `ddrs-run`: the runbook for launching, watching, resuming, and auditing a
   training or eval job.
   The other 16 skills were consolidated on 2026-07-30; see

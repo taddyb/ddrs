@@ -48,8 +48,8 @@ Against the documented benchmarks (`ddrs-dev/references/research-status.md`):
 | **This run: daily flat, p = 21, nse-batch** | **0.7200** | **0.7537** | **+0.042 / +0.037** |
 
 This is the first run on the dHBV2-UH store that beats the baseline on both metrics, and it does so with no
-disaggregation head. The June journal's "structural ceiling" conclusion (daily routing over UH-routed inflow has no
-generalizable skill beyond summed-Q′, `6_19_26_journal.md`, removed 2026-09-08, see `git show 339da86:6_19_26_journal.md`) does not survive this run; that conclusion was drawn from
+disaggregation head. The earlier "structural ceiling" conclusion (daily routing over UH-routed inflow has no
+generalizable skill beyond summed-Q′) does not survive this run; that conclusion was drawn from
 learned-p, L1 and KGE-loss models on the global store.
 
 ## 3. Where the gain is: basin size

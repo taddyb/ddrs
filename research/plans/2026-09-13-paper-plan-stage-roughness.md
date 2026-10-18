@@ -114,4 +114,4 @@ the eval-path bug is the kind of check a reviewer will want to hear about.
 - Figures per run under `.ddrs/runs/<id>/plots/`; the n(d) family via `experiments/stage_roughness/animate_n_of_d.py`
   (`--view area|3d|maps|scatter`), the basin GIF, `gamma_readout.py`, `routing_lag.py`, `arm_delta_by_gauge.py`,
   `dam_roughness.py`; landscape output under `.ddrs/experiments/landscape-n0-gamma/`.
-- Journal entries for every run; research-status table with all seven arms.
+- Research-status table with all seven arms.
