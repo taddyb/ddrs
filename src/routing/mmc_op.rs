@@ -535,7 +535,6 @@ where
             state.use_cuda,
         );
 
-        // gA_values via direct gather+multiply on primitives (mirrors dispatch::grada_primitive).
         let gb_rhs_raw = wrap(gb_rhs_prim.clone());
 
         // Split `gb_rhs` for the MASS BOUND. Where the bound binds, the forward
@@ -558,19 +557,19 @@ where
         // the geometry-side grads to inject below. `None` ⇒ pre-leakance math.
         let zeta_geom = zeta_hook(&gb_rhs_for_zeta);
 
-        let g_a_values_prim = {
-            // -gb[row] * x[col]
-            let gradb_host: Vec<f32> = primitive_to_vec::<I>(gb_rhs_prim.clone());
-            let x_host: Vec<f32> = primitive_to_vec::<I>(state.x_sol.clone());
-            let pattern = &state.pattern;
-            let grada: Vec<f32> = pattern
-                .row_for_nnz
-                .iter()
-                .zip(pattern.col.iter())
-                .map(|(&r, &c)| -gradb_host[r as usize] * x_host[c as usize])
-                .collect();
-            I::float_from_data(burn::tensor::TensorData::from(grada.as_slice()), &device)
-        };
+        // gA[k] = -gb_rhs[row[k]] * x_sol[col[k]]. With `sparse_solver: cuda` this
+        // stays on the device (gather, multiply, negate). The CPU branch is the
+        // same host loop as before, so CPU results do not change. `x_sol` is
+        // always a backend primitive here, so it goes in as `SavedX::Cuda`; the
+        // CPU branch reads it to the host. `gb_rhs_prim` is not used after this
+        // line (`gb_rhs_raw` holds its own clone), so it moves in.
+        let g_a_values_prim = dispatch::grada_primitive::<I>(
+            &state.pattern,
+            gb_rhs_prim,
+            sparse::SavedX::Cuda(state.x_sol.clone()),
+            &device,
+            state.use_cuda,
+        );
 
         // ===========================================================
         // B26. gc1 = assemble_backward(gA_values)
