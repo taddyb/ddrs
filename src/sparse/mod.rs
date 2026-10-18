@@ -392,14 +392,15 @@ thread_local! {
 
 /// Number of host copies (`primitive_to_vec` calls) made on this thread so far.
 ///
-/// Test aid. A test reads it before and after a call and compares the two
-/// values. It counts only the copies in `primitive_to_vec`, the helper that
-/// the sparse solver and the timestep backward use to move a tensor to the
-/// host. The counter is per thread: the tests run in parallel threads, and
-/// burn's autodiff backward runs in the calling thread. The cost is one `Cell`
-/// increment per host copy. No result changes.
+/// Test hook, not a stable API. A test reads it before and after a call and
+/// compares the two values. It counts only the copies in `primitive_to_vec`,
+/// the helper that the sparse solver and the timestep backward use to move a
+/// tensor to the host. It does not see other host reads, such as
+/// `Tensor::into_data` in a caller. The counter is per thread: the tests run
+/// in parallel threads, and burn's autodiff backward runs in the calling
+/// thread. The cost is one `Cell` increment per host copy. No result changes.
 #[doc(hidden)]
-pub fn host_reads_on_this_thread() -> u64 {
+pub fn host_reads_on_this_thread_for_test() -> u64 {
     HOST_READS.with(|c| c.get())
 }
 

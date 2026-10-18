@@ -1288,14 +1288,14 @@ fn trace_backward_reads(cfg: &Config) -> BackwardTrace {
     // the counter, so their host copies do not count.
     let weights = conditioning_weights(true);
 
-    let reads_start = ddrs::sparse::host_reads_on_this_thread();
+    let reads_start = ddrs::sparse::host_reads_on_this_thread_for_test();
     let (loss, parents) = run_forward_loss::<Gpu>(
         cfg, &pattern, &assembler, &dev, &f.n, &f.qsp, &f.psp, &f.qt, &f.qpt, &f.length, &f.slope,
         &weights, Some(Parent::N),
     );
-    let reads_after_forward = ddrs::sparse::host_reads_on_this_thread();
+    let reads_after_forward = ddrs::sparse::host_reads_on_this_thread_for_test();
     let grads = loss.sum().backward();
-    let reads_after_backward = ddrs::sparse::host_reads_on_this_thread();
+    let reads_after_backward = ddrs::sparse::host_reads_on_this_thread_for_test();
 
     let grad_n = parents
         .n
@@ -1318,6 +1318,10 @@ fn trace_backward_reads(cfg: &Config) -> BackwardTrace {
 /// host copies per timestep op (`gb_rhs` and `x_sol`). The control run below
 /// uses the host solver on the same device and must show copies. If it showed
 /// none, the counter would not see the backward and this test would be vacuous.
+///
+/// Scope. The counter sees only `primitive_to_vec`. On this path that is the
+/// only host-read helper: the cuSPARSE solve, SpMV and assemble kernels of the
+/// backward read no tensor to the host.
 #[test]
 fn cusparse_backward_keeps_ga_on_the_device() {
     // Control: the host solver copies to the host, and the counter must see it.
