@@ -726,6 +726,7 @@ fn mc_rows_have_finite_gradients_under_stage_backflow() {
             tv(&[0.3; 3], &device),
             false,
             None,
+            None,
         );
         let q_next = block.step(&pattern, nn.clone(), pp.clone(), qq.clone(), q_t.clone(), q_next_mc, qp);
         let g = q_next.sum().backward();

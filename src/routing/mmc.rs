@@ -1495,6 +1495,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 self.impervious_mask.as_ref().cloned(),
                 if self.collect_zeta { Some(&mut zeta_step) } else { None },
                 self.track_negative_discharge,
+                self.stage_skip.as_deref(),
                 self.gamma.as_ref().cloned(),
             );
             if let Some(diag) = zeta_step {
@@ -1558,6 +1559,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 q_t, q_prime_clamp,
                 length, slope, x_storage,
                 self.track_negative_discharge,
+                self.stage_skip.as_deref(),
                 self.gamma.as_ref().cloned(),
                 self.reservoir.as_ref(),
                 self.release.as_mut().map(|r| {
@@ -1661,7 +1663,6 @@ impl<I: Backend> MuskingumCunge<I> {
         columns.push(initial.unsqueeze_dim::<2>(1));
 
         crate::routing::mmc_op::reset_negative_solve_stats();
-        crate::routing::mmc_op::set_negative_solve_skip_rows(self.stage_skip.clone());
         // The carried dam floor needs dam rows; without them it is a no-op.
         let carry = self.dam_floor == DamFloor::Carry && self.dam_account.is_some();
 
@@ -1765,7 +1766,6 @@ impl<I: Backend> MuskingumCunge<I> {
                 );
             }
         } else {
-            crate::routing::mmc_op::set_negative_solve_skip_rows(None);
             let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
             if total > 0 && neg > 0 {
                 eprintln!(

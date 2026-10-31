@@ -143,6 +143,7 @@ fn run_forward_loss(
         slope_t,
         xst_t,
         false,
+        None,
         gamma_t.clone(),
     );
 
@@ -257,6 +258,7 @@ fn compute_analytical_grad_all_tracked(parent: Parent, gamma: f32) -> Vec<f32> {
         Tensor::from_floats(adj.slope.as_slice(), &device),
         Tensor::from_floats(vec![0.3f32; N].as_slice(), &device),
         false,
+        None,
         Some(gamma_t.clone()),
     );
     let grads = q_next.sum().backward();
