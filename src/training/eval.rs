@@ -150,6 +150,10 @@ pub fn evaluate<I: Backend>(
     let mut zeta_sums: ZetaSums<I> = ZetaSums::new();
     // Per-dam clamp account across chunks (empty without dam rows).
     let mut dam_clamp = crate::training::release_eval::DamClampSums::default();
+    // The stage block's end-of-chunk state and volume account (C9); unused
+    // without `params.stage_routing`.
+    let mut stage_state = crate::training::forward::StageEvalState::default();
+    let stage_on = cfg.stage_routing_on();
 
     // Helper: dispatch the forward based on EvalParams.
     //
@@ -213,6 +217,7 @@ pub fn evaluate<I: Backend>(
                     false,
                     Some(&mut zeta_sums),
                     &mut dam_clamp,
+                    stage_on.then_some(&mut stage_state),
                 );
                 let [n_reaches, chunk_hours] = runoff_reaches.dims();
                 let final_col: Vec<f32> = runoff_reaches
@@ -414,6 +419,15 @@ pub fn evaluate<I: Backend>(
         eprintln!("release clamp (test phase, {} dams): {}", records.len(), summary.describe("dam"));
     }
 
+    if stage_on {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "stage mass balance: rel {:.2e}",
+            stage_state.mass.rel()
+        );
+    }
+
     // Final gate: the tau-trim/downsample and zeta-mean readbacks above also
     // run on the device, after the last per-chunk check — a worker panic
     // there would otherwise slip through as a clean `Ok`.
@@ -446,6 +460,8 @@ pub fn evaluate<I: Backend>(
 #[cfg(test)]
 mod tests {
     use super::{corrupted_chunk_reason, ensure_panic_hook_installed, take_worker_panicked};
+    use crate::config::Config;
+    use crate::training::scatter_add_by_group;
     use ndarray::Array2;
     use std::sync::Mutex;
 
@@ -507,5 +523,123 @@ mod tests {
             corrupted_chunk_reason(&pred),
             Some("non-finite value(s) in predictions".to_string())
         );
+    }
+
+    /// C9: a 30-day Juniata window routed in one chunk and in two 15-day
+    /// chunks gives the same hourly gauge series, because the stage block's
+    /// `(h, Q)` is carried across the chunk boundary. Control: the same two
+    /// chunks without the carry differ more.
+    #[test]
+    fn eval_chunks_carry_the_stage_state() {
+        use crate::config::{ConfigMode, SparseSolver, StageRouting};
+        use crate::data::dataset::MeritGagesDataset;
+        use crate::data::TestWindow;
+        use crate::training::forward::{forward_eval_reaches_with_dams, StageEvalState};
+        use crate::training::release_eval::DamClampSums;
+        use burn::backend::NdArray;
+        use burn::tensor::Tensor;
+
+        type I = NdArray<f32>;
+        let device = <I as burn::tensor::backend::BackendTypes>::Device::default();
+
+        let mut cfg = Config::from_yaml_file_with_mode("examples/juniata/ddrs.yaml", ConfigMode::Testing)
+            .expect("juniata config");
+        cfg.params.sparse_solver = SparseSolver::Cpu;
+        cfg.params.use_cuda_graphs = false;
+        {
+            let exp = cfg.experiment.as_mut().unwrap();
+            exp.start_time = "1995/10/01".into();
+            exp.end_time = "1995/10/30".into();
+        }
+        // examples/juniata/ddrs_stage.yaml settings: block on, every reach,
+        // normal-depth outlet, theta 1, theta_control 0.5, 1 substep.
+        cfg.params.stage_routing = Some(StageRouting { enabled: true, ..Default::default() });
+        let dataset = MeritGagesDataset::open(&cfg).expect("open juniata");
+        let head = crate::config::kan_config(cfg.kan_head.as_ref().unwrap(), cfg.seed).init::<I>(&device);
+        let axis = dataset.time_axis().clone();
+        assert_eq!(axis.num_days, 30);
+
+        // The chunk loop of `evaluate`, hourly, with or without the stage carry.
+        let hourly = |chunk_days: usize, carry: bool, stage: bool| -> Vec<f32> {
+            let mut cfg = cfg.clone();
+            if !stage {
+                cfg.params.stage_routing = None;
+            }
+            let mut state = StageEvalState::default();
+            let mut dams = DamClampSums::default();
+            let mut prev: Option<Vec<f32>> = None;
+            let mut out: Vec<Vec<f32>> = Vec::new();
+            let mut day = 0;
+            while day < axis.num_days {
+                let n = (axis.num_days - day).min(chunk_days);
+                let win = TestWindow::new(&axis, day, n);
+                let batch = dataset.collate_window(&win).expect("collate");
+                let mut tensors = batch.to_tensors::<I>(&device);
+                if let Some(q0) = prev.as_ref() {
+                    tensors.initial_state = Some(Tensor::<I, 1>::from_floats(q0.as_slice(), &device));
+                }
+                if !carry {
+                    state.carry = None;
+                }
+                let reaches = forward_eval_reaches_with_dams::<I>(
+                    &cfg,
+                    &tensors,
+                    &head,
+                    &device,
+                    false,
+                    None,
+                    &mut dams,
+                    stage.then_some(&mut state),
+                );
+                let [nr, th] = reaches.dims();
+                prev = Some(reaches.clone().slice([0..nr, th - 1..th]).reshape([nr]).into_data().into_vec().unwrap());
+                let pred = scatter_add_by_group(
+                    reaches,
+                    tensors.flat_indices.clone(),
+                    tensors.group_ids.clone(),
+                    tensors.num_gauges,
+                );
+                out.push(pred.into_data().into_vec().unwrap());
+                day += n;
+            }
+            // Concatenate the chunks along time (one gauge): the chunk
+            // boundary column is the next chunk's first column.
+            out.into_iter().flatten().collect()
+        };
+        let max_rel = |a: &[f32], b: &[f32]| -> f32 {
+            assert_eq!(a.len(), b.len());
+            a.iter().zip(b).map(|(x, y)| (x - y).abs() / x.abs().max(y.abs()).max(1e-3)).fold(0.0, f32::max)
+        };
+        let one = hourly(30, true, true);
+        let two = hourly(15, true, true);
+        let two_no_carry = hourly(15, false, true);
+        let mc_one = hourly(30, true, false);
+        let mc_two = hourly(15, true, false);
+        assert!(one.iter().chain(&two).all(|v| v.is_finite()));
+        let with_carry = max_rel(&one, &two);
+        let without = max_rel(&one, &two_no_carry);
+        let mc_split = max_rel(&mc_one, &mc_two);
+        println!(
+            "eval chunks, stage on: max rel diff 1 vs 2 chunks {with_carry:.3e} (no carry {without:.3e}); \
+             MC only {mc_split:.3e}"
+        );
+        // The MC rows alone differ by `mc_split` between the two chunkings:
+        // `forward` never reads the last q' row of a chunk, so chunk 2 uses
+        // one hour of forcing early (tests/eval_chunk_continuity.rs). That is
+        // the floor; the carry must add nothing beyond it and must matter.
+        assert!(with_carry < 1e-2, "stage chunks differ by rel {with_carry}");
+        assert!(with_carry <= mc_split * 1.5, "stage chunks differ by {with_carry}, MC floor {mc_split}");
+        assert!(with_carry * 10.0 < without, "the carry does nothing: {with_carry} vs {without}");
+
+        // `evaluate` itself threads the state (daily, tau-trimmed).
+        let run = |days: usize| {
+            super::evaluate::<I>(&cfg, &dataset, super::EvalParams::KanHead(&head), &device, days, std::path::Path::new("ckpt"))
+                .expect("evaluate")
+                .predictions_daily
+        };
+        let (d30, d15) = (run(30), run(15));
+        let rel = d30.iter().zip(d15.iter()).map(|(x, y)| (x - y).abs() / x.abs().max(y.abs()).max(1e-3)).fold(0.0f32, f32::max);
+        println!("evaluate daily, 1 vs 2 chunks: max rel diff {rel:.3e}");
+        assert!(rel < 1e-2, "evaluate daily differs by rel {rel}");
     }
 }

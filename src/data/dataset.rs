@@ -35,6 +35,14 @@ pub struct StageBatch {
     /// Table geometry rows in this batch's COMID order. `Some` exactly when
     /// `params.stage_routing.geometry` is `table` or `mixed`.
     pub geometry: Option<ChannelGeometryRows>,
+    /// Seed rows of the stage set in this batch's network, from
+    /// `StageReaches::Comids` (the COMID lookup `map_reservoir_rows` uses).
+    /// `None` for `reaches: all`; `Some(empty)` when no listed COMID is in the
+    /// batch (the block is then not armed for this batch).
+    pub seed_rows: Option<Vec<usize>>,
+    /// Row of `boundary_comid` in this batch's network. `None` when unset or
+    /// when the batch has no stage seeds.
+    pub boundary_row: Option<usize>,
 }
 
 /// One batch of inputs for the MC routing engine + MLP head.
@@ -405,6 +413,8 @@ pub struct MeritGagesDataset {
     channel_geometry: Option<ChannelGeometryStore>,
     /// `cfg.stage_routing_on()`, captured at open.
     stage_on: bool,
+    /// `params.stage_routing`, captured at open when the block is on.
+    stage_cfg: Option<crate::config::StageRouting>,
 }
 
 /// Log the data version a store opened at, as a sibling of the
@@ -893,6 +903,7 @@ impl MeritGagesDataset {
             stage_boundary,
             channel_geometry,
             stage_on,
+            stage_cfg: cfg.params.stage_routing.clone().filter(|_| stage_on),
         })
     }
 
@@ -1217,7 +1228,37 @@ impl MeritGagesDataset {
             }
             None => None,
         };
-        Ok(Some(StageBatch { boundary, geometry }))
+        // Stage seeds and the boundary reach in this batch's network. With no
+        // seed in the batch the block is not armed (`Some(empty)`), and the
+        // boundary reach is not checked.
+        let cfg = self.stage_cfg.as_ref().expect("stage_on implies stage_cfg");
+        let seed_rows = match &cfg.reaches {
+            crate::config::StageReaches::All => None,
+            crate::config::StageReaches::Comids(ids) => {
+                let want: std::collections::HashSet<i64> = ids.iter().copied().collect();
+                Some(
+                    comids
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| want.contains(&c.0))
+                        .map(|(i, _)| i)
+                        .collect::<Vec<usize>>(),
+                )
+            }
+        };
+        let has_set = seed_rows.as_ref().is_none_or(|s| !s.is_empty());
+        let boundary_row = match cfg.boundary_comid {
+            Some(id) if has_set => Some(comids.iter().position(|c| c.0 == id).ok_or_else(|| {
+                DataError::Malformed {
+                    path: std::path::PathBuf::from("<config>"),
+                    message: format!(
+                        "params.stage_routing.boundary_comid {id} is not in this batch's network"
+                    ),
+                }
+            })?),
+            _ => None,
+        };
+        Ok(Some(StageBatch { boundary, geometry, seed_rows, boundary_row }))
     }
 
     // -----------------------------------------------------------------------
@@ -1620,6 +1661,38 @@ impl MeritGagesDataset {
             );
             rows
         });
+
+        // 8. Stage block: the stage set on the full static network, logged once
+        // per dataset (like the reservoir line above, to fd 2).
+        if let Some(sr) = self.stage_cfg.as_ref() {
+            let (k, added) = match &sr.reaches {
+                crate::config::StageReaches::All => (n, 0),
+                crate::config::StageReaches::Comids(ids) => {
+                    let want: std::collections::HashSet<i64> = ids.iter().copied().collect();
+                    let seeds: Vec<usize> = compressed
+                        .divide_comids
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| want.contains(&c.0))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let (set, added) = crate::routing::stage::downstream_closure(&adjacency, &seeds);
+                    (set.iter().filter(|&&b| b).count(), added)
+                }
+            };
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "stage routing: {k} of {n} reaches in the stage block ({added} added by downstream closure)"
+            );
+            let _ = writeln!(
+                std::io::stderr(),
+                "stage routing: substeps: {}, theta: {}, theta_control: {}",
+                sr.substeps,
+                sr.theta,
+                sr.theta_control
+            );
+        }
 
         Ok(StaticNetworkCache {
             adjacency,

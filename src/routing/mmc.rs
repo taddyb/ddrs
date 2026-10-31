@@ -28,6 +28,9 @@ use burn::tensor::TensorPrimitive;
 use crate::config::{Config, DamFloor, DamRow, SparseSolver};
 use crate::routing::mmc_op::{ReleaseParent, ReservoirTensors};
 use crate::routing::release::{MIN_T_DAYS, SECONDS_PER_DAY};
+use crate::routing::stage::{
+    StageBlock, StageCarry, StageInputs, StageMassBalance, StageNetwork, StageParams,
+};
 use crate::routing::utils::denormalize;
 use crate::sparse::{triangular_csr_solve, AValuesAssembler, CsrPattern, SparseAdjacency};
 
@@ -293,6 +296,8 @@ pub struct FloodPoolAccount {
 /// constant `T` (seconds) when the release is not seasonal, and the step `T`
 /// `forward` hands to `route_timestep`.
 struct ArmedRelease<I: Backend> {
+    /// The dam rows on the host (`set_stage_block` checks them against the stage set).
+    rows_host: Vec<usize>,
     rows: Tensor<I, 1, Int>,
     mask: Tensor<I, 1, Bool>,
     t0_days: Tensor<Autodiff<I>, 1>,
@@ -668,6 +673,13 @@ pub struct MuskingumCunge<I: Backend> {
     /// `Config::dam_row_positivity` at construction). `false` routes bitwise
     /// as before the option existed.
     dam_row_positivity: bool,
+    /// Implicit stage block on the downstream-closed stage set
+    /// (`set_stage_block`; `crate::routing::stage`). `None` routes bitwise as
+    /// before the block existed.
+    stage: Option<StageBlock<I>>,
+    /// The routed adjacency (rows, cols, length, raw slope; no values), kept on
+    /// the host for `set_stage_block`.
+    stage_adj: Option<SparseAdjacency>,
     /// Network size cached for output shape / hot-start sizing. The dense
     /// `N` tensor is gone — all network use goes through `pattern`/`assembler`.
     n_segments: Option<usize>,
@@ -776,6 +788,8 @@ impl<I: Backend> MuskingumCunge<I> {
             flood_pool: None,
             dam_floor,
             dam_row_positivity,
+            stage: None,
+            stage_adj: None,
             n_segments: None,
             pattern: None,
             assembler: None,
@@ -847,6 +861,19 @@ impl<I: Backend> MuskingumCunge<I> {
         let pattern = Arc::new(CsrPattern::from_sparse(&inputs.adjacency));
         self.assembler = Some(AValuesAssembler::<I>::new(&pattern, &self.device));
         self.pattern = Some(pattern);
+        // A new network drops the previous stage block; re-arm it with
+        // `set_stage_block` (after the reservoir rows).
+        self.stage = None;
+        // Only the topology and geometry `StageNetwork::build` reads (no values).
+        self.stage_adj = Some(SparseAdjacency {
+            n,
+            rows: inputs.adjacency.rows.clone(),
+            cols: inputs.adjacency.cols.clone(),
+            values: Vec::new(),
+            length_m: inputs.adjacency.length_m.clone(),
+            slope: inputs.adjacency.slope.clone(),
+            parent_offset: None,
+        });
 
         self.n_segments = Some(n);
         self.length = Some(length);
@@ -1200,6 +1227,7 @@ impl<I: Backend> MuskingumCunge<I> {
             }
         });
         self.release = Some(ArmedRelease {
+            rows_host: release.rows.clone(),
             rows: Tensor::from_data(TensorData::new(rows_i32, [n_dams]), &self.device),
             mask: Tensor::from_data(TensorData::from(mask.as_slice()), &self.device),
             t0_days: release.t0_days,
@@ -1457,6 +1485,10 @@ impl<I: Backend> MuskingumCunge<I> {
                 "set_reservoir_rows / set_dam_release are not supported with use_cuda_graphs: \
                  the captured graph has no linear-reservoir K/X override"
             );
+            assert!(
+                self.stage.is_none(),
+                "the stage block is not supported with use_cuda_graphs: the captured graph has no stage solve"
+            );
             crate::routing::mmc_op::timestep_forward_via_graph::<I>(
                 &self.cfg, pattern, assembler,
                 n, q_spatial, p_spatial,
@@ -1464,7 +1496,19 @@ impl<I: Backend> MuskingumCunge<I> {
                 length, slope, x_storage,
             )
         } else {
-            crate::routing::mmc_op::timestep_forward_with_reservoirs::<I>(
+            // Stage block (plain branch only): the MC op reads the stage rows
+            // of `q_t` clamped and detached (`mc_view`, C3); the block then
+            // reads the unclamped `q_t` and the same clamped `q'` the MC op
+            // gets. With no block both are skipped.
+            let discharge_lb = self.cfg.params.attribute_minimums.discharge;
+            let stage_args = self.stage.is_some().then(|| {
+                (n.clone(), p_spatial.clone(), q_spatial.clone(), q_t.clone(), q_prime_clamp.clone())
+            });
+            let q_t = match self.stage.as_ref() {
+                Some(block) => block.mc_view(q_t, discharge_lb),
+                None => q_t,
+            };
+            let q_next = crate::routing::mmc_op::timestep_forward_with_reservoirs::<I>(
                 &self.cfg, pattern, assembler,
                 n, q_spatial, p_spatial,
                 q_t, q_prime_clamp,
@@ -1486,7 +1530,13 @@ impl<I: Backend> MuskingumCunge<I> {
                     }
                 }),
                 self.dam_account.is_some().then_some(&mut self.last_dam_diag),
-            )
+            );
+            match (self.stage.as_mut(), stage_args) {
+                (Some(block), Some((n_man, p, q, q_t_raw, q_prime))) => {
+                    block.step(pattern, n_man, p, q, q_t_raw, q_next, q_prime)
+                }
+                _ => q_next,
+            }
         }
     }
 
@@ -1817,6 +1867,150 @@ impl<I: Backend> MuskingumCunge<I> {
             }),
             _ => None,
         }
+    }
+
+    /// The stage set (downstream closure of `seeds`, or every reach for
+    /// `None`) on the routed network. `None` before `setup_inputs`. Used to
+    /// vet dams against the set before `set_stage_block`.
+    pub fn stage_set(&self, seeds: Option<&[usize]>) -> Option<Vec<bool>> {
+        let adj = self.stage_adj.as_ref()?;
+        let all: Vec<usize>;
+        let seeds = match seeds {
+            Some(s) => s,
+            None => {
+                all = (0..adj.n).collect();
+                &all
+            }
+        };
+        Some(crate::routing::stage::downstream_closure(adj, seeds).0)
+    }
+
+    /// Arm the implicit stage block on the downstream closure of
+    /// `inputs.seeds`. Call after [`Self::setup_inputs`] and after the
+    /// reservoir rows. Refuses (`Err` naming "stage"): leakance params; a dam
+    /// release armed on a row inside the stage set (C30); `boundary_row` that
+    /// is not the stage set's outlet (names `boundary_comid`, C1);
+    /// `prescribed_stage` without a boundary series.
+    ///
+    /// Order (Task 10b): the block is built, then `set_boundary_series`,
+    /// `set_table_geometry`, and last `hotstart` from the engine's
+    /// `discharge_t`, because the table hotstart reads the first two.
+    ///
+    /// Outlet anchor: `z_out[outlet]` comes from `inputs.anchor_m`, and
+    /// `set_table_geometry` replaces only `z_mid`. When the outlet has a table
+    /// row, its `bed_z_m` is used as the anchor instead (the downstream end of
+    /// the outlet reach sits at the table's bed), so the two never disagree.
+    pub fn set_stage_block(&mut self, params: StageParams, inputs: StageInputs) -> Result<(), String>
+    where
+        I: 'static,
+        I::FloatTensorPrimitive: 'static,
+        I::Device: 'static,
+    {
+        if self.k_d.is_some() || self.d_gw.is_some() || self.leakance_factor.is_some() {
+            return Err("stage block: not supported with leakance params (params.use_leakance)".into());
+        }
+        let adj = self.stage_adj.as_ref().ok_or("stage block: call setup_inputs first")?;
+        let pattern = self.pattern.as_ref().ok_or("stage block: call setup_inputs first")?;
+        let seeds = inputs.seeds.as_deref();
+        let mut net = StageNetwork::build(adj, pattern, seeds, inputs.anchor_m, &inputs.dams)
+            .map_err(|e| format!("stage block: {e}"))?;
+        if let Some((rows, _)) = &inputs.geometry {
+            if let Some(j) = rows.rows.iter().position(|&r| r == net.outlet) {
+                net = StageNetwork::build(adj, pattern, seeds, rows.bed_z[j], &inputs.dams)
+                    .map_err(|e| format!("stage block: {e}"))?;
+            }
+        }
+        if let Some(rel) = &self.release {
+            if let Some(&row) = rel.rows_host.iter().find(|&&r| net.in_stage[r]) {
+                return Err(format!(
+                    "stage block: a dam release is armed on row {row} inside the stage set; \
+                     the block routes only fixed-table option C dams"
+                ));
+            }
+        }
+        if let Some(r) = inputs.boundary_row {
+            if r != net.outlet {
+                return Err(format!(
+                    "stage block: boundary_comid is row {r} but the stage set's outlet is row {}",
+                    net.outlet
+                ));
+            }
+        }
+        if params.boundary == crate::config::DownstreamBoundary::PrescribedStage
+            && inputs.boundary_series.is_none()
+        {
+            return Err("stage block: downstream_boundary prescribed_stage needs a boundary series".into());
+        }
+        let mut block = StageBlock::<I>::new(net, params, &self.device);
+        if let Some(series) = inputs.boundary_series {
+            block.set_boundary_series(series).map_err(|e| format!("stage block: {e}"))?;
+        }
+        if let Some((rows, strict)) = inputs.geometry {
+            block.set_table_geometry(rows, strict).map_err(|e| format!("stage block: {e}"))?;
+        }
+        let n_segments = self.n_segments.expect("setup_inputs ran");
+        block.hotstart(
+            self.discharge_t.as_ref().expect("setup_inputs ran").clone(),
+            self.n.as_ref().expect("setup_inputs ran").clone(),
+            self.p_spatial_broadcast(n_segments),
+            self.q_spatial.as_ref().expect("setup_inputs ran").clone(),
+            self.slope.as_ref().expect("setup_inputs ran").clone(),
+        );
+        self.stage = Some(block);
+        Ok(())
+    }
+
+    /// The block's carried stage `h_t` (`None` without a block).
+    pub fn stage_state(&self) -> Option<Tensor<Autodiff<I>, 1>> {
+        self.stage.as_ref()?.stage()
+    }
+
+    /// Volume bookkeeping of the block so far (`None` without a block).
+    pub fn stage_mass_balance(&self) -> Option<StageMassBalance> {
+        self.stage.as_ref().map(|b| b.mass_balance())
+    }
+
+    /// The block's `(h, Q)` after `forward()`: `h_t` and the last hour's
+    /// unclamped `Q`, on the host, detached (C9). `None` without a block.
+    pub fn stage_carry(&self) -> Option<StageCarry> {
+        let block = self.stage.as_ref()?;
+        let h: Vec<f32> = block.stage()?.inner().into_data().to_vec().ok()?;
+        let q: Vec<f32> = self.discharge_t.as_ref()?.clone().inner().into_data().to_vec().ok()?;
+        Some(StageCarry { h, q })
+    }
+
+    /// Start the block from `carry` (the previous chunk's end): `h_t` is
+    /// replaced, and `discharge_t` on the stage rows (the MC rows keep the
+    /// value `setup_inputs` gave them, with their tape). Call after
+    /// [`Self::set_stage_block`]. The carried `Q` stays unclamped (C9, C3).
+    pub fn set_stage_carry(&mut self, carry: &StageCarry) -> Result<(), String> {
+        let block = self.stage.as_mut().ok_or("set_stage_carry: no stage block is armed")?;
+        let n = self.n_segments.expect("setup_inputs ran");
+        if carry.h.len() != n || carry.q.len() != n {
+            return Err(format!(
+                "set_stage_carry: carry has {} and {} values for {n} reaches",
+                carry.h.len(),
+                carry.q.len()
+            ));
+        }
+        if let Some(i) = carry.h.iter().chain(&carry.q).position(|v| !v.is_finite()) {
+            return Err(format!("set_stage_carry: non-finite carry value at position {i}"));
+        }
+        let mask = Tensor::<Autodiff<I>, 1, Bool>::from_data(
+            TensorData::from(block.stage_rows()),
+            &self.device,
+        );
+        block.set_stage(Tensor::<Autodiff<I>, 1>::from_floats(carry.h.as_slice(), &self.device));
+        let q_new = Tensor::<Autodiff<I>, 1>::from_floats(carry.q.as_slice(), &self.device);
+        let q_old = self.discharge_t.take().expect("setup_inputs ran");
+        self.discharge_t = Some(q_old.mask_where(mask, q_new));
+        Ok(())
+    }
+
+    /// Test hook: the armed stage block (Task 12 records coefficients; C22).
+    #[doc(hidden)]
+    pub fn stage_block_mut(&mut self) -> Option<&mut StageBlock<I>> {
+        self.stage.as_mut()
     }
 
     pub fn discharge_state(&self) -> Option<Tensor<Autodiff<I>, 1>> {

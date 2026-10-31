@@ -236,6 +236,32 @@ pub struct StageParams {
     pub use_cuda: bool,
 }
 
+/// What the engine hook needs to arm a stage block (`MuskingumCunge::set_stage_block`).
+#[derive(Debug, Clone)]
+pub struct StageInputs {
+    /// Seed rows of the stage set (`StageBatch::seed_rows`); `None` is every reach.
+    pub seeds: Option<Vec<usize>>,
+    /// `stage_routing.anchor_elevation_m`. When the stage outlet has a table
+    /// geometry row, the table's `bed_z_m` replaces it (see `set_stage_block`).
+    pub anchor_m: f32,
+    /// Hourly boundary stage, one value per q' row (`StageBatch::boundary`).
+    pub boundary_series: Option<Vec<f32>>,
+    /// Network row of `boundary_comid` (`StageBatch::boundary_row`, C1).
+    pub boundary_row: Option<usize>,
+    /// Table rows and `strict` (= `geometry == Table`; C17).
+    pub geometry: Option<(ChannelGeometryRows, bool)>,
+    /// `(row, T in days)` of the window's active fixed-table dams (C30).
+    pub dams: Vec<(usize, f32)>,
+}
+
+/// The block's state at the end of a chunk, per reach in network order. Only
+/// the stage rows are read back (C9). `q` is the unclamped discharge.
+#[derive(Debug, Clone)]
+pub struct StageCarry {
+    pub h: Vec<f32>,
+    pub q: Vec<f32>,
+}
+
 /// Volume bookkeeping of the stage rows, summed over the steps taken (m3).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StageMassBalance {
@@ -657,6 +683,11 @@ where
             }
         };
         h_dam * self.c.dam.clone() + h_flow * one_minus::<I>(self.c.dam.clone())
+    }
+
+    /// Stage-set membership per reach.
+    pub fn stage_rows(&self) -> &[bool] {
+        &self.net.in_stage
     }
 
     /// Current stage (`None` before `hotstart`).
