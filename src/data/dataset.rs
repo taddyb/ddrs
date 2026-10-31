@@ -18,7 +18,8 @@ use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
     map_reservoir_rows, read_dam_features, read_fixed_release_table, AorcPrecipStore,
     AttributesStore, ConusAdjacencyStore, FixedTable, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, ReservoirRows, ReservoirTable, StageBoundaryStore, StateCache,
+    ChannelGeometryRows, ChannelGeometryStore, ObservationsStore, ReservoirRows, ReservoirTable,
+    StageBoundaryStore, StateCache,
     StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
@@ -31,6 +32,9 @@ pub struct StageBatch {
     /// value `k` is the hour of q' row `k`, index 0 starts at 00:00 UTC on the
     /// window's first day. `None` when the boundary is not prescribed.
     pub boundary: Option<Vec<f32>>,
+    /// Table geometry rows in this batch's COMID order. `Some` exactly when
+    /// `params.stage_routing.geometry` is `table` or `mixed`.
+    pub geometry: Option<ChannelGeometryRows>,
 }
 
 /// One batch of inputs for the MC routing engine + MLP head.
@@ -396,6 +400,13 @@ pub struct MeritGagesDataset {
     /// `data_sources.stage_boundary`, read once at open when stage routing is
     /// on and the path is set; `None` otherwise.
     stage_boundary: Option<StageBoundaryStore>,
+    /// `data_sources.channel_geometry`, read once at open when stage routing is
+    /// on with `geometry: table | mixed`.
+    channel_geometry: Option<ChannelGeometryStore>,
+    /// `geometry: table`: every stage reach needs a row (checked per batch).
+    geometry_strict: bool,
+    /// `stage_routing.reaches`, for the coverage check.
+    stage_reaches: crate::config::StageReaches,
     /// `cfg.stage_routing_on()`, captured at open.
     stage_on: bool,
 }
@@ -629,6 +640,20 @@ impl MeritGagesDataset {
             _ => None,
         };
 
+        let (channel_geometry, geometry_strict, stage_reaches) = match &cfg.params.stage_routing {
+            Some(sr) if stage_on => {
+                use crate::config::StageGeometry;
+                let store = match (&ds.channel_geometry, sr.geometry) {
+                    (Some(path), StageGeometry::Table | StageGeometry::Mixed) => {
+                        Some(ChannelGeometryStore::open(path)?)
+                    }
+                    _ => None,
+                };
+                (store, sr.geometry == StageGeometry::Table, sr.reaches.clone())
+            }
+            _ => (None, false, crate::config::StageReaches::All),
+        };
+
         let reservoirs = if cfg.params.use_reservoirs {
             let path = ds.reservoirs.as_ref().ok_or_else(|| DataError::Malformed {
                 path: std::path::PathBuf::from("<config>"),
@@ -809,6 +834,9 @@ impl MeritGagesDataset {
             leakance_impervious_threshold,
             reservoirs,
             stage_boundary,
+            channel_geometry,
+            geometry_strict,
+            stage_reaches,
             stage_on,
         })
     }
@@ -1070,7 +1098,12 @@ impl MeritGagesDataset {
             .as_ref()
             .map(|table| map_reservoir_rows(table, &compressed.divide_comids));
 
-        let stage = self.stage_batch(window.window_start, q_prime.shape()[0])?;
+        let stage = self.stage_batch(
+            window.window_start,
+            q_prime.shape()[0],
+            &adjacency,
+            &compressed.divide_comids,
+        )?;
 
         // ----- 8. Assemble -----
         Ok(RoutingBatch {
@@ -1103,10 +1136,44 @@ impl MeritGagesDataset {
         &self,
         window_start: chrono::NaiveDate,
         n_rows: usize,
+        adjacency: &SparseAdjacency,
+        comids: &[Comid],
     ) -> Result<Option<StageBatch>> {
         if !self.stage_on {
             return Ok(None);
         }
+        let geometry = match &self.channel_geometry {
+            Some(store) => {
+                if self.geometry_strict {
+                    let seeds: Vec<usize> = match &self.stage_reaches {
+                        crate::config::StageReaches::All => (0..comids.len()).collect(),
+                        crate::config::StageReaches::Comids(ids) => comids
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| ids.contains(&c.0))
+                            .map(|(i, _)| i)
+                            .collect(),
+                    };
+                    let (in_stage, _) = crate::routing::stage::downstream_closure(adjacency, &seeds);
+                    let missing = store.uncovered_stage_comids(comids, &in_stage);
+                    if !missing.is_empty() {
+                        let first: Vec<String> =
+                            missing.iter().take(5).map(|c| c.0.to_string()).collect();
+                        return Err(DataError::Malformed {
+                            path: store.path.clone(),
+                            message: format!(
+                                "geometry: table needs a row for every stage reach; {} \
+                                 missing, first COMIDs: {}",
+                                missing.len(),
+                                first.join(", ")
+                            ),
+                        });
+                    }
+                }
+                Some(store.rows_for(comids))
+            }
+            None => None,
+        };
         let boundary = match &self.stage_boundary {
             Some(store) => {
                 let v = store.slice(window_start.and_hms_opt(0, 0, 0).unwrap(), n_rows)?;
@@ -1123,7 +1190,7 @@ impl MeritGagesDataset {
             }
             None => None,
         };
-        Ok(Some(StageBatch { boundary }))
+        Ok(Some(StageBatch { boundary, geometry }))
     }
 
     // -----------------------------------------------------------------------
@@ -1359,7 +1426,12 @@ impl MeritGagesDataset {
             None => None,
         };
 
-        let stage = self.stage_batch(window.window_start, q_prime.shape()[0])?;
+        let stage = self.stage_batch(
+            window.window_start,
+            q_prime.shape()[0],
+            &cache.adjacency,
+            &cache.divide_comids,
+        )?;
 
         Ok(RoutingBatch {
             adjacency: cache.adjacency.clone(),

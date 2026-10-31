@@ -13,6 +13,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::DownstreamBoundary;
+use crate::data::store::ChannelGeometryRows;
 use crate::geometry::{compute_trapezoidal_geometry, trapezoid_depth_derivatives, trapezoid_from_depth};
 use crate::sparse::tree_lu::{assert_tree, tree_lu_solve};
 use crate::sparse::{CsrPattern, SparseAdjacency};
@@ -61,6 +62,22 @@ fn down_of(adj: &SparseAdjacency) -> Vec<i32> {
         }
     }
     down
+}
+
+/// Bed at the downstream end of each reach's edge. The outlet's downstream bed
+/// is `z_out[outlet]`, where `h_bc` sits (C21).
+fn z_down_of(net: &StageNetwork) -> Vec<f32> {
+    (0..net.n)
+        .map(|i| {
+            if i == net.outlet {
+                net.z_out[i]
+            } else if net.down[i] >= 0 {
+                net.z_mid[net.down[i] as usize]
+            } else {
+                net.z_mid[i]
+            }
+        })
+        .collect()
 }
 
 /// Mark `seeds` and every reach downstream of them. Returns the mask and the
@@ -303,6 +320,34 @@ struct RowConsts<I: Backend> {
     s0: Tensor<Ad<I>, 1>,
 }
 
+/// Table geometry on the device (`set_table_geometry`). Rows without a table
+/// row have `mask` 0 and neutral values, so the blends return the head's value
+/// exactly.
+struct TableConsts<I: Backend> {
+    /// 1 on table rows in the stage set.
+    mask: Tensor<Ad<I>, 1>,
+    /// Top width; 1 off the table.
+    tw: Tensor<Ad<I>, 1>,
+    /// Fixed Manning `n`; 1 off the table.
+    n: Tensor<Ad<I>, 1>,
+    /// Dam release reference stage (`pool_z`, or the bed); 0 off the table.
+    pool: Tensor<Ad<I>, 1>,
+    /// Host copy of the bed for the hotstart.
+    bed_h: Vec<f32>,
+}
+
+/// Edge or storage section: head trapezoid, or the rectangle on table rows.
+struct Section<I: Backend> {
+    top_width: Tensor<Ad<I>, 1>,
+    area: Tensor<Ad<I>, 1>,
+    wetted_perimeter: Tensor<Ad<I>, 1>,
+    hydraulic_radius: Tensor<Ad<I>, 1>,
+    /// `dA/dd`.
+    a_d: Tensor<Ad<I>, 1>,
+    /// `dP/dd`.
+    p_d: Tensor<Ad<I>, 1>,
+}
+
 /// Slot-level constants (length `nnz`), built on the first step.
 struct SlotConsts<I: Backend> {
     pattern: Arc<CsrPattern>,
@@ -323,6 +368,7 @@ pub struct StageBlock<I: Backend> {
     params: StageParams,
     c: RowConsts<I>,
     slots: Option<SlotConsts<I>>,
+    table: Option<TableConsts<I>>,
     h_t: Option<Tensor<Ad<I>, 1>>,
     boundary_series: Option<Vec<f32>>,
     step_index: usize,
@@ -388,18 +434,7 @@ where
             .collect();
         let mut outlet = vec![0.0f32; n];
         outlet[net.outlet] = 1.0;
-        // The outlet's downstream bed is `z_out[outlet]`, where `h_bc` sits (C21).
-        let z_down: Vec<f32> = (0..n)
-            .map(|i| {
-                if i == net.outlet {
-                    net.z_out[i]
-                } else if net.down[i] >= 0 {
-                    net.z_mid[net.down[i] as usize]
-                } else {
-                    net.z_mid[i]
-                }
-            })
-            .collect();
+        let z_down = z_down_of(&net);
         let s0: Vec<f32> = net.slope.iter().map(|s| s.max(1e-5)).collect();
         let c = RowConsts {
             down_idx: Tensor::<Ad<I>, 1, Int>::from_data(TensorData::from(down_idx.as_slice()), device),
@@ -425,6 +460,7 @@ where
             params,
             c,
             slots: None,
+            table: None,
             h_t: None,
             boundary_series: None,
             step_index: 0,
@@ -434,6 +470,106 @@ where
             record: false,
             coeff_record: Vec::new(),
         }
+    }
+
+    /// Section at `depth`: the head's trapezoid, with the rectangle (`A_d = TW`,
+    /// `P_d = 2`) on table rows. The head's `p`, `q` get exactly zero gradient
+    /// on table rows (the mask multiplies the trapezoid branch).
+    fn section(
+        &self,
+        p: &Tensor<Ad<I>, 1>,
+        q: &Tensor<Ad<I>, 1>,
+        depth: Tensor<Ad<I>, 1>,
+    ) -> Section<I> {
+        let bw_lb = self.params.bottom_width_lb;
+        let g = trapezoid_from_depth(p.clone(), q.clone(), depth.clone(), bw_lb);
+        let (a_d, p_d) = trapezoid_depth_derivatives(p.clone(), q.clone(), depth.clone(), &g, bw_lb);
+        let Some(t) = &self.table else {
+            return Section {
+                top_width: g.top_width,
+                area: g.area,
+                wetted_perimeter: g.wetted_perimeter,
+                hydraulic_radius: g.hydraulic_radius,
+                a_d,
+                p_d,
+            };
+        };
+        let keep = one_minus::<I>(t.mask.clone());
+        let area_r = t.tw.clone() * depth.clone();
+        let perim_r = t.tw.clone() + depth * 2.0;
+        let radius_r = area_r.clone() / perim_r.clone();
+        let mix = |head: Tensor<Ad<I>, 1>, tab: Tensor<Ad<I>, 1>| {
+            head * keep.clone() + tab * t.mask.clone()
+        };
+        Section {
+            top_width: mix(g.top_width, t.tw.clone()),
+            area: mix(g.area, area_r),
+            wetted_perimeter: mix(g.wetted_perimeter, perim_r),
+            hydraulic_radius: mix(g.hydraulic_radius, radius_r),
+            a_d: mix(a_d, t.tw.clone()),
+            p_d: mix(p_d, Tensor::<Ad<I>, 1>::ones_like(&t.tw) * 2.0),
+        }
+    }
+
+    /// Use the table for the reaches it lists (`geometry: table | mixed`).
+    /// Table rows are rectangles of width `top_width`, fixed `n`, bed `bed_z`
+    /// (it replaces the head's `z_mid` there) and, on dam rows, release
+    /// reference `pool_z` (the bed when `None`). Table rows outside the stage
+    /// set are ignored. With `strict` (`geometry: table`) a stage row without
+    /// a table row is an error; otherwise it keeps the head's geometry (C17).
+    /// Call before `hotstart`, after `new`.
+    pub fn set_table_geometry(&mut self, rows: ChannelGeometryRows, strict: bool) -> Result<(), String> {
+        let nn = self.net.n;
+        let k = rows.rows.len();
+        if [rows.top_width.len(), rows.bed_z.len(), rows.n.len(), rows.pool_z.len()]
+            .iter()
+            .any(|&l| l != k)
+        {
+            return Err("table geometry columns differ in length".into());
+        }
+        let mut mask = vec![0.0f32; nn];
+        let mut listed = vec![false; nn];
+        let mut tw = vec![1.0f32; nn];
+        let mut nt = vec![1.0f32; nn];
+        let mut bed = self.net.z_mid.clone();
+        let mut pool = vec![0.0f32; nn];
+        for j in 0..k {
+            let r = rows.rows[j];
+            if r >= nn {
+                return Err(format!("table geometry row {r} is out of range (n = {nn})"));
+            }
+            if listed[r] {
+                return Err(format!("table geometry lists row {r} twice"));
+            }
+            listed[r] = true;
+            if !self.net.in_stage[r] {
+                continue;
+            }
+            mask[r] = 1.0;
+            tw[r] = rows.top_width[j];
+            nt[r] = rows.n[j];
+            bed[r] = rows.bed_z[j];
+            pool[r] = rows.pool_z[j].unwrap_or(rows.bed_z[j]);
+        }
+        if strict {
+            if let Some(i) = (0..nn).find(|&i| self.net.in_stage[i] && mask[i] == 0.0) {
+                return Err(format!(
+                    "stage row {i} has no row in the channel geometry table (geometry: table)"
+                ));
+            }
+        }
+        let device = self.c.z_mid.device();
+        self.net.z_mid = bed;
+        self.c.z_mid = f32_tensor::<I>(&self.net.z_mid, &device);
+        self.c.z_down = f32_tensor::<I>(&z_down_of(&self.net), &device);
+        self.table = Some(TableConsts {
+            mask: f32_tensor::<I>(&mask, &device),
+            tw: f32_tensor::<I>(&tw, &device),
+            n: f32_tensor::<I>(&nt, &device),
+            pool: f32_tensor::<I>(&pool, &device),
+            bed_h: self.net.z_mid.clone(),
+        });
+        Ok(())
     }
 
     /// Hourly boundary stage, one value per output column. Hour `k` (0-based)
@@ -465,6 +601,7 @@ where
     ) {
         let pr = &self.params;
         let q0 = q0.clamp_min(1e-6);
+        let (q0_tab, slope_tab) = (q0.clone(), slope_floored.clone());
         let geom = compute_trapezoidal_geometry(
             n,
             p.clone(),
@@ -480,8 +617,46 @@ where
             .powf(e.recip())
             .clamp_min(pr.depth_lb);
         let depth = geom.depth * one_minus::<I>(self.c.dam.clone()) + d_dam * self.c.dam.clone();
-        self.h_t = Some(self.c.z_mid.clone() + depth);
+        let h_head = self.c.z_mid.clone() + depth;
+        self.h_t = Some(match &self.table {
+            None => h_head,
+            Some(t) => {
+                let h_tab = self.table_hotstart(t, q0_tab, slope_tab);
+                h_head * one_minus::<I>(t.mask.clone()) + h_tab * t.mask.clone()
+            }
+        });
         self.step_index = 0;
+    }
+
+    /// Table-row start stage (C10). Non-dam rows: the boundary at t0 under
+    /// `PrescribedStage` (at least `bed + depth_lb`), else bed plus the
+    /// wide-channel normal depth of the rectangle. Dam rows: option C on the
+    /// active storage, `pool + T*Q0/(TW*L)`.
+    fn table_hotstart(
+        &self,
+        t: &TableConsts<I>,
+        q0: Tensor<Ad<I>, 1>,
+        slope_floored: Tensor<Ad<I>, 1>,
+    ) -> Tensor<Ad<I>, 1> {
+        let pr = &self.params;
+        let device = q0.device();
+        let nn = self.net.n;
+        let h_dam = t.pool.clone()
+            + self.c.dam_t.clone() * q0.clone() / (t.tw.clone() * self.c.length.clone());
+        let prescribed = pr.boundary == DownstreamBoundary::PrescribedStage;
+        let h_flow = match (prescribed, self.boundary_series.as_ref()) {
+            (true, Some(s)) => {
+                let v: Vec<f32> = (0..nn).map(|i| (t.bed_h[i] + pr.depth_lb).max(s[0])).collect();
+                f32_tensor::<I>(&v, &device)
+            }
+            _ => {
+                let dn = (t.n.clone() * q0 / (t.tw.clone() * slope_floored.sqrt()))
+                    .powf_scalar(0.6)
+                    .clamp_min(pr.depth_lb);
+                f32_tensor::<I>(&t.bed_h, &device) + dn
+            }
+        };
+        h_dam * self.c.dam.clone() + h_flow * one_minus::<I>(self.c.dam.clone())
     }
 
     /// Current stage (`None` before `hotstart`).
@@ -637,6 +812,11 @@ where
         let i_delta = i_n - i_t.clone();
 
         let q_eps = q.clone() + 1e-6;
+        // Fixed n on table rows (zero gradient to the head's n there).
+        let n_man = match &self.table {
+            None => n_man,
+            Some(t) => n_man * one_minus::<I>(t.mask.clone()) + t.n.clone() * t.mask.clone(),
+        };
         let n2 = n_man.clone() * n_man.clone();
         let qp_stage = q_prime_t * c.in_stage.clone();
 
@@ -664,10 +844,10 @@ where
             let s_dn = one_minus::<I>(up_ge) * above;
 
             // 2. edge section at d_edge, storage section at depth
-            let ge = trapezoid_from_depth(p.clone(), q.clone(), d_edge.clone(), pr.bottom_width_lb);
-            let (a_d, p_d) = trapezoid_depth_derivatives(p.clone(), q.clone(), d_edge.clone(), &ge, pr.bottom_width_lb);
-            let gs = trapezoid_from_depth(p.clone(), q.clone(), depth.clone(), pr.bottom_width_lb);
-            let (a_ds, p_ds) = trapezoid_depth_derivatives(p.clone(), q.clone(), depth.clone(), &gs, pr.bottom_width_lb);
+            let ge = self.section(&p, &q, d_edge.clone());
+            let (a_d, p_d) = (ge.a_d.clone(), ge.p_d.clone());
+            let gs = self.section(&p, &q, depth.clone());
+            let (a_ds, p_ds) = (gs.a_d.clone(), gs.p_d.clone());
             let d_s = gs.top_width.clone() * c.length.clone() / dt_s;
 
             // 3. friction, alpha, beta, Q*, kappa, a, b (zero on control and non-stage rows, C8)
@@ -690,8 +870,18 @@ where
 
             // 4. control edges: dams (power-law storage over T) and the normal-depth outlet
             let e1 = q_eps.clone() + 1.0;
-            let r_dam = c.length.clone() * p.clone() * depth.clone().powf(e1.clone()) / e1 / c.dam_t.clone();
-            let rp_dam = d_s.clone() * dt_s / c.dam_t.clone();
+            let mut r_dam = c.length.clone() * p.clone() * depth.clone().powf(e1.clone()) / e1 / c.dam_t.clone();
+            let mut rp_dam = d_s.clone() * dt_s / c.dam_t.clone();
+            if let Some(t) = &self.table {
+                // Table dam rows: release over the active storage above the
+                // pool level, R = TW*L*max(h - pool, 0)/T (option C).
+                let excess = h.clone() - t.pool.clone();
+                let active = excess.clone().detach().greater_elem(0.0).float();
+                let r_tab = t.tw.clone() * c.length.clone() * excess.clamp_min(0.0) / c.dam_t.clone();
+                let rp_tab = rp_dam.clone() * active;
+                r_dam = r_dam * one_minus::<I>(t.mask.clone()) + r_tab * t.mask.clone();
+                rp_dam = rp_dam * one_minus::<I>(t.mask.clone()) + rp_tab * t.mask.clone();
+            }
             let kk = gs.area.clone() * gs.hydraulic_radius.clone().powf_scalar(2.0 / 3.0) / n_man.clone();
             let s0_sqrt = c.s0.clone().sqrt();
             let r_nd = kk.clone() * s0_sqrt.clone();

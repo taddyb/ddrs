@@ -9,6 +9,7 @@
 //! models. Composition over abstraction at this layer.
 
 pub mod camels_hourly;
+pub mod channel_geometry;
 pub mod gage_csv;
 pub mod icechunk;
 pub mod netcdf;
@@ -33,6 +34,7 @@ pub use reservoirs::{
     dam_is_active, reservoir_rows, DamFeatures, FixedDam, FixedTable, ReservoirRows, ReservoirTable,
     INFLOW_MEAN_COLUMN, PURPOSE_FLOOD_COLUMN,
 };
+pub use channel_geometry::{ChannelGeometryRows, ChannelGeometryStore};
 pub use stage_boundary::StageBoundaryStore;
 pub use state_cache::StateCache;
 pub use zarr::{ConusAdjacencyStore, GageSubgraph, GagesAdjacencyStore};

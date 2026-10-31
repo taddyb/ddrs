@@ -10,6 +10,7 @@ use std::sync::Arc;
 use burn::tensor::Tensor;
 
 use ddrs::config::DownstreamBoundary;
+use ddrs::data::store::ChannelGeometryRows;
 use ddrs::data::ConusAdjacencyStore;
 use ddrs::routing::mmc_op::timestep_forward;
 use ddrs::routing::stage::{StageBlock, StageNetwork, StageParams};
@@ -107,8 +108,26 @@ fn drive(
     hours: usize,
     device: &TestDevice,
 ) -> Run {
+    drive_with(adj, pattern, net, sp, mc, q_prime, q_init, hours, device, &|_| {})
+}
+
+/// `drive`, with `setup` run on the new block before the hotstart.
+#[allow(clippy::too_many_arguments)]
+fn drive_with(
+    adj: &SparseAdjacency,
+    pattern: &Arc<CsrPattern>,
+    net: StageNetwork,
+    sp: StageParams,
+    mc: &[Vec<f32>],
+    q_prime: &[f32],
+    q_init: &[f32],
+    hours: usize,
+    device: &TestDevice,
+    setup: &dyn Fn(&mut StageBlock<InnerBackend>),
+) -> Run {
     let n = adj.n;
     let mut block = StageBlock::<InnerBackend>::new(net, sp, device);
+    setup(&mut block);
     let nn = tv(&vec![N_MAN; n], device);
     let pp = tv(&vec![P_SP; n], device);
     let qq = tv(&vec![Q_SP; n], device);
@@ -974,4 +993,229 @@ fn adverse_flow_keeps_the_m_matrix() {
     let mb = block.mass_balance();
     assert!(mb.rel() <= 1e-4, "{mb:?}");
     println!("adverse flow: Q_next {q:?}, floor_created_m3 {}", mb.floor_created_m3);
+}
+
+// =============================================================================
+// Task 10b: table geometry (channel_geometry)
+// =============================================================================
+
+fn table(rows: &[usize], tw: f32, bed: &[f32], n: f32, pool: &[Option<f32>]) -> ChannelGeometryRows {
+    ChannelGeometryRows {
+        rows: rows.to_vec(),
+        top_width: vec![tw; rows.len()],
+        bed_z: bed.to_vec(),
+        n: vec![n; rows.len()],
+        pool_z: pool.to_vec(),
+    }
+}
+
+#[test]
+fn table_geometry_must_cover_the_stage_set_in_the_block() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let mut block = StageBlock::<InnerBackend>::new(net, prescribed(1.0, 1), &device);
+    let rows = table(&[0, 2], 100.0, &[0.0, 0.0], 0.03, &[None, None]);
+    let err = block.set_table_geometry(rows.clone(), true).unwrap_err();
+    assert!(err.contains("row 1"), "{err}");
+    block.set_table_geometry(rows, false).unwrap();
+}
+
+#[test]
+fn mixed_geometry_uses_the_head_where_the_table_has_no_row() {
+    let device = TestDevice::default();
+    let n = 3;
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let mk = || StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = mk().z_mid.clone();
+    let h0: Vec<f32> = z_mid.iter().map(|z| z + 1.0).collect();
+    let q_t = [3.0f32, 5.0, 7.0];
+    let qp = [0.5f32, 0.4, 0.3];
+    let run = |tab: Option<ChannelGeometryRows>| {
+        let mut block = StageBlock::<InnerBackend>::new(mk(), prescribed(1.0, 1), &device);
+        block.set_boundary_series(vec![-5.0; 2]).unwrap();
+        if let Some(t) = tab {
+            block.set_table_geometry(t, false).unwrap();
+        }
+        block.set_stage(tv(&h0, &device));
+        let q = one_step(&mut block, &pattern, N_MAN, &q_t, &[0.0; 3], &qp, &device);
+        (q, block.last_coefficients().unwrap())
+    };
+    let (qa, ca) = run(None);
+    // Row 2 table: width 80 m, fixed n 0.02, bed at the head's z_mid so row 1's
+    // downstream bed is unchanged.
+    let (qb, cb) = run(Some(table(&[2], 80.0, &[z_mid[2]], 0.02, &[None])));
+    let bits = |t: Tensor<InnerBackend, 1>| to_vec1(t).iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    for (name, a, b) in [
+        ("beta", bits(ca.beta), bits(cb.beta)),
+        ("kappa", bits(ca.kappa), bits(cb.kappa)),
+        ("alpha", bits(ca.alpha), bits(cb.alpha)),
+        ("area_edge", bits(ca.area_edge), bits(cb.area_edge)),
+        ("radius_edge", bits(ca.radius_edge), bits(cb.radius_edge)),
+        ("d_s", bits(ca.d_s), bits(cb.d_s)),
+    ] {
+        assert_eq!(a[0], b[0], "{name} row 0");
+        assert_eq!(a[1], b[1], "{name} row 1");
+        assert_ne!(a[2], b[2], "{name} row 2 should use the rectangle");
+    }
+    // Discharge is not compared: the tree solve couples every row to the table row.
+    assert!(qa.iter().chain(qb.iter()).all(|v| v.is_finite()));
+}
+
+#[test]
+fn table_rows_use_the_rectangle_and_fixed_n() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = net.z_mid.clone();
+    let edge_len = net.edge_length.clone();
+    let (tw, bed, n_tab) = (80.0f64, 0.3f32, 0.02f64);
+    let mut block = StageBlock::<InnerBackend>::new(net, prescribed(1.0, 1), &device);
+    block.set_boundary_series(vec![-5.0; 2]).unwrap();
+    block
+        .set_table_geometry(table(&[2], tw as f32, &[bed], n_tab as f32, &[None]), false)
+        .unwrap();
+    let mut h0: Vec<f32> = z_mid.iter().map(|z| z + 1.0).collect();
+    h0[2] = 1.5;
+    block.set_stage(tv(&h0, &device));
+    let (q_t2, dt, g) = (7.0f64, 3600.0f64, 9.81f64);
+    let nn = |v: f32| tv(&[v; 3], &device);
+    // Differentiable inputs, to check the head's gradient on the table row.
+    let (nh, qh, ph) = (nn(0.035).require_grad(), nn(0.5).require_grad(), nn(21.0).require_grad());
+    let out = block.step(
+        &pattern,
+        nh.clone(),
+        ph.clone(),
+        qh.clone(),
+        tv(&[3.0, 5.0, q_t2 as f32], &device),
+        tv(&[0.0; 3], &device),
+        tv(&[0.5, 0.4, 0.3], &device),
+    );
+    let c = block.last_coefficients().unwrap();
+    let (area, rad, d_s, kappa) = (
+        to_vec1(c.area_edge)[2] as f64,
+        to_vec1(c.radius_edge)[2] as f64,
+        to_vec1(c.d_s)[2] as f64,
+        to_vec1(c.kappa)[2] as f64,
+    );
+    // Outlet edge: d_edge = max(h, h_bc) - max(bed, z_down) = 1.5 - max(0.3, 0).
+    let d = 1.5f64 - bed as f64;
+    let a = tw * d;
+    let p = tw + 2.0 * d;
+    let rel = |x: f64, y: f64| ((x - y) / y).abs();
+    assert!(rel(area, a) <= 1e-6, "area {area} vs {a}");
+    assert!(rel(rad, a / p) <= 1e-6, "radius {rad} vs {}", a / p);
+    assert!(rel(d_s, tw * 1000.0 / dt) <= 1e-6, "d_s {d_s}");
+    // kappa, section derivatives A_d = TW, P_d = 2 (revision 4).
+    let phi_cap = a * (a / p).powf(4.0 / 3.0);
+    let phi = g * n_tab * n_tab * q_t2.abs() / phi_cap;
+    let phid_over = tw / a + (4.0 / 3.0) * (tw / a - 2.0 / p);
+    let dh = 1.5f64 - (-5.0);
+    let want_k = (dt * phi * q_t2 * phid_over + g * tw * dt / edge_len[2] as f64 * dh) / (1.0 + 2.0 * dt * phi);
+    assert!(rel(kappa, want_k) <= 1e-5, "kappa {kappa} vs {want_k}");
+    // The head's n, p, q are not read on the table row: exactly zero gradient.
+    let g_all = out.sum().backward();
+    for (name, t) in [("n", &nh), ("q", &qh), ("p", &ph)] {
+        let gv = to_vec1(t.grad(&g_all).expect("grad"));
+        assert_eq!(gv[2], 0.0, "d loss/d {name}[2]");
+    }
+}
+
+#[test]
+fn pool_z_sets_the_release_reference() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let (tw, len, t_days, theta_c) = (400.0f64, 1000.0f64, 1.5f32, 1.0f32);
+    let run = |stage_above_bed: f32| {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[(0, t_days)]).unwrap();
+        let mut sp = prescribed(1.0, 1);
+        sp.theta_control = theta_c;
+        let mut block = StageBlock::<InnerBackend>::new(net, sp, &device);
+        block.set_boundary_series(vec![-5.0; 2]).unwrap();
+        // Bed 10 m, pool 2 m above it, on every row so the others stay simple.
+        block
+            .set_table_geometry(table(&[0, 1, 2], tw as f32, &[10.0, 10.0, 10.0], 0.03, &[Some(12.0), None, None]), true)
+            .unwrap();
+        block.set_stage(tv(&[10.0 + stage_above_bed, 12.0, 12.0], &device));
+        let q = one_step(&mut block, &pattern, N_MAN, &[0.0; 3], &[0.0; 3], &[0.0; 3], &device);
+        let c = block.last_coefficients().unwrap();
+        (q[0] as f64, to_vec1(c.r_prime)[0] as f64, to_vec1(c.d_s)[0] as f64)
+    };
+    let (q_lo, rp_lo, _) = run(1.0);
+    assert_eq!(q_lo, 0.0, "R below the pool");
+    assert_eq!(rp_lo, 0.0, "R' below the pool");
+    let (q_hi, rp_hi, ds) = run(3.0);
+    let t_s = t_days as f64 * 86_400.0;
+    let want_rp = tw * len / t_s;
+    assert!(((rp_hi - want_rp) / want_rp).abs() <= 1e-6, "R' {rp_hi} vs {want_rp}");
+    // theta_c = 1 and no inflow: dh = -R/(D_s + R'), Q = R + R'dh = R*D_s/(D_s + R').
+    let r = q_hi * (ds + rp_hi) / ds;
+    let want_r = tw * len * 1.0 / t_s;
+    assert!(((r - want_r) / want_r).abs() <= 1e-5, "R {r} vs {want_r}");
+}
+
+#[test]
+fn table_rows_hotstart_from_the_boundary_or_normal_depth() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let (tw, n_tab, bed) = (1000.0f64, 0.022f64, -10.0f32);
+    let q0 = [100.0f32, 2000.0, 2000.0];
+    let slope_f = [1e-3f32; 3];
+    let all = |pool: [Option<f32>; 3]| table(&[0, 1, 2], tw as f32, &[bed; 3], n_tab as f32, &pool);
+    let start = |dams: &[(usize, f32)], bc: DownstreamBoundary, pool: [Option<f32>; 3]| {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, dams).unwrap();
+        let sp = StageParams { boundary: bc, ..params(1.0, 0.5, 1) };
+        let mut block = StageBlock::<InnerBackend>::new(net, sp, &device);
+        if bc == DownstreamBoundary::PrescribedStage {
+            block.set_boundary_series(vec![0.4; 3]).unwrap();
+        }
+        block.set_table_geometry(all(pool), true).unwrap();
+        let v = |x: f32| tv(&[x; 3], &device);
+        block.hotstart(tv(&q0, &device), v(0.035), v(21.0), v(0.5), tv(&slope_f, &device));
+        to_vec1(block.stage().unwrap())
+    };
+    // PrescribedStage: the boundary at t0 on non-dam rows, exactly.
+    let h = start(&[], DownstreamBoundary::PrescribedStage, [None; 3]);
+    for i in 0..3 {
+        assert_eq!(h[i], 0.4, "row {i}");
+    }
+    // NormalDepth: the wide-channel normal depth of the rectangle.
+    let h = start(&[], DownstreamBoundary::NormalDepth, [None; 3]);
+    for i in 1..3 {
+        let dn = (n_tab * q0[i] as f64 / (tw * (1e-3f64).sqrt())).powf(0.6);
+        let got = (h[i] - bed) as f64;
+        assert!(((got - dn) / dn).abs() <= 1e-5, "row {i}: {got} vs {dn}");
+    }
+    // A dam row: pool_z + T*Q0/(TW*L).
+    let t_days = 1.23f32;
+    let h = start(&[(0, t_days)], DownstreamBoundary::NormalDepth, [Some(-2.0), None, None]);
+    let want = -2.0 + t_days as f64 * 86_400.0 * 100.0 / (tw * 1000.0);
+    assert!(((h[0] as f64 - want) / want).abs() <= 1e-6, "dam {} vs {want}", h[0]);
+}
+
+#[test]
+fn geometry_head_is_bitwise_the_block_without_a_table() {
+    let device = TestDevice::default();
+    let n = 5;
+    let hours = 24;
+    let t = hours + 1;
+    let adj = linear_chain_sparse(n);
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let sf = mock_streamflow(t, n, &device);
+    let mc = mc_hydrograph(&adj, &sf, &device);
+    let q_init: Vec<f32> = (0..n).map(|i| mc[i][0]).collect();
+    let go = |with_table: bool| {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        drive_with(&adj, &pattern, net, params(0.7, 0.5, 2), &mc, &flat(&sf), &q_init, hours, &device, &|b| {
+            if with_table {
+                b.set_table_geometry(ChannelGeometryRows::default(), false).unwrap();
+            }
+        })
+    };
+    let (a, b) = (go(false), go(true));
+    for h in 0..hours {
+        for i in 0..n {
+            assert_eq!(a.q[h][i].to_bits(), b.q[h][i].to_bits(), "hour {h} row {i}");
+        }
+    }
 }
