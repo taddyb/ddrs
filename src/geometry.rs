@@ -131,3 +131,42 @@ pub fn compute_trapezoidal_geometry_gamma<B: Backend>(
         velocity,
     }
 }
+
+/// Cross-section of the Leopold & Maddock trapezoid at a given depth.
+pub struct DepthGeometry<B: Backend> {
+    pub top_width: Tensor<B, 1>,
+    pub bottom_width: Tensor<B, 1>,
+    pub side_slope: Tensor<B, 1>,
+    pub area: Tensor<B, 1>,
+    pub wetted_perimeter: Tensor<B, 1>,
+    pub hydraulic_radius: Tensor<B, 1>,
+}
+
+/// Build the trapezoid for a known depth. Same formulas as S7 to S14 of
+/// `src/routing/mmc_op.rs::forward_chain_inner` and as the tail of
+/// [`compute_trapezoidal_geometry_gamma`], with `q_eps = q + 1e-6`.
+/// The stage block and the MC block share this cross-section.
+pub fn trapezoid_from_depth<B: Backend>(
+    p_spatial: Tensor<B, 1>,
+    q_spatial: Tensor<B, 1>,
+    depth: Tensor<B, 1>,
+    bottom_width_lb: f32,
+) -> DepthGeometry<B> {
+    let q_eps = q_spatial + 1e-6;
+    let top_width = p_spatial * depth.clone().powf(q_eps.clone());
+    let side_slope = (top_width.clone() * q_eps / (depth.clone() * 2.0)).clamp(0.5, 50.0);
+    let bottom_width =
+        (top_width.clone() - side_slope.clone() * depth.clone() * 2.0).clamp_min(bottom_width_lb);
+    let area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
+    let wetted_perimeter =
+        bottom_width.clone() + depth * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
+    let hydraulic_radius = area.clone() / wetted_perimeter.clone();
+    DepthGeometry {
+        top_width,
+        bottom_width,
+        side_slope,
+        area,
+        wetted_perimeter,
+        hydraulic_radius,
+    }
+}
