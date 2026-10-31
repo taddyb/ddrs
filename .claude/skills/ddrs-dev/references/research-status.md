@@ -239,6 +239,16 @@ Three matched CONUS arms off the 500-update `nse-batch` baseline, all on 2,365 g
 - Routing adds the lag the gauges ask for (0 d below ~1,500 km², 1 d to 30,000, 2 d above) at ~70 % of
   gauges on all three arms; `experiments/stage_roughness/routing_lag.py`.
 
+## Stage routing on Juniata (2026-10-31)
+
+Stage routing (`stage:` config block, `src/routing/stage*`) solves for water depth instead of discharge. The
+Juniata bundle trains and tests with it (`examples/juniata/ddrs_stage.yaml`, `theta: 1.0`, `normal_depth` outlet,
+all 213 reaches, seed 42, CPU). Result: median NSE 0.7928 / KGE 0.8808 against the summed-Q' baseline 0.6947 /
+0.8192, and mass balance rel 5.3e-9. The committed Muskingum-Cunge result is 0.7903 / 0.8810. Wall time is about
+853 s against about 21 s for Muskingum-Cunge (about 40x). There is **no DDR reference** for stage routing, so the
+check is the baseline and the analytic stage tests, not parity. One gauge, one seed: do not read the 0.0025 NSE
+difference as a gain. Gate: `tests/juniata_stage_acceptance.rs`.
+
 ## Structural constants (stable)
 
 CONUS 346,321 reaches / 338,814 edges · eval network 64,892 reaches for the

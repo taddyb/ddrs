@@ -72,6 +72,21 @@ stores by DDR's `examples/juniata/extract_bundle.py` (maintainer-run);
 this copy is taken verbatim from the ddr repo — regenerate there, then
 re-copy `data/` and re-copy the generated statistics JSON.
 
+## Stage routing
+
+`ddrs_stage.yaml` is the same bundle with the `stage:` block on (`theta: 1.0`,
+`normal_depth` outlet, all 213 reaches). Measured 2026-10-31, seed 42, CPU,
+`train-and-test`:
+
+| Run | Median NSE | Median KGE | Wall time |
+|---|---|---|---|
+| Summed-Q' baseline | 0.6947 | 0.8192 | none |
+| Muskingum-Cunge (`ddrs.yaml`) | 0.7903 | 0.8810 | about 21 s |
+| Stage routing (`ddrs_stage.yaml`) | 0.7928 | 0.8808 | about 853 s |
+
+Stage mass balance rel 5.3e-9. There is no DDR reference for stage routing.
+Gate: `cargo test --release --test juniata_stage_acceptance -- --nocapture`.
+
 ## Gate
 
 `tests/juniata_bundle.rs` asserts the bundle contract through the real
