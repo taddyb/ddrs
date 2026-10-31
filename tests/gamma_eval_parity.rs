@@ -89,6 +89,7 @@ fn minimal_routing_tensors<B: Backend>(
         initial_state: None,
         impervious_mask: None,
         reservoir_rows: None,
+        stage: None,
     }
 }
 

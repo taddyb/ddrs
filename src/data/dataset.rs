@@ -18,9 +18,20 @@ use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
     map_reservoir_rows, read_dam_features, read_fixed_release_table, AorcPrecipStore,
     AttributesStore, ConusAdjacencyStore, FixedTable, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, ReservoirRows, ReservoirTable, StateCache, StreamflowSource,
+    ObservationsStore, ReservoirRows, ReservoirTable, StageBoundaryStore, StateCache,
+    StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
+
+/// Stage-block inputs of one batch. `None` on the batch unless
+/// `cfg.stage_routing_on()`. Later tasks add fields here only.
+#[derive(Debug, Clone, Default)]
+pub struct StageBatch {
+    /// Prescribed downstream stage, m, one value per q' row (`q_prime.shape()[0]`):
+    /// value `k` is the hour of q' row `k`, index 0 starts at 00:00 UTC on the
+    /// window's first day. `None` when the boundary is not prescribed.
+    pub boundary: Option<Vec<f32>>,
+}
 
 /// One batch of inputs for the MC routing engine + MLP head.
 ///
@@ -92,6 +103,8 @@ pub struct RoutingBatch {
     /// `params.use_reservoirs` is true (possibly with no rows, when no table
     /// COMID is in this network); `None` leaves routing unchanged.
     pub reservoir_rows: Option<ReservoirRows>,
+    /// Stage-block inputs. `Some` exactly when `params.stage_routing` is on.
+    pub stage: Option<StageBatch>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +181,8 @@ pub struct RoutingTensors<B: Backend> {
     /// Carried from `RoutingBatch::reservoir_rows`; host-side indices, applied
     /// by `training::forward::apply_reservoir_rows` after `setup_inputs`.
     pub reservoir_rows: Option<ReservoirRows>,
+    /// Carried from `RoutingBatch::stage`.
+    pub stage: Option<StageBatch>,
 }
 
 impl RoutingBatch {
@@ -273,6 +288,7 @@ impl RoutingBatch {
             initial_state,
             impervious_mask,
             reservoir_rows: self.reservoir_rows,
+            stage: self.stage,
         }
     }
 }
@@ -377,6 +393,11 @@ pub struct MeritGagesDataset {
     /// phase resolves it (`resolve_learned_release`). Mapped onto each batch's
     /// COMID order by `map_reservoir_rows`.
     reservoirs: Option<ReservoirTable>,
+    /// `data_sources.stage_boundary`, read once at open when stage routing is
+    /// on and the path is set; `None` otherwise.
+    stage_boundary: Option<StageBoundaryStore>,
+    /// `cfg.stage_routing_on()`, captured at open.
+    stage_on: bool,
 }
 
 /// Log the data version a store opened at, as a sibling of the
@@ -602,6 +623,12 @@ impl MeritGagesDataset {
             None
         };
 
+        let stage_on = cfg.stage_routing_on();
+        let stage_boundary = match (&ds.stage_boundary, stage_on) {
+            (Some(path), true) => Some(StageBoundaryStore::open(path)?),
+            _ => None,
+        };
+
         let reservoirs = if cfg.params.use_reservoirs {
             let path = ds.reservoirs.as_ref().ok_or_else(|| DataError::Malformed {
                 path: std::path::PathBuf::from("<config>"),
@@ -781,6 +808,8 @@ impl MeritGagesDataset {
             state_cache,
             leakance_impervious_threshold,
             reservoirs,
+            stage_boundary,
+            stage_on,
         })
     }
 
@@ -1041,6 +1070,8 @@ impl MeritGagesDataset {
             .as_ref()
             .map(|table| map_reservoir_rows(table, &compressed.divide_comids));
 
+        let stage = self.stage_batch(window.window_start, q_prime.shape()[0])?;
+
         // ----- 8. Assemble -----
         Ok(RoutingBatch {
             adjacency,
@@ -1060,7 +1091,39 @@ impl MeritGagesDataset {
             initial_state,
             impervious_mask,
             reservoir_rows,
+            stage,
         })
+    }
+
+    /// Stage-block inputs for a window whose first q' row starts at
+    /// `window_start` 00:00 UTC and has `n_rows` q' rows. `None` unless stage
+    /// routing is on. Errors, naming the store path, when the record does not
+    /// cover the window or the slice length differs from `n_rows`.
+    fn stage_batch(
+        &self,
+        window_start: chrono::NaiveDate,
+        n_rows: usize,
+    ) -> Result<Option<StageBatch>> {
+        if !self.stage_on {
+            return Ok(None);
+        }
+        let boundary = match &self.stage_boundary {
+            Some(store) => {
+                let v = store.slice(window_start.and_hms_opt(0, 0, 0).unwrap(), n_rows)?;
+                if v.len() != n_rows {
+                    return Err(DataError::Malformed {
+                        path: store.path.clone(),
+                        message: format!(
+                            "stage boundary has {} values for {n_rows} q' rows",
+                            v.len()
+                        ),
+                    });
+                }
+                Some(v)
+            }
+            None => None,
+        };
+        Ok(Some(StageBatch { boundary }))
     }
 
     // -----------------------------------------------------------------------
@@ -1296,6 +1359,8 @@ impl MeritGagesDataset {
             None => None,
         };
 
+        let stage = self.stage_batch(window.window_start, q_prime.shape()[0])?;
+
         Ok(RoutingBatch {
             adjacency: cache.adjacency.clone(),
             spatial_attributes_normalized: cache.spatial_attributes_normalized.clone(),
@@ -1320,6 +1385,7 @@ impl MeritGagesDataset {
             initial_state,
             impervious_mask: cache.impervious_mask.clone(),
             reservoir_rows: cache.reservoir_rows.clone(),
+            stage,
         })
     }
 
