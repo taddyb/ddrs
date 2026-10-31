@@ -170,3 +170,36 @@ pub fn trapezoid_from_depth<B: Backend>(
         hydraulic_radius,
     }
 }
+
+/// Closed-form `(dA/dd, dP/dd)` of the trapezoid built by [`trapezoid_from_depth`],
+/// with the same `q_eps = q + 1e-6` and the same clamp branches: the side slope
+/// is constant where its clamp is active, and the bottom width is constant where
+/// its lower bound is active. `geom` must come from `trapezoid_from_depth` at
+/// the same `(p, q, depth, bottom_width_lb)`. The result stays on the tape: the stage step
+/// differentiates through it.
+pub fn trapezoid_depth_derivatives<B: Backend>(
+    _p_spatial: Tensor<B, 1>,
+    q_spatial: Tensor<B, 1>,
+    depth: Tensor<B, 1>,
+    geom: &DepthGeometry<B>,
+    bottom_width_lb: f32,
+) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    let q_eps = q_spatial + 1e-6;
+    let tw = geom.top_width.clone();
+    let ss = geom.side_slope.clone();
+    let bw = geom.bottom_width.clone();
+    let depth = depth;
+    let tw_d = q_eps.clone() * tw.clone() / depth.clone();
+    // Branch masks from the unclamped values.
+    let ss_raw = tw.clone() * q_eps / (depth.clone() * 2.0);
+    let ss_active = ss_raw.clone().greater_elem(0.5).int() * ss_raw.clone().lower_elem(50.0).int();
+    let ss_active = ss_active.float();
+    let ss_d = (ss_raw / depth.clone()) * (tw_d.clone() / tw.clone() * depth.clone() - 1.0) * ss_active;
+    let bw_raw = tw.clone() - ss.clone() * depth.clone() * 2.0;
+    let bw_active = bw_raw.greater_elem(bottom_width_lb).float();
+    let bw_d = (tw_d.clone() - ss.clone() * 2.0 - depth.clone() * ss_d.clone() * 2.0) * bw_active;
+    let area_d = (tw + bw) / 2.0 + depth.clone() * (tw_d + bw_d.clone()) / 2.0;
+    let root = (ss.clone().powf_scalar(2.0) + 1.0).sqrt();
+    let per_d = bw_d + root.clone() * 2.0 + depth * ss.clone() * ss_d * 2.0 / root;
+    (area_d, per_d)
+}

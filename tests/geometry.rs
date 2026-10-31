@@ -126,3 +126,35 @@ fn trapezoid_from_depth_is_differentiable_in_depth() {
     let closed = 1.125 * tw;
     assert!(((ad - closed) / closed).abs() < 1e-3, "autodiff {ad} vs closed form {closed}");
 }
+
+/// f64 test-side copy of `src/geometry.rs::trapezoid_from_depth` (area, wetted perimeter).
+fn section_f64(p: f64, q: f64, d: f64, bw_lb: f64) -> (f64, f64) {
+    let qe = q + 1e-6;
+    let tw = p * d.powf(qe);
+    let ss = (tw * qe / (2.0 * d)).clamp(0.5, 50.0);
+    let bw = (tw - 2.0 * ss * d).max(bw_lb);
+    ((tw + bw) * d / 2.0, bw + 2.0 * d * (ss * ss + 1.0).sqrt())
+}
+
+#[test]
+fn trapezoid_depth_derivatives_match_finite_differences() {
+    use ddrs::geometry::{trapezoid_depth_derivatives, trapezoid_from_depth};
+    let device = TestDevice::default();
+    let bw_lb = 0.1f32;
+    for (p, q) in [(21.0f32, 0.5f32), (1000.0, 0.0), (5.0, 0.9)] {
+        for d in [0.02f32, 0.3, 1.0, 5.0] {
+            let pt: Tensor<TestBackend, 1> = Tensor::from_floats([p], &device);
+            let qt: Tensor<TestBackend, 1> = Tensor::from_floats([q], &device);
+            let dt: Tensor<TestBackend, 1> = Tensor::from_floats([d], &device);
+            let geom = trapezoid_from_depth(pt.clone(), qt.clone(), dt.clone(), bw_lb);
+            let (ad, pd) = trapezoid_depth_derivatives(pt, qt, dt, &geom, bw_lb);
+            let (ad, pd) = (ad.into_scalar() as f64, pd.into_scalar() as f64);
+            let h = 1e-6 * d as f64;
+            let (ap, pp) = section_f64(p as f64, q as f64, d as f64 + h, bw_lb as f64);
+            let (am, pm) = section_f64(p as f64, q as f64, d as f64 - h, bw_lb as f64);
+            let (fa, fp) = ((ap - am) / (2.0 * h), (pp - pm) / (2.0 * h));
+            assert!(((ad - fa) / fa).abs() <= 1e-4, "p {p} q {q} d {d}: dA {ad} vs {fa}");
+            assert!(((pd - fp) / fp).abs() <= 1e-4, "p {p} q {q} d {d}: dP {pd} vs {fp}");
+        }
+    }
+}

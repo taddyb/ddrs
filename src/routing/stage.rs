@@ -11,7 +11,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::DownstreamBoundary;
-use crate::geometry::{compute_trapezoidal_geometry, trapezoid_from_depth};
+use crate::geometry::{compute_trapezoidal_geometry, trapezoid_depth_derivatives, trapezoid_from_depth};
 use crate::sparse::tree_lu::{assert_tree, tree_lu_solve};
 use crate::sparse::{CsrPattern, SparseAdjacency};
 
@@ -255,8 +255,16 @@ impl StageMassBalance {
 /// Coefficients of the last substep, on the inner backend (test hook, C22).
 #[doc(hidden)]
 pub struct StageCoefficients<I: Backend> {
+    /// `(1 + dt_s*phi)/(1 + 2*dt_s*phi)` on friction rows, 0 elsewhere.
     pub alpha: Tensor<I, 1>,
+    /// `g*A_e*dt_s/(L_edge*(1 + 2*dt_s*phi))` on friction rows, 0 elsewhere.
     pub beta: Tensor<I, 1>,
+    /// Signed section sensitivity of the edge flux, 0 off friction rows.
+    pub kappa: Tensor<I, 1>,
+    /// `max(theta*beta + kappa*s_up, 0)`.
+    pub a_up: Tensor<I, 1>,
+    /// `max(theta*beta - kappa*s_dn, 0)`.
+    pub b_down: Tensor<I, 1>,
     pub area_edge: Tensor<I, 1>,
     pub radius_edge: Tensor<I, 1>,
     pub d_s: Tensor<I, 1>,
@@ -427,8 +435,8 @@ where
     }
 
     /// Hourly boundary stage, one value per output column. Hour `k` (0-based)
-    /// reads `series[k]` at its start and `series[k + 1]` at its end, so a run
-    /// of `H` hours needs `H + 1` values. Used with `PrescribedStage`.
+    /// reads `series[k]` at its start and `series[k + 1]` at its end, so
+    /// `H` steps need `H + 1` values. Used with `PrescribedStage`.
     pub fn set_boundary_series(&mut self, series: Vec<f32>) -> Result<(), String> {
         if series.len() < 2 {
             return Err(format!(
@@ -504,6 +512,9 @@ where
         self.last_coeffs.as_ref().map(|c| StageCoefficients {
             alpha: c.alpha.clone(),
             beta: c.beta.clone(),
+            kappa: c.kappa.clone(),
+            a_up: c.a_up.clone(),
+            b_down: c.b_down.clone(),
             area_edge: c.area_edge.clone(),
             radius_edge: c.radius_edge.clone(),
             d_s: c.d_s.clone(),
@@ -633,22 +644,38 @@ where
             if prescribed {
                 h_down = h_down * one_minus::<I>(c.outlet.clone()) + c.outlet.clone() * hbc0;
             }
-            let d_edge = (h.clone().max_pair(h_down.clone()) - c.z_mid.clone().max_pair(c.z_down.clone()))
-                .clamp_min(pr.depth_lb);
+            let d_edge_raw = h.clone().max_pair(h_down.clone()) - c.z_mid.clone().max_pair(c.z_down.clone());
+            let d_edge = d_edge_raw.clone().clamp_min(pr.depth_lb);
+            // Which end the Bates max follows, where the floor is inactive (no gradient).
+            let above = d_edge_raw.detach().greater_elem(pr.depth_lb).float();
+            let up_ge = (h.clone().detach() - h_down.clone().detach()).greater_equal_elem(0.0).float();
+            let s_up = up_ge.clone() * above.clone();
+            let s_dn = one_minus::<I>(up_ge) * above;
 
             // 2. edge section at d_edge, storage section at depth
-            let ge = trapezoid_from_depth(p.clone(), q.clone(), d_edge, pr.bottom_width_lb);
+            let ge = trapezoid_from_depth(p.clone(), q.clone(), d_edge.clone(), pr.bottom_width_lb);
+            let (a_d, p_d) = trapezoid_depth_derivatives(p.clone(), q.clone(), d_edge.clone(), &ge, pr.bottom_width_lb);
             let gs = trapezoid_from_depth(p.clone(), q.clone(), depth.clone(), pr.bottom_width_lb);
+            let (a_ds, p_ds) = trapezoid_depth_derivatives(p.clone(), q.clone(), depth.clone(), &gs, pr.bottom_width_lb);
             let d_s = gs.top_width.clone() * c.length.clone() / dt_s;
 
             // 3. friction, alpha, beta, Q_hat (zero on control and non-stage rows, C8)
             let phi = n2.clone() * qc.clone().abs() * pr.g
                 / (ge.area.clone() * ge.hydraulic_radius.clone().powf_scalar(4.0 / 3.0));
             let dt_phi = phi * dt_s;
-            let inv = (dt_phi.clone() + 1.0).recip();
-            let alpha = inv.clone() * c.friction.clone();
-            let beta = ge.area.clone() * inv * c.edge_length.clone().recip() * (pr.g * dt_s) * c.friction.clone();
-            let q_hat = alpha.clone() * qc.clone() + beta.clone() * (h.clone() - h_down) * (1.0 - th);
+            let den = dt_phi.clone() * 2.0 + 1.0;
+            let alpha = (dt_phi.clone() + 1.0) / den.clone() * c.friction.clone();
+            let beta = ge.area.clone() * (pr.g * dt_s) / (c.edge_length.clone() * den.clone()) * c.friction.clone();
+            let phi_d = a_d.clone() / ge.area.clone()
+                + (a_d.clone() / ge.area.clone() - p_d / ge.wetted_perimeter.clone()) * (4.0 / 3.0);
+            let dh_edge = h.clone() - h_down;
+            let kappa = (dt_phi.clone() * qc.clone() * phi_d
+                + a_d * dh_edge.clone() * (pr.g * dt_s) / c.edge_length.clone())
+                / den
+                * c.friction.clone();
+            let q_star = alpha.clone() * qc.clone() + beta.clone() * dh_edge;
+            let a_up = (beta.clone() * th + kappa.clone() * s_up).clamp_min(0.0) * c.friction.clone();
+            let b_down = (beta.clone() * th - kappa.clone() * s_dn).clamp_min(0.0) * c.friction.clone();
 
             // 4. control edges: dams (power-law storage over T) and the normal-depth outlet
             let e1 = q_eps.clone() + 1.0;
@@ -657,52 +684,52 @@ where
             let kk = gs.area.clone() * gs.hydraulic_radius.clone().powf_scalar(2.0 / 3.0) / n_man.clone();
             let s0_sqrt = c.s0.clone().sqrt();
             let r_nd = kk.clone() * s0_sqrt.clone();
-            let dp_dd = (gs.side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
-            let dk_dd = kk.clone() * gs.top_width.clone() / gs.area.clone() * (5.0 / 3.0)
-                - kk * dp_dd / gs.wetted_perimeter.clone() * (2.0 / 3.0);
+            let dk_dd = kk * (a_ds / gs.area.clone() * (5.0 / 3.0) - p_ds / gs.wetted_perimeter.clone() * (2.0 / 3.0));
             let rp_nd = dk_dd * s0_sqrt;
             let r_t = c.dam.clone() * r_dam + c.nd.clone() * r_nd;
             let r_prime = (c.dam.clone() * rp_dam + c.nd.clone() * rp_nd).clamp_min(0.0);
 
-            // 5. matrix values [2·nnz]
-            let beta_edge = beta.clone().gather(0, sl.col_idx.clone()) * sl.adj_friction.clone();
-            let off_f = beta_edge.clone() * (-th2);
+            // 5. matrix values [2·nnz]; the unknown is the increment dh
+            let a_edge = a_up.clone().gather(0, sl.col_idx.clone()) * sl.adj_friction.clone();
+            let b_edge = b_down.clone().gather(0, sl.col_idx.clone()) * sl.adj_friction.clone();
+            let lower_f = a_edge.neg() * th;
+            let upper_f = b_edge.clone().neg() * th;
             let off_dam = r_prime.clone().gather(0, sl.col_idx.clone()) * sl.dam_slot.clone() * (-thc);
-            let sum_in_beta = scatter_add::<I>(nn, &sl.row_idx, beta_edge);
-            let diag_stage = d_s.clone() + (beta.clone() + sum_in_beta) * th2;
+            let sum_in_b = scatter_add::<I>(nn, &sl.row_idx, b_edge);
+            let diag_stage = d_s.clone() + (a_up.clone() + sum_in_b) * th;
             let diag = diag_stage * c.in_stage.clone()
                 + c.w_ctrl.clone() * r_prime.clone()
                 + one_minus::<I>(c.in_stage.clone());
-            let lower = off_f.clone() + off_dam + diag.gather(0, sl.row_idx.clone()) * sl.diag_slot.clone();
-            let a_values = Tensor::cat(vec![lower, off_f], 0);
+            let lower = lower_f + off_dam + diag.gather(0, sl.row_idx.clone()) * sl.diag_slot.clone();
+            let a_values = Tensor::cat(vec![lower, upper_f], 0);
 
-            // 6. right-hand side: each edge's old flux once, with its own weight
-            let flux_old = c.friction.clone() * ((q_hat.clone() * th) + qc.clone() * (1.0 - th));
-            let ctrl_old = c.w_ctrl.clone() * (r_t.clone() - r_prime.clone() * h.clone())
-                + (c.ctrl.clone() - c.w_ctrl.clone()) * qc.clone();
+            // 6. right-hand side r: fluxes only, each edge's old flux once with its own weight
+            let flux_old = c.friction.clone() * ((q_star.clone() * th) + qc.clone() * (1.0 - th));
+            let ctrl_old = c.w_ctrl.clone() * r_t.clone() + (c.ctrl.clone() - c.w_ctrl.clone()) * qc.clone();
             let e_old = flux_old + ctrl_old;
             let in_e = scatter_add::<I>(
                 nn,
                 &sl.row_idx,
                 e_old.clone().gather(0, sl.col_idx.clone()) * sl.adj_stage.clone(),
             );
-            let mut b = d_s.clone() * h.clone() * c.in_stage.clone() + qp_stage.clone() + i_mid.clone() + in_e - e_old;
+            let mut r = qp_stage.clone() + i_mid.clone() + in_e - e_old;
             if prescribed {
-                b = b + c.outlet.clone() * beta.clone() * (th2 * hbc1);
+                r = r + c.outlet.clone() * b_down.clone() * (th * (hbc1 - hbc0));
             }
 
-            // 7. solve, then floor the stage; the created volume is counted
-            let h_solved = tree_lu_solve(pattern, a_values, b, pr.use_cuda);
+            // 7. solve for dh, then floor the stage; the created volume is counted
+            let dh = tree_lu_solve(pattern, a_values, r, pr.use_cuda);
+            let h_solved = h.clone() + dh.clone();
             let h_floor = c.z_mid.clone() + pr.depth_lb;
             let h_new = h_solved.clone().max_pair(h_floor);
 
-            // 8. readout from the solved stage (so the balance closes exactly)
-            let mut hs_down = h_solved.clone().gather(0, c.down_idx.clone());
+            // 8. readout from dh before the floor (never Q* - a*h + b*h_down)
+            let mut dh_down = dh.clone().gather(0, c.down_idx.clone());
             if prescribed {
-                hs_down = hs_down * one_minus::<I>(c.outlet.clone()) + c.outlet.clone() * hbc1;
+                dh_down = dh_down * one_minus::<I>(c.outlet.clone()) + c.outlet.clone() * (hbc1 - hbc0);
             }
-            let q_fr = q_hat + beta.clone() * (h_solved.clone() - hs_down) * th;
-            let q_ctrl = (r_t + r_prime.clone() * (h_solved.clone() - h.clone())) * c.ctrl.clone();
+            let q_fr = q_star + a_up.clone() * dh.clone() - b_down.clone() * dh_down;
+            let q_ctrl = (r_t + r_prime.clone() * dh) * c.ctrl.clone();
             let q_new = q_fr + q_ctrl;
 
             // 9. mass balance on the inner backend
@@ -742,6 +769,9 @@ where
                 coeffs = Some(StageCoefficients {
                     alpha: alpha.inner(),
                     beta: beta.inner(),
+                    kappa: kappa.inner(),
+                    a_up: a_up.inner(),
+                    b_down: b_down.inner(),
                     area_edge: ge.area.inner(),
                     radius_edge: ge.hydraulic_radius.inner(),
                     d_s: d_s.inner(),

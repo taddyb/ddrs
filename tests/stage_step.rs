@@ -196,7 +196,6 @@ fn juniata() -> (SparseAdjacency, Arc<CsrPattern>) {
 }
 
 #[test]
-#[ignore = "blocked: lagged edge section is linearly unstable, see task-6-report.md"]
 fn step_is_finite_on_juniata_network() {
     let device = TestDevice::default();
     let (adj, pattern) = juniata();
@@ -249,9 +248,7 @@ fn mc_interface_conserves_volume_for_any_theta() {
 fn control_edges_count_their_old_flux_once() {
     let device = TestDevice::default();
     let n = 3;
-    // The brief asks for 48 hours. The lagged edge section diverges after ~4 hours
-    // on this chain (see task-6-report.md), so the identity is checked on 4.
-    let hours = 4;
+    let hours = 48;
     let t = hours + 1;
     let (theta, theta_c) = (0.55f32, 0.5f32);
     let adj = linear_chain_sparse(n);
@@ -264,21 +261,11 @@ fn control_edges_count_their_old_flux_once() {
     let q_init = cumulative(&adj, &qp[0..n]);
     let run = drive(&adj, &pattern, net, params(theta, theta_c, 1), &mc, &qp, &q_init, hours, &device);
     let mut q_prev = q_init.clone();
-    let z_mid = StageNetwork::build(&adj, &pattern, None, 0.0, &[(0, 1.23)]).unwrap().z_mid;
-    let mut checked = 0;
     for k in 0..hours {
         let q_new = &run.q[k];
         let (h0, h1) = (&run.h[k], &run.h[k + 1]);
         let d_s = &run.d_s[k];
         let qp_k = &qp[k * n..(k + 1) * n];
-        // The depth floor adds volume that the identity does not include; the
-        // floor is counted in `mass_balance` (asserted below), so skip those hours.
-        let floored = (1..3).any(|i| h1[i] <= z_mid[i] + DEPTH_LB + 1e-5);
-        if floored {
-            q_prev = q_new.clone();
-            continue;
-        }
-        checked += 1;
         let bar = |a: &[f32]| 1e-5 * a.iter().map(|v| v.abs()).sum::<f32>();
         // Row 1: dam edge in (weight theta_c), friction edge out (weight theta).
         let lhs1 = d_s[1] * (h1[1] - h0[1]);
@@ -298,13 +285,12 @@ fn control_edges_count_their_old_flux_once() {
         assert!((lhs2 - rhs2).abs() <= b2, "hour {k} row 2: {lhs2} vs {rhs2} (bar {b2}) h0 {h0:?} h1 {h1:?} q {q_new:?} prev {q_prev:?} ds {d_s:?} mb {:?}", run.block.mass_balance());
         q_prev = q_new.clone();
     }
-    assert!(checked >= 3, "only {checked} hours were free of the depth floor");
     let mb = run.block.mass_balance();
     assert!(mb.rel() <= 1e-4, "{mb:?}");
+    assert_eq!(mb.floor_created_m3, 0.0, "{mb:?}");
 }
 
 #[test]
-#[ignore = "blocked: lagged edge section is linearly unstable, see task-6-report.md"]
 fn substeps_four_approaches_substeps_one_at_steady_state() {
     let device = TestDevice::default();
     let n = 5;
@@ -373,7 +359,7 @@ fn gradcheck_through_one_step() {
         };
         let base = [&n0, &q0, &p0, &h0, &qt0];
         let (_, grads) = eval(base, true);
-        let eps_abs = [1e-3f32, 1e-3, 1e-3, 4e-3, 1e-2];
+        let eps_abs = [1e-3f32, 1e-3, 1e-3, 1e-2, 1e-2];
         let names = ["n", "q", "p", "h_t", "q_t"];
         for (pi, name) in names.iter().enumerate() {
             for i in 0..n {
@@ -394,10 +380,117 @@ fn gradcheck_through_one_step() {
                 let an = grads[pi][i];
                 let err = (fd - an).abs();
                 assert!(
-                    err <= 5e-4 || err <= 5e-3 * fd.abs().max(an.abs()),
+                    err <= 1e-4 || err <= 5e-3 * fd.abs().max(an.abs()),
                     "substeps {substeps} d loss/d {name}[{i}]: fd {fd} analytic {an}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn newton_coefficients_match_the_implicit_edge_law() {
+    let device = TestDevice::default();
+    let n = 3;
+    let adj = linear_chain_sparse(n);
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = net.z_mid.clone();
+    let theta = 0.55f32;
+    let mut block = StageBlock::<InnerBackend>::new(net, params(theta, 0.5, 1), &device);
+    let h: Vec<f32> = [0.6f32, 1.8, 0.8].iter().zip(&z_mid).map(|(d, z)| z + d).collect();
+    block.set_stage(tv(&h, &device));
+    let q_t = [-3.0f32, 4.0, 5.0];
+    let _ = block.step(
+        &pattern,
+        tv(&[N_MAN; 3], &device),
+        tv(&[P_SP; 3], &device),
+        tv(&[Q_SP; 3], &device),
+        tv(&q_t, &device),
+        tv(&[0.0; 3], &device),
+        tv(&[1.0; 3], &device),
+    );
+    let c = block.last_coefficients().unwrap();
+    let (alpha, beta, kappa, a_up, b_down, dt_phi) = (
+        to_vec1(c.alpha),
+        to_vec1(c.beta),
+        to_vec1(c.kappa),
+        to_vec1(c.a_up),
+        to_vec1(c.b_down),
+        to_vec1(c.dt_phi),
+    );
+    // Test-side f64 copy of src/geometry.rs::trapezoid_from_depth (area, wetted perimeter).
+    let section = |d: f64| -> (f64, f64) {
+        let qe = Q_SP as f64 + 1e-6;
+        let tw = P_SP as f64 * d.powf(qe);
+        let ss = (tw * qe / (2.0 * d)).clamp(0.5, 50.0);
+        let bw = (tw - 2.0 * ss * d).max(0.1);
+        ((tw + bw) * d / 2.0, bw + 2.0 * d * (ss * ss + 1.0).sqrt())
+    };
+    let (g, dt, l_edge, nm) = (9.81f64, 3600.0f64, 1000.0f64, N_MAN as f64);
+    let f = |qn: f64, qt: f64, de: f64, dh: f64| -> f64 {
+        let (a, p) = section(de);
+        let phi_conv = a * (a / p).powf(4.0 / 3.0) / (nm * nm);
+        qn - qt + dt * (g * qn * qn.abs() / phi_conv - g * a * dh / l_edge)
+    };
+    let eps = 1e-6;
+    // (edge, d_e, dh^t, s_up, s_dn)
+    let edges = [(0usize, 0.8f64, (h[0] - h[1]) as f64, 0.0f64, 1.0f64), (1, 1.8, (h[1] - h[2]) as f64, 1.0, 0.0)];
+    for (e, de, dh, s_up, s_dn) in edges {
+        let qt = q_t[e] as f64;
+        let dq = (f(qt + eps, qt, de, dh) - f(qt - eps, qt, de, dh)) / (2.0 * eps);
+        let ddh = (f(qt, qt, de, dh + eps) - f(qt, qt, de, dh - eps)) / (2.0 * eps);
+        let dde = (f(qt, qt, de + eps, dh) - f(qt, qt, de - eps, dh)) / (2.0 * eps);
+        let (b_ref, k_ref) = (-ddh / dq, -dde / dq);
+        let rel = |x: f32, y: f64| ((x as f64 - y) / y.abs().max(1e-9)).abs();
+        assert!(rel(beta[e], b_ref) <= 1e-4, "edge {e} beta {} vs {b_ref}", beta[e]);
+        assert!(rel(kappa[e], k_ref) <= 1e-4, "edge {e} kappa {} vs {k_ref}", kappa[e]);
+        let a_alpha = ((1.0 + dt_phi[e]) / (1.0 + 2.0 * dt_phi[e])) as f64;
+        assert!(rel(alpha[e], a_alpha) <= 1e-6, "edge {e} alpha {} vs {a_alpha}", alpha[e]);
+        let a_ref = (theta as f64 * beta[e] as f64 + kappa[e] as f64 * s_up).max(0.0);
+        let b_ref2 = (theta as f64 * beta[e] as f64 - kappa[e] as f64 * s_dn).max(0.0);
+        assert!(rel(a_up[e], a_ref) <= 1e-5, "edge {e} a {} vs {a_ref}", a_up[e]);
+        assert!(rel(b_down[e], b_ref2) <= 1e-5, "edge {e} b {} vs {b_ref2}", b_down[e]);
+    }
+    // f64 reference values from the plan (coef_state.py), looser: they pin the whole chain.
+    let want = [(0.5107f32, 8.477f32, -8.361f32, 4.662f32, 13.023f32), (0.5692, 185.80, 312.36, 414.55, 102.19)];
+    for (e, w) in want.iter().enumerate() {
+        for (got, exp, name) in [
+            (alpha[e], w.0, "alpha"),
+            (beta[e], w.1, "beta"),
+            (kappa[e], w.2, "kappa"),
+            (a_up[e], w.3, "a"),
+            (b_down[e], w.4, "b"),
+        ] {
+            assert!(((got - exp) / exp).abs() <= 2e-3, "edge {e} {name}: {got} vs {exp}");
+        }
+    }
+}
+
+#[test]
+fn perturbation_decays_on_short_reaches() {
+    let device = TestDevice::default();
+    let n = 5;
+    let hours = 48;
+    for theta in [1.0f32, 0.55] {
+        let adj = linear_chain_sparse(n);
+        let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let steady = cumulative(&adj, &vec![1.0; n]);
+        let q_init: Vec<f32> = steady.iter().map(|v| 0.9 * v).collect();
+        let mc = vec![vec![0.0f32; hours + 1]; n];
+        let qp = vec![1.0f32; hours * n];
+        let run = drive(&adj, &pattern, net, params(theta, 0.5, 1), &mc, &qp, &q_init, hours, &device);
+        let smax = steady.iter().cloned().fold(0.0f32, f32::max);
+        // e[t] is the error after t hours (e[0] is the start state).
+        let e: Vec<f32> = std::iter::once(&q_init)
+            .chain(run.q.iter())
+            .map(|q| q.iter().zip(&steady).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max) / smax)
+            .collect();
+        assert!(e[12] <= 1e-4, "theta {theta}: e(12) = {}", e[12]);
+        assert!(e[24] <= 1e-5, "theta {theta}: e(24) = {}", e[24]);
+        for t in 2..hours {
+            assert!(e[t + 1] <= e[t] + 1e-5, "theta {theta}: e grows at hour {t}: {} -> {}", e[t], e[t + 1]);
         }
     }
 }
