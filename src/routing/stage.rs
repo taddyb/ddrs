@@ -26,8 +26,12 @@ pub struct StageNetwork {
     pub n: usize,
     /// Downstream reach of each reach, -1 at a network outlet.
     pub down: Vec<i32>,
-    /// The stage set's one outlet (C1). It is a network outlet, because the set is downstream-closed.
+    /// The first outlet of the stage set (the only one under `prescribed_stage`).
     pub outlet: usize,
+    /// Every outlet of the stage set. Each is a network outlet, because the set
+    /// is downstream-closed. More than one is a forest, allowed only with a
+    /// normal-depth boundary (each outlet gets its own control edge).
+    pub outlets: Vec<usize>,
     /// Downstream-closed stage membership.
     pub in_stage: Vec<bool>,
     /// Size of the stage set.
@@ -69,7 +73,7 @@ fn down_of(adj: &SparseAdjacency) -> Vec<i32> {
 fn z_down_of(net: &StageNetwork) -> Vec<f32> {
     (0..net.n)
         .map(|i| {
-            if i == net.outlet {
+            if net.down[i] < 0 {
                 net.z_out[i]
             } else if net.down[i] >= 0 {
                 net.z_mid[net.down[i] as usize]
@@ -120,7 +124,8 @@ pub fn bed_elevation(adj: &SparseAdjacency, anchor_m: f32) -> (Vec<f32>, Vec<f32
 impl StageNetwork {
     /// Build the constants. `seeds = None` means every reach. `dams` holds
     /// `(row, T in days)`. A dam row outside the stage set is skipped. Returns
-    /// `Err` when the pattern is not a tree or the stage set has 0 or 2+ outlets.
+    /// `Err` when the pattern is not a forest or the stage set is empty. A stage set with
+    /// several outlets is built; `prescribed_stage` allows only one (`set_stage_block`).
     pub fn build(
         adj: &SparseAdjacency,
         pattern: &CsrPattern,
@@ -145,12 +150,8 @@ impl StageNetwork {
         let (in_stage, n_added) = downstream_closure(adj, seed_slice);
         let n_stage = in_stage.iter().filter(|&&b| b).count();
         let outlets: Vec<usize> = (0..n).filter(|&i| in_stage[i] && down[i] < 0).collect();
-        if outlets.len() != 1 {
-            return Err(format!(
-                "the stage set must drain to exactly 1 outlet, found {} outlet(s) {:?}",
-                outlets.len(),
-                outlets
-            ));
+        if outlets.is_empty() {
+            return Err("the stage set is empty: it has no outlet".to_string());
         }
         let outlet = outlets[0];
 
@@ -194,6 +195,7 @@ impl StageNetwork {
             n,
             down,
             outlet,
+            outlets,
             in_stage,
             n_stage,
             n_added,
@@ -442,7 +444,7 @@ where
         let f = |b: bool| if b { 1.0f32 } else { 0.0 };
         let in_stage: Vec<f32> = net.in_stage.iter().map(|&b| f(b)).collect();
         let nd: Vec<f32> = (0..n)
-            .map(|i| f(!prescribed && i == net.outlet && dam[i] == 0.0))
+            .map(|i| f(!prescribed && net.in_stage[i] && net.down[i] < 0 && dam[i] == 0.0))
             .collect();
         let friction: Vec<f32> = (0..n)
             .map(|i| f(net.in_stage[i] && dam[i] == 0.0 && nd[i] == 0.0))
@@ -459,7 +461,9 @@ where
             .map(|i| if net.down[i] >= 0 { net.down[i] } else { i as i32 })
             .collect();
         let mut outlet = vec![0.0f32; n];
-        outlet[net.outlet] = 1.0;
+        for &o in &net.outlets {
+            outlet[o] = 1.0;
+        }
         let z_down = z_down_of(&net);
         let s0: Vec<f32> = net.slope.iter().map(|s| s.max(1e-5)).collect();
         let c = RowConsts {

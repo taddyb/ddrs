@@ -90,11 +90,15 @@ fn juniata_network_facts() {
 }
 
 #[test]
-fn stage_set_with_two_outlets_is_rejected() {
+fn stage_set_with_two_outlets_is_a_forest() {
+    // Allowed by the builder (normal-depth boundary); `set_stage_block`
+    // refuses it under `prescribed_stage`.
     let adj = two_chains();
     let pat = CsrPattern::from_sparse(&adj);
-    let err = StageNetwork::build(&adj, &pat, None, 0.0, &[]).unwrap_err();
-    assert!(err.contains('2') && err.contains("outlet"), "{err}");
+    let net = StageNetwork::build(&adj, &pat, None, 0.0, &[]).unwrap();
+    assert_eq!(net.outlets, vec![2, 5]);
+    assert_eq!(net.z_out[2], 0.0);
+    assert_eq!(net.z_out[5], 0.0);
 }
 
 #[test]

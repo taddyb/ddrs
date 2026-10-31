@@ -878,9 +878,19 @@ pub struct StageRouting {
     pub reaches: StageReaches,
     #[serde(default)]
     pub downstream_boundary: DownstreamBoundary,
-    /// When set, the stage set's outlet must be this COMID (checked at dataset open).
+    /// The stage set's outlet reach. Required with `prescribed_stage`
+    /// (`validate_stage_routing`); optional with `normal_depth`, where, when
+    /// set, it must be an outlet of the stage set. A COMID missing from a
+    /// batch network is a `DataError` at batch time; under `prescribed_stage`
+    /// `MeritGagesDataset::open` also checks that every batch holds it
+    /// (`experiment.batch_size` at least the gauge count).
     #[serde(default)]
     pub boundary_comid: Option<i64>,
+    /// Bed elevation `z_b` (m) at the downstream end of the stage set's outlet
+    /// reach; the datum of the `stage_boundary` series. Head beds integrate up
+    /// from it. When the outlet has a `channel_geometry` row, that row's
+    /// `bed_z_m` replaces it (the two must not disagree), and a differing
+    /// value is reported once on stderr.
     #[serde(default)]
     pub anchor_elevation_m: f32,
     #[serde(default)]
@@ -2314,6 +2324,11 @@ fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
     }
     let has_boundary = ds.is_some_and(|d| d.stage_boundary.is_some());
     match (s.downstream_boundary, has_boundary) {
+        (DownstreamBoundary::PrescribedStage, _) if s.boundary_comid.is_none() => {
+            return Err("params.stage_routing: `downstream_boundary: prescribed_stage` requires \
+                        `boundary_comid` (the outlet reach the series is applied to)"
+                .to_string());
+        }
         (DownstreamBoundary::PrescribedStage, false) => {
             return Err("params.stage_routing: `downstream_boundary: prescribed_stage` requires \
                         `data_sources.stage_boundary`"
@@ -4768,7 +4783,7 @@ data_sources:
 
     #[test]
     fn stage_routing_prescribed_stage_needs_boundary_source() {
-        let p = "  stage_routing:\n    enabled: true\n    downstream_boundary: prescribed_stage\n";
+        let p = "  stage_routing:\n    enabled: true\n    downstream_boundary: prescribed_stage\n    boundary_comid: 7\n";
         stage_rejection(
             stage_yaml("ddrs_sr_pres_no.yaml", "", p, ""),
             &["prescribed_stage", "data_sources.stage_boundary"],
@@ -4779,6 +4794,18 @@ data_sources:
             stage_yaml("ddrs_sr_pres_conv.yaml", ds, SR_ON, ""),
             &["data_sources.stage_boundary", "normal_depth"],
         );
+    }
+
+    #[test]
+    fn stage_routing_prescribed_stage_needs_boundary_comid() {
+        let ds = "  stage_boundary: /dev/null/stage.csv\n";
+        let no = "  stage_routing:\n    enabled: true\n    downstream_boundary: prescribed_stage\n";
+        stage_rejection(
+            stage_yaml("ddrs_sr_pres_nocomid.yaml", ds, no, ""),
+            &["prescribed_stage", "boundary_comid"],
+        );
+        let yes = format!("{no}    boundary_comid: 7\n");
+        Config::from_yaml_file(stage_yaml("ddrs_sr_pres_comid.yaml", ds, &yes, "")).expect("comid set loads");
     }
 
     #[test]

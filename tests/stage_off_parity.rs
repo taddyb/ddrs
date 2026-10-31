@@ -118,7 +118,7 @@ fn stage_routing_absent_is_bitwise_the_committed_hydrograph() {
         bitwise &= got.to_bits() == exp.to_bits();
     }
     println!("stage absent: max abs diff to EXPECTED {max_diff:e}, bitwise = {bitwise}");
-    assert!(max_diff < 1e-6, "max abs diff {max_diff}");
+    assert!(bitwise, "absent block is not bitwise the committed hydrograph (max abs diff {max_diff:e})");
 }
 
 #[test]
@@ -304,31 +304,163 @@ fn stage_carry_round_trips_unclamped() {
 #[test]
 fn engine_mc_rows_stay_finite_under_stage_backflow() {
     let device = TestDevice::default();
-    let leaf = |v: f32| Tensor::<TestBackend, 1>::from_floats([v; 3], &device).require_grad();
-    let (n_l, q_l, p_l) = (leaf(0.5), leaf(0.5), leaf(0.1));
-    let q0 = Tensor::<TestBackend, 1>::from_floats([5.0, 3.0, 3.0], &device).require_grad();
-    let mut mc = backflow_engine(Some(q0.clone()), Some(&[n_l.clone(), q_l.clone(), p_l.clone()]), &device);
-    // Backflow on the stage rows at the step start, stage high above the bed.
-    let h = mc.stage_state().unwrap();
-    let h_vals: Vec<f32> = h.into_data().to_vec().unwrap();
-    mc.set_stage_carry(&StageCarry { h: h_vals, q: vec![0.0, -5.0, -2.0] }).unwrap();
-    let qp = Tensor::<TestBackend, 1>::from_floats([1.0; 3], &device);
-    let q_next = mc.route_timestep(qp);
-    let g = q_next.clone().sum().backward();
-    for (name, t) in [("n", &n_l), ("q", &q_l), ("p", &p_l), ("q0", &q0)] {
+    // One engine per backward: a backward consumes the shared graph.
+    let build = || {
+        let leaf = |v: f32| Tensor::<TestBackend, 1>::from_floats([v; 3], &device).require_grad();
+        let (n_l, q_l, p_l) = (leaf(0.5), leaf(0.5), leaf(0.1));
+        let q0 = Tensor::<TestBackend, 1>::from_floats([5.0, 3.0, 3.0], &device).require_grad();
+        let mut mc =
+            backflow_engine(Some(q0.clone()), Some(&[n_l.clone(), q_l.clone(), p_l.clone()]), &device);
+        // Backflow on the stage rows at the step start, stage high above the bed.
+        let h_vals: Vec<f32> = mc.stage_state().unwrap().into_data().to_vec().unwrap();
+        mc.set_stage_carry(&StageCarry { h: h_vals, q: vec![0.0, -5.0, -2.0] }).unwrap();
+        let qp = Tensor::<TestBackend, 1>::from_floats([1.0; 3], &device);
+        let q_next = mc.route_timestep(qp);
+        (mc, q_next, [n_l, q_l, p_l], q0)
+    };
+    let (_mc, q_next, leaves, q0) = build();
+    let g = q_next.sum().backward();
+    for (name, t) in [("n", &leaves[0]), ("q", &leaves[1]), ("p", &leaves[2]), ("q0", &q0)] {
         let v: Vec<f32> = t.grad(&g).unwrap_or_else(|| panic!("no gradient for {name}")).into_data().to_vec().unwrap();
         assert!(v.iter().all(|x| x.is_finite()), "gradient of {name} is not finite: {v:?}");
     }
-    // The MC row (0) still gets a gradient through the hook (a hook that
-    // detached every row would give 0).
-    let g0: Vec<f32> = q0.grad(&g).unwrap().into_data().to_vec().unwrap();
-    assert!(g0[0].abs() > 1e-6, "MC-row q_t gradient is {}", g0[0]);
+    // The loss on the MC row (0) alone: its output reads q0[0] only through the
+    // MC op, so a hook that detached every row (or all of `q_t`) would give none.
+    let (mut mc, q_next, _leaves, q0) = build();
+    let g_mc = q_next.slice([0..1]).sum().backward();
+    let g0: Vec<f32> = q0.grad(&g_mc).expect("MC-row loss reaches q0").into_data().to_vec().unwrap();
+    assert!(g0[0] != 0.0, "MC-row q_t gradient is {}", g0[0]);
     // mc_view: stage rows are constants for the MC op, MC rows pass through.
     let probe = Tensor::<TestBackend, 1>::from_floats([5.0, -5.0, -2.0], &device).require_grad();
     let view = mc.stage_block_mut().unwrap().mc_view(probe.clone(), 1e-3);
-    let gm = view.clone().slice([0..1]).sum().backward();
+    let gm = view.slice([0..1]).sum().backward();
     assert_eq!(probe.grad(&gm).unwrap().into_data().to_vec::<f32>().unwrap(), vec![1.0, 0.0, 0.0]);
+    let view = mc.stage_block_mut().unwrap().mc_view(probe.clone(), 1e-3);
     let gs = view.slice([1..3]).sum().backward();
     let v: Vec<f32> = probe.grad(&gs).map(|t| t.into_data().to_vec().unwrap()).unwrap_or(vec![0.0; 3]);
     assert_eq!(v, vec![0.0, 0.0, 0.0], "stage-row q_t gradient through the MC path is not zero");
+}
+
+/// The Juniata dataset with `prescribed_stage` on its outlet (open-time checks).
+fn prescribed_juniata(batch_size: usize, boundary: i64, csv: &std::path::Path) -> ddrs::config::Config {
+    use ddrs::config::{Config, ConfigMode, StageRouting};
+    let mut cfg = Config::from_yaml_file_with_mode("examples/juniata/ddrs.yaml", ConfigMode::Training).unwrap();
+    cfg.experiment.as_mut().unwrap().batch_size = batch_size;
+    cfg.data_sources.as_mut().unwrap().stage_boundary = Some(csv.to_path_buf());
+    cfg.params.stage_routing = Some(StageRouting {
+        enabled: true,
+        downstream_boundary: DownstreamBoundary::PrescribedStage,
+        boundary_comid: Some(boundary),
+        ..Default::default()
+    });
+    cfg
+}
+
+#[test]
+fn prescribed_stage_fails_at_open_unless_every_batch_holds_the_boundary() {
+    use ddrs::data::MeritGagesDataset;
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("stage.csv");
+    let mut body = String::from("time,stage_m\n");
+    for h in 0..48 {
+        body += &format!("2000-01-{:02}T{:02}:00:00Z,0.5\n", 1 + h / 24, h % 24);
+    }
+    std::fs::write(&csv, body).unwrap();
+    // The gauge sits on COMID 73005278; one gauge, so batch_size 1 holds all of them.
+    MeritGagesDataset::open(&prescribed_juniata(1, 73005278, &csv)).expect("one batch holds the gauge");
+    let err = MeritGagesDataset::open(&prescribed_juniata(0, 73005278, &csv)).err().expect("batch_size 0").to_string();
+    assert!(err.contains("batch_size") && err.contains("1 gauges") && err.contains("every batch"), "{err}");
+    let err = MeritGagesDataset::open(&prescribed_juniata(1, 1, &csv)).err().expect("bad comid").to_string();
+    assert!(err.contains("boundary_comid"), "{err}");
+}
+
+/// Two 3-chains: rows 0..3 and 3..6.
+fn forest_adjacency() -> ddrs::sparse::SparseAdjacency {
+    ddrs::sparse::SparseAdjacency {
+        n: 6,
+        rows: vec![1, 2, 4, 5],
+        cols: vec![0, 1, 3, 4],
+        values: vec![1.0; 4],
+        length_m: vec![1000.0; 6],
+        slope: vec![1e-3; 6],
+        parent_offset: None,
+    }
+}
+
+fn forest_engine(device: &TestDevice) -> MuskingumCunge<InnerBackend> {
+    let mut mc = MuskingumCunge::<InnerBackend>::new(mock_config(), device.clone());
+    mc.setup_inputs(
+        ddrs::routing::RoutingInputs {
+            adjacency: forest_adjacency(),
+            x_storage: Tensor::<TestBackend, 1>::ones([6], device) * 0.2,
+        },
+        mock_streamflow(T, 6, device),
+        spatial(6, device),
+        false,
+        None,
+    );
+    mc
+}
+
+#[test]
+fn two_tree_forest_runs_under_normal_depth_and_is_refused_under_prescribed_stage() {
+    let device = TestDevice::default();
+    let mut mc = forest_engine(&device);
+    mc.set_stage_block(stage_params(DownstreamBoundary::NormalDepth), inputs(None)).unwrap();
+    let out: Vec<f32> = mc.forward().into_data().to_vec().unwrap();
+    assert!(out.iter().all(|v| v.is_finite()), "forest hydrograph is not finite");
+    let mb = mc.stage_mass_balance().unwrap();
+    println!("forest mass balance rel {:e}", mb.rel());
+    assert!(mb.steps == T - 1 && mb.rel() < 1e-4, "{mb:?}");
+    // Each outlet is a normal-depth control edge: the two identical trees agree.
+    for t in 0..T {
+        let (a, b) = (out[2 * T + t], out[5 * T + t]);
+        assert!((a - b).abs() <= 1e-3 * a.abs().max(1.0), "outlets differ at hour {t}: {a} vs {b}");
+    }
+    let mut inp = inputs(None);
+    inp.boundary_series = Some(vec![0.5; T]);
+    inp.boundary_row = Some(2);
+    let err = forest_engine(&device)
+        .set_stage_block(stage_params(DownstreamBoundary::PrescribedStage), inp)
+        .unwrap_err();
+    assert!(err.contains("exactly 1 outlet") && err.contains("boundary_comid"), "{err}");
+}
+
+#[test]
+fn outlet_table_bed_is_the_anchor_for_the_outlet_edge() {
+    use ddrs::data::store::ChannelGeometryRows;
+    let device = TestDevice::default();
+    let mut mc = engine(3, T, &device);
+    let mut inp = inputs(Some(vec![1]));
+    inp.anchor_m = 0.0;
+    inp.boundary_series = Some(vec![-8.0; T]);
+    inp.boundary_row = Some(2);
+    inp.geometry = Some((
+        ChannelGeometryRows {
+            rows: vec![2],
+            top_width: vec![100.0],
+            bed_z: vec![-10.0],
+            n: vec![0.035],
+            pool_z: vec![None],
+        },
+        false,
+    ));
+    mc.set_stage_block(stage_params(DownstreamBoundary::PrescribedStage), inp).unwrap();
+    let _ = mc.route_timestep(Tensor::<TestBackend, 1>::from_floats([1.0; 3], &device));
+    let area: Vec<f32> = mc.stage_block_mut().unwrap().last_coefficients().unwrap().area_edge.into_data().to_vec().unwrap();
+    // Depth from the table bed (-10): h_bc - bed = 2 m over a 100 m rectangle.
+    // With the anchor left at 0 the edge depth would floor at depth_lb (area 1).
+    assert!((area[2] - 200.0).abs() < 0.2, "outlet edge area {} (want 200)", area[2]);
+}
+
+#[test]
+fn carried_backflow_is_unclamped_in_column_zero() {
+    let device = TestDevice::default();
+    let mut mc = backflow_engine(None, None, &device);
+    let h: Vec<f32> = mc.stage_state().unwrap().into_data().to_vec().unwrap();
+    mc.set_stage_carry(&StageCarry { h, q: vec![0.0, -5.0, -2.0] }).unwrap();
+    let out: Vec<f32> = mc.forward().into_data().to_vec().unwrap();
+    assert_eq!(out[T], -5.0, "stage row 1, column 0");
+    assert_eq!(out[2 * T], -2.0, "stage row 2, column 0");
+    assert!(out[0] > 0.0, "MC row 0 stays clamped and positive");
 }

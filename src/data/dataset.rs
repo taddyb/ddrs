@@ -507,6 +507,56 @@ fn check_table_covers_stage_set(
     })
 }
 
+/// `downstream_boundary: prescribed_stage` fixes one outlet reach, so every
+/// batch network must contain `boundary_comid`. Checked once at open: the
+/// boundary must lie in the union of the gauge subgraphs (the eval network),
+/// and in a training dataset (`experiment.rho` set; the testing overlay sets
+/// it null) one batch must hold every gauge, so no training batch can omit it.
+fn check_stage_boundary_in_every_batch(
+    sr: &crate::config::StageRouting,
+    exp: &crate::config::Experiment,
+    conus: &ConusAdjacencyStore,
+    gages_adj: &GagesAdjacencyStore,
+    gauges: &[Staid],
+) -> Result<()> {
+    use crate::config::DownstreamBoundary;
+    let bad = |message: String| DataError::Malformed {
+        path: std::path::PathBuf::from("<config>"),
+        message,
+    };
+    if sr.downstream_boundary != DownstreamBoundary::PrescribedStage {
+        return Ok(());
+    }
+    let id = sr.boundary_comid.ok_or_else(|| {
+        bad("params.stage_routing: prescribed_stage needs boundary_comid".into())
+    })?;
+    let pos = conus.order.iter().position(|c| c.0 == id).ok_or_else(|| {
+        bad(format!("params.stage_routing.boundary_comid {id} is not in the adjacency"))
+    })?;
+    let in_union = gauges.iter().any(|s| {
+        gages_adj
+            .get(s)
+            .is_some_and(|g| g.indices_0.iter().chain(&g.indices_1).any(|&p| p as usize == pos))
+    });
+    if !in_union {
+        return Err(bad(format!(
+            "params.stage_routing.boundary_comid {id} is in none of the {} gauge subgraphs, \
+             so no batch network contains it",
+            gauges.len()
+        )));
+    }
+    if exp.rho.is_some() && exp.batch_size < gauges.len() {
+        return Err(bad(format!(
+            "params.stage_routing: prescribed_stage needs boundary_comid {id} in every batch network, \
+             so experiment.batch_size must be >= the number of gauges (one batch holds all of them); \
+             got batch_size {} for {} gauges",
+            exp.batch_size,
+            gauges.len()
+        )));
+    }
+    Ok(())
+}
+
 impl MeritGagesDataset {
     /// Open all five stores and apply the training-mode filter pipeline.
     /// Mirrors `Merit.__init__` + `_init_training` in `geodatazoo/merit.py`.
@@ -700,6 +750,10 @@ impl MeritGagesDataset {
             (Some(path), true) => Some(StageBoundaryStore::open(path)?),
             _ => None,
         };
+
+        if let Some(sr) = cfg.params.stage_routing.as_ref().filter(|_| stage_on) {
+            check_stage_boundary_in_every_batch(sr, exp, &conus, &gages_adj, &gauges)?;
+        }
 
         let channel_geometry = match &cfg.params.stage_routing {
             Some(sr) if stage_on => {

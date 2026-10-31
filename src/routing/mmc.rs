@@ -1571,6 +1571,19 @@ impl<I: Backend> MuskingumCunge<I> {
             .unwrap()
             .clone()
             .clamp_min(discharge_lb);
+        // With a stage block the stage rows of column 0 stay unclamped: the
+        // carried backflow Q must reach the output (and any filter on it).
+        // `route_timestep` reads the unclamped `discharge_t` either way.
+        let initial = match self.stage.as_ref() {
+            Some(block) => {
+                let mask = Tensor::<Autodiff<I>, 1, Bool>::from_data(
+                    TensorData::from(block.stage_rows()),
+                    &self.device,
+                );
+                initial.mask_where(mask, self.discharge_t.as_ref().unwrap().clone())
+            }
+            None => initial,
+        };
 
         // SP-10 Phase 3: when CUDA graphs are active, the captured-graph
         // replay path in `route_timestep` causes cubecl's `Auto`-mode
@@ -1897,9 +1910,14 @@ impl<I: Backend> MuskingumCunge<I> {
     /// `discharge_t`, because the table hotstart reads the first two.
     ///
     /// Outlet anchor: `z_out[outlet]` comes from `inputs.anchor_m`, and
-    /// `set_table_geometry` replaces only `z_mid`. When the outlet has a table
-    /// row, its `bed_z_m` is used as the anchor instead (the downstream end of
-    /// the outlet reach sits at the table's bed), so the two never disagree.
+    /// `set_table_geometry` replaces only `z_mid`. When a stage-set outlet has
+    /// a table row, its `bed_z_m` is used as the anchor instead (the downstream
+    /// end of the outlet reach sits at the table's bed), so the two never
+    /// disagree. Head beds (`geometry: mixed`) then integrate up from that
+    /// bed. A differing configured anchor is reported once on stderr.
+    ///
+    /// Several stage outlets (a forest) are allowed with a normal-depth
+    /// boundary; `prescribed_stage` needs exactly one.
     pub fn set_stage_block(&mut self, params: StageParams, inputs: StageInputs) -> Result<(), String>
     where
         I: 'static,
@@ -1915,8 +1933,22 @@ impl<I: Backend> MuskingumCunge<I> {
         let mut net = StageNetwork::build(adj, pattern, seeds, inputs.anchor_m, &inputs.dams)
             .map_err(|e| format!("stage block: {e}"))?;
         if let Some((rows, _)) = &inputs.geometry {
-            if let Some(j) = rows.rows.iter().position(|&r| r == net.outlet) {
-                net = StageNetwork::build(adj, pattern, seeds, rows.bed_z[j], &inputs.dams)
+            if let Some(j) = rows.rows.iter().position(|&r| net.outlets.contains(&r)) {
+                let bed = rows.bed_z[j];
+                if bed != inputs.anchor_m {
+                    // Once per process: this runs for every batch and chunk.
+                    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        use std::io::Write;
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "stage routing: anchor_elevation_m {} overridden by the table's outlet bed {} m",
+                            inputs.anchor_m,
+                            bed
+                        );
+                    }
+                }
+                net = StageNetwork::build(adj, pattern, seeds, bed, &inputs.dams)
                     .map_err(|e| format!("stage block: {e}"))?;
             }
         }
@@ -1928,11 +1960,19 @@ impl<I: Backend> MuskingumCunge<I> {
                 ));
             }
         }
+        if params.boundary == crate::config::DownstreamBoundary::PrescribedStage && net.outlets.len() != 1 {
+            return Err(format!(
+                "stage block: downstream_boundary prescribed_stage needs a stage set with exactly 1 outlet, \
+                 found {} (rows {:?}); boundary_comid must name it",
+                net.outlets.len(),
+                net.outlets
+            ));
+        }
         if let Some(r) = inputs.boundary_row {
-            if r != net.outlet {
+            if !net.outlets.contains(&r) {
                 return Err(format!(
-                    "stage block: boundary_comid is row {r} but the stage set's outlet is row {}",
-                    net.outlet
+                    "stage block: boundary_comid is row {r} but the stage set's outlet(s) are rows {:?}",
+                    net.outlets
                 ));
             }
         }
