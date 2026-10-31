@@ -13,6 +13,7 @@
 
 pub mod cusparse;
 pub(crate) mod dispatch;
+pub mod tree_lu;
 
 use std::sync::Arc;
 
@@ -311,7 +312,7 @@ fn build_transposed_pattern(
 ///
 /// Pure-Rust port of `scipy.sparse.linalg.spsolve_triangular(A, b, lower=True)`.
 /// `a_values` is laid out per [`CsrPattern`] (off-diag then diag within each row).
-fn forward_sub_lower(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
+pub(crate) fn forward_sub_lower(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
     debug_assert_eq!(a_values.len(), pattern.nnz());
     debug_assert_eq!(b.len(), pattern.n);
     let n = pattern.n;
