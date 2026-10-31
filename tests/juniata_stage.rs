@@ -291,3 +291,187 @@ fn juniata_synthetic_tide_at_outlet_propagates_upstream() {
     println!("volume ratio tide/free at the gauge: {:.5}", vt / vf);
     assert!((vt - vf).abs() / vf < 0.02, "tide changes the gauge volume by {:.3} %", 100.0 * (vt / vf - 1.0));
 }
+
+// ---------------------------------------------------------------------------
+// Task 13: Raystown as a control node, then a pool with a physical bed.
+// ---------------------------------------------------------------------------
+
+const RAYSTOWN_CONFIG: &str = "examples/juniata/ddrs_stage_raystown.yaml";
+const POOL_CONFIG: &str = "examples/juniata/ddrs_stage_raystown_pool.yaml";
+const POOL_CSV: &str = "examples/juniata/data/juniata_pool_geometry.csv";
+const DAM_ROW: usize = 177;
+const T_DAYS: f64 = 1.23;
+/// Pool rows with 0.8 x their wedge depth (m), by row (C13).
+const POOL_BARS: [(usize, f64); 4] = [(177, 19.718), (175, 8.460), (174, 8.737), (173, 4.092)];
+
+struct DamRun {
+    q: Vec<Vec<f32>>,
+    /// `h[hour][row]` when the stage block recorded it.
+    h: Vec<Vec<f32>>,
+    mass_rel: Option<f32>,
+    geom: Option<ddrs::data::store::channel_geometry::ChannelGeometryRows>,
+    length: Vec<f32>,
+}
+
+/// `route` with option C armed first (as the real forward does) and an
+/// optional zero `q_spatial` on `zero_q_row`. `stage_off` routes plain MC.
+fn route_dam(cfg: &Config, zero_q_row: Option<usize>, record_h: bool) -> DamRun {
+    let device = Default::default();
+    let ds = MeritGagesDataset::open(cfg).expect("open Juniata dataset");
+    let axis = ds.time_axis();
+    let start = chrono::NaiveDate::from_ymd_opt(1990, 1, 1).unwrap();
+    let window = RhoWindow {
+        start_day_idx: (start - axis.start).num_days() as usize,
+        rho_days: 90,
+        window_start: start,
+    };
+    let batch = ds.collate(&[Staid::from(GAUGE)], &window).expect("collate");
+    let tensors = batch.to_tensors::<I>(&device);
+    let n = tensors.adjacency.n;
+    let mut qs = vec![NORM[1]; n];
+    if let Some(r) = zero_q_row {
+        qs[r] = 0.0;
+    }
+    let col = |v: f32| Tensor::<Ad, 1>::full([n], v, &device);
+    let mut engine = MuskingumCunge::<I>::new(cfg.clone(), device);
+    engine.setup_inputs(
+        RoutingInputs { adjacency: tensors.adjacency.clone(), x_storage: col(0.3) },
+        Tensor::from_inner(tensors.q_prime.clone()),
+        SpatialParameters {
+            n: col(NORM[0]),
+            q_spatial: Tensor::<Ad, 1>::from_floats(qs.as_slice(), &device),
+            p_spatial: Some(col(NORM[2])),
+            k_d: None,
+            d_gw: None,
+            leakance_factor: None,
+            impervious_mask: None,
+            gamma: None,
+        },
+        false,
+        None,
+    );
+    ddrs::training::forward::apply_reservoir_rows(
+        cfg,
+        &mut engine,
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+        tensors.q_prime.dims()[0],
+        None,
+    );
+    apply_stage_block(
+        cfg,
+        &mut engine,
+        tensors.stage.as_ref(),
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+    );
+    if record_h {
+        engine.stage_block_mut().expect("stage block armed").record_coefficients(true);
+    }
+    let out: Vec<f32> = engine.forward().inner().into_data().to_vec().unwrap();
+    let t = out.len() / n;
+    let q = (0..n).map(|r| out[r * t..(r + 1) * t].to_vec()).collect();
+    let h = engine
+        .stage_block_mut()
+        .map(|b| b.stage_record().to_vec())
+        .unwrap_or_default();
+    DamRun {
+        q,
+        h,
+        mass_rel: engine.stage_mass_balance().map(|m| m.rel()),
+        geom: tensors.stage.as_ref().and_then(|s| s.geometry.clone()),
+        length: tensors.adjacency.length_m.clone(),
+    }
+}
+
+#[test]
+fn raystown_control_node_matches_option_c_on_the_dam_row() {
+    let mut cfg_a = Config::from_yaml_file(RAYSTOWN_CONFIG).unwrap();
+    cfg_a.params.stage_routing = None;
+    let cfg_b = Config::from_yaml_file(RAYSTOWN_CONFIG).unwrap();
+    let a = route_dam(&cfg_a, Some(DAM_ROW), false);
+    let b = route_dam(&cfg_b, Some(DAM_ROW), false);
+    let max_rel = a.q[DAM_ROW]
+        .iter()
+        .zip(&b.q[DAM_ROW])
+        .map(|(x, y)| ((x - y).abs() / x.abs().max(1e-6)) as f64)
+        .fold(0.0, f64::max);
+    println!("dam row 177: max relative difference, stage control node vs option C: {max_rel:.3e}");
+    assert!(max_rel < 1e-4, "dam outflow differs from option C by {max_rel:.3e}");
+    for r in 0..DAM_ROW {
+        assert_eq!(a.q[r], b.q[r], "row {r} below the dam must be bitwise identical");
+    }
+}
+
+fn header_value(path: &str, key: &str) -> f64 {
+    let text = std::fs::read_to_string(path).unwrap();
+    let line = text.lines().find(|l| l.starts_with('#') && l.contains(key)).expect("header comment");
+    let at = line.find(key).unwrap() + key.len();
+    line[at..].split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn raystown_pool_holds_physical_storage_and_conserves() {
+    let cfg = Config::from_yaml_file(POOL_CONFIG).unwrap();
+    let a = {
+        let mut c = Config::from_yaml_file(RAYSTOWN_CONFIG).unwrap();
+        c.params.stage_routing = None;
+        route_dam(&c, None, false)
+    };
+    let b = route_dam(&cfg, None, true);
+    assert!(b.q.iter().all(|r| r.iter().all(|v| v.is_finite())), "non-finite Q");
+    let geom = b.geom.as_ref().expect("mixed geometry carries the table");
+    let cap_mcm = header_value(POOL_CSV, "capacity_mcm=");
+    let cap = cap_mcm * 1e6;
+
+    let hours = b.h.len();
+    assert!(hours > 2000, "recorded {hours} hours");
+    let z_pool = geom.pool_z[0].expect("pool_z_m on pool rows") as f64;
+    let volume = |h: &[f32]| -> f64 {
+        geom.rows
+            .iter()
+            .enumerate()
+            .map(|(j, &r)| {
+                let lvl = (h[r] as f64).min(z_pool);
+                geom.top_width[j] as f64 * b.length[r] as f64 * (lvl - geom.bed_z[j] as f64)
+            })
+            .sum()
+    };
+    let v_end = volume(&b.h[hours - 1]);
+    let v_start = volume(&b.h[0]);
+    println!("pool volume: start {:.2} MCM, end {:.2} MCM, capacity {cap_mcm:.2} MCM", v_start / 1e6, v_end / 1e6);
+    assert!((v_end - cap).abs() / cap < 0.05, "pool volume {:.2} MCM vs capacity {cap_mcm}", v_end / 1e6);
+
+    // Active storage above the normal pool is T*Q on the dam row (option C on S_active).
+    let j177 = geom.rows.iter().position(|&r| r == DAM_ROW).expect("dam row in the table");
+    let (tw, len) = (geom.top_width[j177] as f64, b.length[DAM_ROW] as f64);
+    let mut worst = 0.0f64;
+    let mut checked = 0;
+    for k in (WARMUP_H..hours).step_by(24) {
+        let s_act = (b.h[k][DAM_ROW] as f64 - z_pool).max(0.0) * tw * len;
+        let tq = T_DAYS * 86400.0 * b.q[DAM_ROW][k] as f64;
+        if tq > 0.0 {
+            worst = worst.max((s_act - tq).abs() / tq);
+            checked += 1;
+        }
+    }
+    println!("active storage vs T*Q on the dam row: worst relative difference {worst:.3e} over {checked} days");
+    assert!(worst < 0.10, "active storage differs from T*Q by {worst:.3}");
+
+    // Lake depths stay above 0.8 x the wedge depth (C13), at every hour.
+    for (row, bar) in POOL_BARS {
+        let j = geom.rows.iter().position(|&r| r == row).expect("pool row in the table");
+        let bed = geom.bed_z[j] as f64;
+        let min_depth = b.h.iter().map(|h| h[row] as f64 - bed).fold(f64::INFINITY, f64::min);
+        println!("row {row}: minimum depth {min_depth:.3} m (bar {bar} m)");
+        assert!(min_depth > bar, "row {row} depth {min_depth:.3} m is under {bar} m");
+    }
+
+    let rel = b.mass_rel.expect("stage block armed");
+    println!("stage mass balance rel: {rel:.3e}");
+    assert!(rel <= 1e-4, "mass balance rel {rel}");
+
+    let (sa, sb) = (sum_after_warmup(&a.q[OUTLET]), sum_after_warmup(&b.q[OUTLET]));
+    println!("gauge volume ratio pool/option C: {:.5}", sb / sa);
+    assert!((sb - sa).abs() / sa < 0.02, "gauge volume differs by {:.3} %", 100.0 * (sb / sa - 1.0));
+}

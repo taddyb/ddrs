@@ -20,6 +20,18 @@ use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, Tensor
 use crate::config::Config;
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
 
+thread_local! {
+    /// Rows the negative-discharge count leaves out (stage-routed rows). Set
+    /// by `MuskingumCunge::forward` on the routing thread, cleared after it.
+    static NEG_SKIP_ROWS: std::cell::RefCell<Option<Vec<bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Leave `rows` (true = skip) out of the negative-solve count on this thread;
+/// `None` counts every row.
+pub fn set_negative_solve_skip_rows(rows: Option<Vec<bool>>) {
+    NEG_SKIP_ROWS.with(|c| *c.borrow_mut() = rows);
+}
+
 /// Count of solve outputs that came out NEGATIVE before the S28
 /// `clamp_min(discharge_lb)` rewrote them to `+1e-4`.
 ///
@@ -2324,9 +2336,16 @@ where
     // `collect_zeta` / `enable_zeta_accumulation` pattern on MuskingumCunge.
     if track_neg {
         let x_host: Vec<f32> = primitive_to_vec::<I>(x_sol_prim.clone());
-        let n_neg = x_host.iter().filter(|&&v| v < 0.0).count() as u64;
+        let (n_neg, n_all) = NEG_SKIP_ROWS.with(|c| match c.borrow().as_ref() {
+            Some(skip) => x_host
+                .iter()
+                .zip(skip)
+                .filter(|(_, &s)| !s)
+                .fold((0u64, 0u64), |(a, b), (&v, _)| (a + (v < 0.0) as u64, b + 1)),
+            None => (x_host.iter().filter(|&&v| v < 0.0).count() as u64, x_host.len() as u64),
+        });
         NEG_SOLVES.fetch_add(n_neg, Ordering::Relaxed);
-        TOTAL_SOLVES.fetch_add(x_host.len() as u64, Ordering::Relaxed);
+        TOTAL_SOLVES.fetch_add(n_all, Ordering::Relaxed);
     }
 
     // S28: q_next = max(x_sol, discharge_lb)

@@ -518,6 +518,10 @@ struct DamAccount<I: Backend> {
     neg_c1_steps: Tensor<I, 1>,
 }
 
+fn pick_int<I: Backend>(t: &Tensor<I, 1, Int>, idx: &Tensor<I, 1, Int>) -> Tensor<I, 1, Int> {
+    t.clone().select(0, idx.clone())
+}
+
 impl<I: Backend> DamAccount<I> {
     fn new(rows: &[usize], record_qin: bool, device: &I::Device) -> Self {
         let n = rows.len();
@@ -536,6 +540,41 @@ impl<I: Backend> DamAccount<I> {
             c1_min: Tensor::full([n], f32::INFINITY, device),
             neg_c1_steps: Tensor::zeros([n], device),
         }
+    }
+
+    /// Drop the dams whose row is stage-routed (`inside[row]`): the stage
+    /// block overwrites those rows, so the S28 clamp values it would record
+    /// are MC numbers for rows MC does not route. Returns `false` when no dam
+    /// is left.
+    fn retain_outside(&mut self, inside: &[bool], device: &I::Device) -> bool {
+        let keep: Vec<usize> = (0..self.rows.len())
+            .filter(|&k| !inside.get(self.rows[k]).copied().unwrap_or(false))
+            .collect();
+        if keep.len() == self.rows.len() {
+            return true;
+        }
+        if keep.is_empty() {
+            return false;
+        }
+        let idx = Tensor::<I, 1, Int>::from_data(
+            TensorData::new(keep.iter().map(|&k| k as i64).collect::<Vec<_>>(), [keep.len()]),
+            device,
+        );
+        let pick = |t: &Tensor<I, 1>| t.clone().select(0, idx.clone());
+        self.rows = keep.iter().map(|&k| self.rows[k]).collect();
+        self.rows_t = pick_int(&self.rows_t, &idx);
+        self.created = pick(&self.created);
+        self.storage = pick(&self.storage);
+        self.inflow = pick(&self.inflow);
+        self.clamp_steps = pick(&self.clamp_steps);
+        self.owed = pick(&self.owed);
+        self.repaid = pick(&self.repaid);
+        self.c1_min = pick(&self.c1_min);
+        self.neg_c1_steps = pick(&self.neg_c1_steps);
+        if let Some(q) = self.qin.as_mut() {
+            *q = q.iter().map(pick).collect();
+        }
+        true
     }
 
     /// Carried floor, before a solve: the repayment rate `paid/dt` per dam
@@ -662,6 +701,9 @@ pub struct MuskingumCunge<I: Backend> {
     /// The last routed step's pre-clamp solve and routed inflow, handed from
     /// `route_timestep` to `forward`'s accounting.
     last_dam_diag: Option<crate::routing::mmc_op::DamStepDiag<I>>,
+    /// Stage-set rows (set with the stage block); the negative-discharge
+    /// count leaves them out because the block overwrites them.
+    stage_skip: Option<Vec<bool>>,
     /// Per-dam flood pool on armed dam rows ([`FloodPool`],
     /// `set_flood_pool`). `None` routes bitwise as before the pool existed.
     flood_pool: Option<ArmedFloodPool<I>>,
@@ -785,6 +827,7 @@ impl<I: Backend> MuskingumCunge<I> {
             release: None,
             dam_account: None,
             last_dam_diag: None,
+            stage_skip: None,
             flood_pool: None,
             dam_floor,
             dam_row_positivity,
@@ -864,6 +907,7 @@ impl<I: Backend> MuskingumCunge<I> {
         // A new network drops the previous stage block; re-arm it with
         // `set_stage_block` (after the reservoir rows).
         self.stage = None;
+        self.stage_skip = None;
         // Only the topology and geometry `StageNetwork::build` reads (no values).
         self.stage_adj = Some(SparseAdjacency {
             n,
@@ -1617,6 +1661,7 @@ impl<I: Backend> MuskingumCunge<I> {
         columns.push(initial.unsqueeze_dim::<2>(1));
 
         crate::routing::mmc_op::reset_negative_solve_stats();
+        crate::routing::mmc_op::set_negative_solve_skip_rows(self.stage_skip.clone());
         // The carried dam floor needs dam rows; without them it is a no-op.
         let carry = self.dam_floor == DamFloor::Carry && self.dam_account.is_some();
 
@@ -1720,6 +1765,7 @@ impl<I: Backend> MuskingumCunge<I> {
                 );
             }
         } else {
+            crate::routing::mmc_op::set_negative_solve_skip_rows(None);
             let (neg, total) = crate::routing::mmc_op::negative_solve_stats();
             if total > 0 && neg > 0 {
                 eprintln!(
@@ -1996,6 +2042,16 @@ impl<I: Backend> MuskingumCunge<I> {
             self.q_spatial.as_ref().expect("setup_inputs ran").clone(),
             self.slope.as_ref().expect("setup_inputs ran").clone(),
         );
+        // The block overwrites its rows, so MC-side diagnostics for them
+        // would be MC numbers for rows MC does not route: leave stage-set
+        // dams out of the clamp account (Task 13).
+        let inside = block.stage_rows().to_vec();
+        if let Some(acc) = self.dam_account.as_mut() {
+            if !acc.retain_outside(&inside, &self.device) {
+                self.dam_account = None;
+            }
+        }
+        self.stage_skip = Some(inside);
         self.stage = Some(block);
         Ok(())
     }

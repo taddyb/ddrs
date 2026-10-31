@@ -1,0 +1,6 @@
+# capacity_mcm=634.01 source=NID normal storage (PA00004); surface_km2=33.59 source=NID; wedge along 173->175->177, 174 at the junction depth
+COMID,top_width_m,bed_z_m,n,pool_z_m
+73005301,696.8,185.874,0.03,210.522
+73005302,696.8,199.947,0.03,210.522
+73006253,696.8,199.601,0.03,210.522
+73005305,696.8,205.407,0.03,210.522

@@ -360,6 +360,8 @@ struct TableConsts<I: Backend> {
     n: Tensor<Ad<I>, 1>,
     /// Dam release reference stage (`pool_z`, or the bed); 0 off the table.
     pool: Tensor<Ad<I>, 1>,
+    /// 1 where the table row gave an explicit `pool_z_m`.
+    has_pool: Tensor<Ad<I>, 1>,
     /// Host copy of the bed for the hotstart.
     bed_h: Vec<f32>,
 }
@@ -406,6 +408,8 @@ pub struct StageBlock<I: Backend> {
     last_coeffs: Option<StageCoefficients<I>>,
     record: bool,
     coeff_record: Vec<(Vec<f32>, Vec<f32>)>,
+    /// Per hour, the end-of-hour stage of every row (kept when `record` is on).
+    stage_record: Vec<Vec<f32>>,
 }
 
 fn f32_tensor<I: Backend>(v: &[f32], device: &I::Device) -> Tensor<Ad<I>, 1> {
@@ -499,6 +503,7 @@ where
             last_coeffs: None,
             record: false,
             coeff_record: Vec::new(),
+            stage_record: Vec::new(),
         }
     }
 
@@ -563,6 +568,7 @@ where
         let mut nt = vec![1.0f32; nn];
         let mut bed = self.net.z_mid.clone();
         let mut pool = vec![0.0f32; nn];
+        let mut has_pool = vec![0.0f32; nn];
         for j in 0..k {
             let r = rows.rows[j];
             if r >= nn {
@@ -580,6 +586,7 @@ where
             nt[r] = rows.n[j];
             bed[r] = rows.bed_z[j];
             pool[r] = rows.pool_z[j].unwrap_or(rows.bed_z[j]);
+            has_pool[r] = if rows.pool_z[j].is_some() { 1.0 } else { 0.0 };
         }
         if strict {
             if let Some(i) = (0..nn).find(|&i| self.net.in_stage[i] && mask[i] == 0.0) {
@@ -597,6 +604,7 @@ where
             tw: f32_tensor::<I>(&tw, &device),
             n: f32_tensor::<I>(&nt, &device),
             pool: f32_tensor::<I>(&pool, &device),
+            has_pool: f32_tensor::<I>(&has_pool, &device),
             bed_h: self.net.z_mid.clone(),
         });
         Ok(())
@@ -686,6 +694,8 @@ where
                 f32_tensor::<I>(&t.bed_h, &device) + dn
             }
         };
+        // Task 13: a non-dam row with `pool_z_m` starts full to normal pool.
+        let h_flow = h_flow * one_minus::<I>(t.has_pool.clone()) + t.pool.clone() * t.has_pool.clone();
         h_dam * self.c.dam.clone() + h_flow * one_minus::<I>(self.c.dam.clone())
     }
 
@@ -745,6 +755,13 @@ where
     #[doc(hidden)]
     pub fn coefficient_record(&self) -> &[(Vec<f32>, Vec<f32>)] {
         &self.coeff_record
+    }
+
+    /// Per hour, the stage `h` of every row at the hour's end (recorded with
+    /// [`Self::record_coefficients`]).
+    #[doc(hidden)]
+    pub fn stage_record(&self) -> &[Vec<f32>] {
+        &self.stage_record
     }
 
     fn ensure_slots(&mut self, pattern: &Arc<CsrPattern>, device: &I::Device) {
@@ -1030,6 +1047,9 @@ where
             }
         }
         self.last_coeffs = coeffs;
+        if self.record {
+            self.stage_record.push(h.clone().inner().into_data().to_vec().expect("f32"));
+        }
         self.h_t = Some(h);
         self.step_index += 1;
         q_next_mc.mask_where(self.c.in_stage_b.clone(), qc)
