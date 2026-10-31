@@ -270,6 +270,9 @@ where
     if cfg.params.use_reservoirs {
         return Err("this probe does not support params.use_reservoirs: true (it routes every reach as a channel)".into());
     }
+    if cfg.stage_routing_on() {
+        return Err("this probe does not support params.stage_routing (it probes the Muskingum-Cunge coefficients)".into());
+    }
     if let (Some(exp), Some(ckpt)) = (cfg.experiment.as_mut(), cli.checkpoint.clone()) {
         exp.checkpoint = Some(ckpt);
     }

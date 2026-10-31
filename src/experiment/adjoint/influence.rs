@@ -108,6 +108,14 @@ where
             )
             .into());
         }
+        if cfg.stage_routing_on() {
+            return Err(format!(
+                "arm `{}`: `params.stage_routing` arms are unsupported by the paper studies \
+                 (their engines route with the Muskingum-Cunge solve)",
+                arm.name
+            )
+            .into());
+        }
         let dataset = MeritGagesDataset::open(&cfg).map_err(|e| format!("arm `{}`: {e}", arm.name))?;
         <I as Backend>::seed(device, cfg.seed);
         let section = cfg
@@ -555,6 +563,42 @@ mod tests {
             .expect("a reservoir arm must be refused")
             .to_string();
             assert!(err.contains("use_reservoirs"), "{err}");
+        }
+    }
+
+    #[test]
+    fn stage_routing_arms_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "mode: training\nseed: 1\nnp_seed: 1\ndata_sources:\n  attributes: /dev/null/a.nc\n  \
+             conus_adjacency: /dev/null/c.zarr\n  gages_adjacency: /dev/null/g.zarr\n  \
+             streamflow: /dev/null/s.ic\n  observations: /dev/null/o.ic\n  \
+             gages: /dev/null/g.csv\n\
+             params:\n  stage_routing:\n    enabled: true\n",
+        )
+        .unwrap();
+        let arm = ResolvedArm {
+            name: "stage".into(),
+            run_id: "run".into(),
+            run_dir: dir.path().into(),
+            config_path,
+            checkpoint_dir: dir.path().into(),
+            checkpoint_label: "init".into(),
+        };
+        for allow_leakance in [false, true] {
+            let err = InfluenceContext::<burn::backend::NdArray<f32>>::open_inner(
+                &arm,
+                &Default::default(),
+                true,
+                PERIOD_TESTING,
+                allow_leakance,
+            )
+            .err()
+            .expect("a stage-routing arm must be refused")
+            .to_string();
+            assert!(err.contains("stage_routing"), "{err}");
         }
     }
 

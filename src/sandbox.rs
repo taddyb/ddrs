@@ -259,6 +259,9 @@ where
 {
     type Bv<I> = Autodiff<I>;
 
+    if inputs.config.stage_routing_on() {
+        return Err(CliError::Runtime("sandbox smoke does not support params.stage_routing".into()));
+    }
     let qprime: Tensor<Bv<I>, 2> =
         Tensor::<Bv<I>, 1>::from_floats(inputs.qprime_flat.as_slice(), device)
             .reshape([inputs.n_timesteps, N_REACHES]);
