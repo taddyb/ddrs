@@ -403,10 +403,6 @@ pub struct MeritGagesDataset {
     /// `data_sources.channel_geometry`, read once at open when stage routing is
     /// on with `geometry: table | mixed`.
     channel_geometry: Option<ChannelGeometryStore>,
-    /// `geometry: table`: every stage reach needs a row (checked per batch).
-    geometry_strict: bool,
-    /// `stage_routing.reaches`, for the coverage check.
-    stage_reaches: crate::config::StageReaches,
     /// `cfg.stage_routing_on()`, captured at open.
     stage_on: bool,
 }
@@ -444,6 +440,61 @@ fn validate_disagg_vs_resolution(
         });
     }
     Ok(())
+}
+
+/// `geometry: table` coverage, once at open. A batch's stage set is the
+/// downstream closure of the seeds inside that batch's network. That is a
+/// subset of (closure of the seeds on the full CONUS adjacency) intersected
+/// with (the union of the routed gauges' subgraphs), so a table that covers
+/// this set covers every batch. Errors name the missing COMIDs.
+fn check_table_covers_stage_set(
+    store: &ChannelGeometryStore,
+    reaches: &crate::config::StageReaches,
+    conus: &ConusAdjacencyStore,
+    gages_adj: &GagesAdjacencyStore,
+    gauges: &[Staid],
+) -> Result<()> {
+    let n = conus.n;
+    let mut routed = vec![false; n];
+    for s in gauges {
+        if let Some(g) = gages_adj.get(s) {
+            for &pos in g.indices_0.iter().chain(&g.indices_1) {
+                routed[pos as usize] = true;
+            }
+        }
+    }
+    let seeds: Vec<usize> = match reaches {
+        crate::config::StageReaches::All => (0..n).filter(|&i| routed[i]).collect(),
+        crate::config::StageReaches::Comids(ids) => (0..n)
+            .filter(|&i| routed[i] && ids.contains(&conus.order[i].0))
+            .collect(),
+    };
+    let adj = SparseAdjacency {
+        n,
+        rows: conus.indices_0.clone(),
+        cols: conus.indices_1.clone(),
+        values: vec![1.0; conus.nnz],
+        length_m: conus.length_m.to_vec(),
+        slope: conus.slope.to_vec(),
+        parent_offset: None,
+    };
+    let (closure, _) = crate::routing::stage::downstream_closure(&adj, &seeds);
+    let in_stage: Vec<bool> = (0..n).map(|i| closure[i] && routed[i]).collect();
+    let mut missing = store.uncovered_stage_comids(&conus.order, &in_stage);
+    missing.sort();
+    missing.dedup();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let first: Vec<String> = missing.iter().take(5).map(|c| c.0.to_string()).collect();
+    Err(DataError::Malformed {
+        path: store.path.clone(),
+        message: format!(
+            "geometry: table needs a row for every stage reach; {} missing, first COMIDs: {}",
+            missing.len(),
+            first.join(", ")
+        ),
+    })
 }
 
 impl MeritGagesDataset {
@@ -640,7 +691,7 @@ impl MeritGagesDataset {
             _ => None,
         };
 
-        let (channel_geometry, geometry_strict, stage_reaches) = match &cfg.params.stage_routing {
+        let channel_geometry = match &cfg.params.stage_routing {
             Some(sr) if stage_on => {
                 use crate::config::StageGeometry;
                 let store = match (&ds.channel_geometry, sr.geometry) {
@@ -649,9 +700,15 @@ impl MeritGagesDataset {
                     }
                     _ => None,
                 };
-                (store, sr.geometry == StageGeometry::Table, sr.reaches.clone())
+                // `geometry: table`: every reach any batch can route as stage
+                // needs a row. Checked once here, not per batch, so a gap
+                // fails at open and not mid-training.
+                if let (Some(store), StageGeometry::Table) = (&store, sr.geometry) {
+                    check_table_covers_stage_set(store, &sr.reaches, &conus, &gages_adj, &gauges)?;
+                }
+                store
             }
-            _ => (None, false, crate::config::StageReaches::All),
+            _ => None,
         };
 
         let reservoirs = if cfg.params.use_reservoirs {
@@ -835,8 +892,6 @@ impl MeritGagesDataset {
             reservoirs,
             stage_boundary,
             channel_geometry,
-            geometry_strict,
-            stage_reaches,
             stage_on,
         })
     }
@@ -1101,7 +1156,6 @@ impl MeritGagesDataset {
         let stage = self.stage_batch(
             window.window_start,
             q_prime.shape()[0],
-            &adjacency,
             &compressed.divide_comids,
         )?;
 
@@ -1136,7 +1190,6 @@ impl MeritGagesDataset {
         &self,
         window_start: chrono::NaiveDate,
         n_rows: usize,
-        adjacency: &SparseAdjacency,
         comids: &[Comid],
     ) -> Result<Option<StageBatch>> {
         if !self.stage_on {
@@ -1144,32 +1197,6 @@ impl MeritGagesDataset {
         }
         let geometry = match &self.channel_geometry {
             Some(store) => {
-                if self.geometry_strict {
-                    let seeds: Vec<usize> = match &self.stage_reaches {
-                        crate::config::StageReaches::All => (0..comids.len()).collect(),
-                        crate::config::StageReaches::Comids(ids) => comids
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, c)| ids.contains(&c.0))
-                            .map(|(i, _)| i)
-                            .collect(),
-                    };
-                    let (in_stage, _) = crate::routing::stage::downstream_closure(adjacency, &seeds);
-                    let missing = store.uncovered_stage_comids(comids, &in_stage);
-                    if !missing.is_empty() {
-                        let first: Vec<String> =
-                            missing.iter().take(5).map(|c| c.0.to_string()).collect();
-                        return Err(DataError::Malformed {
-                            path: store.path.clone(),
-                            message: format!(
-                                "geometry: table needs a row for every stage reach; {} \
-                                 missing, first COMIDs: {}",
-                                missing.len(),
-                                first.join(", ")
-                            ),
-                        });
-                    }
-                }
                 Some(store.rows_for(comids))
             }
             None => None,
@@ -1429,7 +1456,6 @@ impl MeritGagesDataset {
         let stage = self.stage_batch(
             window.window_start,
             q_prime.shape()[0],
-            &cache.adjacency,
             &cache.divide_comids,
         )?;
 

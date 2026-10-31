@@ -92,3 +92,44 @@ fn example_config_opens_the_dataset() {
     assert_eq!(ds.len(), 1);
     assert_eq!(ds.staids(), &[Staid::from(GAGE)]);
 }
+
+/// `geometry: table` is checked once at dataset open: a table that lacks one
+/// stage reach fails, naming the COMID; a full table opens.
+#[test]
+fn table_geometry_coverage_is_checked_at_open() {
+    use ddrs::config::{StageGeometry, StageRouting};
+
+    let conus = ConusAdjacencyStore::open(format!("{BUNDLE}/juniata_conus_adjacency.zarr"))
+        .expect("open bundle conus adjacency");
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, skip: Option<usize>| {
+        let mut body = String::from("COMID,top_width_m,bed_z_m,n\n");
+        for (i, c) in conus.order.iter().enumerate() {
+            if Some(i) != skip {
+                body.push_str(&format!("{},50.0,0.0,0.035\n", c.0));
+            }
+        }
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    };
+    let open = |path: std::path::PathBuf| {
+        let mut cfg = Config::from_yaml_file("examples/juniata/ddrs.yaml").expect("load config");
+        cfg.params.stage_routing = Some(StageRouting {
+            enabled: true,
+            geometry: StageGeometry::Table,
+            ..StageRouting::default()
+        });
+        cfg.data_sources.as_mut().unwrap().channel_geometry = Some(path);
+        MeritGagesDataset::open(&cfg)
+    };
+
+    let missing = conus.order[100];
+    let err = open(write("gap.csv", Some(100))).err().expect("a gap must fail at open");
+    let msg = err.to_string();
+    assert!(msg.contains(&missing.0.to_string()), "error should name COMID {}: {msg}", missing.0);
+    assert!(msg.contains("gap.csv"), "{msg}");
+
+    let ds = open(write("full.csv", None)).expect("a full table opens");
+    assert_eq!(ds.len(), 1);
+}
