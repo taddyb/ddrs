@@ -116,3 +116,56 @@ fn dam_days_become_seconds() {
     let want = 1.23f32 * 86_400.0;
     assert!((net.dam_t_seconds[0] - want).abs() / want < 1e-6);
 }
+
+fn ones(pat: &CsrPattern, mask: &[f32]) -> Vec<(i32, i32)> {
+    let mut v: Vec<(i32, i32)> = (0..pat.nnz())
+        .filter(|&s| mask[s] == 1.0)
+        .map(|s| (pat.row_for_nnz[s], pat.col[s]))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn edge_masks_split_mc_to_stage_and_stage_to_stage() {
+    // Y junction: headwaters 0 and 1 join at 2, then 2 -> 3 -> 4 (outlet).
+    let adj = SparseAdjacency {
+        n: 5,
+        rows: vec![2, 2, 3, 4],
+        cols: vec![0, 1, 2, 3],
+        values: vec![1.0; 4],
+        length_m: vec![1000.0; 5],
+        slope: vec![1e-3; 5],
+        parent_offset: None,
+    };
+    let pat = CsrPattern::from_sparse(&adj);
+    let net = StageNetwork::build(&adj, &pat, Some(&[2]), 0.0, &[]).unwrap();
+    assert_eq!(net.in_stage, vec![false, false, true, true, true]);
+    // Stage-to-stage: (3,2) and (4,3). MC-to-stage: (2,0) and (2,1).
+    assert_eq!(ones(&pat, &net.adj_stage_to_stage), vec![(3, 2), (4, 3)]);
+    assert_eq!(ones(&pat, &net.adj_mc_to_stage), vec![(2, 0), (2, 1)]);
+    // Diagonal slots stay 0 and no slot is set in both masks.
+    for s in 0..pat.nnz() {
+        if pat.row_for_nnz[s] == pat.col[s] {
+            assert_eq!(net.adj_mc_to_stage[s], 0.0);
+            assert_eq!(net.adj_stage_to_stage[s], 0.0);
+        }
+        assert!(net.adj_mc_to_stage[s] * net.adj_stage_to_stage[s] == 0.0);
+    }
+    // MC-to-MC would need a row in {0,1}: those rows have no off-diagonal entries here,
+    // so total ones equal the four stage-row edges.
+    let total = ones(&pat, &net.adj_mc_to_stage).len() + ones(&pat, &net.adj_stage_to_stage).len();
+    assert_eq!(total, 4);
+}
+
+#[test]
+fn dam_outside_the_stage_set_is_skipped() {
+    let adj = two_chains();
+    let pat = CsrPattern::from_sparse(&adj);
+    // Stage set = tree 2 (rows 3..6). Dam at row 4 is inside, dam at row 1 is on tree 1.
+    let net = StageNetwork::build(&adj, &pat, Some(&[3]), 0.0, &[(1, 2.0), (4, 1.23)]).unwrap();
+    assert_eq!(net.dam_rows, vec![4]);
+    let want = 1.23f32 * 86_400.0;
+    assert_eq!(net.dam_t_seconds.len(), 1);
+    assert!((net.dam_t_seconds[0] - want).abs() / want < 1e-6);
+}
