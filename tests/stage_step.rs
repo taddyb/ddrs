@@ -11,9 +11,10 @@ use burn::tensor::Tensor;
 
 use ddrs::config::DownstreamBoundary;
 use ddrs::data::ConusAdjacencyStore;
+use ddrs::routing::mmc_op::timestep_forward;
 use ddrs::routing::stage::{StageBlock, StageNetwork, StageParams};
 use ddrs::routing::{MuskingumCunge, RoutingInputs};
-use ddrs::sparse::{CsrPattern, SparseAdjacency};
+use ddrs::sparse::{AValuesAssembler, CsrPattern, SparseAdjacency};
 
 use common::{
     linear_chain_sparse, mock_config, mock_spatial_parameters, mock_streamflow, InnerBackend,
@@ -214,6 +215,11 @@ fn step_is_finite_on_juniata_network() {
     assert!(hl.iter().all(|v| v.is_finite()));
     let wet = (0..n).filter(|&i| hl[i] - z_mid[i] > DEPTH_LB + 1e-4).count();
     assert!(wet >= 200, "only {wet} reaches deeper than depth_lb");
+    // No growth: the start state is the steady state of q' = 1, so |Q| must stay
+    // within 1.5x the steady outlet discharge (reference: max abs Q 235, no growth).
+    let steady_outlet = q_init.iter().cloned().fold(0.0f32, f32::max);
+    let max_abs = run.q.iter().flat_map(|q| q.iter()).fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!(max_abs <= 1.5 * steady_outlet, "max |Q| {max_abs} vs steady outlet {steady_outlet}");
     let mb = run.block.mass_balance();
     assert!(mb.rel() <= 1e-4, "{mb:?}");
 }
@@ -493,4 +499,479 @@ fn perturbation_decays_on_short_reaches() {
             assert!(e[t + 1] <= e[t] + 1e-5, "theta {theta}: e grows at hour {t}: {} -> {}", e[t], e[t + 1]);
         }
     }
+}
+
+// =============================================================================
+// Task 7: edge cases of the step
+// =============================================================================
+
+/// Chain of `len.len()` reaches with per-reach length and slope.
+fn chain(len: &[f32], slope: &[f32]) -> (SparseAdjacency, Arc<CsrPattern>) {
+    let n = len.len();
+    let mut dense = vec![0.0_f32; n * n];
+    for i in 0..n - 1 {
+        dense[(i + 1) * n + i] = 1.0;
+    }
+    let adj = SparseAdjacency::from_dense(n, &dense, len.to_vec(), slope.to_vec());
+    let pat = Arc::new(CsrPattern::from_sparse(&adj));
+    (adj, pat)
+}
+
+fn prescribed(theta: f32, substeps: u32) -> StageParams {
+    StageParams { boundary: DownstreamBoundary::PrescribedStage, ..params(theta, 0.5, substeps) }
+}
+
+/// One step with uniform physical parameters. Returns `q_next`.
+#[allow(clippy::too_many_arguments)]
+fn one_step(
+    block: &mut StageBlock<InnerBackend>,
+    pattern: &Arc<CsrPattern>,
+    n_man: f32,
+    q_t: &[f32],
+    q_next_mc: &[f32],
+    qp: &[f32],
+    device: &TestDevice,
+) -> Vec<f32> {
+    let n = q_t.len();
+    to_vec1(block.step(
+        pattern,
+        tv(&vec![n_man; n], device),
+        tv(&vec![P_SP; n], device),
+        tv(&vec![Q_SP; n], device),
+        tv(q_t, device),
+        tv(q_next_mc, device),
+        tv(qp, device),
+    ))
+}
+
+#[test]
+fn stage_depth_floor_is_counted() {
+    let device = TestDevice::default();
+    let n = 3;
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = net.z_mid.clone();
+    let mut block = StageBlock::<InnerBackend>::new(net, prescribed(1.0, 1), &device);
+    // The outlet stage sits 5 m below every bed.
+    block.set_boundary_series(vec![-5.0; 7]).unwrap();
+    let h0: Vec<f32> = z_mid.iter().map(|z| z + 0.05).collect();
+    block.set_stage(tv(&h0, &device));
+    let mut q_t = vec![0.0f32; n];
+    for _ in 0..6 {
+        q_t = one_step(&mut block, &pattern, N_MAN, &q_t, &vec![0.0; n], &vec![0.0; n], &device);
+    }
+    let h = to_vec1(block.stage().unwrap());
+    for i in 0..n {
+        assert!(h[i] - z_mid[i] >= DEPTH_LB - 1e-6, "row {i} below the floor: {}", h[i] - z_mid[i]);
+    }
+    let mb = block.mass_balance();
+    assert!(mb.floor_created_m3 > 0.0, "{mb:?}");
+    let resid = (mb.storage_change_m3 - mb.net_flux_m3 - mb.floor_created_m3).abs();
+    assert!(resid <= 1e-4 * mb.gross_flux_m3, "resid {resid} {mb:?}");
+}
+
+#[test]
+fn beta_is_finite_at_zero_flow() {
+    let device = TestDevice::default();
+    let n = 3;
+    let theta = 0.7f32;
+    let (adj, pattern) = chain(&[1000.0; 3], &[0.0; 3]);
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = net.z_mid.clone();
+    let edge_len = net.edge_length.clone();
+    let mut block = StageBlock::<InnerBackend>::new(net, prescribed(theta, 1), &device);
+    let flat_h = z_mid[0] + 1.0;
+    assert!(z_mid.iter().all(|&z| z == z_mid[0]), "slope 0 means a flat bed");
+    block.set_boundary_series(vec![flat_h; 2]).unwrap();
+    block.set_stage(tv(&vec![flat_h; n], &device));
+    let q = one_step(&mut block, &pattern, N_MAN, &[0.0; 3], &[0.0; 3], &[0.0; 3], &device);
+    let c = block.last_coefficients().unwrap();
+    let (alpha, beta, kappa, a_up, b_down, area) = (
+        to_vec1(c.alpha),
+        to_vec1(c.beta),
+        to_vec1(c.kappa),
+        to_vec1(c.a_up),
+        to_vec1(c.b_down),
+        to_vec1(c.area_edge),
+    );
+    for i in 0..n {
+        let want = 9.81 * area[i] * 3600.0 / edge_len[i];
+        assert!(beta[i].is_finite() && ((beta[i] - want) / want).abs() <= 1e-6, "beta[{i}] {} vs {want}", beta[i]);
+        assert_eq!(alpha[i], 1.0, "alpha[{i}]");
+        assert_eq!(kappa[i], 0.0, "kappa[{i}]");
+        assert_eq!(a_up[i], theta * beta[i], "a[{i}]");
+        assert_eq!(b_down[i], theta * beta[i], "b[{i}]");
+        assert_eq!(q[i], 0.0, "Q_next[{i}]");
+    }
+    let h = to_vec1(block.stage().unwrap());
+    for i in 0..n {
+        assert!((h[i] - flat_h).abs() <= 1e-6, "stage[{i}] moved: {}", h[i]);
+    }
+}
+
+/// Test-side f64 trapezoid section (area, wetted perimeter) at depth `d`.
+fn section64(d: f64) -> (f64, f64) {
+    let qe = Q_SP as f64 + 1e-6;
+    let tw = P_SP as f64 * d.powf(qe);
+    let ss = (tw * qe / (2.0 * d)).clamp(0.5, 50.0);
+    let bw = (tw - 2.0 * ss * d).max(0.1);
+    ((tw + bw) * d / 2.0, bw + 2.0 * d * (ss * ss + 1.0).sqrt())
+}
+
+/// Conveyance `K = A R^(2/3) / n` at depth `d` (f64).
+fn conveyance64(d: f64, n_man: f64) -> f64 {
+    let (a, p) = section64(d);
+    a * (a / p).powf(2.0 / 3.0) / n_man
+}
+
+#[test]
+fn friction_limit_recovers_the_diffusive_conveyance() {
+    // In this limit one substep is one Newton step on the diffusive law
+    // Q = K(d_e) sqrt(dh / L_edge), which is the limit case of the local-inertial law.
+    let device = TestDevice::default();
+    let n = 5;
+    let (n_man, slope, len) = (0.1f32, 5e-3f32, 1000.0f32);
+    let (adj, pattern) = chain(&[len; 5], &[slope; 5]);
+    let k = conveyance64(0.5, n_man as f64);
+    let q_eq = (k * (slope as f64).sqrt()) as f32;
+    assert!((q_eq - 2.0414).abs() < 1e-3, "Q_eq {q_eq}");
+    // dK/dd, central difference in f64.
+    let e = 1e-6;
+    let dk = (conveyance64(0.5 + e, n_man as f64) - conveyance64(0.5 - e, n_man as f64)) / (2.0 * e);
+    for scale in [1.0f32, 1.2] {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let z_mid = net.z_mid.clone();
+        let mut block = StageBlock::<InnerBackend>::new(net, params(1.0, 0.5, 1), &device);
+        let h: Vec<f32> = z_mid.iter().map(|z| z + 0.5).collect();
+        block.set_stage(tv(&h, &device));
+        let mut qp = vec![0.0f32; n];
+        qp[0] = q_eq;
+        let q = one_step(&mut block, &pattern, n_man, &vec![q_eq * scale; n], &vec![0.0; n], &qp, &device);
+        let c = block.last_coefficients().unwrap();
+        let (alpha, beta, kappa) = (to_vec1(c.alpha), to_vec1(c.beta), to_vec1(c.kappa));
+        for i in 1..4 {
+            if scale == 1.0 {
+                let want_beta = k / (2.0 * len as f64 * slope.sqrt() as f64 * 1.0);
+                let want_beta = want_beta * 1.0;
+                assert!(((beta[i] as f64 - want_beta) / want_beta).abs() <= 0.02, "beta[{i}] {} vs {want_beta}", beta[i]);
+                assert!((alpha[i] - 0.5).abs() <= 0.01, "alpha[{i}] {}", alpha[i]);
+                let want_kappa = (slope as f64).sqrt() * dk;
+                assert!(((kappa[i] as f64 - want_kappa) / want_kappa).abs() <= 0.02, "kappa[{i}] {} vs {want_kappa}", kappa[i]);
+                assert!(((q[i] - q_eq) / q_eq).abs() <= 1e-4, "Q_next[{i}] {} vs {q_eq}", q[i]);
+            } else {
+                assert!((q[i] / q_eq - 1.0).abs() <= 0.03, "scale {scale}: Q_next[{i}]/Q_eq {}", q[i] / q_eq);
+            }
+        }
+    }
+}
+
+#[test]
+fn mc_rows_have_finite_gradients_under_stage_backflow() {
+    // C3: the MC op reads stage rows of q_t through mc_view (clamp_min(discharge_lb).detach()).
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let cfg = mock_config();
+    let lb = cfg.params.attribute_minimums.discharge;
+    let assembler = AValuesAssembler::<InnerBackend>::new(&pattern, &device);
+    let mut finite_with_raw = None;
+    for use_view in [true, false] {
+        let net = StageNetwork::build(&adj, &pattern, Some(&[1]), 0.0, &[]).unwrap();
+        let z_mid = net.z_mid.clone();
+        let mut block = StageBlock::<InnerBackend>::new(net, prescribed(1.0, 1), &device);
+        block.set_boundary_series(vec![0.0, 0.0]).unwrap();
+        let h: Vec<f32> = z_mid.iter().map(|z| z + 0.5).collect();
+        block.set_stage(tv(&h, &device));
+        let nn = tv(&[0.035; 3], &device).require_grad();
+        let qq = tv(&[0.4; 3], &device).require_grad();
+        let pp = tv(&[20.0; 3], &device).require_grad();
+        let q_t = tv(&[5.0, -5.0, -2.0], &device).require_grad();
+        let qp = tv(&[1.0; 3], &device);
+        let q_t_mc = if use_view { block.mc_view(q_t.clone(), lb) } else { q_t.clone() };
+        if use_view {
+            let v = to_vec1(q_t_mc.clone().inner().into());
+            assert_eq!(v[0], 5.0);
+            assert_eq!(v[1], lb);
+            assert_eq!(v[2], lb);
+        }
+        let q_next_mc = timestep_forward::<InnerBackend>(
+            &cfg,
+            &pattern,
+            &assembler,
+            nn.clone(),
+            qq.clone(),
+            pp.clone(),
+            q_t_mc,
+            qp.clone(),
+            tv(&adj.length_m, &device),
+            tv(&adj.slope, &device),
+            tv(&[0.3; 3], &device),
+            false,
+            None,
+        );
+        let q_next = block.step(&pattern, nn.clone(), pp.clone(), qq.clone(), q_t.clone(), q_next_mc, qp);
+        let g = q_next.sum().backward();
+        let all_finite = [&nn, &qq, &pp, &q_t].iter().all(|t| match t.grad(&g) {
+            Some(v) => to_vec1(v).iter().all(|x| x.is_finite()),
+            None => false,
+        });
+        if use_view {
+            assert!(all_finite, "a gradient is not finite with mc_view");
+        } else {
+            finite_with_raw = Some(all_finite);
+        }
+    }
+    println!("raw q_t into the MC op: all gradients finite = {finite_with_raw:?}");
+}
+
+#[test]
+fn flow_reversal_is_not_clamped() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 2], &[1e-3; 2]);
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = net.z_mid.clone();
+    let mut block = StageBlock::<InnerBackend>::new(net, prescribed(1.0, 1), &device);
+    let h: Vec<f32> = z_mid.iter().map(|z| z + 0.5).collect();
+    // The outlet stage starts at the outlet reach's stage and rises 1 m in one hour.
+    block.set_boundary_series(vec![h[1], h[1] + 1.0]).unwrap();
+    block.set_stage(tv(&h, &device));
+    let q = one_step(&mut block, &pattern, N_MAN, &[0.0; 2], &[0.0; 2], &[0.0; 2], &device);
+    assert!(q[1].is_finite() && q[1] < 0.0, "outlet Q {}", q[1]);
+    assert!(q[1] < -DEPTH_LB, "outlet Q {} is clamped near zero", q[1]);
+}
+
+/// Central-difference check of `sum(q_next)` through one step, every input.
+/// Steps: n 1e-3, q 1e-2, p 0.2, h_t 1e-2, q_t 1e-2.
+#[allow(clippy::too_many_arguments)]
+fn gradcheck_state(
+    label: &str,
+    adj: &SparseAdjacency,
+    pattern: &Arc<CsrPattern>,
+    dams: &[(usize, f32)],
+    depth0: &[f32],
+    qt0: &[f32],
+    params: StageParams,
+    device: &TestDevice,
+) {
+    let n = adj.n;
+    let net0 = StageNetwork::build(adj, pattern, None, 0.0, dams).unwrap();
+    let h0: Vec<f32> = (0..n).map(|i| net0.z_mid[i] + depth0[i]).collect();
+    let n0: Vec<f32> = (0..n).map(|i| 0.03 + 0.005 * i as f32).collect();
+    let q0: Vec<f32> = (0..n).map(|i| 0.45 + 0.05 * (i % 3) as f32).collect();
+    let p0: Vec<f32> = (0..n).map(|i| 18.0 + 2.0 * (i % 4) as f32).collect();
+    let qt0 = qt0.to_vec();
+    let qprime = vec![1.0f32; n];
+    let zeros = vec![0.0f32; n];
+    let eval = |x: [&Vec<f32>; 5], with_grad: bool| -> (f32, Vec<Vec<f32>>) {
+        let net = StageNetwork::build(adj, pattern, None, 0.0, dams).unwrap();
+        let mut block = StageBlock::<InnerBackend>::new(net, params, device);
+        let ts: Vec<Tensor<TestBackend, 1>> = x.iter().map(|v| tv(v, device).require_grad()).collect();
+        block.set_stage(ts[3].clone());
+        let out = block.step(
+            pattern,
+            ts[0].clone(),
+            ts[2].clone(),
+            ts[1].clone(),
+            ts[4].clone(),
+            tv(&zeros, device),
+            tv(&qprime, device),
+        );
+        let loss = out.sum();
+        let l = loss.clone().into_scalar();
+        if !with_grad {
+            return (l, vec![]);
+        }
+        let g = loss.backward();
+        (l, ts.iter().map(|t| to_vec1(t.grad(&g).expect("grad"))).collect())
+    };
+    let base = [&n0, &q0, &p0, &h0, &qt0];
+    let (l0, grads) = eval(base, true);
+    println!("{label}: loss {l0}");
+    let names = ["n", "q", "p", "h_t", "q_t"];
+    // f32 noise on the loss (about 1e-5) sets the lower bound; curvature the upper.
+    const EPS: [f32; 5] = [1e-3, 1e-2, 0.2, 1e-2, 1e-2];
+    for (pi, name) in names.iter().enumerate() {
+        for i in 0..n {
+            let x = base[pi][i];
+            let eps = EPS[pi];
+            let mut up = base[pi].clone();
+            let mut dn = base[pi].clone();
+            up[i] = x + eps;
+            dn[i] = x - eps;
+            let mut bu = base;
+            bu[pi] = &up;
+            let mut bd = base;
+            bd[pi] = &dn;
+            let fd = (eval(bu, false).0 - eval(bd, false).0) / (2.0 * eps);
+            let an = grads[pi][i];
+            let err = (fd - an).abs();
+            assert!(
+                an.is_finite() && (err <= 1e-4 || err <= 5e-3 * fd.abs().max(an.abs())),
+                "{label}: d loss/d {name}[{i}]: fd {fd} analytic {an}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gradcheck_through_a_reversed_edge_and_negative_flow() {
+    // Edge 0 is reversed (h_1 > h_0 by 0.2 m, s_dn = 1: the b = max(theta*beta - kappa*s_dn, 0)
+    // branch) and row 1 carries a negative q_t (negative kappa). Away from every kink.
+    // A gentle bed (2e-4) keeps the surface slopes small, so the f32 central
+    // differences stay below the 5e-3 bar.
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 5], &[2e-4; 5]);
+    let depth0 = [0.3f32, 0.7, 0.6, 0.5, 0.5];
+    let qt0 = [0.8f32, -1.2, 1.5, 1.8, 2.0];
+    // Pin which branches the state takes (theta 0.8, one substep).
+    {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let h: Vec<f32> = net.z_mid.iter().zip(&depth0).map(|(z, d)| z + d).collect();
+        assert!(h[1] > h[0], "edge 0 must be reversed");
+        let mut block = StageBlock::<InnerBackend>::new(net, params(0.8, 0.5, 1), &device);
+        block.set_stage(tv(&h, &device));
+        let _ = one_step(&mut block, &pattern, N_MAN, &qt0, &[0.0; 5], &[1.0; 5], &device);
+        let c = block.last_coefficients().unwrap();
+        let (beta, kappa, b_down) = (to_vec1(c.beta), to_vec1(c.kappa), to_vec1(c.b_down));
+        println!("reversed state: beta {beta:?} kappa {kappa:?} b {b_down:?}");
+        assert!(0.8 * beta[0] - kappa[0] > 1e-3 || b_down[0] == 0.0, "b[0] sits on the kink");
+        assert!(kappa[1] != 0.0);
+    }
+    for substeps in [1u32, 2] {
+        gradcheck_state(
+            &format!("reversed edge, substeps {substeps}"),
+            &adj,
+            &pattern,
+            &[],
+            &depth0,
+            &qt0,
+            params(0.8, 0.5, substeps),
+            &device,
+        );
+    }
+}
+
+#[test]
+fn gradcheck_through_a_dam_control_edge() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 5], &[1e-3; 5]);
+    let depth0 = [0.45f32, 0.55, 0.8, 0.6, 0.7];
+    let qt0 = [1.1f32, 2.3, 3.2, 4.6, 5.1];
+    for substeps in [1u32, 2] {
+        gradcheck_state(
+            &format!("dam at row 2, substeps {substeps}"),
+            &adj,
+            &pattern,
+            &[(2, 1.23)],
+            &depth0,
+            &qt0,
+            params(0.8, 0.5, substeps),
+            &device,
+        );
+    }
+}
+
+#[test]
+fn normal_depth_outlet_gradient_is_finite() {
+    // The outlet R' path: dL/dn at the outlet row of a 2-chain, REL 5e-3.
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 2], &[1e-3; 2]);
+    let net0 = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let h0: Vec<f32> = (0..2).map(|i| net0.z_mid[i] + 0.6 + 0.2 * i as f32).collect();
+    let eval = |n_out: f32, with_grad: bool| -> (f32, f32) {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let mut block = StageBlock::<InnerBackend>::new(net, params(1.0, 0.5, 1), &device);
+        block.set_stage(tv(&h0, &device));
+        let nn = tv(&[0.035, n_out], &device).require_grad();
+        let out = block.step(
+            &pattern,
+            nn.clone(),
+            tv(&[P_SP; 2], &device),
+            tv(&[Q_SP; 2], &device),
+            tv(&[2.0, 3.0], &device),
+            tv(&[0.0; 2], &device),
+            tv(&[1.0; 2], &device),
+        );
+        let loss = out.sum();
+        let l = loss.clone().into_scalar();
+        if !with_grad {
+            return (l, 0.0);
+        }
+        let g = loss.backward();
+        (l, to_vec1(nn.grad(&g).expect("grad"))[1])
+    };
+    let n0 = 0.04f32;
+    let (_, an) = eval(n0, true);
+    let eps = 1e-3;
+    let fd = (eval(n0 + eps, false).0 - eval(n0 - eps, false).0) / (2.0 * eps);
+    assert!(an.is_finite() && an != 0.0, "analytic {an}");
+    assert!(((fd - an) / fd.abs().max(an.abs())).abs() <= 5e-3, "fd {fd} analytic {an}");
+}
+
+/// Hour-to-hour changes of `x`, the longest run of sign alternations (both
+/// changes above `thresh`), and the largest |change| from index `skip` on.
+fn ring_stats(x: &[f32], thresh: f32, skip: usize) -> (usize, f32) {
+    let d: Vec<f32> = x.windows(2).map(|w| w[1] - w[0]).collect();
+    let (mut run, mut best) = (0usize, 0usize);
+    for k in 1..d.len() {
+        let alt = d[k] * d[k - 1] < 0.0 && d[k].abs() > thresh && d[k - 1].abs() > thresh;
+        run = if alt { run + 1 } else { 0 };
+        best = best.max(run);
+    }
+    let tail = d.iter().skip(skip).fold(0.0f32, |m, v| m.max(v.abs()));
+    (best, tail)
+}
+
+#[test]
+fn stiff_short_reach_does_not_ring() {
+    let device = TestDevice::default();
+    let n = 5;
+    let (pre, post) = (24usize, 48usize);
+    let hours = pre + post;
+    let (adj, pattern) = chain(&[5000.0, 5000.0, 93.0, 5000.0, 5000.0], &[3e-3, 3e-3, 0.0, 3e-3, 3e-3]);
+    let step = 2.5f32;
+    let mut qp = vec![5.0f32; hours * n];
+    for t in pre..hours {
+        qp[t * n + 2] += step;
+    }
+    let steady = cumulative(&adj, &vec![5.0; n]);
+    let mc = vec![vec![0.0f32; hours + 1]; n];
+    let mut stats = vec![];
+    for theta in [1.0f32, 0.5] {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let run = drive(&adj, &pattern, net, params(theta, 0.5, 1), &mc, &qp, &steady, hours, &device);
+        // Q at reach 2 from the hour before the step on.
+        let series: Vec<f32> = run.q[pre - 1..].iter().map(|q| q[2]).collect();
+        assert!(series.iter().all(|v| v.is_finite()));
+        let (alt, tail) = ring_stats(&series, 1e-3 * step, 1 + 6);
+        println!("stiff reach 2, theta {theta}: longest alternation {alt} h, max |dQ| after hour 6 = {tail} ({:.2e} x step)", tail / step);
+        stats.push((theta, alt, tail));
+    }
+    let (_, alt1, tail1) = stats[0];
+    assert!(alt1 <= 2, "theta 1.0 rings: run {alt1} h");
+    assert!(tail1 <= 1e-2 * step, "theta 1.0 tail {tail1}");
+    let (_, alt5, tail5) = stats[1];
+    assert!(alt5 >= 10, "theta 0.5 should ring (run {alt5} h): the test cannot fail otherwise");
+    assert!(tail5 > 1e-2 * step, "theta 0.5 tail {tail5}");
+}
+
+#[test]
+fn adverse_flow_keeps_the_m_matrix() {
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+    let z_mid = net.z_mid.clone();
+    let theta = 1.0f32;
+    let mut block = StageBlock::<InnerBackend>::new(net, params(theta, 0.5, 1), &device);
+    let h: Vec<f32> = z_mid.iter().zip([0.3f32, 1.5, 1.0]).map(|(z, d)| z + d).collect();
+    block.set_stage(tv(&h, &device));
+    let q = one_step(&mut block, &pattern, N_MAN, &[10.0, 5.0, 6.0], &[0.0; 3], &[1.0; 3], &device);
+    let c = block.last_coefficients().unwrap();
+    let (beta, kappa, a_up, b_down) = (to_vec1(c.beta), to_vec1(c.kappa), to_vec1(c.a_up), to_vec1(c.b_down));
+    assert!(theta * beta[0] - kappa[0] < 0.0, "clamp not exercised: {} - {}", theta * beta[0], kappa[0]);
+    assert_eq!(b_down[0], 0.0);
+    assert!(a_up.iter().all(|&v| v >= 0.0) && b_down.iter().all(|&v| v >= 0.0));
+    assert!(q.iter().all(|v| v.is_finite()), "{q:?}");
+    let mb = block.mass_balance();
+    assert!(mb.rel() <= 1e-4, "{mb:?}");
+    println!("adverse flow: Q_next {q:?}, floor_created_m3 {}", mb.floor_created_m3);
 }

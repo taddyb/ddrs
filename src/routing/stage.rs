@@ -1,8 +1,10 @@
-//! Per-network constants for the stage routing block (host side, f32).
+//! The stage routing block (f32): per-network constants and the step.
 //!
 //! The stage set is a downstream-closed set of reaches that drains to exactly
-//! one network outlet. This module builds the set, the bed elevations, the
-//! edge lengths, the edge masks on the `CsrPattern` layout and the dam rows.
+//! one network outlet. `StageNetwork` (host side) builds the set, the bed
+//! elevations, the edge lengths, the edge masks on the `CsrPattern` layout and
+//! the dam rows. `StageBlock` (device side) takes one Newton-linearised
+//! local-inertial step per routing hour: assembly, tree solve, readout.
 
 use std::sync::Arc;
 
@@ -575,6 +577,16 @@ where
         });
     }
 
+    /// `q_t` as the MC op must read it (C3): stage rows become
+    /// `q_t.clamp_min(discharge_lb).detach()`, MC rows are unchanged. The
+    /// stage rows of the MC output are discarded, so the clamp only keeps the
+    /// MC op finite when a stage row carries backflow. The block's own `step`
+    /// keeps reading the unclamped `q_t`.
+    pub fn mc_view(&self, q_t: Tensor<Ad<I>, 1>, discharge_lb: f32) -> Tensor<Ad<I>, 1> {
+        let clamped = q_t.clone().clamp_min(discharge_lb).detach();
+        q_t.mask_where(self.c.in_stage_b.clone(), clamped)
+    }
+
     /// One routing hour. Returns `q_next_mc` with the stage rows replaced by the
     /// stage discharge; that value is the next hour's `q_t` on stage rows.
     #[allow(clippy::too_many_arguments)]
@@ -595,7 +607,6 @@ where
         let pr = self.params;
         let nn = self.net.n;
         let (th, thc) = (pr.theta, pr.theta_control);
-        let th2 = th * th;
         let subs = pr.substeps.max(1) as usize;
         let dt_s = pr.dt / subs as f32;
         let prescribed = pr.boundary == DownstreamBoundary::PrescribedStage;
@@ -659,7 +670,7 @@ where
             let (a_ds, p_ds) = trapezoid_depth_derivatives(p.clone(), q.clone(), depth.clone(), &gs, pr.bottom_width_lb);
             let d_s = gs.top_width.clone() * c.length.clone() / dt_s;
 
-            // 3. friction, alpha, beta, Q_hat (zero on control and non-stage rows, C8)
+            // 3. friction, alpha, beta, Q*, kappa, a, b (zero on control and non-stage rows, C8)
             let phi = n2.clone() * qc.clone().abs() * pr.g
                 / (ge.area.clone() * ge.hydraulic_radius.clone().powf_scalar(4.0 / 3.0));
             let dt_phi = phi * dt_s;
