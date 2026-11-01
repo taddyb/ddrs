@@ -350,6 +350,16 @@ fn tree_levels_of_random_trees() {
             }
         }
         let mut is_col = vec![false; n];
+        let mut up_max: Vec<Option<usize>> = vec![None; n];
+        for s in 0..p.nnz() {
+            let (r, c) = (p.row_for_nnz[s] as usize, p.col[s] as usize);
+            if r != c {
+                up_max[r] = Some(up_max[r].map_or(level[c], |m| m.max(level[c])));
+            }
+        }
+        for r in 0..n {
+            assert_eq!(level[r], up_max[r].map_or(0, |m| m + 1), "exact level of {r}");
+        }
         for s in 0..p.nnz() {
             assert_eq!(t.col_diag[s] as usize, diag_slot(&p, p.col[s] as usize));
             let (r, c) = (p.row_for_nnz[s] as usize, p.col[s] as usize);
@@ -393,7 +403,6 @@ fn tree_levels_of_the_bundles() {
         };
         let p = pattern_of(&adj);
         let t = ddrs::sparse::tree_lu::tree_levels(&p).expect("tree");
-        eprintln!("{name}: n_levels {} max upstream {}", t.n_levels, max_upstream(&p));
         assert_eq!(t.n_levels, n_levels, "{name} levels");
         assert_eq!(max_upstream(&p), max_up, "{name} max upstream");
     }
@@ -412,4 +421,22 @@ fn tree_levels_rejects_a_non_tree() {
     };
     let err = ddrs::sparse::tree_lu::tree_levels(&pattern_of(&adj)).unwrap_err();
     assert!(err.contains("two downstream"), "{err}");
+}
+
+#[test]
+fn tree_levels_of_a_hand_built_tree() {
+    // 0 -> 1 -> 3, 2 -> 3, 3 -> 4
+    let adj = SparseAdjacency {
+        n: 5,
+        rows: vec![1, 3, 3, 4],
+        cols: vec![0, 1, 2, 3],
+        values: vec![1.0; 4],
+        length_m: vec![1000.0; 5],
+        slope: vec![1e-3; 5],
+        parent_offset: None,
+    };
+    let t = ddrs::sparse::tree_lu::tree_levels(&pattern_of(&adj)).unwrap();
+    assert_eq!(t.n_levels, 4);
+    assert_eq!(t.lvl_ptr, vec![0, 2, 3, 4, 5]);
+    assert_eq!(t.lvl_idx, vec![0, 2, 1, 3, 4]);
 }

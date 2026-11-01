@@ -20,6 +20,10 @@ pub type Gpu = burn_cuda::Cuda<f32, i32>;
 /// A device tensor on that backend.
 pub type Cube = CubeTensor<CudaRuntime>;
 
+// Compile-time proof that the backend primitive is the cube type. The unsafe
+// reads in `into_cube` rely on it.
+const _: fn(<Gpu as burn::tensor::backend::BackendTypes>::FloatTensorPrimitive) -> Cube = |p| p;
+
 /// View a backend float primitive as a `Cube`. Panics unless `B` is `Cuda<f32, i32>`.
 pub(crate) fn into_cube<B: Backend + 'static>(p: B::FloatTensorPrimitive) -> Cube {
     assert_eq!(
@@ -39,6 +43,8 @@ pub(crate) fn from_cube<B: Backend + 'static>(c: Cube) -> B::FloatTensorPrimitiv
 }
 
 /// An uninitialised contiguous f32 buffer of `len` on the device of `like`.
+// The CUDA kernels will call this. Remove the allow when they do.
+#[allow(dead_code)]
 pub(crate) fn empty_f32(like: &Cube, len: usize) -> Cube {
     empty_device_contiguous_dtype(
         like.client.clone(),
@@ -49,6 +55,8 @@ pub(crate) fn empty_f32(like: &Cube, len: usize) -> Cube {
 }
 
 /// A zero-filled f32 buffer of `len` on the device of `like`.
+// The CUDA kernels will call this. Remove the allow when they do.
+#[allow(dead_code)]
 pub(crate) fn zeros_f32(like: &Cube, len: usize) -> Cube {
     zeros_client(
         like.client.clone(),
@@ -56,6 +64,13 @@ pub(crate) fn zeros_f32(like: &Cube, len: usize) -> Cube {
         Shape::from(vec![len]),
         DType::F32,
     )
+}
+
+/// View a slice of plain numbers as bytes.
+fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
+    // SAFETY: `T` is `f32` or `i32` here, with no padding. The length in bytes
+    // is exact and `u8` has alignment 1.
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
 fn upload_bytes(like: &Cube, bytes: &[u8], len: usize, dtype: DType) -> Cube {
@@ -70,20 +85,20 @@ fn upload_bytes(like: &Cube, bytes: &[u8], len: usize, dtype: DType) -> Cube {
 }
 
 /// Copy `v` to the device of `like` as f32.
+// The CUDA kernels will call this. Remove the allow when they do.
+#[allow(dead_code)]
 pub(crate) fn upload_f32(like: &Cube, v: &[f32]) -> Cube {
-    // SAFETY: an f32 slice viewed as bytes; size and alignment are valid.
-    let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) };
-    upload_bytes(like, bytes, v.len(), DType::F32)
+    upload_bytes(like, as_bytes(v), v.len(), DType::F32)
 }
 
 /// Copy `v` to the device of `like` as i32.
 pub(crate) fn upload_i32(like: &Cube, v: &[i32]) -> Cube {
-    // SAFETY: an i32 slice viewed as bytes; size and alignment are valid.
-    let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) };
-    upload_bytes(like, bytes, v.len(), DType::I32)
+    upload_bytes(like, as_bytes(v), v.len(), DType::I32)
 }
 
 /// Launch shape for one thread per element: 256 threads per cube, at least one cube.
+// The CUDA kernels will call this. Remove the allow when they do.
+#[allow(dead_code)]
 pub(crate) fn grid(len: usize) -> (cubecl::CubeCount, cubecl::CubeDim) {
     const THREADS: u32 = 256;
     let cubes = (len as u32).div_ceil(THREADS).max(1);
@@ -97,10 +112,7 @@ pub fn cube_from_host(
     device: &<Gpu as burn::tensor::backend::BackendTypes>::Device,
 ) -> Cube {
     let client = <CudaRuntime as cubecl::Runtime>::client(device);
-    let handle = client.create_from_slice(
-        // SAFETY: an f32 slice viewed as bytes.
-        unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) },
-    );
+    let handle = client.create_from_slice(as_bytes(v));
     CubeTensor::new_contiguous(client, device.clone(), Shape::from(vec![v.len()]), handle, DType::F32)
 }
 
