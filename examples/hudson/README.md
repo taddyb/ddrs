@@ -84,6 +84,48 @@ tidally filtered flow can reverse). 289 days are estimated (`A:e`). About 13 %
 of 90-day training windows have a NaN after warm-up, so Poughkeepsie leaves the
 loss in those windows. This is not a defect.
 
+## Results
+
+`train-and-test` on CPU, seed 42, 30 epochs, 2026-11-01. The test is
+`tests/hudson_acceptance.rs` (release, local only, not in CI). Metrics are per
+gauge on the daily series after the 5-day warm-up. "Stage" is `ddrs.yaml`,
+"MC" is `ddrs_mc_only.yaml`.
+
+| Gauge | MC NSE / KGE | Stage NSE / KGE | Baseline NSE / KGE |
+|---|---|---|---|
+| Poughkeepsie 01372058 | 0.145 / 0.604 | 0.308 / 0.625 | 0.144 / 0.561 |
+| Green Island 01358000 | 0.781 / 0.876 | 0.780 / 0.876 | 0.688 / 0.801 |
+| Croton 01375000 | 0.820 / 0.856 | 0.819 / 0.856 | 0.835 / 0.867 |
+| Harbor pseudo-gauge 73005067 | NaN | NaN | NaN |
+
+Both runs report `n_gauges_total` 4 and `n_gauges_finite_nse` 3. The stage
+block lifts Poughkeepsie NSE by 0.16 and leaves the other gauges alone.
+
+Spring-neap check: the amplitude of the 14.77 day cycle in the filtered daily
+Poughkeepsie series, model over observed, is 0.96 for the stage run and 0.54 for
+MC (maximum over periods of 13.5 to 16 days: 1.11 and 0.78).
+
+Wall time: MC 27 s, stage 123 s (ratio 4.5). The one-chunk eval peaks at about
+2 GB of memory in the test process.
+
+Acceptance floors (measured minus 0.04): stage Poughkeepsie NSE >= 0.26 and
+KGE >= 0.58, plus NSE above the summed-Q' baseline, Green Island NSE within 0.02
+of MC, and a stage mass balance of at most 1e-4 (measured 5.9e-11).
+
+### Caveats
+
+- Fallback geometry. All 41 stage rows use the uniform placeholder (width
+  1000 m, bed -10 m). The tide shape is not asserted. Real bathymetry is the next
+  step.
+- 2004 filled boundary. The Battery series from 2004-02-01 to 2004-05-31 is tide
+  plus a smooth residual, with no storm surge. That span is in the training window.
+- One-chunk eval. Both configs set `testing.batch_size: 2600`, which covers the
+  whole test period (2,526 days) in one eval chunk. Chunked eval repeats or skips
+  one hour at each chunk seam, and that error leaks into the 71 h Godin filter at
+  Poughkeepsie. With 15-day chunks the daily Poughkeepsie error reached 125 m3/s
+  (35 %), against 1.9 m3/s for MC. This is a known limitation of chunked eval on
+  tidal reaches. Keep eval as one chunk for stage runs with `tidal_filter: godin`.
+
 ## Rebuilding the bundle
 
 `scripts/extract_merit_bundle.py` with `--domain-from-comid 73005067

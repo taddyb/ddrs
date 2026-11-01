@@ -92,8 +92,10 @@ params:
 
 # Evaluation overlay (2012-10-01 to 2019-08-31, inside the 72137 record).
 # CAUTION — batch_size changes meaning: GAUGES in training, DAYS here.
+# 2600 days covers the whole test period (2,526 days) in ONE eval chunk. A 15-day
+# chunk seam leaks into the 71 h Godin filter at Poughkeepsie (see the README).
 testing:
   start_time: 2012/10/01
   end_time: 2019/08/31
-  batch_size: 15
+  batch_size: 2600
   rho: null

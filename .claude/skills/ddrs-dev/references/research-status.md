@@ -970,3 +970,17 @@ Harvest the trained field cheaply with bundle `landscape-pfixed-all-nfield`: the
 does not depend on the evaluation window, so it runs a one-year window with `newton_iters: 0`, `grid: 0`,
 `series: false`. **Its loss and NSE columns are one water year and must not be compared to the five-year
 censuses**; that mismatch is exactly what produced the withdrawn 0.700-against-0.720 figure.
+
+
+## Hudson tidal example (2026-11-01)
+
+`examples/hudson/` routes 756 MERIT reaches with a 41-reach stage block and a
+Battery water-level boundary, scored at Poughkeepsie against USGS 72137 (Godin
+filtered in training and eval). On the fallback uniform geometry, seed 42, the
+stage run reaches Poughkeepsie NSE 0.308 / KGE 0.625 against MC-only 0.145 /
+0.604 and the summed-Q' baseline 0.144 / 0.560. Green Island and Croton do not
+change. The 14.77 day amplitude ratio (model over observed) is 0.96 for stage
+and 0.54 for MC. Eval must run as one chunk: a 15-day chunk seam leaks into the
+71 h Godin filter (up to 125 m3/s daily at Poughkeepsie). The tide shape is
+unasserted until real bathymetry replaces the fallback. Test:
+`tests/hudson_acceptance.rs`, local only.
