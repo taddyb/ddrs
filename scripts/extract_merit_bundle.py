@@ -269,8 +269,15 @@ def main() -> None:
     if extra is not None:
         for gid, df in extra.groupby("gage_id"):
             s = df.set_index("date")["q_m3s"]
+            n_all = len(s)
             s = s[(s.index >= o_sub.time.values[0]) & (s.index <= o_sub.time.values[-1])]
+            print(f"extra obs {gid}: {n_all - len(s)} of {n_all} dates dropped as outside "
+                  f"--time {t0}..{t1}, {len(s)} kept")
             idx = int(np.where(o_sub.gage_id.values == gid)[0][0])
+            if gid in present:
+                n_store = int(np.isfinite(o_sub["streamflow"].values[idx]).sum())
+                print(f"note: extra obs for {gid} overwrites the obs-store series "
+                      f"({n_store} finite store days in the window) on the {len(s)} extra dates")
             tpos = o_sub.indexes["time"].get_indexer(s.index)
             if (tpos < 0).any():
                 raise SystemExit(f"extra obs for {gid} has dates outside the time axis")
