@@ -1,0 +1,51 @@
+# Hudson stage-reach geometry, 41 rows: the tidal mainstem from COMID 73001655
+# (the reach below Green Island) to the harbor outlet COMID 73005067.
+# PLACEHOLDER: every row is the uniform fallback, not a survey. Rectangle 1000 m
+# wide, bed -10.0 m NAVD88, Manning n 0.022 (tag fallback_uniform). Real
+# bathymetry (NOAA ENC soundings or the Hudson River Estuary multibeam survey)
+# replaces it later; chart soundings are MLLW, convert to NAVD88 with the NOAA
+# Battery datum (MLLW is 0.844 m below NAVD88). The tide-shape check in the
+# tests stays off while any row carries a source tag.
+# anchor_elevation_m in ddrs.yaml equals the outlet row's bed_z_m (-10.0).
+COMID,top_width_m,bed_z_m,n,source
+73001655,1000,-10.0,0.022,fallback_uniform
+73001654,1000,-10.0,0.022,fallback_uniform
+73001652,1000,-10.0,0.022,fallback_uniform
+73001651,1000,-10.0,0.022,fallback_uniform
+73001649,1000,-10.0,0.022,fallback_uniform
+73001648,1000,-10.0,0.022,fallback_uniform
+73001647,1000,-10.0,0.022,fallback_uniform
+73003022,1000,-10.0,0.022,fallback_uniform
+73003020,1000,-10.0,0.022,fallback_uniform
+73003019,1000,-10.0,0.022,fallback_uniform
+73003017,1000,-10.0,0.022,fallback_uniform
+73003016,1000,-10.0,0.022,fallback_uniform
+73003015,1000,-10.0,0.022,fallback_uniform
+73002973,1000,-10.0,0.022,fallback_uniform
+73002972,1000,-10.0,0.022,fallback_uniform
+73002971,1000,-10.0,0.022,fallback_uniform
+73002970,1000,-10.0,0.022,fallback_uniform
+73002969,1000,-10.0,0.022,fallback_uniform
+73002968,1000,-10.0,0.022,fallback_uniform
+73002967,1000,-10.0,0.022,fallback_uniform
+73002966,1000,-10.0,0.022,fallback_uniform
+73002965,1000,-10.0,0.022,fallback_uniform
+73002964,1000,-10.0,0.022,fallback_uniform
+73002963,1000,-10.0,0.022,fallback_uniform
+73002962,1000,-10.0,0.022,fallback_uniform
+73002961,1000,-10.0,0.022,fallback_uniform
+73002960,1000,-10.0,0.022,fallback_uniform
+73002959,1000,-10.0,0.022,fallback_uniform
+73002958,1000,-10.0,0.022,fallback_uniform
+73002957,1000,-10.0,0.022,fallback_uniform
+73002956,1000,-10.0,0.022,fallback_uniform
+73002955,1000,-10.0,0.022,fallback_uniform
+73002954,1000,-10.0,0.022,fallback_uniform
+73002953,1000,-10.0,0.022,fallback_uniform
+73002952,1000,-10.0,0.022,fallback_uniform
+73002951,1000,-10.0,0.022,fallback_uniform
+73002950,1000,-10.0,0.022,fallback_uniform
+73002949,1000,-10.0,0.022,fallback_uniform
+73002948,1000,-10.0,0.022,fallback_uniform
+73005068,1000,-10.0,0.022,fallback_uniform
+73005067,1000,-10.0,0.022,fallback_uniform
