@@ -3,6 +3,9 @@
 //!
 //! Release only: each routed 90-day window takes tens of seconds. Debug builds
 //! skip with the `cfg!(debug_assertions)` pattern of `tests/juniata_acceptance.rs`.
+//! Run it with:
+//!
+//!     cargo test --release --test hudson_stage -- --nocapture
 //!
 //! The run uses uniform normalized head parameters `[n, q_spatial, p_spatial]`
 //! = `[0.0851, 0.5, 0.575]` (n 0.035, q 0.5, p 21.04) on the MC reaches. The
@@ -38,7 +41,7 @@ const STAGE_CONFIG: &str = "examples/hudson/ddrs.yaml";
 const MC_CONFIG: &str = "examples/hudson/ddrs_mc_only.yaml";
 const GEOMETRY_CSV: &str = "examples/hudson/data/hudson_channel_geometry.csv";
 
-// Reach COMIDs nearest each tide station (L10). Found with the one-off
+// Reach COMIDs nearest each tide station. Found with the one-off
 // geopandas script `hudson_nearest_reaches.py` (scratchpad, not committed):
 // it reads the MERIT fabric
 // `/mnt/ssd1/data/merit/riv_pfaf_7_MERIT_Hydro_v07_Basins_v01_bugfix1.shp`,
@@ -106,6 +109,8 @@ struct Run {
     depth_lb: f32,
 }
 
+/// Stage COMIDs from the geometry table, and the count of rows whose `source`
+/// starts with `fallback` (a survey name in a real row does not count).
 fn stage_comids() -> (Vec<i64>, usize) {
     let text = std::fs::read_to_string(GEOMETRY_CSV).expect("geometry csv");
     let mut comids = Vec::new();
@@ -113,7 +118,7 @@ fn stage_comids() -> (Vec<i64>, usize) {
     for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).skip(1) {
         let f: Vec<&str> = line.split(',').collect();
         comids.push(f[0].trim().parse::<i64>().unwrap());
-        if f.get(4).is_some_and(|s| !s.trim().is_empty()) {
+        if f.get(4).is_some_and(|s| s.trim().starts_with("fallback")) {
             with_source += 1;
         }
     }
@@ -400,7 +405,7 @@ fn hudson_stage_window_is_finite_and_conserves() {
             / 15.0
     });
 
-    // Tide shape (P1): asserted only on a real, non-fallback geometry.
+    // Tide shape: asserted only on a real, non-fallback geometry.
     let (_, k) = stage_comids();
     if k > 0 {
         println!(
@@ -434,8 +439,9 @@ fn hudson_stage_window_is_finite_and_conserves() {
         lag / (2.0 * std::f64::consts::PI) * M2_PERIOD_H,
         if ap > 0.2 { "above" } else { "BELOW" }
     );
+    assert!(ap > 0.2, "Poughkeepsie M2 stage amplitude {ap:.3} m is not above 0.2 m");
 
-    // Fast modes (P7): theta 0.6 (a) and 0.55 (b).
+    // Fast modes: theta 0.6 (a) and 0.55 (b).
     let warm = WARMUP_DAYS * 24;
     let ringing = |run: &Run, tag: &str| {
         let mut idx: Vec<usize> = run.stage_rows.clone();

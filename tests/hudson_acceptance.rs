@@ -206,7 +206,7 @@ fn hudson_mc_only_and_stage_runs_meet_floors() {
         st_wall / mc_wall
     );
 
-    // Gauge counts (P3): 4 gauges, the harbor pseudo-gauge has no observations.
+    // Gauge counts: 4 gauges, the harbor pseudo-gauge has no observations.
     for (name, dir, m) in [("mc", &mc_dir, &mc_m), ("stage", &st_dir, &st_m)] {
         let manifest = read_json(dir.join("manifest.json"));
         let metrics = &manifest["metrics"];
@@ -252,6 +252,13 @@ fn hudson_mc_only_and_stage_runs_meet_floors() {
     }
     let count = |needle: &str| log.lines().filter(|l| l.contains(needle)).count();
     assert_eq!(count("eval: tidal filter: godin at 1 gauge (01372058)"), 1, "eval filter line");
+    // One-chunk eval: a chunk seam leaks into the 71 h Godin filter.
+    assert!(
+        log.lines().any(|l| l.contains("chunk 1/1:")),
+        "stage eval did not run as one chunk (expected `chunk 1/1:` in run.log)"
+    );
+    assert!(!log.contains("chunk 1/2:"), "stage eval ran in more than one chunk");
+    assert!(!log.contains("chunk seams leak"), "run.log carries the chunk-seam warning");
     assert!(count("train: tidal filter: godin at 1 gauge (01372058)") >= 1, "train filter line");
     assert!(
         !log.lines().any(|l| l.contains("anchor_elevation_m") && l.contains("overridden")),
