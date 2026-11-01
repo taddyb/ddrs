@@ -145,7 +145,7 @@ pub fn tree_lu_grad_a_host(pattern: &CsrPattern, grad_b: &[f32], x: &[f32]) -> V
 // Modelled on `src/sparse/dispatch.rs::backward_solve_primitive`.
 // =================================================================================
 
-const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
+pub(crate) const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
 
 /// Factor `A` (length `2 * nnz`).
 pub(crate) fn dispatch_factor(

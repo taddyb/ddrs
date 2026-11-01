@@ -10,13 +10,16 @@ use std::sync::Arc;
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData};
+use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive};
 
 use crate::config::DownstreamBoundary;
 use crate::data::store::ChannelGeometryRows;
 use crate::geometry::{compute_trapezoidal_geometry, trapezoid_depth_derivatives, trapezoid_from_depth};
+use crate::routing::stage_op::{
+    dispatch_stage_prologue, stage_hour_forward, Assembled, StageOpConsts,
+};
 use crate::sparse::tree_lu::{assert_tree, tree_lu_solve};
-use crate::sparse::{CsrPattern, SparseAdjacency};
+use crate::sparse::{primitive_to_vec, CsrPattern, SparseAdjacency};
 
 const SECONDS_PER_DAY: f32 = 86_400.0;
 
@@ -406,6 +409,10 @@ pub struct StageBlock<I: Backend> {
     acc: Tensor<I, 1>,
     steps: usize,
     last_coeffs: Option<StageCoefficients<I>>,
+    /// Last substep of the fused path (host); `last_coeffs` is `None` then.
+    last_host: Option<Assembled>,
+    /// Host copy of the constants for the fused op; cleared when the table or the slots change.
+    op_consts: Option<Arc<StageOpConsts>>,
     record: bool,
     coeff_record: Vec<(Vec<f32>, Vec<f32>)>,
     /// Per hour, the end-of-hour stage of every row (kept when `record` is on).
@@ -501,6 +508,8 @@ where
             acc: Tensor::<I, 1>::zeros([5], device),
             steps: 0,
             last_coeffs: None,
+            last_host: None,
+            op_consts: None,
             record: false,
             coeff_record: Vec::new(),
             stage_record: Vec::new(),
@@ -595,6 +604,7 @@ where
                 ));
             }
         }
+        self.op_consts = None;
         let device = self.c.z_mid.device();
         self.net.z_mid = bed;
         self.c.z_mid = f32_tensor::<I>(&self.net.z_mid, &device);
@@ -731,6 +741,22 @@ where
     /// Test hook: coefficients of the last substep.
     #[doc(hidden)]
     pub fn last_coefficients(&self) -> Option<StageCoefficients<I>> {
+        if let Some(a) = &self.last_host {
+            let device = self.c.z_mid.device();
+            let t = |v: &[f32]| Tensor::<I, 1>::from_floats(v, &device);
+            return Some(StageCoefficients {
+                alpha: t(&a.newton.alpha),
+                beta: t(&a.newton.beta),
+                kappa: t(&a.newton.kappa),
+                a_up: t(&a.newton.a_up),
+                b_down: t(&a.newton.b_down),
+                area_edge: t(&a.edge.out_area),
+                radius_edge: t(&a.edge.out_radius),
+                d_s: t(&a.d_s),
+                dt_phi: t(&a.newton.dt_phi),
+                r_prime: t(&a.control.r_prime),
+            });
+        }
         self.last_coeffs.as_ref().map(|c| StageCoefficients {
             alpha: c.alpha.clone(),
             beta: c.beta.clone(),
@@ -770,6 +796,7 @@ where
                 return;
             }
         }
+        self.op_consts = None;
         let nnz = pattern.nnz();
         assert_eq!(pattern.n, self.net.n, "pattern and stage network differ in size");
         assert_eq!(self.net.adj_stage_to_stage.len(), nnz, "pattern and stage masks differ in nnz");
@@ -818,6 +845,23 @@ where
     /// stage discharge; that value is the next hour's `q_t` on stage rows.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
+        &mut self,
+        pattern: &Arc<CsrPattern>,
+        n_man: Tensor<Ad<I>, 1>,
+        p: Tensor<Ad<I>, 1>,
+        q: Tensor<Ad<I>, 1>,
+        q_t: Tensor<Ad<I>, 1>,
+        q_next_mc: Tensor<Ad<I>, 1>,
+        q_prime_t: Tensor<Ad<I>, 1>,
+    ) -> Tensor<Ad<I>, 1> {
+        self.step_reference(pattern, n_man, p, q, q_t, q_next_mc, q_prime_t)
+    }
+
+    /// The Burn-autodiff step: the definition of correct. The fused op
+    /// (`step_fused`) is pinned to it.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_reference(
         &mut self,
         pattern: &Arc<CsrPattern>,
         n_man: Tensor<Ad<I>, 1>,
@@ -1046,6 +1090,7 @@ where
                 ));
             }
         }
+        self.last_host = None;
         self.last_coeffs = coeffs;
         if self.record {
             self.stage_record.push(h.clone().inner().into_data().to_vec().expect("f32"));
@@ -1053,5 +1098,134 @@ where
         self.h_t = Some(h);
         self.step_index += 1;
         q_next_mc.mask_where(self.c.in_stage_b.clone(), qc)
+    }
+
+    /// Host copy of the block's constants for the fused op. Reads the float
+    /// constants back from the device tensors once, so both paths see the same
+    /// bits. Cached until the table or the slots change.
+    #[doc(hidden)]
+    pub fn op_consts(&mut self, pattern: &Arc<CsrPattern>) -> Arc<StageOpConsts> {
+        let device = self.c.z_mid.device();
+        self.ensure_slots(pattern, &device);
+        if let Some(c) = &self.op_consts {
+            return c.clone();
+        }
+        let host = |t: &Tensor<Ad<I>, 1>| -> Vec<f32> { t.clone().inner().into_data().to_vec().expect("f32") };
+        let sl = self.slots.as_ref().expect("slots built");
+        let c = &self.c;
+        let nn = self.net.n;
+        let (t_mask, t_tw, t_n, t_pool) = match &self.table {
+            Some(t) => (host(&t.mask), host(&t.tw), host(&t.n), host(&t.pool)),
+            None => (vec![], vec![], vec![], vec![]),
+        };
+        let out = StageOpConsts {
+            n: nn,
+            nnz: pattern.nnz(),
+            substeps: self.params.substeps.max(1),
+            theta: self.params.theta,
+            theta_c: self.params.theta_control,
+            g: self.params.g,
+            depth_lb: self.params.depth_lb,
+            bw_lb: self.params.bottom_width_lb,
+            dt: self.params.dt,
+            prescribed: self.params.boundary == DownstreamBoundary::PrescribedStage,
+            has_table: self.table.is_some(),
+            down: (0..nn)
+                .map(|i| if self.net.down[i] >= 0 { self.net.down[i] as usize } else { i })
+                .collect(),
+            in_stage: host(&c.in_stage),
+            friction: host(&c.friction),
+            dam: host(&c.dam),
+            ctrl: host(&c.ctrl),
+            nd: host(&c.nd),
+            w_ctrl: host(&c.w_ctrl),
+            w_edge: host(&c.w_edge),
+            has_down: host(&c.has_down),
+            outlet: host(&c.outlet),
+            z_mid: host(&c.z_mid),
+            z_down: host(&c.z_down),
+            length: host(&c.length),
+            edge_length: host(&c.edge_length),
+            dam_t: host(&c.dam_t),
+            s0_sqrt: c.s0.clone().inner().sqrt().into_data().to_vec().expect("f32"),
+            t_mask,
+            t_tw,
+            t_n,
+            t_pool,
+            row: pattern.row_for_nnz.iter().map(|&r| r as usize).collect(),
+            col: pattern.col.iter().map(|&c| c as usize).collect(),
+            diag_slot: host(&sl.diag_slot),
+            adj_stage: host(&sl.adj_stage),
+            adj_mc: host(&sl.adj_mc),
+            adj_friction: host(&sl.adj_friction),
+            dam_slot: host(&sl.dam_slot),
+        };
+        let out = Arc::new(out);
+        self.op_consts = Some(out.clone());
+        out
+    }
+
+    /// One routing hour through the fused host forward (Task 16a): forward
+    /// only, the output is untracked. Same arguments and result as
+    /// `step_reference`.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_fused(
+        &mut self,
+        pattern: &Arc<CsrPattern>,
+        n_man: Tensor<Ad<I>, 1>,
+        p: Tensor<Ad<I>, 1>,
+        q: Tensor<Ad<I>, 1>,
+        q_t: Tensor<Ad<I>, 1>,
+        q_next_mc: Tensor<Ad<I>, 1>,
+        q_prime_t: Tensor<Ad<I>, 1>,
+    ) -> Tensor<Ad<I>, 1> {
+        let device = q_t.device();
+        self.ensure_slots(pattern, &device);
+        let pr = self.params;
+        let prescribed = pr.boundary == DownstreamBoundary::PrescribedStage;
+        let h_t = self.h_t.clone().expect("StageBlock::hotstart (or set_stage) before step");
+        // Mirrors the prologue of `step_reference`.
+        let (b0, b1) = if prescribed {
+            let s = self
+                .boundary_series
+                .as_ref()
+                .expect("PrescribedStage needs set_boundary_series");
+            assert!(
+                self.step_index + 1 < s.len(),
+                "boundary series has {} values, hour {} needs index {}",
+                s.len(),
+                self.step_index,
+                self.step_index + 1
+            );
+            (s[self.step_index], s[self.step_index + 1])
+        } else {
+            (0.0, 0.0)
+        };
+        let consts = self.op_consts(pattern);
+        let host = |t: Tensor<Ad<I>, 1>| -> Vec<f32> {
+            match t.into_primitive() {
+                TensorPrimitive::Float(a) => primitive_to_vec::<I>(a.primitive),
+                TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+            }
+        };
+        let (n_h, q_h, p_h) = (host(n_man), host(q), host(p));
+        let (h_h, qt_h, mc_h, qp_h) = (host(h_t), host(q_t), host(q_next_mc), host(q_prime_t));
+        let hour = dispatch_stage_prologue(&consts, &n_h, &q_h, &p_h, &qt_h, &mc_h, &qp_h, b0, b1, pr.use_cuda);
+        let fwd = stage_hour_forward(&consts, pattern, &hour, &h_h, &qt_h, false, pr.use_cuda);
+        let h_end = Tensor::<Ad<I>, 1>::from_floats(fwd.h_end.as_slice(), &device);
+        let q_out = Tensor::<Ad<I>, 1>::from_floats(fwd.q_out.as_slice(), &device);
+        // Epilogue.
+        self.acc = self.acc.clone() + Tensor::<I, 1>::from_floats(fwd.mass, &device);
+        self.steps += 1;
+        if self.record {
+            self.coeff_record.push((fwd.last.newton.dt_phi.clone(), fwd.last.newton.alpha.clone()));
+            self.stage_record.push(fwd.h_end.clone());
+        }
+        self.last_host = Some(fwd.last);
+        self.last_coeffs = None;
+        self.h_t = Some(h_end);
+        self.step_index += 1;
+        q_out
     }
 }
