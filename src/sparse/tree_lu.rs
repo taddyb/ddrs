@@ -47,6 +47,7 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
+use super::dispatch::effective_use_cuda;
 use super::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
 
 /// Factors of a tree matrix. Both vectors have length `nnz` (`CsrPattern` layout).
@@ -148,102 +149,26 @@ pub fn tree_lu_grad_a_host(pattern: &CsrPattern, grad_b: &[f32], x: &[f32]) -> V
     out
 }
 
-// =================================================================================
-// Dispatch layer. One function per host step; the CUDA arms are filled in Phase G.
-// Modelled on `src/sparse/dispatch.rs::backward_solve_primitive`.
-// =================================================================================
-
+/// Panic text of the CUDA arms until Phase G fills them in.
 pub(crate) const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
-
-/// Factor `A` (length `2 * nnz`).
-pub(crate) fn dispatch_factor(
-    pattern: &CsrPattern,
-    a_values: &[f32],
-    use_cuda: bool,
-) -> TreeFactors {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    tree_lu_factor(pattern, a_values)
-}
-
-/// Solve `L y = b`.
-pub(crate) fn dispatch_l_solve(
-    pattern: &CsrPattern,
-    l_values: &[f32],
-    b: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    forward_sub_lower(pattern, l_values, b)
-}
-
-/// Solve `U x = y`.
-pub(crate) fn dispatch_u_solve(
-    pattern: &CsrPattern,
-    u_values: &[f32],
-    y: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    back_sub_upper_transposed(pattern, u_values, y)
-}
-
-/// Solve `Uᵀ z = g`.
-pub(crate) fn dispatch_ut_solve(
-    pattern: &CsrPattern,
-    u_values: &[f32],
-    g: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    forward_sub_lower(pattern, u_values, g)
-}
-
-/// Solve `Lᵀ g = z`.
-pub(crate) fn dispatch_lt_solve(
-    pattern: &CsrPattern,
-    l_values: &[f32],
-    z: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    back_sub_upper_transposed(pattern, l_values, z)
-}
-
-/// Gradient w.r.t. `A` (length `2 * nnz`) from `g` and `x`.
-pub(crate) fn dispatch_grad_a(
-    pattern: &CsrPattern,
-    g: &[f32],
-    x: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    tree_lu_grad_a_host(pattern, g, x)
-}
 
 // =================================================================================
 // Autodiff op
 // =================================================================================
 
-/// Saved state for the backward pass. Everything is behind an `Arc`, so cloning
-/// onto the tape is a refcount bump.
+/// What the backward needs from the forward. The CPU/CUDA choice is made once
+/// per op, in [`tree_lu_solve`]; the variant records which arm ran. Everything
+/// is behind an `Arc`, so cloning onto the tape is a refcount bump.
+#[derive(Clone, Debug)]
+enum TreeSaved {
+    Host { factors: Arc<TreeFactors>, x: Arc<Vec<f32>> },
+}
+
+/// Saved state for the backward pass.
 #[derive(Clone, Debug)]
 struct TreeSolveState {
-    factors: Arc<TreeFactors>,
-    x: Arc<Vec<f32>>,
+    saved: TreeSaved,
     pattern: Arc<CsrPattern>,
-    use_cuda: bool,
 }
 
 #[derive(Debug)]
@@ -261,18 +186,19 @@ where
         grads: &mut Gradients,
         _checkpointer: &mut Checkpointer,
     ) {
-        let TreeSolveState { factors, x, pattern, use_cuda } = ops.state;
+        let TreeSolveState { saved, pattern } = ops.state;
+        let TreeSaved::Host { factors, x } = saved;
         let [parent_a, parent_b] = ops.parents;
         let grad_out = grads.consume::<B>(&ops.node);
         let device = B::float_device(&grad_out);
         let grad_x = primitive_to_vec::<B>(grad_out);
 
         // g = A^{-T} grad_x: Uᵀ z = grad_x, then Lᵀ g = z.
-        let z = dispatch_ut_solve(&pattern, &factors.u_values, &grad_x, use_cuda);
-        let g = dispatch_lt_solve(&pattern, &factors.l_values, &z, use_cuda);
+        let z = forward_sub_lower(&pattern, &factors.u_values, &grad_x);
+        let g = back_sub_upper_transposed(&pattern, &factors.l_values, &z);
 
         if let Some(p_a) = parent_a {
-            let ga = dispatch_grad_a(&pattern, &g, &x, use_cuda);
+            let ga = tree_lu_grad_a_host(&pattern, &g, &x);
             let len = ga.len();
             grads.register::<B>(
                 p_a.id,
@@ -292,7 +218,9 @@ where
 /// Solve `A x = b` for a tree matrix with a hand-written adjoint.
 ///
 /// `a_values` has length `2 * nnz` (layout in the module doc). `pattern` is
-/// structural metadata and does not take part in autograd.
+/// structural metadata and does not take part in autograd. `use_cuda` on a
+/// backend that is not CUDA falls back to the host path, with the one-shot
+/// WARN of `effective_use_cuda`.
 pub fn tree_lu_solve<I: Backend + 'static>(
     pattern: &Arc<CsrPattern>,
     a_values: Tensor<Autodiff<I>, 1>,
@@ -303,6 +231,9 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    if effective_use_cuda::<I>(use_cuda) {
+        unimplemented!("{}", CUDA_TODO)
+    }
     let a_at = match a_values.into_primitive() {
         TensorPrimitive::Float(p) => p,
         TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
@@ -315,9 +246,9 @@ where
 
     let a_host = primitive_to_vec::<I>(a_at.primitive.clone());
     let b_host = primitive_to_vec::<I>(b_at.primitive.clone());
-    let factors = dispatch_factor(pattern, &a_host, use_cuda);
-    let y = dispatch_l_solve(pattern, &factors.l_values, &b_host, use_cuda);
-    let x = dispatch_u_solve(pattern, &factors.u_values, &y, use_cuda);
+    let factors = tree_lu_factor(pattern, &a_host);
+    let y = forward_sub_lower(pattern, &factors.l_values, &b_host);
+    let x = back_sub_upper_transposed(pattern, &factors.u_values, &y);
     let n = x.len();
     let out_prim = I::float_from_data(TensorData::new(x.clone(), [n]), &device);
 
@@ -328,10 +259,8 @@ where
     {
         OpsKind::Tracked(prep) => {
             let state = TreeSolveState {
-                factors: Arc::new(factors),
-                x: Arc::new(x),
+                saved: TreeSaved::Host { factors: Arc::new(factors), x: Arc::new(x) },
                 pattern: pattern.clone(),
-                use_cuda,
             };
             prep.finish(state, out_prim)
         }

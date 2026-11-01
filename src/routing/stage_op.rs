@@ -8,9 +8,40 @@
 //! [`StageTimestepOp`] (`Backward<B, 7>`, parents `n, q, p, h_t, q_t,
 //! q_next_mc, q'`) built by [`stage_timestep`].
 //!
-//! The CPU branch of each dispatch fn is a plain host loop over reaches or
-//! slots. The CUDA branch is `unimplemented!` (Phase G). The orchestration fns
-//! [`stage_hour_forward`] and [`stage_hour_backward`] loop over substeps only.
+//! # CPU or CUDA: one choice per op
+//!
+//! [`stage_timestep`] (and `tree_lu_solve` in `src/sparse/tree_lu.rs`) pick the
+//! backend once, on `effective_use_cuda`. The host block fns in this file are
+//! the CPU path and the reference for the device mirrors. The device arms live
+//! in `src/routing/stage_cuda/` (from Task 4 of Phase G). The orchestration
+//! fns [`stage_hour_forward`] and [`stage_hour_backward`] loop over substeps
+//! only and call the host fns directly. Until Phase G fills it in, the CUDA arm
+//! is `unimplemented!`. `use_cuda: true` on a backend that is not CUDA falls
+//! back to the host path.
+//!
+//! # Host tie rule per clamp
+//!
+//! This table is the binding tie rule for both arms. Ties pass for every clamp
+//! gradient, as Burn's default does. Strict masks apply only to the constant
+//! indicators. A kernel must use the operator of the host line (strict or not).
+//! `clamp_min(x, lb)` is `x < lb ? lb : x`, so a NaN passes through.
+//!
+//! | Line | Forward | Backward mask | At the tie |
+//! |---|---|---|---|
+//! | 1a depth floor | `clamp_min(x, lb)` = `x < lb ? lb : x` | `!(x < lb)` | passes |
+//! | 1c Bates max | `h < hd ? hd : h` | to `h` if `!(h < hd)`, to `hd` if `h < hd` | goes to `h` |
+//! | 1d edge depth | `clamp_min(der, lb)` | `!(der < lb)` | passes |
+//! | 1e `above`, `up` | `[der > lb]`, `[(h - hd) >= 0]` | constants | `above = 0` at `der == lb` (the kappa term is off while `d_e` passes) |
+//! | 2a side slope | `clamp(ssr, 0.5, 50)` | `ssr >= 0.5 && ssr <= 50` | passes at both ends (0 for NaN) |
+//! | 2b bottom width | `clamp_min(bwr, bwlb)` | `!(bwr < bwlb)` | passes |
+//! | 2d, 2e `sa`, `ba` | `[ssr > 0.5] * [ssr < 50]`, `[bwr > bwlb]` | constants | 0 at the tie (the derivative terms are off) |
+//! | 3a `abs(Q)` | `q.abs()` | `sign0(q)` | 0 at `Q = 0` |
+//! | 3f `a`, `b` | `clamp_min(ra, 0) * f`, `clamp_min(rb, 0) * f` | `!(ra < 0)`, `!(rb < 0)` | passes |
+//! | 4b table release | `clamp_min(ex, 0)`; `act = [ex > 0]` | `!(ex < 0)`; `act` constant | the release passes to `h`; the `R'` part is 0 |
+//! | 4d `R'` | `clamp_min(rpr, 0)` | `!(rpr < 0)` | passes |
+//! | 7b stage floor | `hs < hf ? hf : hs` | `!(hs < hf)` | passes (to `h_solved`) |
+//! | table rows | `keep = (-m) + 1` | `* keep` on the head `n`, `p`, `q` | exactly 0 (finite cotangent) |
+//! | MC rows | `* in_stage` (BH0, BH3 `q'`) | | exactly 0 |
 // `!(x < y)` is kept on purpose: with a NaN it is true, as in the Burn ops this file mirrors.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
@@ -24,12 +55,9 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
-use crate::sparse::primitive_to_vec;
-use crate::sparse::tree_lu::{
-    dispatch_factor, dispatch_grad_a, dispatch_l_solve, dispatch_lt_solve, dispatch_u_solve,
-    dispatch_ut_solve, TreeFactors, CUDA_TODO,
-};
-use crate::sparse::CsrPattern;
+use crate::sparse::dispatch::effective_use_cuda;
+use crate::sparse::tree_lu::{tree_lu_factor, tree_lu_grad_a_host, TreeFactors, CUDA_TODO};
+use crate::sparse::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
 
 // Scalars the reference passes as f64 literals; Burn casts them to f32.
 const F43: f32 = (4.0f64 / 3.0) as f32;
@@ -748,8 +776,7 @@ pub fn stage_readout_host(
 // ---------------------------------------------------------------- adjoints
 //
 // The adjoints of the elementwise blocks (B1 to B4), one loop over reaches
-// each. These are the CPU branches; the dispatch fns below wrap them with a
-// `use_cuda` arm. Masks use the
+// each. These are the CPU path; the device mirrors are chosen at the op. Masks use the
 // forward line's comparison (overview 16.5). An empty cotangent Vec is zeros.
 
 /// `v[i]`, or 0.0 for an empty cotangent Vec.
@@ -1148,7 +1175,7 @@ pub fn depth_backward_host(
 
 // ---------------------------------------------------------------------------
 // Adjoints of blocks B5 to B8 and the hour adjoints BH0 to BH3. One loop over reaches or
-// slots each; the CUDA arms are in the dispatch fns below.
+// slots each. The CUDA arms are chosen at the op, not here.
 // ---------------------------------------------------------------------------
 
 /// Cotangents out of the readout. `dh` is the cotangent the solve adjoint takes
@@ -1324,8 +1351,11 @@ fn add_into(acc: &mut [f32], x: &[f32]) {
     }
 }
 
+/// B6 to B1 for substep `s`, composed from the 16b fns. Adds into `acc`.
+/// Returns `(ḡh, ḡQ)` of the substep's start state.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-fn assemble_backward_impl(
+pub fn assemble_backward_host(
     c: &StageOpConsts,
     hour: &HourHost,
     s: usize,
@@ -1336,19 +1366,18 @@ fn assemble_backward_impl(
     g_r: &[f32],
     g_a_values: &[f32],
     acc: &mut HourAcc,
-    use_cuda: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let n = c.n;
     let subs = c.substeps.max(1) as usize;
     let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
     // B6, B5
-    let rhs = dispatch_rhs_backward(c, asm, g_r, use_cuda);
-    let mat = dispatch_matrix_backward(c, g_a_values, use_cuda);
+    let rhs = rhs_backward_host(c, asm, g_r);
+    let mat = matrix_backward_host(c, g_a_values);
     // B4: cotangents of R and R' from the readout, the RHS and the matrix
     let ctl_bar = ControlBar { r_t: add2(&rg.r_t, &rhs.r_t), r_prime: add2(&rg.r_prime, &mat.r_prime) };
-    let ctl = dispatch_control_backward(
+    let ctl = control_backward_host(
         c, asm.dt_s, h, &hour.p, &hour.q_eps, &hour.n_eff, &asm.depth.depth, &asm.store, &asm.d_s,
-        &asm.control, &ctl_bar, use_cuda,
+        &asm.control, &ctl_bar
     );
     // B3
     let nw_bar = NewtonBar {
@@ -1356,18 +1385,18 @@ fn assemble_backward_impl(
         a_up: add2(&rg.a_up, &mat.a_up),
         b_down: add2(&add2(&rg.b_down, &rhs.b_down), &mat.b_down),
     };
-    let nw = dispatch_newton_backward(
-        c, asm.dt_s, h, qc, &hour.n2, &asm.depth, &asm.edge, &asm.newton, &nw_bar, use_cuda,
+    let nw = newton_backward_host(
+        c, asm.dt_s, h, qc, &hour.n2, &asm.depth, &asm.edge, &asm.newton, &nw_bar
     );
     // B2: the storage top width carries ḡD_s·L/Δ (the storage path)
     let g_ds = add2(&mat.d_s, &ctl.d_s);
     let mut store_bar = ctl.store.clone();
     store_bar.top_width = (0..n).map(|i| g_ds[i] * c.length[i] / asm.dt_s).collect();
-    let sec_e = dispatch_section_backward(c, &hour.p, &hour.q_eps, &asm.depth.d_edge, &asm.edge, &nw.edge, use_cuda);
-    let sec_s = dispatch_section_backward(c, &hour.p, &hour.q_eps, &asm.depth.depth, &asm.store, &store_bar, use_cuda);
+    let sec_e = section_backward_host(c, &hour.p, &hour.q_eps, &asm.depth.d_edge, &asm.edge, &nw.edge);
+    let sec_s = section_backward_host(c, &hour.p, &hour.q_eps, &asm.depth.depth, &asm.store, &store_bar);
     // B1
     let g_depth = add2(&ctl.depth, &sec_s.d);
-    let gh_depth = dispatch_depth_backward(c, h, &asm.depth, &g_depth, &sec_e.d, &nw.h_down, use_cuda);
+    let gh_depth = depth_backward_host(c, h, &asm.depth, &g_depth, &sec_e.d, &nw.h_down);
     let g_h: Vec<f32> = (0..n).map(|i| rg.h[i] + ctl.h[i] + nw.h[i] + gh_depth[i]).collect();
     let g_q = add2(&rhs.qc, &nw.qc);
     // hour accumulators (BH1 weights i_delta)
@@ -1386,25 +1415,6 @@ fn assemble_backward_impl(
         acc.i_delta[i] += rhs.i_mid[i] * w;
     }
     (g_h, g_q)
-}
-
-/// B6 to B1 for substep `s`, composed from the 16b fns. Adds into `acc`.
-/// Returns `(ḡh, ḡQ)` of the substep's start state.
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn assemble_backward_host(
-    c: &StageOpConsts,
-    hour: &HourHost,
-    s: usize,
-    h: &[f32],
-    qc: &[f32],
-    asm: &Assembled,
-    rg: &ReadoutGrads,
-    g_r: &[f32],
-    g_a_values: &[f32],
-    acc: &mut HourAcc,
-) -> (Vec<f32>, Vec<f32>) {
-    assemble_backward_impl(c, hour, s, h, qc, asm, rg, g_r, g_a_values, acc, false)
 }
 
 /// BH0: `(ḡh_S, ḡQ_S, ḡq_next_mc direct)` from the `[2n]` output cotangent.
@@ -1473,56 +1483,6 @@ pub fn prologue_backward_host(
     }
 }
 
-// -------------------------------------------------------------- dispatch
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn dispatch_stage_prologue(
-    c: &StageOpConsts,
-    n: &[f32],
-    q: &[f32],
-    p: &[f32],
-    q_t: &[f32],
-    q_next_mc: &[f32],
-    q_prime: &[f32],
-    b0: f32,
-    b1: f32,
-    use_cuda: bool,
-) -> HourHost {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    stage_prologue_host(c, n, q, p, q_t, q_next_mc, q_prime, b0, b1)
-}
-
-pub(crate) fn dispatch_stage_assemble(
-    c: &StageOpConsts,
-    hour: &HourHost,
-    s: usize,
-    h: &[f32],
-    qc: &[f32],
-    use_cuda: bool,
-) -> Assembled {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    stage_assemble_host(c, hour, s, h, qc)
-}
-
-pub(crate) fn dispatch_stage_readout(
-    c: &StageOpConsts,
-    hour: &HourHost,
-    h: &[f32],
-    qc: &[f32],
-    asm: &Assembled,
-    dh: &[f32],
-    use_cuda: bool,
-) -> Readout {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    stage_readout_host(c, hour, h, qc, asm, dh)
-}
-
 /// The hour forward: `substeps` substeps of assemble, factor, L solve, U solve
 /// and readout. Sums the mass over the substeps and keeps the last
 /// `Assembled`. Pushes a [`SubstepSaved`] per substep when `save`. No loop
@@ -1535,7 +1495,6 @@ pub fn stage_hour_forward(
     h_t: &[f32],
     q_t: &[f32],
     save: bool,
-    use_cuda: bool,
 ) -> HourForward {
     let subs = c.substeps.max(1) as usize;
     let mut h = h_t.to_vec();
@@ -1544,11 +1503,11 @@ pub fn stage_hour_forward(
     let mut saved = Vec::new();
     let mut last = Assembled::default();
     for s in 0..subs {
-        let asm = dispatch_stage_assemble(c, hour, s, &h, &qc, use_cuda);
-        let factors = dispatch_factor(pattern, &asm.a_values, use_cuda);
-        let y = dispatch_l_solve(pattern, &factors.l_values, &asm.r, use_cuda);
-        let dh = dispatch_u_solve(pattern, &factors.u_values, &y, use_cuda);
-        let ro = dispatch_stage_readout(c, hour, &h, &qc, &asm, &dh, use_cuda);
+        let asm = stage_assemble_host(c, hour, s, &h, &qc);
+        let factors = tree_lu_factor(pattern, &asm.a_values);
+        let y = forward_sub_lower(pattern, &factors.l_values, &asm.r);
+        let dh = back_sub_upper_transposed(pattern, &factors.u_values, &y);
+        let ro = stage_readout_host(c, hour, &h, &qc, &asm, &dh);
         for (m, v) in mass.iter_mut().zip(ro.mass) {
             *m += v;
         }
@@ -1559,7 +1518,7 @@ pub fn stage_hour_forward(
         qc = ro.q_new;
         last = asm;
     }
-    let q_out = dispatch_stage_epilogue(c, hour, &qc, use_cuda);
+    let q_out = stage_epilogue_host(c, hour, &qc);
     HourForward { h_end: h, q_out, last, mass, subs: saved }
 }
 
@@ -1567,156 +1526,6 @@ pub fn stage_hour_forward(
 #[doc(hidden)]
 pub fn stage_epilogue_host(c: &StageOpConsts, hour: &HourHost, qc: &[f32]) -> Vec<f32> {
     (0..c.n).map(|i| if c.in_stage[i] == 1.0 { qc[i] } else { hour.q_next_mc[i] }).collect()
-}
-
-pub(crate) fn dispatch_stage_epilogue(
-    c: &StageOpConsts,
-    hour: &HourHost,
-    qc: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    stage_epilogue_host(c, hour, qc)
-}
-
-// ------------------------------------------------- backward dispatch (16c)
-
-macro_rules! cuda_guard {
-    ($use_cuda:expr) => {
-        if $use_cuda {
-            unimplemented!("{}", CUDA_TODO)
-        }
-    };
-}
-
-pub(crate) fn dispatch_stage_output_backward(
-    c: &StageOpConsts,
-    g_out: &[f32],
-    use_cuda: bool,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    cuda_guard!(use_cuda);
-    output_backward_host(c, g_out)
-}
-
-pub(crate) fn dispatch_stage_readout_backward(
-    c: &StageOpConsts,
-    h: &[f32],
-    asm: &Assembled,
-    dh: &[f32],
-    g_h_new: &[f32],
-    g_q_new: &[f32],
-    use_cuda: bool,
-) -> ReadoutGrads {
-    cuda_guard!(use_cuda);
-    readout_backward_host(c, h, asm, dh, g_h_new, g_q_new)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn dispatch_stage_assemble_backward(
-    c: &StageOpConsts,
-    hour: &HourHost,
-    s: usize,
-    h: &[f32],
-    qc: &[f32],
-    asm: &Assembled,
-    rg: &ReadoutGrads,
-    g_r: &[f32],
-    g_a_values: &[f32],
-    acc: &mut HourAcc,
-    use_cuda: bool,
-) -> (Vec<f32>, Vec<f32>) {
-    cuda_guard!(use_cuda);
-    assemble_backward_impl(c, hour, s, h, qc, asm, rg, g_r, g_a_values, acc, use_cuda)
-}
-
-pub(crate) fn dispatch_stage_prologue_backward(
-    c: &StageOpConsts,
-    hour: &HourHost,
-    acc: &HourAcc,
-    g_h0: &[f32],
-    g_q0: &[f32],
-    g_qmc_direct: &[f32],
-    use_cuda: bool,
-) -> HourGrads {
-    cuda_guard!(use_cuda);
-    prologue_backward_host(c, hour, acc, g_h0, g_q0, g_qmc_direct)
-}
-
-// One dispatch fn per 16b/16c block adjoint, so every per-reach loop of the
-// backward sits behind a `use_cuda` arm (the GPU-ready rule).
-
-pub(crate) fn dispatch_rhs_backward(c: &StageOpConsts, asm: &Assembled, g_r: &[f32], use_cuda: bool) -> RhsGrads {
-    cuda_guard!(use_cuda);
-    rhs_backward_host(c, asm, g_r)
-}
-
-pub(crate) fn dispatch_matrix_backward(c: &StageOpConsts, g_a_values: &[f32], use_cuda: bool) -> MatrixGrads {
-    cuda_guard!(use_cuda);
-    matrix_backward_host(c, g_a_values)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn dispatch_control_backward(
-    c: &StageOpConsts,
-    dt_s: f32,
-    h: &[f32],
-    p: &[f32],
-    q_eps: &[f32],
-    n_eff: &[f32],
-    depth: &[f32],
-    store: &SectionHost,
-    d_s: &[f32],
-    o: &ControlOut,
-    bar: &ControlBar,
-    use_cuda: bool,
-) -> ControlGrads {
-    cuda_guard!(use_cuda);
-    control_backward_host(c, dt_s, h, p, q_eps, n_eff, depth, store, d_s, o, bar)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn dispatch_newton_backward(
-    c: &StageOpConsts,
-    dt_s: f32,
-    h: &[f32],
-    qc: &[f32],
-    n2: &[f32],
-    dep: &DepthOut,
-    edge: &SectionHost,
-    o: &NewtonOut,
-    bar: &NewtonBar,
-    use_cuda: bool,
-) -> NewtonGrads {
-    cuda_guard!(use_cuda);
-    newton_backward_host(c, dt_s, h, qc, n2, dep, edge, o, bar)
-}
-
-pub(crate) fn dispatch_section_backward(
-    c: &StageOpConsts,
-    p: &[f32],
-    q_eps: &[f32],
-    d: &[f32],
-    s: &SectionHost,
-    bar: &SectionBar,
-    use_cuda: bool,
-) -> SectionGrads {
-    cuda_guard!(use_cuda);
-    section_backward_host(c, p, q_eps, d, s, bar)
-}
-
-pub(crate) fn dispatch_depth_backward(
-    c: &StageOpConsts,
-    h: &[f32],
-    dep: &DepthOut,
-    g_depth: &[f32],
-    g_d_edge: &[f32],
-    g_h_down: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    cuda_guard!(use_cuda);
-    depth_backward_host(c, h, dep, g_depth, g_d_edge, g_h_down)
 }
 
 /// The hour backward: BH0, then for `s = S-1..0` the rematerialized assembly,
@@ -1730,28 +1539,34 @@ pub fn stage_hour_backward(
     hour: &HourHost,
     subs: &[SubstepSaved],
     g_out: &[f32],
-    use_cuda: bool,
 ) -> HourGrads {
-    let (mut g_h, mut g_q, g_mc) = dispatch_stage_output_backward(c, g_out, use_cuda);
+    let (mut g_h, mut g_q, g_mc) = output_backward_host(c, g_out);
     let mut acc = HourAcc::zeros(c.n);
     for s in (0..subs.len()).rev() {
         let sv = &subs[s];
-        let asm = dispatch_stage_assemble(c, hour, s, &sv.h, &sv.qc, use_cuda);
-        let rg = dispatch_stage_readout_backward(c, &sv.h, &asm, &sv.dh, &g_h, &g_q, use_cuda);
+        let asm = stage_assemble_host(c, hour, s, &sv.h, &sv.qc);
+        let rg = readout_backward_host(c, &sv.h, &asm, &sv.dh, &g_h, &g_q);
         // g = A^{-T} ḡdh: Uᵀ z = ḡdh, then Lᵀ g = z, on the saved factors.
-        let z = dispatch_ut_solve(pattern, &sv.factors.u_values, &rg.dh, use_cuda);
-        let g_r = dispatch_lt_solve(pattern, &sv.factors.l_values, &z, use_cuda);
-        let g_a = dispatch_grad_a(pattern, &g_r, &sv.dh, use_cuda);
-        let (nh, nq) = dispatch_stage_assemble_backward(
-            c, hour, s, &sv.h, &sv.qc, &asm, &rg, &g_r, &g_a, &mut acc, use_cuda,
+        let z = forward_sub_lower(pattern, &sv.factors.u_values, &rg.dh);
+        let g_r = back_sub_upper_transposed(pattern, &sv.factors.l_values, &z);
+        let g_a = tree_lu_grad_a_host(pattern, &g_r, &sv.dh);
+        let (nh, nq) = assemble_backward_host(
+            c, hour, s, &sv.h, &sv.qc, &asm, &rg, &g_r, &g_a, &mut acc,
         );
         g_h = nh;
         g_q = nq;
     }
-    dispatch_stage_prologue_backward(c, hour, &acc, &g_h, &g_q, &g_mc, use_cuda)
+    prologue_backward_host(c, hour, &acc, &g_h, &g_q, &g_mc)
 }
 
 // ------------------------------------------------------------------ the op
+
+/// What the backward needs from the forward. The CPU/CUDA choice is made once
+/// per op, in [`stage_timestep`]; the variant records which arm ran.
+#[derive(Clone, Debug)]
+pub(crate) enum HourSaved {
+    Host { hour: Arc<HourHost>, subs: Arc<Vec<SubstepSaved>> },
+}
 
 /// Saved state of one routing hour. Everything is behind an `Arc`, so a clone
 /// onto the tape is a refcount bump.
@@ -1759,9 +1574,7 @@ pub fn stage_hour_backward(
 pub(crate) struct StageTimestepState {
     consts: Arc<StageOpConsts>,
     pattern: Arc<CsrPattern>,
-    hour: Arc<HourHost>,
-    subs: Arc<Vec<SubstepSaved>>,
-    use_cuda: bool,
+    saved: HourSaved,
 }
 
 #[derive(Debug)]
@@ -1774,12 +1587,13 @@ where
     type State = StageTimestepState;
 
     fn backward(self, ops: Ops<Self::State, 7>, grads: &mut Gradients, _checkpointer: &mut Checkpointer) {
-        let StageTimestepState { consts, pattern, hour, subs, use_cuda } = ops.state;
+        let StageTimestepState { consts, pattern, saved } = ops.state;
+        let HourSaved::Host { hour, subs } = saved;
         let [p_n, p_q, p_p, p_ht, p_qt, p_mc, p_qp] = ops.parents;
         let grad_out = grads.consume::<B>(&ops.node);
         let device = B::float_device(&grad_out);
         let g_out = primitive_to_vec::<B>(grad_out);
-        let g = stage_hour_backward(&consts, &pattern, &hour, &subs, &g_out, use_cuda);
+        let g = stage_hour_backward(&consts, &pattern, &hour, &subs, &g_out);
         let n = consts.n;
         macro_rules! reg {
             ($p:expr, $v:expr) => {
@@ -1820,6 +1634,9 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    if effective_use_cuda::<I>(use_cuda) {
+        unimplemented!("{}", CUDA_TODO)
+    }
     let float = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
         TensorPrimitive::Float(a) => a,
         TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
@@ -1859,8 +1676,8 @@ where
         primitive_to_vec::<I>(a_mc.primitive),
         primitive_to_vec::<I>(a_qp.primitive),
     );
-    let hour = dispatch_stage_prologue(consts, &n_h, &q_h, &p_h, &qt_h, &mc_h, &qp_h, b0, b1, use_cuda);
-    let mut fwd = stage_hour_forward(consts, pattern, &hour, &h_h, &qt_h, save, use_cuda);
+    let hour = stage_prologue_host(consts, &n_h, &q_h, &p_h, &qt_h, &mc_h, &qp_h, b0, b1);
+    let mut fwd = stage_hour_forward(consts, pattern, &hour, &h_h, &qt_h, save);
     let nn = consts.n;
     let out = I::float_from_data(
         TensorData::new([fwd.h_end.as_slice(), fwd.q_out.as_slice()].concat(), [2 * nn]),
@@ -1871,9 +1688,10 @@ where
             let state = StageTimestepState {
                 consts: consts.clone(),
                 pattern: pattern.clone(),
-                hour: Arc::new(hour),
-                subs: Arc::new(std::mem::take(&mut fwd.subs)),
-                use_cuda,
+                saved: HourSaved::Host {
+                    hour: Arc::new(hour),
+                    subs: Arc::new(std::mem::take(&mut fwd.subs)),
+                },
             };
             prep.finish(state, out)
         }
@@ -1887,24 +1705,9 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "stage_routing CUDA path: Phase G")]
-    fn epilogue_cuda_branch_is_unimplemented() {
-        let c = StageOpConsts { n: 1, in_stage: vec![1.0], ..Default::default() };
-        let hour = HourHost { q_next_mc: vec![0.0], ..Default::default() };
-        let _ = dispatch_stage_epilogue(&c, &hour, &[1.0], true);
-    }
-
-    #[test]
-    #[should_panic(expected = "stage_routing CUDA path: Phase G")]
-    fn backward_dispatch_cuda_branch_is_unimplemented() {
-        let c = StageOpConsts { n: 1, in_stage: vec![1.0], ..Default::default() };
-        let _ = dispatch_stage_output_backward(&c, &[0.0, 0.0], true);
-    }
-
-    #[test]
     fn output_backward_splits_the_discharge_cotangent() {
         let c = StageOpConsts { n: 2, in_stage: vec![1.0, 0.0], ..Default::default() };
-        let (gh, gq, gmc) = dispatch_stage_output_backward(&c, &[1.0, 2.0, 3.0, 4.0], false);
+        let (gh, gq, gmc) = output_backward_host(&c, &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!((gh, gq, gmc), (vec![1.0, 2.0], vec![3.0, 0.0], vec![0.0, 4.0]));
     }
 
@@ -1912,6 +1715,6 @@ mod tests {
     fn epilogue_cpu_branch_mixes_rows() {
         let c = StageOpConsts { n: 2, in_stage: vec![1.0, 0.0], ..Default::default() };
         let hour = HourHost { q_next_mc: vec![7.0, 8.0], ..Default::default() };
-        assert_eq!(dispatch_stage_epilogue(&c, &hour, &[1.0, 2.0], false), vec![1.0, 8.0]);
+        assert_eq!(stage_epilogue_host(&c, &hour, &[1.0, 2.0]), vec![1.0, 8.0]);
     }
 }

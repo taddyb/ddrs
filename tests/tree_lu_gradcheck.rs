@@ -98,13 +98,32 @@ fn forward_matches_host_solve() {
     }
 }
 
+/// `use_cuda: true` on a CPU backend falls back to the host path, bit for bit.
 #[test]
-#[should_panic(expected = "stage_routing CUDA path: Phase G")]
-fn cuda_branch_is_unimplemented() {
+fn use_cuda_on_a_cpu_backend_falls_back_bitwise() {
     let (_, p) = tree();
     let a = matrix(&p, 1);
     let b = vec_b(N, 2, -5.0, 5.0);
-    let _ = tree_lu_solve(&p, t1(&a, true), t1(&b, true), true);
+    let w = vec_b(N, 5, -1.0, 1.0);
+    let run = |use_cuda: bool| {
+        let (at, bt) = (t1(&a, true), t1(&b, true));
+        let x = tree_lu_solve(&p, at.clone(), bt.clone(), use_cuda);
+        let loss = (x.clone() * t1(&w, false)).sum();
+        let grads = loss.backward();
+        (
+            host_vec(x),
+            at.grad(&grads).unwrap().into_data().to_vec::<f32>().unwrap(),
+            bt.grad(&grads).unwrap().into_data().to_vec::<f32>().unwrap(),
+        )
+    };
+    let (x_on, ga_on, gb_on) = run(true);
+    let (x_off, ga_off, gb_off) = run(false);
+    for (name, on, off) in [("x", &x_on, &x_off), ("grad a", &ga_on, &ga_off), ("grad b", &gb_on, &gb_off)] {
+        assert_eq!(on.len(), off.len(), "{name} length");
+        for (i, (g, w)) in on.iter().zip(off.iter()).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "{name}[{i}]");
+        }
+    }
 }
 
 fn loss_of(p: &Arc<CsrPattern>, a: &[f32], b: &[f32], w: &[f32]) -> f32 {

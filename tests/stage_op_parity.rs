@@ -622,36 +622,61 @@ fn op_consts_match_the_device_constants() {
     assert_eq!(c3.t_pool[2], 0.3);
 }
 
+/// `use_cuda: true` on a CPU backend falls back to the host path, bit for bit.
 #[test]
-#[should_panic(expected = "stage_routing CUDA path: Phase G")]
-fn stage_dispatch_cuda_branch_is_unimplemented() {
+fn use_cuda_on_a_cpu_backend_falls_back_bitwise() {
     let device = TestDevice::default();
     let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
-    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
-    let z = net.z_mid.clone();
-    let sp = StageParams {
-        theta: 1.0,
-        theta_control: 0.5,
-        substeps: 1,
-        boundary: DownstreamBoundary::NormalDepth,
-        depth_lb: DEPTH_LB,
-        bottom_width_lb: 0.1,
-        dt: 3600.0,
-        g: 9.81,
-        use_cuda: true,
+    let run = |use_cuda: bool| {
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let z = net.z_mid.clone();
+        let sp = StageParams {
+            theta: 1.0,
+            theta_control: 0.5,
+            substeps: 1,
+            boundary: DownstreamBoundary::NormalDepth,
+            depth_lb: DEPTH_LB,
+            bottom_width_lb: 0.1,
+            dt: 3600.0,
+            g: 9.81,
+            use_cuda,
+        };
+        let mut block = StageBlock::<InnerBackend>::new(net, sp, &device);
+        let h: Vec<f32> = z.iter().map(|z| z + 0.5).collect();
+        block.set_stage(tv(&h, &device));
+        let mut q = vec![1.0f32; 3];
+        let mut outs = Vec::new();
+        for _ in 0..3 {
+            q = to_vec1(block.step_fused(
+                &pattern,
+                tv(&[0.035; 3], &device),
+                tv(&[21.0; 3], &device),
+                tv(&[0.5; 3], &device),
+                tv(&q, &device),
+                tv(&[0.0; 3], &device),
+                tv(&[1.0; 3], &device),
+            ));
+            let mb = block.mass_balance();
+            let mut row = q.clone();
+            row.extend(to_vec1(block.stage().unwrap()));
+            row.extend([
+                mb.storage_change_m3,
+                mb.net_flux_m3,
+                mb.floor_created_m3,
+                mb.gross_flux_m3,
+                mb.mc_inflow_m3,
+            ]);
+            outs.push(row);
+        }
+        outs
     };
-    let mut block = StageBlock::<InnerBackend>::new(net, sp, &device);
-    let h: Vec<f32> = z.iter().map(|z| z + 0.5).collect();
-    block.set_stage(tv(&h, &device));
-    let _ = block.step_fused(
-        &pattern,
-        tv(&[0.035; 3], &device),
-        tv(&[21.0; 3], &device),
-        tv(&[0.5; 3], &device),
-        tv(&[1.0; 3], &device),
-        tv(&[0.0; 3], &device),
-        tv(&[1.0; 3], &device),
-    );
+    let (on, off) = (run(true), run(false));
+    for (hour, (a, b)) in on.iter().zip(&off).enumerate() {
+        assert_eq!(a.len(), b.len());
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "hour {hour} entry {i}");
+        }
+    }
 }
 
 // ================================================================ gradients
