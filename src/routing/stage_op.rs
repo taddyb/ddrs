@@ -1,12 +1,16 @@
-//! Host forward of the fused stage timestep (Task 16a).
+//! The fused stage timestep: one autodiff node per routing hour (Task 16).
 //!
 //! The definition is `StageBlock::step_reference` (`src/routing/stage.rs`).
-//! Every line here keeps that step's op order and association, so the forward
-//! can be bitwise. Block names (H0 to H5, 1a to 9) follow the Task 16 overview.
+//! Forward (16a): every line keeps that step's op order and association, so
+//! the forward is bitwise. Block names (H0 to H5, 1a to 9) follow the Task 16
+//! overview. Adjoints (16b, 16c): hand-written host adjoints of every block
+//! (B1 to B8, BH0 to BH3), composed by [`stage_hour_backward`], and the op
+//! [`StageTimestepOp`] (`Backward<B, 7>`, parents `n, q, p, h_t, q_t,
+//! q_next_mc, q'`) built by [`stage_timestep`].
 //!
 //! The CPU branch of each dispatch fn is a plain host loop over reaches or
-//! slots. The CUDA branch is `unimplemented!` (Phase G). The orchestration fn
-//! [`stage_hour_forward`] loops over substeps only.
+//! slots. The CUDA branch is `unimplemented!` (Phase G). The orchestration fns
+//! [`stage_hour_forward`] and [`stage_hour_backward`] loop over substeps only.
 
 use std::sync::Arc;
 
@@ -1288,7 +1292,7 @@ pub fn matrix_backward_host(c: &StageOpConsts, g_a_values: &[f32]) -> MatrixGrad
     o
 }
 
-/// Hour accumulators, summed over substeps. Empty until the first substep adds.
+/// Hour accumulators, summed over substeps. Start from `HourAcc::zeros(n)`.
 #[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct HourAcc {
@@ -1333,9 +1337,6 @@ fn assemble_backward_impl(
     use_cuda: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let n = c.n;
-    if acc.i_t.is_empty() {
-        *acc = HourAcc::zeros(n);
-    }
     let subs = c.substeps.max(1) as usize;
     let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
     // B6, B5
@@ -1731,7 +1732,7 @@ pub fn stage_hour_backward(
     use_cuda: bool,
 ) -> HourGrads {
     let (mut g_h, mut g_q, g_mc) = dispatch_stage_output_backward(c, g_out, use_cuda);
-    let mut acc = HourAcc::default();
+    let mut acc = HourAcc::zeros(c.n);
     for s in (0..subs.len()).rev() {
         let sv = &subs[s];
         let asm = dispatch_stage_assemble(c, hour, s, &sv.h, &sv.qc, use_cuda);

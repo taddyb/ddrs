@@ -1,14 +1,23 @@
-//! Forward parity of the fused stage op (Task 16a): `StageBlock::step_fused`
-//! against `StageBlock::step_reference`, hour by hour, on the states of the
-//! stage tests (`stage_step.rs`). The reference is the definition.
+//! Parity of the fused stage op against `StageBlock::step_reference`, the
+//! definition, on the states of the stage tests (`stage_step.rs`).
 //!
-//! Bars (overview 16.6): per hour and per field `max|f - r| <= 1e-6 max|r|`;
-//! the five mass sums within `1e-5 * gross_flux_m3`; `steps` equal.
-//! Each family prints `bitwise: true|false`.
+//! Forward (Task 16a): `StageBlock::step_fused` hour by hour. Bars (overview
+//! 16.6): per hour and per field `max|f - r| <= 1e-6 max|r|`; the five mass
+//! sums within `1e-5 * gross_flux_m3`; `steps` equal. Each family prints
+//! `bitwise: true|false`.
+//!
+//! Gradients (Task 16c): all seven parents tracked, against Burn autodiff of
+//! the reference. `gradient_parity_hour1_strict` holds one-hour runs to the
+//! strict bar with no allowance. The multi-hour `gradient_parity_*` tests use
+//! the strict bar plus a bounded noise allowance (see `grad_pair`).
+//! `fused_op_gradcheck_by_central_differences` checks the op by central
+//! differences; `fused_op_untracked_matches_tracked` checks the untracked branch.
 //!
 //! Timing: every test here runs in a debug build in under 60 s, except
-//! `forward_parity_juniata_48h`, which skips itself in debug builds (the
-//! `cfg!(debug_assertions)` rule of `tests/juniata_acceptance.rs`). Run it with
+//! `forward_parity_juniata_48h` and `gradient_parity_juniata_48h`, which skip
+//! themselves in debug builds (the `cfg!(debug_assertions)` rule of
+//! `tests/juniata_acceptance.rs`). `gradient_parity_hour1_strict` includes the
+//! Juniata case only in release builds. Run them with
 //! `cargo test --release --test stage_op_parity`.
 
 mod common;
@@ -655,14 +664,29 @@ fn stage_dispatch_cuda_branch_is_unimplemented() {
 // `L = sum_t sum_i w[t][i] q_next[t][i] + sum_i v_i (h_end_i - z_mid_i)`, with
 // `w` and `v` seeded uniform in [0.5, 1.5].
 
+/// Copy of the generator of `tests/tree_lu_gradcheck.rs` (`Rng`, `vec_b`), C33.
+struct Rng(u64);
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.unit()
+    }
+}
+
+fn vec_b(n: usize, seed: u64, lo: f64, hi: f64) -> Vec<f32> {
+    let mut rng = Rng(seed);
+    (0..n).map(|_| rng.range(lo, hi) as f32).collect()
+}
+
+/// Loss weights, uniform in [0.5, 1.5].
 fn weights(seed: u64, len: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    (0..len)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            0.5 + ((s >> 40) as f32) / (1u64 << 24) as f32
-        })
-        .collect()
+    vec_b(len, seed, 0.5, 1.5)
 }
 
 const PARENTS: [&str; 7] = ["n", "q", "p", "h_t", "q_t", "q_next_mc", "q_prime"];
@@ -766,13 +790,40 @@ fn linearity_noise(case: &Case, theta: f32, substeps: u32, fused: bool, both: &[
     out
 }
 
-/// A strict-bar violation is accepted only when it is within `NOISE_FACTOR`
-/// times the combined rounding noise of the two paths (see the report).
+/// Why a bounded allowance exists. Both paths are f32. The Burn autodiff
+/// reference is itself only accurate to f32 rounding, and on entries made by
+/// cancelling large terms (a badly conditioned PrescribedStage outlet row,
+/// sums over 2 or more hours) its error exceeds the strict bar: an f64 ground
+/// truth (Task 16c review) shows the reference misses the strict bar at the
+/// same rate as the fused path. One-hour runs are noise-free and are held to
+/// the strict bar by `gradient_parity_hour1_strict`. For the multi-hour runs a
+/// strict-bar miss is accepted only when all three hold:
+/// 1. `err <= NOISE_FACTOR` times the measured linearity noise of both paths;
+/// 2. `err <= NOISE_CAP_FRAC * max|g|` of its parent;
+/// 3. the accepted entries of the family are at most `NOISE_BUDGET_FRAC` of
+///    the compared entries.
 const NOISE_FACTOR: f32 = 4.0;
+const NOISE_CAP_FRAC: f32 = 5e-4;
+const NOISE_BUDGET_FRAC: f64 = 0.01;
 
-/// One state: returns the worst `err / allowed` per parent. Counts strict-bar
-/// violations in `strict` and the worst `err / noise` among them in `noise_ratio`.
-fn grad_pair(case: &Case, theta: f32, substeps: u32, device: &TestDevice, strict: &mut usize, noise_ratio: &mut f32) -> [f32; 7] {
+#[derive(Default)]
+struct Tally {
+    compared: usize,
+    accepted: usize,
+}
+
+/// One state: returns the worst `err / allowed` per parent. With `strict_only`
+/// every miss fails. Otherwise a miss must meet the bounded acceptance above;
+/// accepted entries are printed and counted in `tally`.
+fn grad_pair(
+    family: &str,
+    case: &Case,
+    theta: f32,
+    substeps: u32,
+    device: &TestDevice,
+    strict_only: bool,
+    tally: &mut Tally,
+) -> [f32; 7] {
     let (lr, gr) = run_grads(case, theta, substeps, false, device);
     let (lf, gf) = run_grads(case, theta, substeps, true, device);
     let tag = format!("{} theta {theta} substeps {substeps}", case.label);
@@ -783,46 +834,73 @@ fn grad_pair(case: &Case, theta: f32, substeps: u32, device: &TestDevice, strict
         let (g, r) = (&gf[pi], &gr[pi]);
         assert_eq!(g.len(), r.len(), "{tag} {}: length", PARENTS[pi]);
         let scale = r.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+        let gmax = r.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         for (i, (a, b)) in g.iter().zip(r).enumerate() {
-            assert!(a.is_finite(), "{tag} {}[{i}]: non-finite {a}", PARENTS[pi]);
+            assert!(a.is_finite(), "{tag} {}[{i}]: non-finite fused gradient {a}", PARENTS[pi]);
+            assert!(b.is_finite(), "{tag} {}[{i}]: non-finite reference gradient {b}", PARENTS[pi]);
+            tally.compared += 1;
             let err = (a - b).abs();
             let allowed = (1e-4 * a.abs().max(b.abs())).max(1e-6 * scale);
             worst[pi] = worst[pi].max(err / allowed);
             if err <= allowed {
                 continue;
             }
-            *strict += 1;
+            assert!(
+                !strict_only,
+                "{tag} {}[{i}]: fused {a} vs autodiff {b} (err {err:e}, allowed {allowed:e})",
+                PARENTS[pi]
+            );
             let nz = *noise.get_or_insert_with(|| {
                 let nr = linearity_noise(case, theta, substeps, false, &gr, device);
                 let nf = linearity_noise(case, theta, substeps, true, &gf, device);
                 std::array::from_fn(|k| nr[k] + nf[k])
             });
             let ratio = err / nz[pi].max(f32::MIN_POSITIVE);
-            *noise_ratio = noise_ratio.max(ratio);
             println!(
-                "strict bar exceeded: {tag} {}[{i}]: fused {a} vs autodiff {b} (err {err:e}, allowed {allowed:e}, combined noise {:e}, err/noise {ratio:.2})",
-                PARENTS[pi], nz[pi]
+                "accepted: {family} {tag} {}[{i}]: fused {a} vs autodiff {b} err {err:e}, err/max|g| {:e}, err/noise {ratio:.2}",
+                PARENTS[pi],
+                err / gmax.max(f32::MIN_POSITIVE)
             );
             assert!(
                 err <= NOISE_FACTOR * nz[pi],
-                "{tag} {}[{i}]: fused {a} vs autodiff {b} (err {err:e}, allowed {allowed:e}, noise {:e})",
+                "{tag} {}[{i}]: err {err:e} exceeds {NOISE_FACTOR} x noise {:e}",
                 PARENTS[pi], nz[pi]
             );
+            assert!(
+                err <= NOISE_CAP_FRAC * gmax,
+                "{tag} {}[{i}]: err {err:e} exceeds the cap {NOISE_CAP_FRAC} x max|g| {gmax:e}",
+                PARENTS[pi]
+            );
+            tally.accepted += 1;
         }
     }
     worst
 }
 
-fn grad_family(cases: Vec<Case>, grid: &[(f32, u32)]) {
+fn grad_family_with(family: &str, cases: Vec<Case>, grid: &[(f32, u32)], strict_only: bool) {
+    grad_family_budget(family, cases, grid, strict_only, NOISE_BUDGET_FRAC);
+}
+
+fn grad_family_budget(family: &str, cases: Vec<Case>, grid: &[(f32, u32)], strict_only: bool, budget: f64) {
     let device = TestDevice::default();
-    let (mut strict, mut noise_ratio) = (0usize, 0.0f32);
+    let mut tally = Tally::default();
     for case in &cases {
         for &(theta, substeps) in grid {
-            let w = grad_pair(case, theta, substeps, &device, &mut strict, &mut noise_ratio);
-            println!("{} theta {theta} substeps {substeps}: worst err/allowed {w:?} (parents {PARENTS:?})", case.label);
+            let w = grad_pair(family, case, theta, substeps, &device, strict_only, &mut tally);
+            println!("{family}: {} theta {theta} substeps {substeps}: worst err/allowed {w:?} (parents {PARENTS:?})", case.label);
         }
     }
-    println!("strict-bar violations: {strict}, worst err/noise among them: {noise_ratio:.2}");
+    println!("{family}: compared {} entries, accepted {} strict-bar misses", tally.compared, tally.accepted);
+    assert!(
+        (tally.accepted as f64) <= budget * tally.compared as f64,
+        "{family}: {} accepted misses exceed {budget} of {} compared entries",
+        tally.accepted,
+        tally.compared
+    );
+}
+
+fn grad_family(family: &str, cases: Vec<Case>, grid: &[(f32, u32)]) {
+    grad_family_with(family, cases, grid, false);
 }
 
 fn full_grid() -> Vec<(f32, u32)> {
@@ -837,23 +915,23 @@ fn full_grid() -> Vec<(f32, u32)> {
 
 #[test]
 fn gradient_parity_chain_states() {
-    grad_family(chain_state_cases(), &full_grid());
+    grad_family("chain_states", chain_state_cases(), &full_grid());
 }
 
 #[test]
 fn gradient_parity_table_and_mixed() {
-    grad_family(table_and_mixed_cases(), &full_grid());
+    grad_family("table_and_mixed", table_and_mixed_cases(), &full_grid());
 }
 
 #[test]
 fn gradient_parity_prescribed_boundary() {
-    grad_family(prescribed_boundary_cases(), &full_grid());
+    grad_family("prescribed_boundary", prescribed_boundary_cases(), &full_grid());
 }
 
 #[test]
 fn gradient_parity_mc_inflow() {
     let device = TestDevice::default();
-    grad_family(vec![mc_inflow_case(&device)], &full_grid());
+    grad_family("mc_inflow", vec![mc_inflow_case(&device)], &full_grid());
 }
 
 #[test]
@@ -863,7 +941,46 @@ fn gradient_parity_juniata_48h() {
         return;
     }
     let device = TestDevice::default();
-    grad_family(vec![juniata_case(&device)], &[(1.0, 1), (0.6, 4)]);
+    grad_family("juniata_48h", vec![juniata_case(&device)], &[(1.0, 1), (0.6, 4)]);
+}
+
+/// The strict §16.6 bar with no noise allowance, on one-hour runs of the
+/// families whose one-hour gradients are noise-free: chain, prescribed
+/// boundary, MC inflow and (release only) Juniata. This pins the formulas.
+#[test]
+fn gradient_parity_hour1_strict() {
+    let device = TestDevice::default();
+    let mut families: Vec<(&str, Vec<Case>, Vec<(f32, u32)>)> = vec![
+        ("chain_states", chain_state_cases(), full_grid()),
+        ("prescribed_boundary", prescribed_boundary_cases(), full_grid()),
+        ("mc_inflow", vec![mc_inflow_case(&device)], full_grid()),
+    ];
+    if !cfg!(debug_assertions) {
+        families.push(("juniata_48h", vec![juniata_case(&device)], vec![(1.0, 1), (0.6, 4)]));
+    }
+    for (name, mut cases, grid) in families {
+        for c in cases.iter_mut() {
+            c.hours = 1;
+        }
+        grad_family_with(&format!("{name} (hour 1)"), cases, &grid, true);
+    }
+}
+
+/// One-hour table_and_mixed runs are NOT noise-free: their PrescribedStage
+/// outlet row is a table row (80 m wide, badly conditioned), and with the C33
+/// loss weights 6 of 504 entries miss the strict bar (worst 1.97 x the bar,
+/// err/noise <= 1.0, err/max|g| <= 1.6e-4). The count changes with the weight
+/// seed (6, 5, 2, 0 misses for four seeds). They get the noise and cap gates
+/// with the looser budget `NOISE_BUDGET_FRAC_TABLE_HOUR1`, which needs a ruling.
+const NOISE_BUDGET_FRAC_TABLE_HOUR1: f64 = 0.02;
+
+#[test]
+fn gradient_parity_hour1_table_and_mixed() {
+    let mut cases = table_and_mixed_cases();
+    for c in cases.iter_mut() {
+        c.hours = 1;
+    }
+    grad_family_budget("table_and_mixed (hour 1)", cases, &full_grid(), false, NOISE_BUDGET_FRAC_TABLE_HOUR1);
 }
 
 #[test]
@@ -937,6 +1054,15 @@ fn fused_op_gradcheck_by_central_differences() {
     }
 }
 
+/// The autodiff requirement of the output node (`is_require_grad` is false for
+/// every derived node, so it cannot tell tracked from untracked).
+fn requires_grad(t: &Tensor<TestBackend, 1>) -> bool {
+    match t.clone().into_primitive() {
+        burn::tensor::TensorPrimitive::Float(a) => !format!("{:?}", a.node.requirement).contains("None"),
+        _ => panic!("expected float tensor"),
+    }
+}
+
 #[test]
 fn fused_op_untracked_matches_tracked() {
     let device = TestDevice::default();
@@ -957,14 +1083,14 @@ fn fused_op_untracked_matches_tracked() {
             &case.pattern, n_leaf.clone(), pl.clone(), ql.clone(), q_tr.clone(), mc.clone(), qp.clone(),
         );
         let out_p = plain.step_fused(&case.pattern, nl.clone(), pl.clone(), ql.clone(), q_pl.clone(), mc, qp);
-        assert!(!out_p.is_require_grad(), "hour {k}: untracked output must not be tracked");
+        assert!(!requires_grad(&out_p), "hour {k}: untracked output must not be tracked");
+        assert!(requires_grad(&out_t), "hour {k}: tracked output must be tracked");
         assert_eq!(to_vec1(out_t.clone()), to_vec1(out_p.clone()), "hour {k}: q_next bits");
         assert_eq!(to_vec1(tracked.stage().unwrap()), to_vec1(plain.stage().unwrap()), "hour {k}: stage bits");
         q_tr = out_t;
         q_pl = out_p;
     }
-    // The tracked run carries a gradient to its leaf; a derived node reports
-    // `is_require_grad() == false` in Burn, so the leaf is the check.
+    // The tracked run also carries a gradient to its leaf.
     let g = q_tr.sum().backward();
     assert!(n_leaf.grad(&g).is_some(), "tracked run: no gradient reached the n leaf");
 }
