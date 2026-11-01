@@ -3,7 +3,8 @@
 //! (`examples/juniata/ddrs_stage.yaml`), then metric floors on the manifest.
 //!
 //! Reference (2026-10-31, seed 42): NSE 0.7928 / KGE 0.8808 vs baseline NSE 0.6947,
-//! wall 853 s on CPU (MC: about 21 s).
+//! wall 35.5 s on CPU with the fused stage op (853 s with the autodiff step;
+//! MC: about 21 s).
 //!
 //! Release-only (a debug train takes minutes). The test greps `run.log` for the
 //! `stage routing:` lines, which go to stderr, so it needs `--nocapture`: plain

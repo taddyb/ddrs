@@ -26,7 +26,8 @@ cargo test --test reservoir_override    # the plain timestep op carries S19''/B1
 # Stage routing (src/routing/stage*): the stage tests below
 cargo test --test stage_analytic --test stage_boundary_store --test stage_network \
   --test stage_off_parity --test stage_option_c --test stage_roughness --test stage_step \
-  --test juniata_stage --test juniata_stage_diag
+  --test juniata_stage --test juniata_stage_diag \
+  --test stage_op_parity --test stage_op_adjoint --test stage_op_tape
 ```
 
 Since 2026-09-02 the sandbox gate is machine-enforced twice over:

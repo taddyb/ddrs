@@ -411,6 +411,7 @@ pub struct StageBlock<I: Backend> {
     last_host: Option<Assembled>,
     /// Host copy of the constants for the fused op; cleared when the table or the slots change.
     op_consts: Option<Arc<StageOpConsts>>,
+    reference_step: bool,
     record: bool,
     coeff_record: Vec<(Vec<f32>, Vec<f32>)>,
     /// Per hour, the end-of-hour stage of every row (kept when `record` is on).
@@ -508,6 +509,7 @@ where
             last_coeffs: None,
             last_host: None,
             op_consts: None,
+            reference_step: false,
             record: false,
             coeff_record: Vec::new(),
             stage_record: Vec::new(),
@@ -841,6 +843,8 @@ where
 
     /// One routing hour. Returns `q_next_mc` with the stage rows replaced by the
     /// stage discharge; that value is the next hour's `q_t` on stage rows.
+    /// Runs the fused op `step_fused` by default, or the autodiff reference
+    /// `step_reference` after `set_reference_step(true)`.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
@@ -852,7 +856,20 @@ where
         q_next_mc: Tensor<Ad<I>, 1>,
         q_prime_t: Tensor<Ad<I>, 1>,
     ) -> Tensor<Ad<I>, 1> {
-        self.step_reference(pattern, n_man, p, q, q_t, q_next_mc, q_prime_t)
+        if self.reference_step {
+            self.step_reference(pattern, n_man, p, q, q_t, q_next_mc, q_prime_t)
+        } else {
+            self.step_fused(pattern, n_man, p, q, q_t, q_next_mc, q_prime_t)
+        }
+    }
+
+    /// Choose the step path. On, `step` runs the Burn-autodiff reference
+    /// (`step_reference`); off (the default), it runs the fused op
+    /// (`step_fused`). The reference exists for the parity tests and the
+    /// tape count.
+    #[doc(hidden)]
+    pub fn set_reference_step(&mut self, on: bool) {
+        self.reference_step = on;
     }
 
     /// The Burn-autodiff step: the definition of correct. The fused op

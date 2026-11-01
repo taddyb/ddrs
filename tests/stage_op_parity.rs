@@ -971,7 +971,9 @@ fn gradient_parity_hour1_strict() {
 /// loss weights 6 of 504 entries miss the strict bar (worst 1.97 x the bar,
 /// err/noise <= 1.0, err/max|g| <= 1.6e-4). The count changes with the weight
 /// seed (6, 5, 2, 0 misses for four seeds). They get the noise and cap gates
-/// with the looser budget `NOISE_BUDGET_FRAC_TABLE_HOUR1`, which needs a ruling.
+/// with the looser budget `NOISE_BUDGET_FRAC_TABLE_HOUR1` (2 %). The controller ruled that
+/// table_and_mixed hour 1 stays under the noise and cap gate with this budget,
+/// because its misses sit on the badly conditioned table PrescribedStage outlet row.
 const NOISE_BUDGET_FRAC_TABLE_HOUR1: f64 = 0.02;
 
 #[test]
