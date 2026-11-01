@@ -1,5 +1,5 @@
 //! End-to-end acceptance of stage routing on the committed Juniata bundle:
-//! full `train-and-test` on CPU with the `stage:` block on
+//! full `train-and-test` on CPU with `params.stage_routing` on
 //! (`examples/juniata/ddrs_stage.yaml`), then metric floors on the manifest.
 //!
 //! Reference (2026-10-31, seed 42): NSE 0.7928 / KGE 0.8808 vs baseline NSE 0.6947,
@@ -29,7 +29,7 @@ const KGE_FLOOR: f64 = 0.84;
 /// Same baseline band as `juniata_acceptance`.
 const BASELINE_NSE_RANGE: (f64, f64) = (0.67, 0.72);
 
-/// WET copy of `run_juniata` in `tests/juniata_acceptance.rs` (ruling C33: keep
+/// WET copy of `run_juniata` in `tests/juniata_acceptance.rs` (kept
 /// parallel copies). CPU `train-and-test` of `config` into a fresh workspace.
 fn run_juniata(config: &Path, tmp: &Path) -> PathBuf {
     run(RunInput {
@@ -115,4 +115,18 @@ fn juniata_stage_train_and_test_beats_the_baseline() {
         .parse()
         .expect("mass balance number parses as f32");
     assert!(rel <= 1e-4, "stage mass balance rel {rel} > 1e-4");
+    // The block must have run. With zero steps `rel` is 0 and MC alone clears the floors.
+    let tail = mb[0].split(" over ").nth(1).expect("mass balance line names the step count");
+    let steps: usize = tail.split_whitespace().next().unwrap().parse().expect("step count parses");
+    assert!(steps > 0, "stage block took no steps: {}", mb[0]);
+    let gross: f32 = tail
+        .split("gross ")
+        .nth(1)
+        .expect("mass balance line names the gross flux")
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .expect("gross flux parses as f32");
+    assert!(gross > 0.0, "stage gross flux is zero: {}", mb[0]);
 }

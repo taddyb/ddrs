@@ -150,7 +150,7 @@ pub fn evaluate<I: Backend>(
     let mut zeta_sums: ZetaSums<I> = ZetaSums::new();
     // Per-dam clamp account across chunks (empty without dam rows).
     let mut dam_clamp = crate::training::release_eval::DamClampSums::default();
-    // The stage block's end-of-chunk state and volume account (C9); unused
+    // The stage block's end-of-chunk state and volume account; unused
     // without `params.stage_routing`.
     let mut stage_state = crate::training::forward::StageEvalState::default();
     let stage_on = cfg.stage_routing_on();
@@ -421,11 +421,18 @@ pub fn evaluate<I: Backend>(
 
     if stage_on {
         use std::io::Write;
-        let _ = writeln!(
-            std::io::stderr(),
-            "stage mass balance: rel {:.2e}",
-            stage_state.mass.rel()
-        );
+        let m = &stage_state.mass;
+        if m.steps > 0 {
+            let _ = writeln!(
+                std::io::stderr(),
+                "stage mass balance: rel {:.2e} over {} steps, gross {:.3e} m3",
+                m.rel(),
+                m.steps,
+                m.gross_flux_m3
+            );
+        } else {
+            let _ = writeln!(std::io::stderr(), "stage mass balance: no steps");
+        }
     }
 
     // Final gate: the tau-trim/downsample and zeta-mean readbacks above also
@@ -525,7 +532,7 @@ mod tests {
         );
     }
 
-    /// C9: a 30-day Juniata window routed in one chunk and in two 15-day
+    /// a 30-day Juniata window routed in one chunk and in two 15-day
     /// chunks gives the same hourly gauge series, because the stage block's
     /// `(h, Q)` is carried across the chunk boundary. Control: the same two
     /// chunks without the carry differ more.
