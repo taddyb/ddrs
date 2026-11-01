@@ -237,8 +237,9 @@ pub(crate) const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
 // =================================================================================
 
 /// What the backward needs from the forward. The CPU/CUDA choice is made once
-/// per op, in [`tree_lu_solve`]; the variant records which arm ran. Everything
-/// is behind an `Arc`, so cloning onto the tape is a refcount bump.
+/// per op, in [`tree_lu_solve`]; the variant records which arm ran. The host
+/// data are behind an `Arc` and the device data are buffer handles, so cloning
+/// onto the tape copies no array.
 #[derive(Clone, Debug)]
 enum TreeSaved {
     Host { factors: Arc<TreeFactors>, x: Arc<Vec<f32>> },
@@ -386,7 +387,10 @@ where
     };
     let a_cube = into_cube::<I>(a_at.primitive.clone());
     let b_cube = into_cube::<I>(b_at.primitive.clone());
-    let levels = super::tree_lu::tree_levels(pattern).expect("tree_lu_solve: pattern is not a tree");
+    // Shape metadata only, no host read.
+    assert_eq!(a_cube.meta.shape()[0], 2 * pattern.nnz(), "a_values must have length 2 * nnz");
+    assert_eq!(b_cube.meta.shape()[0], pattern.n, "b must have length n");
+    let levels = tree_levels(pattern).expect("tree_lu_solve: pattern is not a tree");
     let tree = Arc::new(TreeDev::upload(&levels, &a_cube));
     let f = tree_factor_dev(&tree, &a_cube);
     let x = tree_solve_dev(pattern, &f, &b_cube);

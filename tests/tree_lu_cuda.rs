@@ -66,6 +66,7 @@ fn random_tree(n: usize, seed: u64) -> SparseAdjacency {
     }
 }
 
+// copied from tests/tree_lu.rs::slot
 fn slot(p: &CsrPattern, row: usize, col: usize) -> usize {
     (p.crow[row] as usize..p.crow[row + 1] as usize)
         .find(|&s| p.col[s] as usize == col)
@@ -134,6 +135,7 @@ fn device() -> <Gpu as BackendTypes>::Device {
     Default::default()
 }
 
+// copied from tests/tree_lu_gradcheck.rs::vec_b (renamed)
 fn vec_rand(n: usize, seed: u64, lo: f64, hi: f64) -> Vec<f32> {
     let mut rng = Rng(seed);
     (0..n).map(|_| rng.range(lo, hi) as f32).collect()
@@ -176,6 +178,19 @@ fn check_factor(name: &str, adj: &SparseAdjacency, p: &CsrPattern, seed: u64) ->
 #[test]
 fn factor_matches_host_on_random_trees_and_bundles() {
     let mut worst = 0.0f32;
+    // n = 5000 puts well over 1024 reaches in level 0, so the strided loop of
+    // the factor kernel takes several uneven passes.
+    for seed in 0..3u64 {
+        let adj = random_tree(5000, seed);
+        let p = CsrPattern::from_sparse(&adj);
+        let levels = tree_levels(&p).unwrap();
+        let widest = (0..levels.n_levels)
+            .map(|l| levels.lvl_ptr[l + 1] - levels.lvl_ptr[l])
+            .max()
+            .unwrap();
+        assert!(widest > 2048, "widest level {widest} is too narrow");
+        worst = worst.max(check_factor(&format!("random_tree(5000) seed {seed}"), &adj, &p, seed));
+    }
     for seed in 0..3u64 {
         let adj = random_tree(300, seed);
         let p = CsrPattern::from_sparse(&adj);
@@ -309,6 +324,7 @@ fn small_matrix(p: &CsrPattern, seed: u64) -> Vec<f32> {
     a
 }
 
+// copied from tests/tree_lu_gradcheck.rs::t1 (generic in the backend)
 fn t1<I: Backend>(v: &[f32], grad: bool) -> Tensor<Autodiff<I>, 1> {
     let t = Tensor::<Autodiff<I>, 1>::from_data(TensorData::new(v.to_vec(), [v.len()]), &Default::default());
     if grad {
