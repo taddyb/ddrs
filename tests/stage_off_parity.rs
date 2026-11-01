@@ -19,7 +19,7 @@ use common::{
     TestBackend, TestDevice,
 };
 
-/// Verbatim from `tests/leakance_off_parity.rs::EXPECTED` (WET by user preference, C33).
+/// Verbatim from `tests/leakance_off_parity.rs::EXPECTED` (WET by user preference).
 const EXPECTED: [f32; 120] = [
     5.0, 5.0, 6.138457, 6.8463597, 7.0130415, 6.5882154,
     5.7050047, 4.6247187, 3.6582274, 3.076246, 3.0397897, 3.5674682,
@@ -80,7 +80,7 @@ fn spatial(n: usize, device: &TestDevice) -> SpatialParameters<InnerBackend> {
 }
 
 fn engine(n: usize, t: usize, device: &TestDevice) -> MuskingumCunge<InnerBackend> {
-    let mut mc = MuskingumCunge::<InnerBackend>::new(mock_config(), device.clone());
+    let mut mc = MuskingumCunge::<InnerBackend>::new(stage_on_config(), device.clone());
     mc.setup_inputs(
         mock_routing_inputs(n, device),
         mock_streamflow(t, n, device),
@@ -91,6 +91,17 @@ fn engine(n: usize, t: usize, device: &TestDevice) -> MuskingumCunge<InnerBacken
     mc
 }
 
+/// `mock_config()` with `params.stage_routing` on: `setup_inputs` keeps the
+/// topology the stage block needs only then.
+fn stage_on_config() -> ddrs::config::Config {
+    let mut cfg = mock_config();
+    cfg.params.stage_routing = Some(ddrs::config::StageRouting {
+        enabled: true,
+        ..Default::default()
+    });
+    cfg
+}
+
 fn run(mut mc: MuskingumCunge<InnerBackend>) -> Vec<f32> {
     mc.forward().into_data().to_vec::<f32>().unwrap()
 }
@@ -98,7 +109,7 @@ fn run(mut mc: MuskingumCunge<InnerBackend>) -> Vec<f32> {
 #[test]
 fn stage_routing_absent_is_bitwise_the_committed_hydrograph() {
     let device = TestDevice::default();
-    // EXPECTED was captured under the legacy physics (C7).
+    // EXPECTED was captured under the legacy physics.
     let mut cfg = mock_config();
     cfg.params.ddr_match = true;
     let mut mc = MuskingumCunge::<InnerBackend>::new(cfg, device.clone());
@@ -152,7 +163,7 @@ fn stage_set_subset_leaves_upstream_rows_bitwise() {
 #[test]
 fn route_timestep_with_leakance_and_stage_panics() {
     let device = TestDevice::default();
-    let mut mc = MuskingumCunge::<InnerBackend>::new(mock_config(), device.clone());
+    let mut mc = MuskingumCunge::<InnerBackend>::new(stage_on_config(), device.clone());
     let one = |v: f32| Tensor::<TestBackend, 1>::ones([N], &device) * v;
     mc.setup_inputs(
         mock_routing_inputs(N, &device),
@@ -257,7 +268,7 @@ fn backflow_engine(
     device: &TestDevice,
 ) -> MuskingumCunge<InnerBackend> {
     let n = 3;
-    let mut mc = MuskingumCunge::<InnerBackend>::new(mock_config(), device.clone());
+    let mut mc = MuskingumCunge::<InnerBackend>::new(stage_on_config(), device.clone());
     let sp = match leaves {
         Some([a, b, c]) => SpatialParameters {
             n: a.clone(),
@@ -388,7 +399,7 @@ fn forest_adjacency() -> ddrs::sparse::SparseAdjacency {
 }
 
 fn forest_engine(device: &TestDevice) -> MuskingumCunge<InnerBackend> {
-    let mut mc = MuskingumCunge::<InnerBackend>::new(mock_config(), device.clone());
+    let mut mc = MuskingumCunge::<InnerBackend>::new(stage_on_config(), device.clone());
     mc.setup_inputs(
         ddrs::routing::RoutingInputs {
             adjacency: forest_adjacency(),
@@ -463,4 +474,15 @@ fn carried_backflow_is_unclamped_in_column_zero() {
     assert_eq!(out[T], -5.0, "stage row 1, column 0");
     assert_eq!(out[2 * T], -2.0, "stage row 2, column 0");
     assert!(out[0] > 0.0, "MC row 0 stays clamped and positive");
+}
+
+#[test]
+fn dams_armed_after_the_stage_block_are_refused() {
+    let device = TestDevice::default();
+    let mut mc = engine(N, T, &device);
+    mc.set_stage_block(stage_params(DownstreamBoundary::NormalDepth), inputs(Some(vec![2]))).unwrap();
+    let err = mc.set_dam_release(release_on(3, &device)).unwrap_err();
+    assert!(err.contains("stage block is already armed"), "{err}");
+    let err = mc.set_reservoir_rows(&[3], &[1.0]).unwrap_err();
+    assert!(err.contains("stage block is already armed"), "{err}");
 }

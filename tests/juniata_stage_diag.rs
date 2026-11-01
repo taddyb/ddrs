@@ -1,5 +1,5 @@
 //! A dam inside the stage set is stage-routed, so the MC-side diagnostics
-//! must not count it (Task 13 carry-over from Task 11's review).
+//! must not count it.
 //!
 //! Own file: the negative-solve counters are process-global, and every
 //! `forward()` resets them. One test, no parallel neighbours.

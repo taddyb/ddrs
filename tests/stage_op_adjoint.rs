@@ -1,4 +1,4 @@
-//! Adjoints of the elementwise blocks of the fused stage op (Task 16b).
+//! Adjoints of the elementwise blocks of the fused stage op.
 //!
 //! Each test builds the block's inputs as `require_grad()` leaves on
 //! `Autodiff<NdArray<f32>>`, runs a Burn copy of the block (copied op for op
@@ -191,7 +191,7 @@ fn branches(s: &SectionHost, bwlb: f32) -> Vec<&'static str> {
 fn section_burn(c: &StageOpConsts, p: &T, q: &T, d: &T) -> [T; 6] {
     let bw_lb = c.bw_lb;
     let g = trapezoid_from_depth(p.clone(), q.clone(), d.clone(), bw_lb);
-    let (a_d, p_d) = trapezoid_depth_derivatives(p.clone(), q.clone(), d.clone(), &g, bw_lb);
+    let (a_d, p_d) = trapezoid_depth_derivatives(q.clone(), d.clone(), &g, bw_lb);
     if !c.has_table {
         return [g.top_width, g.area, g.wetted_perimeter, g.hydraulic_radius, a_d, p_d];
     }

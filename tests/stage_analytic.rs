@@ -1,6 +1,6 @@
-//! Analytic checks of the stage step (Task 8): the steady M1 backwater profile
+//! Analytic checks of the stage step: the steady M1 backwater profile
 //! against the standard-step method, and the closed-end standing tidal wave
-//! against the linear solution. Head geometry with physical `p`, `q` (C4).
+//! against the linear solution. Head geometry with physical `p`, `q`.
 //! The references run in f64 inside the test.
 
 mod common;

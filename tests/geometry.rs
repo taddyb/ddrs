@@ -147,7 +147,7 @@ fn trapezoid_depth_derivatives_match_finite_differences() {
             let qt: Tensor<TestBackend, 1> = Tensor::from_floats([q], &device);
             let dt: Tensor<TestBackend, 1> = Tensor::from_floats([d], &device);
             let geom = trapezoid_from_depth(pt.clone(), qt.clone(), dt.clone(), bw_lb);
-            let (ad, pd) = trapezoid_depth_derivatives(pt, qt, dt, &geom, bw_lb);
+            let (ad, pd) = trapezoid_depth_derivatives(qt, dt, &geom, bw_lb);
             let (ad, pd) = (ad.into_scalar() as f64, pd.into_scalar() as f64);
             let h = 1e-6 * d as f64;
             let (ap, pp) = section_f64(p as f64, q as f64, d as f64 + h, bw_lb as f64);

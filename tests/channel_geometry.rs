@@ -16,7 +16,7 @@ fn write_csv(dir: &tempfile::TempDir, body: &str) -> PathBuf {
 fn channel_geometry_reads_and_maps_rows() {
     let dir = tempfile::tempdir().unwrap();
     // A negative bed (NAVD88), an extra `source` column, a comment line, and a
-    // row with and a row without pool_z_m (C25).
+    // row with and a row without pool_z_m.
     let p = write_csv(
         &dir,
         "# Hudson estuary, hand table\n\

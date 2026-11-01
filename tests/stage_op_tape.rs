@@ -1,5 +1,5 @@
 //! Autodiff tape size per routing hour: the fused stage op against the
-//! reference step (Task 16d).
+//! reference step.
 //!
 //! `NodeId::new()` draws from one process-wide counter, so the ids drawn
 //! during an hour count the autodiff tensors created in it. That counter is

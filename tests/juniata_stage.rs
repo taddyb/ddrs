@@ -6,8 +6,7 @@
 //! (c) synthetic tide: a prescribed 12.42 h stage at the outlet reach must
 //!     reach upstream, damped, and not change the volume.
 //!
-//! Neither case skips. Debug wall times are in the report
-//! (`.superpowers/sdd/2026-10-31-tree-solve-juniata/task-12-report.md`).
+//! Neither case skips.
 //! SKIP RULE: any case over 60 s in a debug build would use the
 //! `cfg!(debug_assertions)` skip of `tests/juniata_acceptance.rs`; none does.
 //!
@@ -31,12 +30,12 @@ const GAUGE: &str = "01567000";
 const OUTLET_COMID: i64 = 73005278;
 const OUTLET: usize = 212;
 const WARMUP_H: usize = 5 * 24;
-/// Normalized `[n, q_spatial, p_spatial]` (C6): n 0.035, q 0.5, p 21.04.
+/// Normalized `[n, q_spatial, p_spatial]`: n 0.035, q 0.5, p 21.04.
 const NORM: [f32; 3] = [0.0851, 0.5, 0.575];
 const TIDE_PERIOD_H: f64 = 12.42;
 const TIDE_AMP_M: f64 = 0.5;
 
-/// Same formula as `scripts/make_synthetic_stage.py` (C33).
+/// Same formula as `scripts/make_synthetic_stage.py`.
 fn tide(t_hours: usize, h0: f64) -> f64 {
     h0 + TIDE_AMP_M * (2.0 * std::f64::consts::PI * t_hours as f64 / TIDE_PERIOD_H).sin()
 }
@@ -264,7 +263,7 @@ fn juniata_synthetic_tide_at_outlet_propagates_upstream() {
     let tidal = route(&cfg, false);
     assert!(all_finite(&tidal), "non-finite Q");
 
-    // Carry-over (Task 10): the boundary slice lines up with the q' rows.
+    // Carry-over: the boundary slice lines up with the q' rows.
     let bc = tidal.boundary.as_ref().expect("prescribed boundary reaches the batch");
     assert_eq!(bc.len(), tidal.q_rows, "boundary length equals the q' row count");
     assert!((bc[0] as f64 - series[0]).abs() < 1e-5, "boundary[0] is the 00:00 UTC value");
@@ -290,10 +289,14 @@ fn juniata_synthetic_tide_at_outlet_propagates_upstream() {
     let (vt, vf) = (sum_after_warmup(&tidal.q[OUTLET]), sum_after_warmup(&free.q[OUTLET]));
     println!("volume ratio tide/free at the gauge: {:.5}", vt / vf);
     assert!((vt - vf).abs() / vf < 0.02, "tide changes the gauge volume by {:.3} %", 100.0 * (vt / vf - 1.0));
+
+    let rel = tidal.mass_rel.expect("stage block armed");
+    println!("stage mass balance rel (tide case): {rel:.3e}");
+    assert!(rel <= 1e-4, "tide case mass balance rel {rel}");
 }
 
 // ---------------------------------------------------------------------------
-// Task 13: Raystown as a control node, then a pool with a physical bed.
+// Raystown as a control node, then a pool with a physical bed.
 // ---------------------------------------------------------------------------
 
 const RAYSTOWN_CONFIG: &str = "examples/juniata/ddrs_stage_raystown.yaml";
@@ -301,7 +304,7 @@ const POOL_CONFIG: &str = "examples/juniata/ddrs_stage_raystown_pool.yaml";
 const POOL_CSV: &str = "examples/juniata/data/juniata_pool_geometry.csv";
 const DAM_ROW: usize = 177;
 const T_DAYS: f64 = 1.23;
-/// Pool rows with 0.8 x their wedge depth (m), by row (C13).
+/// Pool rows with 0.8 x their wedge depth (m), by row.
 const POOL_BARS: [(usize, f64); 4] = [(177, 19.718), (175, 8.460), (174, 8.737), (173, 4.092)];
 
 struct DamRun {
@@ -458,7 +461,7 @@ fn raystown_pool_holds_physical_storage_and_conserves() {
     println!("active storage vs T*Q on the dam row: worst relative difference {worst:.3e} over {checked} days");
     assert!(worst < 0.10, "active storage differs from T*Q by {worst:.3}");
 
-    // Lake depths stay above 0.8 x the wedge depth (C13), at every hour.
+    // Lake depths stay above 0.8 x the wedge depth, at every hour.
     for (row, bar) in POOL_BARS {
         let j = geom.rows.iter().position(|&r| r == row).expect("pool row in the table");
         let bed = geom.bed_z[j] as f64;

@@ -521,7 +521,7 @@ fn perturbation_decays_on_short_reaches() {
 }
 
 // =============================================================================
-// Task 7: edge cases of the step
+// Edge cases of the step
 // =============================================================================
 
 /// Chain of `len.len()` reaches with per-reach length and slope.
@@ -686,7 +686,7 @@ fn friction_limit_recovers_the_diffusive_conveyance() {
 
 #[test]
 fn mc_rows_have_finite_gradients_under_stage_backflow() {
-    // C3: the MC op reads stage rows of q_t through mc_view (clamp_min(discharge_lb).detach()).
+    // the MC op reads stage rows of q_t through mc_view (clamp_min(discharge_lb).detach()).
     let device = TestDevice::default();
     let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
     let cfg = mock_config();
@@ -853,7 +853,7 @@ fn gradcheck_through_a_reversed_edge_and_negative_flow() {
         let c = block.last_coefficients().unwrap();
         let (beta, kappa, b_down) = (to_vec1(c.beta), to_vec1(c.kappa), to_vec1(c.b_down));
         println!("reversed state: beta {beta:?} kappa {kappa:?} b {b_down:?}");
-        assert!(0.8 * beta[0] - kappa[0] > 1e-3 || b_down[0] == 0.0, "b[0] sits on the kink");
+        assert!(0.8 * beta[0] - kappa[0] > 1e-3, "b[0] sits on the kink");
         assert!(kappa[1] != 0.0);
     }
     for substeps in [1u32, 2] {
@@ -997,7 +997,7 @@ fn adverse_flow_keeps_the_m_matrix() {
 }
 
 // =============================================================================
-// Task 10b: table geometry (channel_geometry)
+// Table geometry (channel_geometry)
 // =============================================================================
 
 fn table(rows: &[usize], tw: f32, bed: &[f32], n: f32, pool: &[Option<f32>]) -> ChannelGeometryRows {

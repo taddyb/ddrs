@@ -298,6 +298,14 @@ fn assert_tree_rejects_two_downstreams() {
 }
 
 #[test]
+fn assert_tree_rejects_a_row_without_its_diagonal() {
+    // Row 1 holds only column 0: no diagonal slot.
+    let p = CsrPattern::from_csr_structure(2, vec![0, 1, 2], vec![0, 0]);
+    let err = assert_tree(&p).unwrap_err();
+    assert!(err.contains("diagonal"), "{err}");
+}
+
+#[test]
 fn juniata_pattern_is_a_tree() {
     let path = std::path::PathBuf::from("examples/juniata/data/juniata_conus_adjacency.zarr");
     let store = ConusAdjacencyStore::open(&path).expect("open juniata adjacency");

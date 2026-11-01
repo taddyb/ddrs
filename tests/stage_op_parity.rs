@@ -1,12 +1,12 @@
 //! Parity of the fused stage op against `StageBlock::step_reference`, the
 //! definition, on the states of the stage tests (`stage_step.rs`).
 //!
-//! Forward (Task 16a): `StageBlock::step_fused` hour by hour. Bars (overview
+//! Forward: `StageBlock::step_fused` hour by hour. Bars (overview
 //! 16.6): per hour and per field `max|f - r| <= 1e-6 max|r|`; the five mass
 //! sums within `1e-5 * gross_flux_m3`; `steps` equal. Each family prints
 //! `bitwise: true|false`.
 //!
-//! Gradients (Task 16c): all seven parents tracked, against Burn autodiff of
+//! Gradients: all seven parents tracked, against Burn autodiff of
 //! the reference. `gradient_parity_hour1_strict` holds one-hour runs to the
 //! strict bar with no allowance. The multi-hour `gradient_parity_*` tests use
 //! the strict bar plus a bounded noise allowance (see `grad_pair`).
@@ -190,7 +190,7 @@ fn check(cmp: &mut Cmp, what: &str, a: &[f32], r: &[f32]) {
     let rel = if scale > 0.0 { diff / scale } else { diff };
     cmp.worst = cmp.worst.max(rel);
     assert!(diff <= 1e-6 * scale, "{what}: max abs diff {diff} vs max|ref| {scale} (rel {rel:e})");
-    // Every case is bitwise (C7): hold the fields to equality.
+    // Every case is bitwise: hold the fields to equality.
     assert!(a.iter().zip(r).all(|(x, y)| x == y), "{what}: not bitwise (rel {rel:e})");
 }
 
@@ -253,7 +253,7 @@ fn run_pair(case: &Case, theta: f32, substeps: u32, device: &TestDevice) -> Cmp 
     cmp
 }
 
-/// Run a case at the §16.6 grid and report.
+/// Run a case on the parity grid and report.
 fn run_grid(case: &Case, device: &TestDevice) -> bool {
     let mut all = true;
     for theta in [0.55f32, 0.6, 1.0] {
@@ -656,7 +656,7 @@ fn stage_dispatch_cuda_branch_is_unimplemented() {
 
 // ================================================================ gradients
 //
-// Task 16c: gradient parity of the fused op against Burn autodiff of
+// Gradient parity of the fused op against Burn autodiff of
 // `step_reference`, and a central-difference gradcheck of the op.
 //
 // Gradient bar (overview 16.6): per entry `|g_f - g_r| <= 1e-4 max(|g_f|, |g_r|)`
@@ -664,7 +664,7 @@ fn stage_dispatch_cuda_branch_is_unimplemented() {
 // `L = sum_t sum_i w[t][i] q_next[t][i] + sum_i v_i (h_end_i - z_mid_i)`, with
 // `w` and `v` seeded uniform in [0.5, 1.5].
 
-/// Copy of the generator of `tests/tree_lu_gradcheck.rs` (`Rng`, `vec_b`), C33.
+/// Copy of the generator of `tests/tree_lu_gradcheck.rs` (`Rng`, `vec_b`); kept as a copy on purpose.
 struct Rng(u64);
 impl Rng {
     fn unit(&mut self) -> f64 {
@@ -794,7 +794,7 @@ fn linearity_noise(case: &Case, theta: f32, substeps: u32, fused: bool, both: &[
 /// reference is itself only accurate to f32 rounding, and on entries made by
 /// cancelling large terms (a badly conditioned PrescribedStage outlet row,
 /// sums over 2 or more hours) its error exceeds the strict bar: an f64 ground
-/// truth (Task 16c review) shows the reference misses the strict bar at the
+/// truth shows the reference misses the strict bar at the
 /// same rate as the fused path. One-hour runs are noise-free and are held to
 /// the strict bar by `gradient_parity_hour1_strict`. For the multi-hour runs a
 /// strict-bar miss is accepted only when all three hold:
@@ -944,7 +944,7 @@ fn gradient_parity_juniata_48h() {
     grad_family("juniata_48h", vec![juniata_case(&device)], &[(1.0, 1), (0.6, 4)]);
 }
 
-/// The strict §16.6 bar with no noise allowance, on one-hour runs of the
+/// The strict bar with no noise allowance, on one-hour runs of the
 /// families whose one-hour gradients are noise-free: chain, prescribed
 /// boundary, MC inflow and (release only) Juniata. This pins the formulas.
 #[test]
@@ -967,7 +967,7 @@ fn gradient_parity_hour1_strict() {
 }
 
 /// One-hour table_and_mixed runs are NOT noise-free: their PrescribedStage
-/// outlet row is a table row (80 m wide, badly conditioned), and with the C33
+/// outlet row is a table row (80 m wide, badly conditioned), and with the
 /// loss weights 6 of 504 entries miss the strict bar (worst 1.97 x the bar,
 /// err/noise <= 1.0, err/max|g| <= 1.6e-4). The count changes with the weight
 /// seed (6, 5, 2, 0 misses for four seeds). They get the noise and cap gates
