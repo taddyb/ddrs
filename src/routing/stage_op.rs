@@ -814,8 +814,44 @@ pub fn stage_hour_forward(
         qc = ro.q_new;
         last = asm;
     }
-    // H5
-    let q_out: Vec<f32> =
-        (0..c.n).map(|i| if c.in_stage[i] == 1.0 { qc[i] } else { hour.q_next_mc[i] }).collect();
+    let q_out = dispatch_stage_epilogue(c, hour, &qc, use_cuda);
     HourForward { h_end: h, q_out, last, mass, subs: saved }
+}
+
+/// H5: `q_next_i = in_i == 1 ? Q_i : q_next_mc_i`.
+#[doc(hidden)]
+pub fn stage_epilogue_host(c: &StageOpConsts, hour: &HourHost, qc: &[f32]) -> Vec<f32> {
+    (0..c.n).map(|i| if c.in_stage[i] == 1.0 { qc[i] } else { hour.q_next_mc[i] }).collect()
+}
+
+pub(crate) fn dispatch_stage_epilogue(
+    c: &StageOpConsts,
+    hour: &HourHost,
+    qc: &[f32],
+    use_cuda: bool,
+) -> Vec<f32> {
+    if use_cuda {
+        unimplemented!("{}", CUDA_TODO)
+    }
+    stage_epilogue_host(c, hour, qc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "stage_routing CUDA path: Phase G")]
+    fn epilogue_cuda_branch_is_unimplemented() {
+        let c = StageOpConsts { n: 1, in_stage: vec![1.0], ..Default::default() };
+        let hour = HourHost { q_next_mc: vec![0.0], ..Default::default() };
+        let _ = dispatch_stage_epilogue(&c, &hour, &[1.0], true);
+    }
+
+    #[test]
+    fn epilogue_cpu_branch_mixes_rows() {
+        let c = StageOpConsts { n: 2, in_stage: vec![1.0, 0.0], ..Default::default() };
+        let hour = HourHost { q_next_mc: vec![7.0, 8.0], ..Default::default() };
+        assert_eq!(dispatch_stage_epilogue(&c, &hour, &[1.0, 2.0], false), vec![1.0, 8.0]);
+    }
 }

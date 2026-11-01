@@ -439,7 +439,7 @@ fn forward_parity_mc_inflow() {
     case.qp = (0..hours).map(|k| sfl[k * n..(k + 1) * n].to_vec()).collect();
     case.mc = (0..hours).map(|k| (0..n).map(|i| mc[i][k + 1]).collect()).collect();
     let mut all = true;
-    for theta in [0.55f32, 1.0] {
+    for theta in [0.55f32, 0.6, 1.0] {
         for substeps in [1u32, 4] {
             let c = run_pair(&case, theta, substeps, &device);
             println!("mc_inflow theta {theta} substeps {substeps}: bitwise: {} (worst rel {:e}, mass diff/gross {:e})", c.bitwise, c.worst, c.mass_worst);
