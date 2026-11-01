@@ -97,6 +97,15 @@ def attribute_statistics(ds: xr.Dataset) -> dict:
     return out
 
 
+def check_time_bounds(store: str, ds: xr.Dataset, t0: str, t1: str) -> None:
+    """Fail when a sliced store does not span exactly --time."""
+    first, last = ds.time.values[0], ds.time.values[-1]
+    if first != np.datetime64(t0) or last != np.datetime64(t1):
+        raise SystemExit(
+            f"{store}: sliced time axis is {first}..{last}, requested {t0}..{t1}"
+        )
+
+
 def split_list(text: str | None) -> list[str]:
     """Split a comma-separated CLI value; empty or None gives []."""
     return [t.strip() for t in text.split(",") if t.strip()] if text else []
@@ -137,19 +146,35 @@ def main() -> None:
     c_slope = conus["slope"][:]
     comid_to_pos = {int(c): i for i, c in enumerate(c_order)}
 
+    with open(args.gage_csv, newline="") as f:
+        csv_rows = {r["STAID"]: r for r in csv.DictReader(f)}
     gz_in = zarr.open_group(str(args.gages_zarr), mode="r")
     groups = {}
     for g in gages:
         grp = gz_in[g]
         attrs = dict(grp.attrs)
         gidx = int(attrs["gage_idx"])
-        # The builder's cut and our own walk must agree (silent disagreement guard).
+        # Independent guard: the gauge's COMID comes from the CSV, not the builder.
+        if g not in csv_rows:
+            raise SystemExit(f"gauge {g} is not in {args.gage_csv}")
+        comid = int(csv_rows[g]["COMID"])
+        if comid not in comid_to_pos or comid_to_pos[comid] != gidx:
+            raise SystemExit(
+                f"gauge {g}: CSV COMID {comid} is at position {comid_to_pos.get(comid)}, "
+                f"builder gage_idx is {gidx}"
+            )
+        if int(c_order[gidx]) != int(attrs["gage_catchment"]):
+            raise SystemExit(
+                f"gauge {g}: order[{gidx}]={int(c_order[gidx])} != gage_catchment "
+                f"{attrs['gage_catchment']}"
+            )
+        # The builder's cut and a walk from the CSV COMID must agree.
         members = {int(comid_to_pos[int(c)]) for c in grp["order"][:]}
-        walk = upstream_set(gidx, c_rows, c_cols)
+        walk = upstream_set(comid_to_pos[comid], c_rows, c_cols)
         if members != walk:
             raise SystemExit(
                 f"gauge {g}: builder cut ({len(members)} reaches) differs from "
-                f"upstream walk ({len(walk)} reaches) from position {gidx}"
+                f"upstream walk ({len(walk)} reaches) from COMID {comid}"
             )
         groups[g] = {
             "attrs": attrs,
@@ -216,6 +241,7 @@ def main() -> None:
 
     # --- 4. Q' icechunk store ---
     q_sub = read_ic(args.qprime_ic).sel(divide_id=comids, time=time_slice).compute()
+    check_time_bounds("Q'", q_sub, t0, t1)
     write_local_ic(out / f"{args.name}_qprime.ic", q_sub, f"Q' subset ({args.name})")
 
     # --- 5. Obs icechunk store ---
@@ -231,9 +257,14 @@ def main() -> None:
     o_sub = ods.sel(gage_id=present, time=time_slice).compute()
     wanted = [g for g in gages if g in present or g in nan_gages or g in extra_ids]
     missing = [g for g in gages if g not in wanted]
-    # Gauges with no source keep out of the obs store; ddrs filters by index.
     if missing:
-        print(f"obs: no series for {missing}; not in the obs store")
+        raise SystemExit(
+            f"gauges {missing} have no obs series: not in the obs store, --extra-obs or "
+            f"--nan-obs-gages. Add them to --extra-obs or --nan-obs-gages."
+        )
+    check_time_bounds("obs", o_sub, t0, t1)
+    if not np.array_equal(q_sub.time.values, o_sub.time.values):
+        raise SystemExit("Q' and obs time axes differ")
     o_sub = o_sub.reindex(gage_id=wanted)
     if extra is not None:
         for gid, df in extra.groupby("gage_id"):
