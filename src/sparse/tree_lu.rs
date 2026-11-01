@@ -47,7 +47,12 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
+use super::cube_buf::{from_cube, into_cube, Cube};
 use super::dispatch::effective_use_cuda;
+use super::tree_lu_cuda::{
+    tree_factor_dev, tree_grad_a_dev, tree_solve_dev, tree_solve_transposed_dev, TreeDev,
+    TreeFactorsDev,
+};
 use super::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
 
 /// Factors of a tree matrix. Both vectors have length `nnz` (`CsrPattern` layout).
@@ -237,6 +242,7 @@ pub(crate) const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
 #[derive(Clone, Debug)]
 enum TreeSaved {
     Host { factors: Arc<TreeFactors>, x: Arc<Vec<f32>> },
+    Dev { f: TreeFactorsDev, x: Cube, tree: Arc<TreeDev> },
 }
 
 /// Saved state for the backward pass.
@@ -262,30 +268,44 @@ where
         _checkpointer: &mut Checkpointer,
     ) {
         let TreeSolveState { saved, pattern } = ops.state;
-        let TreeSaved::Host { factors, x } = saved;
         let [parent_a, parent_b] = ops.parents;
         let grad_out = grads.consume::<B>(&ops.node);
-        let device = B::float_device(&grad_out);
-        let grad_x = primitive_to_vec::<B>(grad_out);
+        match saved {
+            TreeSaved::Host { factors, x } => {
+                let device = B::float_device(&grad_out);
+                let grad_x = primitive_to_vec::<B>(grad_out);
 
-        // g = A^{-T} grad_x: Uᵀ z = grad_x, then Lᵀ g = z.
-        let z = forward_sub_lower(&pattern, &factors.u_values, &grad_x);
-        let g = back_sub_upper_transposed(&pattern, &factors.l_values, &z);
+                // g = A^{-T} grad_x: Uᵀ z = grad_x, then Lᵀ g = z.
+                let z = forward_sub_lower(&pattern, &factors.u_values, &grad_x);
+                let g = back_sub_upper_transposed(&pattern, &factors.l_values, &z);
 
-        if let Some(p_a) = parent_a {
-            let ga = tree_lu_grad_a_host(&pattern, &g, &x);
-            let len = ga.len();
-            grads.register::<B>(
-                p_a.id,
-                B::float_from_data(TensorData::new(ga, [len]), &device),
-            );
-        }
-        if let Some(p_b) = parent_b {
-            let len = g.len();
-            grads.register::<B>(
-                p_b.id,
-                B::float_from_data(TensorData::new(g, [len]), &device),
-            );
+                if let Some(p_a) = parent_a {
+                    let ga = tree_lu_grad_a_host(&pattern, &g, &x);
+                    let len = ga.len();
+                    grads.register::<B>(
+                        p_a.id,
+                        B::float_from_data(TensorData::new(ga, [len]), &device),
+                    );
+                }
+                if let Some(p_b) = parent_b {
+                    let len = g.len();
+                    grads.register::<B>(
+                        p_b.id,
+                        B::float_from_data(TensorData::new(g, [len]), &device),
+                    );
+                }
+            }
+            TreeSaved::Dev { f, x, tree } => {
+                // g = A^{-T} grad_x on the device. No host copy.
+                let g = tree_solve_transposed_dev(&pattern, &f, &into_cube::<B>(grad_out));
+                if let Some(p_a) = parent_a {
+                    let ga = tree_grad_a_dev(&tree, &g, &x);
+                    grads.register::<B>(p_a.id, from_cube::<B>(ga));
+                }
+                if let Some(p_b) = parent_b {
+                    grads.register::<B>(p_b.id, from_cube::<B>(g));
+                }
+            }
         }
     }
 }
@@ -307,7 +327,7 @@ where
     I::Device: 'static,
 {
     if effective_use_cuda::<I>(use_cuda) {
-        unimplemented!("{}", CUDA_TODO)
+        return tree_lu_solve_cuda::<I>(pattern, a_values, b);
     }
     let a_at = match a_values.into_primitive() {
         TensorPrimitive::Float(p) => p,
@@ -335,6 +355,51 @@ where
         OpsKind::Tracked(prep) => {
             let state = TreeSolveState {
                 saved: TreeSaved::Host { factors: Arc::new(factors), x: Arc::new(x) },
+                pattern: pattern.clone(),
+            };
+            prep.finish(state, out_prim)
+        }
+        OpsKind::UnTracked(prep) => prep.finish(out_prim),
+    };
+    Tensor::from_primitive(TensorPrimitive::Float(result))
+}
+
+/// The device arm of [`tree_lu_solve`]: factor and solve on the GPU, with the
+/// hand-written adjoint. It builds the level structure on every call, so it
+/// serves the reference step and tests. The fused stage op caches its own.
+pub(crate) fn tree_lu_solve_cuda<I: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    a_values: Tensor<Autodiff<I>, 1>,
+    b: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let a_at = match a_values.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+    };
+    let b_at = match b.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+    };
+    let a_cube = into_cube::<I>(a_at.primitive.clone());
+    let b_cube = into_cube::<I>(b_at.primitive.clone());
+    let levels = super::tree_lu::tree_levels(pattern).expect("tree_lu_solve: pattern is not a tree");
+    let tree = Arc::new(TreeDev::upload(&levels, &a_cube));
+    let f = tree_factor_dev(&tree, &a_cube);
+    let x = tree_solve_dev(pattern, &f, &b_cube);
+    let out_prim = from_cube::<I>(x.clone());
+
+    let result = match TreeSolveOp
+        .prepare::<NoCheckpointing>([a_at.node.clone(), b_at.node.clone()])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => {
+            let state = TreeSolveState {
+                saved: TreeSaved::Dev { f, x, tree },
                 pattern: pattern.clone(),
             };
             prep.finish(state, out_prim)

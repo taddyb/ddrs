@@ -43,8 +43,6 @@ pub(crate) fn from_cube<B: Backend + 'static>(c: Cube) -> B::FloatTensorPrimitiv
 }
 
 /// An uninitialised contiguous f32 buffer of `len` on the device of `like`.
-// The CUDA kernels will call this. Remove the allow when they do.
-#[allow(dead_code)]
 pub(crate) fn empty_f32(like: &Cube, len: usize) -> Cube {
     empty_device_contiguous_dtype(
         like.client.clone(),
@@ -97,8 +95,6 @@ pub(crate) fn upload_i32(like: &Cube, v: &[i32]) -> Cube {
 }
 
 /// Launch shape for one thread per element: 256 threads per cube, at least one cube.
-// The CUDA kernels will call this. Remove the allow when they do.
-#[allow(dead_code)]
 pub(crate) fn grid(len: usize) -> (cubecl::CubeCount, cubecl::CubeDim) {
     const THREADS: u32 = 256;
     let cubes = (len as u32).div_ceil(THREADS).max(1);
