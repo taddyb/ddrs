@@ -1,3 +1,4 @@
+pub mod clamp_rule;
 pub mod courant_probe;
 pub mod leakance;
 pub mod mmc;

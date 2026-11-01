@@ -149,9 +149,10 @@ mod tests {
 /// params plus zeta's contributions into `depth`, `p_spatial`, `q_eps`.
 ///
 /// `losing_only=true`: the forward used `head = max(0, depth − d_gw)`, so the
-/// backward gates all grads to zero where `depth ≤ d_gw` (gaining reaches).
-/// Subgradient at the kink (depth == d_gw) is defined as 0 (measure-zero;
-/// finite-difference safe). `losing_only=false`: unclamped backward.
+/// backward gates all grads to zero where `depth < d_gw` (gaining reaches).
+/// At the kink (depth == d_gw) the gate is inactive, so the tie passes
+/// (the reach counts as losing), by the tie rule in `routing::clamp_rule`.
+/// `losing_only=false`: unclamped backward.
 ///
 /// `mask`: same 0/1 constant passed to the forward. `mask[i]=0` ⇒ the
 /// forward multiplied zeta by 0 at reach i, so `∂L/∂(leakance_params[i]) = 0`
@@ -180,11 +181,12 @@ pub fn zeta_backward<I: Backend>(
     bed_thickness: Option<f32>,
     mask: Option<Tensor<I, 1>>,
 ) -> ZetaGrads<I> {
-    // When losing_only: gate gzeta to zero where depth ≤ d_gw (gaining reaches).
+    // When losing_only: gate gzeta to zero where depth < d_gw (gaining reaches).
     // Since every grad is a product of gzeta, gating it zeros all outputs at once.
-    // Subgradient at the kink (depth == d_gw) = 0 by convention.
+    // At the kink (depth == d_gw) the gate is inactive, so the tie passes and
+    // the reach counts as losing (the tie rule in `routing::clamp_rule`).
     let gzeta = if losing_only {
-        let gate = depth.clone().greater(d_gw.clone()); // true where depth > d_gw
+        let gate = depth.clone().greater_equal(d_gw.clone()); // true where depth >= d_gw
         (-g_b).mask_fill(gate.bool_not(), 0.0)
     } else {
         -g_b
@@ -204,11 +206,11 @@ pub fn zeta_backward<I: Backend>(
     let (m, connected) = match bed_thickness {
         Some(bed_m) => {
             let cap = depth.clone() + bed_m;
-            // Connected ⇔ the cap is NOT binding ⇔ depth − d_gw < depth + M
-            // ⇔ d_gw > −M. At the kink the subgradient is taken as
-            // disconnected (∂h/∂d_gw = 0), matching the `losing_only`
-            // convention of resolving kinks to zero.
-            let conn = m_raw.clone().lower(cap.clone());
+            // Connected ⇔ the cap is NOT binding ⇔ depth − d_gw <= depth + M
+            // ⇔ d_gw >= −M. At the kink the tie goes to `m_raw`, the first
+            // operand of `min_pair`, so the reach counts as connected
+            // (∂h/∂d_gw = −1), matching the `losing_only` tie rule.
+            let conn = m_raw.clone().lower_equal(cap.clone());
             (m_raw.min_pair(cap), Some(conn))
         }
         None => (m_raw, None),

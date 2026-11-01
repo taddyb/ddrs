@@ -18,6 +18,7 @@ use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
 use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, TensorPrimitive};
 
 use crate::config::Config;
+use crate::routing::clamp_rule::{ceiling_active, floor_active};
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
 
 /// Count of solve outputs that came out NEGATIVE before the S28
@@ -82,6 +83,32 @@ pub const POSITIVITY_DELTA: f32 = 1e-2;
 fn dam_row_x_cap<I: Backend>(k_muskingum: Tensor<I, 1>, dt: f32) -> Tensor<I, 1> {
     let cr = k_muskingum.recip() * dt;
     cr * (0.5 * (1.0 - POSITIVITY_DELTA))
+}
+
+/// The depth exponent `3 / (5 + 3·q_eps + 3·gamma)` (S5). The forward and the
+/// backward's pre-clamp depth (B6) both call it, so the two get the same
+/// bits.
+///
+/// Substituting n = n_0·(d/d_ref)^(−gamma) into the Manning relation moves one
+/// power of depth from the left side to the right, so gamma simply shifts the
+/// denominator. `gamma == 0` restores `5 + 3·q_eps` exactly: the literal is
+/// written as a separate binding so the f32 rounding of the historical
+/// expression cannot change. When gamma is learned it is a per-reach tensor
+/// and the denominator is built elementwise; the scalar spelling is kept
+/// verbatim for the constant case so `gamma_t: None` reproduces it bit for
+/// bit.
+pub(crate) fn depth_exponent<I: Backend>(
+    q_eps: Tensor<I, 1>,
+    gamma: f32,
+    gamma_t: Option<&Tensor<I, 1>>,
+) -> Tensor<I, 1> {
+    match gamma_t {
+        Some(g) => (q_eps * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
+        None => {
+            let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
+            (q_eps * 3.0 + five_plus_three_gamma).recip() * 3.0
+        }
+    }
 }
 
 /// Inner-backend leakance inputs threaded into `forward_chain_inner`.
@@ -468,7 +495,8 @@ where
         let slope = wrap(state.slope.clone());
         // The X the forward ACTUALLY used at S19 — equal to `state.x_storage`
         // under `ddr_match`, Cunge-derived otherwise. `state.x_storage` is
-        // deliberately never read here: it is not what c1..c4 were built from.
+        // read only at B19p, as the pre-cap X of a dam row under `ddr_match`:
+        // it is not what c1..c4 were built from.
         let x_eff = wrap(state.x_effective.clone());
         // Dam rows of the linear-reservoir override (S19''). `None` ⇒ B19''
         // below adds no op.
@@ -517,9 +545,9 @@ where
         // ===========================================================
         // B28. gx_sol = gy · mask(x_sol > discharge_lb)
         // ===========================================================
-        // clamp_min(x, lb): gradient passes through where x > lb, zero where x == lb (saturated).
-        let mask_x = x_sol.clone().greater_elem(discharge_lb);
-        let gx_sol = gy.mask_fill(mask_x.bool_not(), 0.0);
+        // clamp_min(x, lb): the gradient is cut where x < lb. A tie (x == lb)
+        // passes (`clamp_rule`).
+        let gx_sol = gy.mask_fill(floor_active(x_sol.clone(), discharge_lb), 0.0);
 
         // ===========================================================
         // B27. (gA_values, gb_rhs) = csr_solve_backward(...)
@@ -739,7 +767,7 @@ where
         //     that did not exist before the clamp. Its contribution is
         //     accumulated into `gk_from_x_cap` and folded into `gk_muskingum`
         //     BELOW (before the S18' floor mask and before B18 consumes it).
-        //   * the `[0, 0.5]` clamp mask belongs to `x_cunge`, NOT to `x_eff`:
+        //   * the `[0, 0.5]` clamp mask belongs to the pre-clamp Cunge X, NOT to `x_eff`:
         //     when `hi_a`/`hi_b` win, `x_eff` can sit anywhere in `[0, 0.5]`
         //     while `x_cunge` is saturated, and vice versa.
         // ===========================================================
@@ -751,9 +779,9 @@ where
         //   cap   = 0.5·(1−δ)·Δt/K       ∂cap/∂K = −0.5·(1−δ)·Δt/K² = −cap/K
         //
         // The same `min` rule as B19': ∂L/∂x_eff goes to exactly one branch.
-        // Where the cap bound (`x_eff == cap`, recomputed from the saved K by
-        // the forward's own ops, so the comparison reproduces its choice; a
-        // tie counts as the cap, a measure-zero subgradient choice) it goes
+        // Where the cap bound (`cap < X_r`, with the cap recomputed from the
+        // saved K by the forward's own ops, so the comparison reproduces its
+        // choice; a tie goes to X_r, the first operand of `min_pair`) it goes
         // into K, and the Cunge chain (`∂X_r/∂Q`, `∂X_r/∂B`, `∂X_r/∂c`) gets
         // nothing; elsewhere it goes on to X_r as before. With the cap bound,
         // `2K·x_eff = (1−δ)Δt` is constant and `2K(1 − x_eff) = 2K − (1−δ)Δt`,
@@ -767,12 +795,29 @@ where
         // under `enforce_pos`). The mask is applied AFTER the product, so a
         // zero-length reach (K = 0, cap = ∞) gets 0, not 0·∞.
         // ---------------------------------------------------------------
+        // Same expression as the forward's S19 (including the +1e-12). Hoisted
+        // above B19p because the dam-row cap compares against the channel X.
+        let bscl = top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
+        let w = q_t.clone() / bscl.clone();
+        // The Cunge X before its [0, 0.5] clamp. The band mask reads THIS, not
+        // the saved clamped X: a `>=` test on a clamped value would pass every
+        // saturated entry.
+        let x_raw = (-w.clone() + 1.0) * 0.5;
         let dam_cap = if state.reservoir_positivity {
             let m = reservoir_mask
                 .as_ref()
                 .expect("dam-row positivity needs the dam-row mask in the saved state");
             let cap = dam_row_x_cap(k_muskingum.clone(), dt);
-            let bound = m.clone().bool_and(x_eff.clone().equal(cap.clone()));
+            // The channel X the forward fed to `min_pair(X_r, cap)`: the
+            // constant `x_storage` under `ddr_match`, else the clamped Cunge X.
+            let x_r = if state.ddr_match {
+                wrap(state.x_storage.clone())
+            } else {
+                x_raw.clone().clamp(0.0, 0.5)
+            };
+            // `min_pair` keeps its first operand at a tie, so the cap wins
+            // only when strictly smaller than X_r.
+            let bound = m.clone().bool_and(cap.clone().lower(x_r));
             let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
             let gk = (gx * -(cap / k_muskingum.clone())).mask_fill(bound.clone().bool_not(), 0.0);
             Some((bound, gk))
@@ -801,19 +846,15 @@ where
                 Some((bound, _)) => gx.mask_fill(bound.clone(), 0.0),
                 None => gx,
             };
-            // Same expression as the forward's S19 (including the +1e-12).
-            let bscl =
-                top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
-            let w = q_t.clone() / bscl.clone();
             let half_w = w.clone() * 0.5;
             // `gx` is ∂L/∂x_eff. Split it across the S19' min branches and pick
             // the tensor whose `[0, 0.5]` clamp mask applies to the Cunge term.
             // Without the clamp, x_eff IS x_cunge and both reduce to identity.
-            let (gx, x_for_clamp) = if enforce_pos {
+            let gx = if enforce_pos {
                 // Recomputed bit-identically to the forward (same ops, same
                 // saved operands), so the comparisons below reproduce the
                 // `min_pair` chain's choice exactly.
-                let x_cunge = ((-w + 1.0) * 0.5).clamp(0.0, 0.5);
+                let x_cunge = x_raw.clone().clamp(0.0, 0.5);
                 let cr = k_muskingum.clone().recip() * dt;
                 let hi_a = cr.clone() * (0.5 * (1.0 - POSITIVITY_DELTA));
                 let hi_b = (-cr * 0.5 + 1.0) * (1.0 - POSITIVITY_DELTA);
@@ -840,16 +881,15 @@ where
                 let gcr = (g_hi_a - g_hi_b) * half_1md;
                 // cr = Δt/k_musk  →  ∂cr/∂k_musk = −Δt/k_musk²
                 gk_from_x_cap = Some(-gcr * dt / (k_muskingum.clone() * k_muskingum.clone()));
-                (gx_cunge, x_cunge)
+                gx_cunge
             } else {
-                (gx, x_eff.clone())
+                gx
             };
-            // Zero where the [0, 0.5] clamp saturated (X is then constant).
-            let unsat = x_for_clamp
-                .clone()
-                .greater_elem(0.0)
-                .bool_and(x_for_clamp.lower_elem(0.5));
-            let gx = gx.mask_fill(unsat.bool_not(), 0.0);
+            // Zero where the [0, 0.5] clamp saturated (X is then constant). A
+            // tie at 0 or 0.5 passes. The mask reads the pre-clamp `x_raw`
+            // under both `enforce_pos` values.
+            let cut_x = floor_active(x_raw.clone(), 0.0).bool_or(ceiling_active(x_raw, 0.5));
+            let gx = gx.mask_fill(cut_x, 0.0);
             Some(XGrads {
                 // ∂X/∂Q = −0.5·W/Q, but W = Q/(B·S·c·L) so Q cancels exactly.
                 // Written in the cancelled form on purpose: `q_t` is only
@@ -941,7 +981,7 @@ where
         // ===========================================================
         // B18'. K floor (`enforce_positivity` only, S18'):
         //   k_musk = max(k_raw, k_floor)  →  ∂k_musk/∂k_raw = 1 where
-        //   k_raw > k_floor, else 0 (the reach is sub-grid and K is pinned to
+        //   k_raw >= k_floor (a tie passes), else 0 (the reach is sub-grid and K is pinned to
         //   the constant floor, so celerity gets NO gradient there).
         // `k_raw = length/celerity` is recomputed from the saved `length` and
         // `celerity` with the same op the forward used, so the mask reproduces
@@ -950,8 +990,7 @@ where
         let gk_raw = if enforce_pos {
             let k_raw = length.clone() / celerity.clone();
             let k_floor = dt * (1.0 + POSITIVITY_DELTA) / 2.0;
-            let unfloored = k_raw.greater_elem(k_floor);
-            gk_muskingum.mask_fill(unfloored.bool_not(), 0.0)
+            gk_muskingum.mask_fill(floor_active(k_raw, k_floor), 0.0)
         } else {
             gk_muskingum
         };
@@ -1043,12 +1082,11 @@ where
 
         // ===========================================================
         // B16. velocity_cl = clamp(velocity_un, velocity_lb, 15)
-        //   gradient passes where velocity_lb < velocity_un < 15
+        //   gradient passes where velocity_lb <= velocity_un <= 15 (ties pass)
         // ===========================================================
-        let mask_v_lo = velocity_un.clone().greater_elem(velocity_lb);
-        let mask_v_hi = velocity_un.clone().lower_elem(15.0);
-        let mask_v = mask_v_lo.bool_and(mask_v_hi);
-        let gvelocity_un = gvelocity_cl.mask_fill(mask_v.bool_not(), 0.0);
+        let cut_v = floor_active(velocity_un.clone(), velocity_lb)
+            .bool_or(ceiling_active(velocity_un.clone(), 15.0));
+        let gvelocity_un = gvelocity_cl.mask_fill(cut_v, 0.0);
 
         // ===========================================================
         // B15. velocity_un = (1/n) · R^(2/3) · √slope
@@ -1130,11 +1168,10 @@ where
 
         // ===========================================================
         // B11. bottom_width = max(bw_raw, bottom_width_lb)
-        //   gradient passes where bw_raw > lb.
+        //   gradient passes where bw_raw >= lb (a tie passes).
         // ===========================================================
-        let mask_bw = bw_raw.clone().greater_elem(bottom_width_lb);
         let gbw_total = gbw_from_s13 + gbw_from_s12;
-        let gbw_raw = gbw_total.mask_fill(mask_bw.bool_not(), 0.0);
+        let gbw_raw = gbw_total.mask_fill(floor_active(bw_raw.clone(), bottom_width_lb), 0.0);
 
         // ===========================================================
         // B10. bw_raw = tw - 2·ss·d
@@ -1148,17 +1185,16 @@ where
 
         // ===========================================================
         // B9. side_slope = clamp(side_slope_raw, 0.5, 50)
-        //   gradient passes where 0.5 < ss_raw < 50.
+        //   gradient passes where 0.5 <= ss_raw <= 50 (ties pass).
         // ===========================================================
         let gss_combined = match beta_grads.as_ref() {
             // ∂beta/∂z enters through u = √(1+z²) at S17.
             Some(bg) => gss_from_s13 + gss_from_s10 + bg.g_side_slope.clone(),
             None => gss_from_s13 + gss_from_s10,
         };
-        let mask_ss_lo = side_slope_raw.clone().greater_elem(0.5);
-        let mask_ss_hi = side_slope_raw.clone().lower_elem(50.0);
-        let mask_ss = mask_ss_lo.bool_and(mask_ss_hi);
-        let gss_from_clamp = gss_combined.mask_fill(mask_ss.bool_not(), 0.0);
+        let cut_ss = floor_active(side_slope_raw.clone(), 0.5)
+            .bool_or(ceiling_active(side_slope_raw.clone(), 50.0));
+        let gss_from_clamp = gss_combined.mask_fill(cut_ss, 0.0);
 
         // ===========================================================
         // B8. side_slope_raw = tw · q_eps / (2·d)
@@ -1216,15 +1252,23 @@ where
         if let Some(zg) = zeta_geom.as_ref() {
             gd_total = gd_total + zg.g_depth.clone();
         }
-        // depth saturates when ratio^exp == depth_lb (clamped). Gradient passes through
-        // when depth > depth_lb. depth itself is the saved post-clamp value, so use
-        // depth > depth_lb as the mask (when the clamp is inactive, depth > depth_lb).
-        let mask_d = depth.clone().greater_elem(depth_lb);
-        let gd_pre_clamp = gd_total.mask_fill(mask_d.bool_not(), 0.0);
+        // The depth clamp cuts the gradient where ratio^exponent < depth_lb. A
+        // tie passes. The saved `depth` is post-clamp, so a `>=` test on it
+        // would pass every clamped entry. The mask reads the PRE-clamp depth,
+        // rebuilt with the forward's own ops (`depth_exponent`, the saved
+        // `ratio`), so it matches the forward bit for bit.
+        let gamma_t_b6 = state
+            .gamma_t
+            .clone()
+            .map(|g| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)));
+        let depth_pre_clamp = ratio
+            .clone()
+            .powf(depth_exponent(q_eps.clone(), state.gamma, gamma_t_b6.as_ref()));
+        let gd_pre_clamp = gd_total.mask_fill(floor_active(depth_pre_clamp, depth_lb), 0.0);
 
-        // d = ratio^exponent  (NOTE: depth saved is post-clamp; the un-clamped
-        // value at differentiation point equals depth when mask is true, so we can
-        // use depth in derivative expressions where mask is true.)
+        // d = ratio^exponent  (NOTE: depth saved is post-clamp; where the mask
+        // passes the gradient the clamp is inactive, so the saved depth equals
+        // the un-clamped value and the derivative expressions can use it.)
         let five_plus_three_gamma: Tensor<I, 1> = match state.gamma_t.clone() {
             Some(g) => {
                 Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)) * 3.0 + 5.0
@@ -1953,23 +1997,8 @@ where
     let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
     // S4
     let ratio = numerator.clone() / denominator.clone();
-    // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma).
-    //
-    // Substituting n = n_0·(d/d_ref)^(−gamma) into the Manning relation moves
-    // one power of depth from the left side to the right, so gamma simply
-    // shifts the denominator. `gamma == 0` restores `5 + 3·q_eps` exactly —
-    // the literal is written as a separate binding so the f32 rounding of the
-    // historical expression cannot change.
-    // When gamma is learned it is a per-reach tensor and the denominator has to
-    // be built elementwise; the scalar spelling is kept verbatim for the
-    // constant case so `gamma_t: None` reproduces it bit for bit.
-    let exponent = match &gamma_in {
-        Some(g) => (q_eps.clone() * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
-        None => {
-            let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
-            (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0
-        }
-    };
+    // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma); see `depth_exponent`.
+    let exponent = depth_exponent(q_eps.clone(), gamma, gamma_in.as_ref());
     // S6
     let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
     // S7
