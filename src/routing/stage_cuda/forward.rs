@@ -13,13 +13,9 @@ use cubecl::cuda::CudaRuntime;
 use cubecl::prelude::*;
 
 use super::{ControlDev, DepthDev, HourDev, NewtonDev, SectionDev, StageOpConstsDev};
-use crate::routing::stage_op::{ControlOut, DepthOut, HourHost, NewtonOut, SectionHost};
+use crate::routing::stage_op::{F23, F43, F53, ControlOut, DepthOut, HourHost, NewtonOut, SectionHost};
 use crate::sparse::cube_buf::{empty_f32, grid, zeros_f32, Cube};
 
-// Same bits as the constants of `src/routing/stage_op.rs`.
-const F43: f32 = (4.0f64 / 3.0) as f32;
-const F23: f32 = (2.0f64 / 3.0) as f32;
-const F53: f32 = (5.0f64 / 3.0) as f32;
 /// The `q + 1e-6` of the width exponent (`stage_prologue_host`).
 const Q_EPS: f32 = 1e-6f32;
 

@@ -53,8 +53,6 @@ pub(crate) fn empty_f32(like: &Cube, len: usize) -> Cube {
 }
 
 /// A zero-filled f32 buffer of `len` on the device of `like`.
-// The CUDA kernels will call this. Remove the allow when they do.
-#[allow(dead_code)]
 pub(crate) fn zeros_f32(like: &Cube, len: usize) -> Cube {
     zeros_client(
         like.client.clone(),
@@ -83,8 +81,6 @@ fn upload_bytes(like: &Cube, bytes: &[u8], len: usize, dtype: DType) -> Cube {
 }
 
 /// Copy `v` to the device of `like` as f32.
-// The CUDA kernels will call this. Remove the allow when they do.
-#[allow(dead_code)]
 pub(crate) fn upload_f32(like: &Cube, v: &[f32]) -> Cube {
     upload_bytes(like, as_bytes(v), v.len(), DType::F32)
 }

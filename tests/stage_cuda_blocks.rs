@@ -25,7 +25,7 @@ use ddrs::routing::stage_cuda::forward::{
 };
 use ddrs::routing::stage_cuda::{ControlDev, DepthDev, HourDev, NewtonDev, SectionDev, StageOpConstsDev};
 use ddrs::routing::stage_op::{
-    control_host, depth_host, newton_host, section_host, stage_prologue_host, ControlOut, DepthOut,
+    control_host, depth_host, newton_host, section_host, stage_assemble_host, stage_prologue_host, ControlOut, DepthOut,
     HourHost, StageOpConsts,
 };
 use ddrs::sparse::cube_buf::{cube_from_host, cube_to_host, cube_to_host_i32, Cube, Gpu};
@@ -121,7 +121,7 @@ fn gen(seed: u32, len: usize, lo: f32, hi: f32) -> Vec<f32> {
     bar(seed, len, false).iter().map(|b| lo + (hi - lo) * (b - 0.5)).collect()
 }
 
-// copied from tests/stage_op_cuda_parity.rs::chain
+// copied from tests/stage_op_adjoint.rs::chain
 fn chain(n: usize) -> (SparseAdjacency, Arc<CsrPattern>) {
     let mut dense = vec![0.0_f32; n * n];
     for i in 0..n - 1 {
@@ -221,6 +221,17 @@ fn hotstart_stage(adj: &SparseAdjacency, pattern: &Arc<CsrPattern>) -> (Vec<f32>
     (h0, q_init)
 }
 
+// copied from tests/stage_op_parity.rs::table_and_mixed_cases (table_rect: table(&[2], 80.0, &[0.3], 0.02, &[None]))
+fn table_rows() -> ChannelGeometryRows {
+    ChannelGeometryRows {
+        rows: vec![2],
+        top_width: vec![80.0],
+        bed_z: vec![0.3],
+        n: vec![0.02],
+        pool_z: vec![None],
+    }
+}
+
 fn non_outlets(c: &StageOpConsts) -> Vec<usize> {
     (0..c.n).filter(|&i| c.down[i] != i).collect()
 }
@@ -242,15 +253,10 @@ fn assert_bits(what: &str, dev: &Cube, host: &[f32], len_if_empty: usize) {
 #[test]
 fn consts_dev_match_host() {
     let (adj, pattern) = juniata();
-    let (cj, _) = (consts_of(&adj, &pattern, Some(&(adj.n / 2..adj.n).collect::<Vec<_>>()), None, params(0.6, 4, false)), 0);
+    let lower: Vec<usize> = (adj.n / 2..adj.n).collect();
+    let cj = consts_of(&adj, &pattern, Some(&lower), None, params(0.6, 4, false));
     let (adj3, pat3) = chain(3);
-    let rows = ChannelGeometryRows {
-        rows: vec![2],
-        top_width: vec![80.0],
-        bed_z: vec![0.3],
-        n: vec![0.02],
-        pool_z: vec![None],
-    };
+    let rows = table_rows();
     let ct = consts_of(&adj3, &pat3, None, Some(rows), params(1.0, 1, true));
     for (label, c) in [("juniata", &cj), ("table chain", &ct)] {
         let (h, d) = (c.host.as_ref(), c.dev.as_ref());
@@ -328,13 +334,13 @@ fn prologue_case(what: &str, c: &Consts) {
     let host = stage_prologue_host(&c.host, &nm, &q, &p, &q_t, &q_next_mc, &qp, b0, b1);
     let dev = stage_prologue_dev(&c.dev, &up(&nm), &up(&q), &up(&p), &up(&q_t), &up(&q_next_mc), &up(&qp), b0, b1);
     compare_hour(what, &dev, &host);
-    // i_mid: the H4 line of stage_assemble_host.
+    // i_mid: the host oracle is stage_assemble_host on the same consts, hour and a state.
     let subs = c.host.substeps.max(1) as usize;
     let hd = HourDev::upload(&host, &like());
+    let h: Vec<f32> = c.host.z_mid.iter().map(|z| z + 0.5).collect();
     for s in 0..subs {
-        let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
-        let want: Vec<f32> = (0..n).map(|i| (host.i_t[i] * 2.0 + host.i_delta[i] * (f0 + f1)) * 0.5).collect();
-        close(&format!("{what} i_mid s={s}"), &cube_to_host(&i_mid_dev(&c.dev, &hd, s)), &want);
+        let asm = stage_assemble_host(&c.host, &host, s, &h, &q_t);
+        close(&format!("{what} i_mid s={s}"), &cube_to_host(&i_mid_dev(&c.dev, &hd, s)), &asm.i_mid);
     }
 }
 
@@ -350,13 +356,7 @@ fn prologue_matches_host() {
 
     // Table chain of table_and_mixed_cases()[0] (copied from tests/stage_op_parity.rs).
     let (adj3, pat3) = chain(3);
-    let rows = ChannelGeometryRows {
-        rows: vec![2],
-        top_width: vec![80.0],
-        bed_z: vec![0.3],
-        n: vec![0.02],
-        pool_z: vec![None],
-    };
+    let rows = table_rows();
     let ct = consts_of(&adj3, &pat3, None, Some(rows), params(1.0, 1, true));
     assert!(ct.host.has_table);
     prologue_case("table chain", &ct);
@@ -454,6 +454,8 @@ fn section_run(label: &str, with_table: bool) {
             h.has_table = true;
             h.t_mask = (0..n).map(|i| (i % 2) as f32).collect();
             h.t_tw = vec![500.0; n];
+            h.t_n = vec![0.03; n];
+            h.t_pool = vec![0.0; n];
         })
     } else {
         base
@@ -489,11 +491,25 @@ fn section_run(label: &str, with_table: bool) {
     // Both clamps and the interior are exercised (same grid as the adjoint test).
     assert!(host.ss_raw.iter().any(|&v| v < 0.5) && host.ss_raw.iter().any(|&v| v > 50.0));
     assert!(host.bw_raw.iter().any(|&v| v < BW_LB));
-    // 2h on the same section: the storage rate (out_tw * L) / dt_s.
-    let dt_s = 900.0f32;
-    let want: Vec<f32> = (0..n).map(|i| (host.out_tw[i] * c.host.length[i]) / dt_s).collect();
-    let store = SectionDev::upload(&host, &like());
-    close(&t("storage_rate"), &cube_to_host(&storage_rate_dev(&c.dev, &store, dt_s)), &want);
+    // 2h: the host oracle is stage_assemble_host. The state h = z_mid + d gives depth = d
+    // (every d of the grid is above the depth floor), so asm.store is this section.
+    let hour = HourHost {
+        p: p.clone(),
+        q_eps: q_eps.clone(),
+        n_eff: vec![0.03; n],
+        n2: vec![0.03 * 0.03; n],
+        qp_stage: vec![0.0; n],
+        i_t: vec![0.0; n],
+        i_delta: vec![0.0; n],
+        q_next_mc: vec![0.0; n],
+        b0: 0.0,
+        b1: 0.0,
+    };
+    let h: Vec<f32> = (0..n).map(|i| c.host.z_mid[i] + d[i]).collect();
+    let asm = stage_assemble_host(&c.host, &hour, 0, &h, &vec![1.0; n]);
+    close(&t("asm.store.out_tw"), &asm.store.out_tw, &host.out_tw);
+    let store = SectionDev::upload(&asm.store, &like());
+    close(&t("storage_rate"), &cube_to_host(&storage_rate_dev(&c.dev, &store, asm.dt_s)), &asm.d_s);
 }
 
 #[test]
@@ -569,6 +585,14 @@ fn newton_matches_host() {
                 host.rb[i]
             );
         }
+        // The 3f clamps bind on friction rows (not only the outlet's structural zero).
+        let live: Vec<usize> = (0..n).filter(|&i| c.host.friction[i] != 0.0).collect();
+        let (neg_a, neg_b) = (
+            live.iter().filter(|&&i| host.ra[i] < 0.0).count(),
+            live.iter().filter(|&&i| host.rb[i] < 0.0).count(),
+        );
+        println!("newton theta {theta}: friction rows with ra < 0: {neg_a}, with rb < 0: {neg_b}");
+        assert!(neg_a > 0 && neg_b > 0, "3f clamps must bind: ra<0 rows {neg_a}, rb<0 rows {neg_b}");
         let dev = newton_dev(
             &c.dev,
             dt_s,
@@ -597,10 +621,12 @@ fn control_run(with_table: bool) {
         if with_table {
             c.t_mask = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0];
             c.t_tw = vec![60.0; n];
+            c.t_n = vec![0.03; n];
             c.t_pool = vec![0.0, 0.0, 0.0, 2.5, 2.5, 2.5, 0.0, 0.0];
         } else {
             c.t_mask = vec![];
             c.t_tw = vec![];
+            c.t_n = vec![];
             c.t_pool = vec![];
         }
     });
@@ -671,4 +697,18 @@ fn compare_control(what: &str, dev: &ControlDev, host: &ControlOut, with_table: 
 fn control_matches_host() {
     control_run(false);
     control_run(true);
+}
+
+#[test]
+fn op_consts_dev_is_cached_and_cleared() {
+    let (adj, pat) = chain(3);
+    let net = StageNetwork::build(&adj, &pat, None, 0.0, &[]).unwrap();
+    let mut block = StageBlock::<Gpu>::new(net, params(1.0, 1, false), &gpu());
+    let (a, b) = (block.op_consts_dev(&pat), block.op_consts_dev(&pat));
+    assert!(Arc::ptr_eq(&a, &b), "a second call returns the cached handle");
+    block.set_table_geometry(table_rows(), false).unwrap();
+    let c = block.op_consts_dev(&pat);
+    assert!(!Arc::ptr_eq(&a, &c), "set_table_geometry clears the cache");
+    assert!(c.host.has_table);
+    assert!(Arc::ptr_eq(&c, &block.op_consts_dev(&pat)));
 }

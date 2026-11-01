@@ -60,9 +60,9 @@ use crate::sparse::tree_lu::{tree_lu_factor, tree_lu_grad_a_host, TreeFactors, C
 use crate::sparse::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
 
 // Scalars the reference passes as f64 literals; Burn casts them to f32.
-const F43: f32 = (4.0f64 / 3.0) as f32;
-const F23: f32 = (2.0f64 / 3.0) as f32;
-const F53: f32 = (5.0f64 / 3.0) as f32;
+pub(crate) const F43: f32 = (4.0f64 / 3.0) as f32;
+pub(crate) const F23: f32 = (2.0f64 / 3.0) as f32;
+pub(crate) const F53: f32 = (5.0f64 / 3.0) as f32;
 
 /// Host copies of the block's constants. Built once per (block, pattern,
 /// table) and shared by `Arc`. Float fields are read back from the device

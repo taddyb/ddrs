@@ -66,6 +66,11 @@ impl StageOpConstsDev {
     pub fn upload(host: &Arc<StageOpConsts>, pattern: &CsrPattern, like: &Cube) -> Self {
         let h = host.as_ref();
         let (n, nnz) = (h.n, h.nnz);
+        if h.has_table {
+            for (name, v) in [("t_mask", &h.t_mask), ("t_tw", &h.t_tw), ("t_n", &h.t_n), ("t_pool", &h.t_pool)] {
+                assert!(v.len() == n, "StageOpConstsDev::upload: {name} has length {} but n is {n}", v.len());
+            }
+        }
         let tree = tree_levels(pattern).expect("stage pattern is a tree");
         let down: Vec<i32> = h.down.iter().map(|&d| d as i32).collect();
         Self {
