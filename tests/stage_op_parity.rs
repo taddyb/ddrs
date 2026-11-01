@@ -266,8 +266,7 @@ fn family(cases: Vec<Case>) {
     println!("bitwise: {all}");
 }
 
-#[test]
-fn forward_parity_chain_states() {
+fn chain_state_cases() -> Vec<Case> {
     let mut cases = vec![];
     // gradcheck_through_one_step
     {
@@ -334,11 +333,15 @@ fn forward_parity_chain_states() {
         c.hours = 6;
         cases.push(c);
     }
-    family(cases);
+    cases
 }
 
 #[test]
-fn forward_parity_table_and_mixed() {
+fn forward_parity_chain_states() {
+    family(chain_state_cases());
+}
+
+fn table_and_mixed_cases() -> Vec<Case> {
     let mut cases = vec![];
     // table_rows_use_the_rectangle_and_fixed_n
     {
@@ -378,11 +381,15 @@ fn forward_parity_table_and_mixed() {
         c.qp = vec![vec![0.5, 0.4, 0.3]];
         cases.push(c);
     }
-    family(cases);
+    cases
 }
 
 #[test]
-fn forward_parity_prescribed_boundary() {
+fn forward_parity_table_and_mixed() {
+    family(table_and_mixed_cases());
+}
+
+fn prescribed_boundary_cases() -> Vec<Case> {
     let mut cases = vec![];
     // flow_reversal_is_not_clamped: the outlet stage rises 1 m per hour
     {
@@ -403,16 +410,19 @@ fn forward_parity_prescribed_boundary() {
         let c = Case::new("rising_series", adj, pattern, H0::Abs(h), vec![2.0, 3.0, 4.0]).prescribed(base, 0.5);
         cases.push(c);
     }
-    family(cases);
+    cases
+}
+
+#[test]
+fn forward_parity_prescribed_boundary() {
+    family(prescribed_boundary_cases());
 }
 
 fn flat(sf: &Tensor<TestBackend, 2>) -> Vec<f32> {
     sf.clone().into_data().to_vec().unwrap()
 }
 
-#[test]
-fn forward_parity_mc_inflow() {
-    let device = TestDevice::default();
+fn mc_inflow_case(device: &TestDevice) -> Case {
     let n = 3;
     let hours = 24;
     let t = hours + 1;
@@ -421,7 +431,7 @@ fn forward_parity_mc_inflow() {
     let sf = mock_streamflow(t, n, &device);
     let mut mcr = MuskingumCunge::<InnerBackend>::new(mock_config(), device.clone());
     mcr.setup_inputs(
-        RoutingInputs { adjacency: adj.clone(), x_storage: Tensor::<TestBackend, 1>::ones([n], &device) * 0.2 },
+        RoutingInputs { adjacency: adj.clone(), x_storage: Tensor::<TestBackend, 1>::ones([n], device) * 0.2 },
         sf.clone(),
         mock_spatial_parameters(n, &device),
         false,
@@ -438,6 +448,13 @@ fn forward_parity_mc_inflow() {
     case.hours = hours;
     case.qp = (0..hours).map(|k| sfl[k * n..(k + 1) * n].to_vec()).collect();
     case.mc = (0..hours).map(|k| (0..n).map(|i| mc[i][k + 1]).collect()).collect();
+    case
+}
+
+#[test]
+fn forward_parity_mc_inflow() {
+    let device = TestDevice::default();
+    let case = mc_inflow_case(&device);
     let mut all = true;
     for theta in [0.55f32, 0.6, 1.0] {
         for substeps in [1u32, 4] {
@@ -449,13 +466,7 @@ fn forward_parity_mc_inflow() {
     println!("bitwise: {all}");
 }
 
-#[test]
-fn forward_parity_juniata_48h() {
-    if cfg!(debug_assertions) {
-        eprintln!("skipped in debug builds: run with --release");
-        return;
-    }
-    let device = TestDevice::default();
+fn juniata_case(device: &TestDevice) -> Case {
     let store = ConusAdjacencyStore::open("examples/juniata/data/juniata_conus_adjacency.zarr")
         .expect("open bundle conus adjacency");
     let adj = SparseAdjacency {
@@ -514,6 +525,17 @@ fn forward_parity_juniata_48h() {
     case.qp = vec![vec![1.0; n]];
     case.mc = vec![vec![0.0; n]];
     case.hours = 48;
+    case
+}
+
+#[test]
+fn forward_parity_juniata_48h() {
+    if cfg!(debug_assertions) {
+        eprintln!("skipped in debug builds: run with --release");
+        return;
+    }
+    let device = TestDevice::default();
+    let case = juniata_case(&device);
     let mut all = true;
     for (theta, substeps) in [(1.0f32, 1u32), (0.6, 4)] {
         let c = run_pair(&case, theta, substeps, &device);
@@ -621,4 +643,328 @@ fn stage_dispatch_cuda_branch_is_unimplemented() {
         tv(&[0.0; 3], &device),
         tv(&[1.0; 3], &device),
     );
+}
+
+// ================================================================ gradients
+//
+// Task 16c: gradient parity of the fused op against Burn autodiff of
+// `step_reference`, and a central-difference gradcheck of the op.
+//
+// Gradient bar (overview 16.6): per entry `|g_f - g_r| <= 1e-4 max(|g_f|, |g_r|)`
+// or `<= 1e-6 max(1, max_j |g_r,j|)` per parent. Loss
+// `L = sum_t sum_i w[t][i] q_next[t][i] + sum_i v_i (h_end_i - z_mid_i)`, with
+// `w` and `v` seeded uniform in [0.5, 1.5].
+
+fn weights(seed: u64, len: usize) -> Vec<f32> {
+    let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (0..len)
+        .map(|_| {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            0.5 + ((s >> 40) as f32) / (1u64 << 24) as f32
+        })
+        .collect()
+}
+
+const PARENTS: [&str; 7] = ["n", "q", "p", "h_t", "q_t", "q_next_mc", "q_prime"];
+
+/// The loss and the gradient of each parent (hours concatenated for `q_next_mc`
+/// and `q_prime`). A fused gradient that is `None` is a test failure.
+#[derive(Clone, Copy, PartialEq)]
+enum LossPart {
+    Both,
+    /// Only the `q_next` terms.
+    Q,
+    /// Only the `h_end` term.
+    H,
+}
+
+fn run_grads(case: &Case, theta: f32, substeps: u32, fused: bool, device: &TestDevice) -> (f32, Vec<Vec<f32>>) {
+    run_grads_part(case, theta, substeps, fused, LossPart::Both, device)
+}
+
+fn run_grads_part(
+    case: &Case,
+    theta: f32,
+    substeps: u32,
+    fused: bool,
+    part: LossPart,
+    device: &TestDevice,
+) -> (f32, Vec<Vec<f32>>) {
+    let n = case.adj.n;
+    let mut block = make_block(case, theta, substeps, device);
+    let z_mid = block.op_consts(&case.pattern).z_mid.clone();
+    let lf = |v: &[f32]| tv(v, device).require_grad();
+    let h0 = to_vec1(block.stage().unwrap());
+    let h_leaf = lf(&h0);
+    block.set_stage(h_leaf.clone());
+    let (nn, pp, qq) = (lf(&case.n), lf(&case.p), lf(&case.q));
+    let qt_leaf = lf(&case.q_t0);
+    let mut q_t = qt_leaf.clone();
+    let (mut qp_l, mut mc_l) = (vec![], vec![]);
+    let mut loss: Option<Tensor<TestBackend, 1>> = None;
+    for k in 0..case.hours {
+        let qpl = lf(&pick(&case.qp, k));
+        let mcl = lf(&pick(&case.mc, k));
+        qp_l.push(qpl.clone());
+        mc_l.push(mcl.clone());
+        let out = if fused {
+            block.step_fused(&case.pattern, nn.clone(), pp.clone(), qq.clone(), q_t.clone(), mcl, qpl)
+        } else {
+            block.step_reference(&case.pattern, nn.clone(), pp.clone(), qq.clone(), q_t.clone(), mcl, qpl)
+        };
+        let wq = if part == LossPart::H { vec![0.0; n] } else { weights(1 + k as u64, n) };
+        let term = (out.clone() * tv(&wq, device)).sum();
+        loss = Some(match loss {
+            None => term,
+            Some(l) => l + term,
+        });
+        q_t = out;
+    }
+    let h_end = block.stage().unwrap();
+    let off = h_end - tv(&z_mid, device);
+    let wv = if part == LossPart::Q { vec![0.0; n] } else { weights(9999, n) };
+    let loss = loss.unwrap() + (off * tv(&wv, device)).sum();
+    let value = loss.clone().into_scalar();
+    let g = loss.backward();
+    let get = |t: &Tensor<TestBackend, 1>, what: &str| -> Vec<f32> {
+        match t.grad(&g) {
+            Some(v) => to_vec1(v),
+            None => {
+                assert!(!fused, "fused: no gradient registered for tracked parent {what}");
+                vec![0.0; n]
+            }
+        }
+    };
+    let cat = |ts: &[Tensor<TestBackend, 1>], what: &str| -> Vec<f32> {
+        ts.iter().flat_map(|t| get(t, what)).collect()
+    };
+    let grads = vec![
+        get(&nn, "n"),
+        get(&qq, "q"),
+        get(&pp, "p"),
+        get(&h_leaf, "h_t"),
+        get(&qt_leaf, "q_t"),
+        cat(&mc_l, "q_next_mc"),
+        cat(&qp_l, "q_prime"),
+    ];
+    (value, grads)
+}
+
+/// Rounding noise of a gradient run: per parent, `max_i |g_q[i] + g_h[i] - g_both[i]|`,
+/// the failure of linearity in the loss. The three runs differ only in the
+/// order and size of the f32 sums, so this measures the rounding noise of the
+/// path itself.
+fn linearity_noise(case: &Case, theta: f32, substeps: u32, fused: bool, both: &[Vec<f32>], device: &TestDevice) -> [f32; 7] {
+    let (_, gq) = run_grads_part(case, theta, substeps, fused, LossPart::Q, device);
+    let (_, gh) = run_grads_part(case, theta, substeps, fused, LossPart::H, device);
+    let mut out = [0.0f32; 7];
+    for pi in 0..7 {
+        for i in 0..both[pi].len() {
+            out[pi] = out[pi].max((gq[pi][i] + gh[pi][i] - both[pi][i]).abs());
+        }
+    }
+    out
+}
+
+/// A strict-bar violation is accepted only when it is within `NOISE_FACTOR`
+/// times the combined rounding noise of the two paths (see the report).
+const NOISE_FACTOR: f32 = 4.0;
+
+/// One state: returns the worst `err / allowed` per parent. Counts strict-bar
+/// violations in `strict` and the worst `err / noise` among them in `noise_ratio`.
+fn grad_pair(case: &Case, theta: f32, substeps: u32, device: &TestDevice, strict: &mut usize, noise_ratio: &mut f32) -> [f32; 7] {
+    let (lr, gr) = run_grads(case, theta, substeps, false, device);
+    let (lf, gf) = run_grads(case, theta, substeps, true, device);
+    let tag = format!("{} theta {theta} substeps {substeps}", case.label);
+    assert_eq!(lr, lf, "{tag}: loss differs (forward is bitwise)");
+    let mut worst = [0.0f32; 7];
+    let mut noise: Option<[f32; 7]> = None;
+    for pi in 0..7 {
+        let (g, r) = (&gf[pi], &gr[pi]);
+        assert_eq!(g.len(), r.len(), "{tag} {}: length", PARENTS[pi]);
+        let scale = r.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+        for (i, (a, b)) in g.iter().zip(r).enumerate() {
+            assert!(a.is_finite(), "{tag} {}[{i}]: non-finite {a}", PARENTS[pi]);
+            let err = (a - b).abs();
+            let allowed = (1e-4 * a.abs().max(b.abs())).max(1e-6 * scale);
+            worst[pi] = worst[pi].max(err / allowed);
+            if err <= allowed {
+                continue;
+            }
+            *strict += 1;
+            let nz = *noise.get_or_insert_with(|| {
+                let nr = linearity_noise(case, theta, substeps, false, &gr, device);
+                let nf = linearity_noise(case, theta, substeps, true, &gf, device);
+                std::array::from_fn(|k| nr[k] + nf[k])
+            });
+            let ratio = err / nz[pi].max(f32::MIN_POSITIVE);
+            *noise_ratio = noise_ratio.max(ratio);
+            println!(
+                "strict bar exceeded: {tag} {}[{i}]: fused {a} vs autodiff {b} (err {err:e}, allowed {allowed:e}, combined noise {:e}, err/noise {ratio:.2})",
+                PARENTS[pi], nz[pi]
+            );
+            assert!(
+                err <= NOISE_FACTOR * nz[pi],
+                "{tag} {}[{i}]: fused {a} vs autodiff {b} (err {err:e}, allowed {allowed:e}, noise {:e})",
+                PARENTS[pi], nz[pi]
+            );
+        }
+    }
+    worst
+}
+
+fn grad_family(cases: Vec<Case>, grid: &[(f32, u32)]) {
+    let device = TestDevice::default();
+    let (mut strict, mut noise_ratio) = (0usize, 0.0f32);
+    for case in &cases {
+        for &(theta, substeps) in grid {
+            let w = grad_pair(case, theta, substeps, &device, &mut strict, &mut noise_ratio);
+            println!("{} theta {theta} substeps {substeps}: worst err/allowed {w:?} (parents {PARENTS:?})", case.label);
+        }
+    }
+    println!("strict-bar violations: {strict}, worst err/noise among them: {noise_ratio:.2}");
+}
+
+fn full_grid() -> Vec<(f32, u32)> {
+    let mut g = vec![];
+    for theta in [0.55f32, 0.6, 1.0] {
+        for substeps in [1u32, 4] {
+            g.push((theta, substeps));
+        }
+    }
+    g
+}
+
+#[test]
+fn gradient_parity_chain_states() {
+    grad_family(chain_state_cases(), &full_grid());
+}
+
+#[test]
+fn gradient_parity_table_and_mixed() {
+    grad_family(table_and_mixed_cases(), &full_grid());
+}
+
+#[test]
+fn gradient_parity_prescribed_boundary() {
+    grad_family(prescribed_boundary_cases(), &full_grid());
+}
+
+#[test]
+fn gradient_parity_mc_inflow() {
+    let device = TestDevice::default();
+    grad_family(vec![mc_inflow_case(&device)], &full_grid());
+}
+
+#[test]
+fn gradient_parity_juniata_48h() {
+    if cfg!(debug_assertions) {
+        eprintln!("skipped in debug builds: run with --release");
+        return;
+    }
+    let device = TestDevice::default();
+    grad_family(vec![juniata_case(&device)], &[(1.0, 1), (0.6, 4)]);
+}
+
+#[test]
+fn fused_op_gradcheck_by_central_differences() {
+    // 5-chain, stage set closure([1]): row 0 is MC, so q_t and q_next_mc enter
+    // through N_mc. Dam on row 2 (T 1.23 d), NormalDepth, theta 0.8.
+    let device = TestDevice::default();
+    let (adj, pattern) = chain(&[1000.0; 5], &[1e-3; 5]);
+    let n = 5;
+    let net0 = StageNetwork::build(&adj, &pattern, Some(&[1]), 0.0, &[(2, 1.23)]).unwrap();
+    let depth0 = [0.45f32, 0.55, 0.8, 0.6, 0.7];
+    let h0: Vec<f32> = (0..n).map(|i| net0.z_mid[i] + depth0[i]).collect();
+    let z_mid = net0.z_mid.clone();
+    let base: [Vec<f32>; 7] = [
+        (0..n).map(|i| 0.03 + 0.005 * i as f32).collect(),
+        (0..n).map(|i| 0.45 + 0.05 * (i % 3) as f32).collect(),
+        (0..n).map(|i| 18.0 + 2.0 * (i % 4) as f32).collect(),
+        h0,
+        vec![1.1, 2.3, 3.2, 4.6, 5.1],
+        vec![1.4, 0.0, 0.0, 0.0, 0.0],
+        vec![1.0; n],
+    ];
+    // n, q, p, h_t, q_t, q_next_mc, q'
+    const EPS: [f32; 7] = [1e-3, 1e-2, 0.2, 1e-2, 1e-2, 1e-2, 1e-2];
+    let w = weights(5, n);
+    let v = weights(6, n);
+    for substeps in [1u32, 4] {
+        let mut case = Case::new("gradcheck", adj.clone(), pattern.clone(), H0::Abs(base[3].clone()), base[4].clone());
+        case.seeds = Some(vec![1]);
+        case.dams = vec![(2, 1.23)];
+        case.hours = 1;
+        let eval = |x: &[Vec<f32>; 7], with_grad: bool| -> (f32, Vec<Vec<f32>>) {
+            let mut block = make_block(&case, 0.8, substeps, &device);
+            let ts: Vec<Tensor<TestBackend, 1>> = x.iter().map(|a| tv(a, &device).require_grad()).collect();
+            block.set_stage(ts[3].clone());
+            let out = block.step_fused(
+                &pattern, ts[0].clone(), ts[2].clone(), ts[1].clone(), ts[4].clone(), ts[5].clone(), ts[6].clone(),
+            );
+            let h_end = block.stage().unwrap();
+            let loss = (out * tv(&w, &device)).sum() + ((h_end - tv(&z_mid, &device)) * tv(&v, &device)).sum();
+            let l = loss.clone().into_scalar();
+            if !with_grad {
+                return (l, vec![]);
+            }
+            let g = loss.backward();
+            (l, ts.iter().map(|t| to_vec1(t.grad(&g).expect("grad"))).collect())
+        };
+        let (l0, grads) = eval(&base, true);
+        println!("gradcheck substeps {substeps}: loss {l0}");
+        let mut worst = [0.0f32; 7];
+        for pi in 0..7 {
+            for i in 0..n {
+                let eps = EPS[pi];
+                let mut up = base.clone();
+                let mut dn = base.clone();
+                up[pi][i] += eps;
+                dn[pi][i] -= eps;
+                let fd = (eval(&up, false).0 - eval(&dn, false).0) / (2.0 * eps);
+                let an = grads[pi][i];
+                let err = (fd - an).abs();
+                let allowed = (5e-3 * fd.abs().max(an.abs())).max(1e-4);
+                assert!(
+                    an.is_finite() && err <= allowed,
+                    "substeps {substeps}: d loss/d {}[{i}]: fd {fd} analytic {an}",
+                    PARENTS[pi]
+                );
+                worst[pi] = worst[pi].max(err / allowed);
+            }
+        }
+        println!("gradcheck substeps {substeps}: worst err/allowed {worst:?} (parents {PARENTS:?})");
+    }
+}
+
+#[test]
+fn fused_op_untracked_matches_tracked() {
+    let device = TestDevice::default();
+    let case = chain_state_cases().remove(0);
+    let (theta, substeps) = (0.6f32, 4u32);
+    let mut tracked = make_block(&case, theta, substeps, &device);
+    let mut plain = make_block(&case, theta, substeps, &device);
+    let h0 = to_vec1(tracked.stage().unwrap());
+    tracked.set_stage(tv(&h0, &device).require_grad());
+    let mut q_tr = tv(&case.q_t0, &device).require_grad();
+    let mut q_pl = tv(&case.q_t0, &device);
+    let (nl, ql, pl) = (tv(&case.n, &device), tv(&case.q, &device), tv(&case.p, &device));
+    let n_leaf = nl.clone().require_grad();
+    for k in 0..case.hours {
+        let qp = tv(&pick(&case.qp, k), &device);
+        let mc = tv(&pick(&case.mc, k), &device);
+        let out_t = tracked.step_fused(
+            &case.pattern, n_leaf.clone(), pl.clone(), ql.clone(), q_tr.clone(), mc.clone(), qp.clone(),
+        );
+        let out_p = plain.step_fused(&case.pattern, nl.clone(), pl.clone(), ql.clone(), q_pl.clone(), mc, qp);
+        assert!(!out_p.is_require_grad(), "hour {k}: untracked output must not be tracked");
+        assert_eq!(to_vec1(out_t.clone()), to_vec1(out_p.clone()), "hour {k}: q_next bits");
+        assert_eq!(to_vec1(tracked.stage().unwrap()), to_vec1(plain.stage().unwrap()), "hour {k}: stage bits");
+        q_tr = out_t;
+        q_pl = out_p;
+    }
+    // The tracked run carries a gradient to its leaf; a derived node reports
+    // `is_require_grad() == false` in Burn, so the leaf is the check.
+    let g = q_tr.sum().backward();
+    assert!(n_leaf.grad(&g).is_some(), "tracked run: no gradient reached the n leaf");
 }

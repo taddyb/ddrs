@@ -603,3 +603,170 @@ fn depth_adjoint_matches_burn_autodiff() {
     }
     rep.print();
 }
+
+// ------------------------------------------------- readout, solve, matrix, RHS
+
+/// Blocks 5 to 8 of one substep, copied from `StageBlock::step_reference` with
+/// `tree_lu_solve`. Returns `(h_new, q_new, dh)`.
+#[allow(clippy::too_many_arguments)]
+fn assemble_solve_burn(
+    c: &StageOpConsts,
+    pat: &Arc<CsrPattern>,
+    hb: (f32, f32),
+    leaves: &[T; 10], // d_s, a_up, b_down, r_prime, r_t, q_star, qc, qp, i_mid, h
+) -> (T, T, T) {
+    use burn::tensor::{IndexingUpdateOp, Int};
+    let idx = |v: &[usize]| {
+        let w: Vec<i32> = v.iter().map(|&x| x as i32).collect();
+        Tensor::<TestBackend, 1, Int>::from_ints(w.as_slice(), &dev())
+    };
+    let (row_idx, col_idx, down_idx) = (idx(&c.row), idx(&c.col), idx(&c.down));
+    let scatter = |vals: T| T::zeros([c.n], &dev()).scatter(0, row_idx.clone(), vals, IndexingUpdateOp::Add);
+    let [d_s, a_up, b_down, r_prime, r_t, q_star, qc, qp, i_mid, h] = leaves.clone();
+    let (th, thc) = (c.theta, c.theta_c);
+    let (hbc0, hbc1) = hb;
+    let one_minus = |t: T| t.neg().add_scalar(1.0);
+    let (in_stage, w_ctrl, friction, ctrl, outlet) =
+        (cst(&c.in_stage), cst(&c.w_ctrl), cst(&c.friction), cst(&c.ctrl), cst(&c.outlet));
+    let (adj_friction, adj_stage, dam_slot, diag_slot) =
+        (cst(&c.adj_friction), cst(&c.adj_stage), cst(&c.dam_slot), cst(&c.diag_slot));
+    // 5
+    let a_edge = a_up.clone().gather(0, col_idx.clone()) * adj_friction.clone();
+    let b_edge = b_down.clone().gather(0, col_idx.clone()) * adj_friction;
+    let lower_f = a_edge.neg() * th;
+    let upper_f = b_edge.clone().neg() * th;
+    let off_dam = r_prime.clone().gather(0, col_idx) * dam_slot * (-thc);
+    let sum_in_b = scatter(b_edge);
+    let diag_stage = d_s + (a_up.clone() + sum_in_b) * th;
+    let diag = diag_stage * in_stage.clone() + w_ctrl.clone() * r_prime.clone() + one_minus(in_stage);
+    let lower = lower_f + off_dam + diag.gather(0, row_idx.clone()) * diag_slot;
+    let a_values = Tensor::cat(vec![lower, upper_f], 0);
+    // 6
+    let flux_old = friction * ((q_star.clone() * th) + qc.clone() * (1.0 - th));
+    let ctrl_old = w_ctrl.clone() * r_t.clone() + (ctrl.clone() - w_ctrl) * qc;
+    let e_old = flux_old + ctrl_old;
+    let in_e = scatter(e_old.clone().gather(0, idx(&c.col)) * adj_stage);
+    let mut r = qp + i_mid + in_e - e_old;
+    if c.prescribed {
+        r = r + outlet.clone() * b_down.clone() * (th * (hbc1 - hbc0));
+    }
+    // 7
+    let dh = ddrs::sparse::tree_lu::tree_lu_solve(pat, a_values, r, false);
+    let h_solved = h.clone() + dh.clone();
+    let h_floor = cst(&c.z_mid) + c.depth_lb;
+    let h_new = h_solved.max_pair(h_floor);
+    // 8
+    let mut dh_down = dh.clone().gather(0, down_idx);
+    if c.prescribed {
+        dh_down = dh_down * (outlet.clone().neg() + 1.0) + outlet * (hbc1 - hbc0);
+    }
+    let q_fr = q_star + a_up * dh.clone() - b_down * dh_down;
+    let q_ctrl = (r_t + r_prime * dh.clone()) * ctrl;
+    (h_new, q_fr + q_ctrl, dh)
+}
+
+fn readout_solve_run(label: &str, floored: bool, rep: &mut Report) {
+    use ddrs::routing::stage_op::{
+        matrix_backward_host, matrix_host, readout_backward_host, rhs_backward_host, rhs_host,
+        stage_readout_host, Assembled, ControlOut, HourHost, NewtonOut,
+    };
+    use ddrs::sparse::tree_lu::{
+        tree_lu_factor, tree_lu_grad_a_host, tree_lu_solve_host, tree_lu_solve_transposed_host,
+    };
+    let n = 5;
+    let (adj, pat) = chain(n);
+    // MC headwater (row 0), a dam on row 2, PrescribedStage
+    let net = StageNetwork::build(&adj, &pat, Some(&[1]), 0.0, &[(2, 1.23)]).unwrap();
+    let params = StageParams {
+        theta: 0.7,
+        theta_control: 0.5,
+        substeps: 1,
+        boundary: DownstreamBoundary::PrescribedStage,
+        depth_lb: 0.01,
+        bottom_width_lb: 0.1,
+        dt: 3600.0,
+        g: 9.81,
+        use_cuda: false,
+    };
+    let mut block = StageBlock::<InnerBackend>::new(net, params, &dev());
+    let c = (*block.op_consts(&pat)).clone();
+    let pos = |seed, lo: f32, hi: f32| -> Vec<f32> { bar(seed, n, false).iter().map(|v| lo + (v - 0.5) * (hi - lo)).collect() };
+    let d_s = pos(1, 1.0, 2.0);
+    let a_up = pos(2, 0.0, 0.3);
+    let b_down = pos(3, 0.0, 0.3);
+    let r_prime = pos(4, 0.0, 0.3);
+    let r_t = bar(5, n, true);
+    let q_star = bar(6, n, true);
+    let qc = bar(7, n, true);
+    let qp: Vec<f32> = bar(8, n, false).iter().zip(&c.in_stage).map(|(v, m)| v * m).collect();
+    let i_mid = bar(9, n, false);
+    let h: Vec<f32> = if floored {
+        c.z_mid.iter().map(|z| z - 3.0).collect()
+    } else {
+        c.z_mid.iter().enumerate().map(|(i, z)| z + 0.5 + 0.1 * i as f32).collect()
+    };
+    let (hb0, hb1) = (0.4f32, 0.9f32);
+    let host_leaves: [&Vec<f32>; 10] = [&d_s, &a_up, &b_down, &r_prime, &r_t, &q_star, &qc, &qp, &i_mid, &h];
+    let lv: [T; 10] = std::array::from_fn(|k| leaf(host_leaves[k]));
+    let (h_new_b, q_new_b, dh_b) = assemble_solve_burn(&c, &pat, (hb0, hb1), &lv);
+    let (wq, wv) = (bar(20, n, true), bar(21, n, true));
+    let loss = wsum(&wq, q_new_b.clone()) + wsum(&wv, h_new_b.clone());
+    let g = loss.backward();
+
+    // host forward
+    let a_values = matrix_host(&c, &d_s, &a_up, &b_down, &r_prime);
+    let r = rhs_host(&c, &qc, &q_star, &r_t, &b_down, &qp, &i_mid, hb0, hb1);
+    let f = tree_lu_factor(&pat, &a_values);
+    let dh = tree_lu_solve_host(&pat, &f, &r);
+    let hour = HourHost { qp_stage: qp.clone(), ..Default::default() };
+    let asm = Assembled {
+        i_mid: i_mid.clone(),
+        hb0,
+        hb1,
+        dt_s: 3600.0,
+        d_s: d_s.clone(),
+        newton: NewtonOut { q_star: q_star.clone(), a_up: a_up.clone(), b_down: b_down.clone(), ..Default::default() },
+        control: ControlOut { r_t: r_t.clone(), r_prime: r_prime.clone(), ..Default::default() },
+        ..Default::default()
+    };
+    let ro = stage_readout_host(&c, &hour, &h, &qc, &asm, &dh);
+    check_fwd("dh", &dh, &val(&dh_b));
+    check_fwd("h_new", &ro.h_new, &val(&h_new_b));
+    check_fwd("q_new", &ro.q_new, &val(&q_new_b));
+    if floored {
+        let hf: Vec<f32> = c.z_mid.iter().map(|z| z + c.depth_lb).collect();
+        assert_eq!(ro.h_new, hf, "every row is on the floor");
+    }
+
+    // host adjoint
+    let rg = readout_backward_host(&c, &h, &asm, &dh, &wv, &wq);
+    let g_r = tree_lu_solve_transposed_host(&pat, &f, &rg.dh);
+    let g_a = tree_lu_grad_a_host(&pat, &g_r, &dh);
+    let rhs = rhs_backward_host(&c, &asm, &g_r);
+    let mat = matrix_backward_host(&c, &g_a);
+    let add = |xs: &[&Vec<f32>]| -> Vec<f32> { (0..n).map(|i| xs.iter().map(|x| x[i]).sum()).collect() };
+    let names = ["d_s", "a_up", "b_down", "r_prime", "r_t", "q_star", "qc", "qp", "i_mid", "h"];
+    let totals: [Vec<f32>; 10] = [
+        mat.d_s.clone(),
+        add(&[&rg.a_up, &mat.a_up]),
+        add(&[&rg.b_down, &rhs.b_down, &mat.b_down]),
+        add(&[&rg.r_prime, &mat.r_prime]),
+        add(&[&rg.r_t, &rhs.r_t]),
+        add(&[&rg.q_star, &rhs.q_star]),
+        rhs.qc.clone(),
+        rhs.qp.clone(),
+        rhs.i_mid.clone(),
+        rg.h.clone(),
+    ];
+    for k in 0..10 {
+        rep.add(&format!("{label} {}", names[k]), &totals[k], &grad(&g, &lv[k], n));
+    }
+}
+
+#[test]
+fn readout_solve_matrix_rhs_adjoint_matches_burn_autodiff() {
+    let mut rep = Report::new("readout+solve+matrix+rhs");
+    readout_solve_run("generic", false, &mut rep);
+    readout_solve_run("floor binds", true, &mut rep);
+    rep.print();
+}

@@ -8,8 +8,20 @@
 //! slots. The CUDA branch is `unimplemented!` (Phase G). The orchestration fn
 //! [`stage_hour_forward`] loops over substeps only.
 
+use std::sync::Arc;
+
+use burn::backend::autodiff::checkpoint::base::Checkpointer;
+use burn::backend::autodiff::checkpoint::strategy::NoCheckpointing;
+use burn::backend::autodiff::grads::Gradients;
+use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
+use burn::backend::Autodiff;
+use burn::tensor::backend::Backend;
+use burn::tensor::{Tensor, TensorData, TensorPrimitive};
+
+use crate::sparse::primitive_to_vec;
 use crate::sparse::tree_lu::{
-    dispatch_factor, dispatch_l_solve, dispatch_u_solve, TreeFactors, CUDA_TODO,
+    dispatch_factor, dispatch_grad_a, dispatch_l_solve, dispatch_lt_solve, dispatch_u_solve,
+    dispatch_ut_solve, TreeFactors, CUDA_TODO,
 };
 use crate::sparse::CsrPattern;
 
@@ -1128,6 +1140,336 @@ pub fn depth_backward_host(
     gh
 }
 
+// ---------------------------------------------------------------------------
+// Task 16c: B5 to B8 and the hour adjoints BH0 to BH3. One loop over reaches or
+// slots each; the CUDA arms are in the dispatch fns below.
+// ---------------------------------------------------------------------------
+
+/// Cotangents out of the readout. `dh` is the cotangent the solve adjoint takes
+/// (`ḡdh` of B8 and B7); `h` is `ḡh` of the start state from the floor.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct ReadoutGrads {
+    pub dh: Vec<f32>,
+    pub h: Vec<f32>,
+    pub q_star: Vec<f32>,
+    pub a_up: Vec<f32>,
+    pub b_down: Vec<f32>,
+    pub r_t: Vec<f32>,
+    pub r_prime: Vec<f32>,
+}
+
+/// B8 and B7 (before the solve): `hs` and `dhd` are recomputed as 7b and 8a.
+#[doc(hidden)]
+pub fn readout_backward_host(
+    c: &StageOpConsts,
+    h: &[f32],
+    asm: &Assembled,
+    dh: &[f32],
+    g_h_new: &[f32],
+    g_q_new: &[f32],
+) -> ReadoutGrads {
+    let n = c.n;
+    let lb = c.depth_lb;
+    let v = || vec![0.0f32; n];
+    let mut o = ReadoutGrads { dh: v(), h: v(), q_star: v(), a_up: v(), b_down: v(), r_t: v(), r_prime: v() };
+    let mut g_dhd = v();
+    for i in 0..n {
+        let gq = at(g_q_new, i);
+        let mut dhd = dh[c.down[i]];
+        if c.prescribed {
+            dhd = if c.outlet[i] == 1.0 { asm.hb1 - asm.hb0 } else { dhd };
+        }
+        // B8
+        o.q_star[i] = gq;
+        o.a_up[i] = gq * dh[i];
+        o.b_down[i] = -gq * dhd;
+        o.dh[i] += gq * asm.newton.a_up[i] + (gq * c.ctrl[i]) * asm.control.r_prime[i];
+        o.r_t[i] = gq * c.ctrl[i];
+        o.r_prime[i] = (gq * c.ctrl[i]) * dh[i];
+        let g = -gq * asm.newton.b_down[i];
+        g_dhd[i] = if c.prescribed { g * keep_of(c.outlet[i]) } else { g };
+        // B7: the floor
+        let hs = h[i] + dh[i];
+        let hf = c.z_mid[i] + lb;
+        let ghs = at(g_h_new, i) * ind(!(hs < hf));
+        o.h[i] = ghs;
+        o.dh[i] += ghs;
+    }
+    // the gather's transpose
+    for i in 0..n {
+        o.dh[c.down[i]] += g_dhd[i];
+    }
+    o
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct RhsGrads {
+    pub qp: Vec<f32>,
+    pub i_mid: Vec<f32>,
+    pub q_star: Vec<f32>,
+    pub qc: Vec<f32>,
+    pub r_t: Vec<f32>,
+    pub b_down: Vec<f32>,
+}
+
+/// B6: the reverse of 6a to 6c, given `ḡr`.
+#[doc(hidden)]
+pub fn rhs_backward_host(c: &StageOpConsts, asm: &Assembled, g_r: &[f32]) -> RhsGrads {
+    let n = c.n;
+    let th = c.theta;
+    let mut g_eo: Vec<f32> = g_r.iter().map(|g| -g).collect();
+    for k in 0..c.nnz {
+        g_eo[c.col[k]] += g_r[c.row[k]] * c.adj_stage[k];
+    }
+    let mut o = RhsGrads {
+        qp: g_r.to_vec(),
+        i_mid: g_r.to_vec(),
+        q_star: vec![0.0; n],
+        qc: vec![0.0; n],
+        r_t: vec![0.0; n],
+        b_down: vec![0.0; n],
+    };
+    for i in 0..n {
+        if c.prescribed {
+            o.b_down[i] = (g_r[i] * c.outlet[i]) * (th * (asm.hb1 - asm.hb0));
+        }
+        o.q_star[i] = (g_eo[i] * c.friction[i]) * th;
+        o.qc[i] = g_eo[i] * (c.friction[i] * (1.0 - th) + (c.ctrl[i] - c.w_ctrl[i]));
+        o.r_t[i] = g_eo[i] * c.w_ctrl[i];
+    }
+    o
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct MatrixGrads {
+    pub d_s: Vec<f32>,
+    pub a_up: Vec<f32>,
+    pub b_down: Vec<f32>,
+    pub r_prime: Vec<f32>,
+}
+
+/// B5: the reverse of 5d to 5a. `g_a_values` is `[ḡlow, ḡupf]`, length `2 * nnz`.
+#[doc(hidden)]
+pub fn matrix_backward_host(c: &StageOpConsts, g_a_values: &[f32]) -> MatrixGrads {
+    let (n, nnz) = (c.n, c.nnz);
+    let (th, thc) = (c.theta, c.theta_c);
+    assert_eq!(g_a_values.len(), 2 * nnz, "g_a_values must have length 2 * nnz");
+    let (g_low, g_upf) = g_a_values.split_at(nnz);
+    // 5d: low_k = (lowf + offd) + diag[row] * diag_slot
+    let mut g_diag = vec![0.0f32; n];
+    for k in 0..nnz {
+        g_diag[c.row[k]] += g_low[k] * c.diag_slot[k];
+    }
+    let mut o = MatrixGrads {
+        d_s: vec![0.0; n],
+        a_up: vec![0.0; n],
+        b_down: vec![0.0; n],
+        r_prime: vec![0.0; n],
+    };
+    // 5c
+    let mut g_sib = vec![0.0f32; n];
+    for i in 0..n {
+        let g_dst = g_diag[i] * c.in_stage[i];
+        o.d_s[i] += g_dst;
+        o.a_up[i] += g_dst * th;
+        g_sib[i] = g_dst * th;
+        o.r_prime[i] += g_diag[i] * c.w_ctrl[i];
+    }
+    // 5b, 5a, 5c's sib scatter
+    for k in 0..nnz {
+        let col = c.col[k];
+        o.a_up[col] += (-th * g_low[k]) * c.adj_friction[k];
+        o.b_down[col] += (g_sib[c.row[k]] - th * g_upf[k]) * c.adj_friction[k];
+        o.r_prime[col] += (-thc * g_low[k]) * c.dam_slot[k];
+    }
+    o
+}
+
+/// Hour accumulators, summed over substeps. Empty until the first substep adds.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct HourAcc {
+    pub i_t: Vec<f32>,
+    pub i_delta: Vec<f32>,
+    pub n2: Vec<f32>,
+    pub n_eff: Vec<f32>,
+    pub p: Vec<f32>,
+    pub q_eps: Vec<f32>,
+    pub qp: Vec<f32>,
+}
+
+impl HourAcc {
+    pub fn zeros(n: usize) -> Self {
+        let v = || vec![0.0f32; n];
+        HourAcc { i_t: v(), i_delta: v(), n2: v(), n_eff: v(), p: v(), q_eps: v(), qp: v() }
+    }
+}
+
+fn add2(a: &[f32], b: &[f32]) -> Vec<f32> {
+    a.iter().zip(b).map(|(x, y)| x + y).collect()
+}
+
+fn add_into(acc: &mut [f32], x: &[f32]) {
+    for (a, v) in acc.iter_mut().zip(x) {
+        *a += v;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_backward_impl(
+    c: &StageOpConsts,
+    hour: &HourHost,
+    s: usize,
+    h: &[f32],
+    qc: &[f32],
+    asm: &Assembled,
+    rg: &ReadoutGrads,
+    g_r: &[f32],
+    g_a_values: &[f32],
+    acc: &mut HourAcc,
+    use_cuda: bool,
+) -> (Vec<f32>, Vec<f32>) {
+    let n = c.n;
+    if acc.i_t.is_empty() {
+        *acc = HourAcc::zeros(n);
+    }
+    let subs = c.substeps.max(1) as usize;
+    let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
+    // B6, B5
+    let rhs = dispatch_rhs_backward(c, asm, g_r, use_cuda);
+    let mat = dispatch_matrix_backward(c, g_a_values, use_cuda);
+    // B4: cotangents of R and R' from the readout, the RHS and the matrix
+    let ctl_bar = ControlBar { r_t: add2(&rg.r_t, &rhs.r_t), r_prime: add2(&rg.r_prime, &mat.r_prime) };
+    let ctl = dispatch_control_backward(
+        c, asm.dt_s, h, &hour.p, &hour.q_eps, &hour.n_eff, &asm.depth.depth, &asm.store, &asm.d_s,
+        &asm.control, &ctl_bar, use_cuda,
+    );
+    // B3
+    let nw_bar = NewtonBar {
+        q_star: add2(&rg.q_star, &rhs.q_star),
+        a_up: add2(&rg.a_up, &mat.a_up),
+        b_down: add2(&add2(&rg.b_down, &rhs.b_down), &mat.b_down),
+    };
+    let nw = dispatch_newton_backward(
+        c, asm.dt_s, h, qc, &hour.n2, &asm.depth, &asm.edge, &asm.newton, &nw_bar, use_cuda,
+    );
+    // B2: the storage top width carries ḡD_s·L/Δ (the storage path)
+    let g_ds = add2(&mat.d_s, &ctl.d_s);
+    let mut store_bar = ctl.store.clone();
+    store_bar.top_width = (0..n).map(|i| g_ds[i] * c.length[i] / asm.dt_s).collect();
+    let sec_e = dispatch_section_backward(c, &hour.p, &hour.q_eps, &asm.depth.d_edge, &asm.edge, &nw.edge, use_cuda);
+    let sec_s = dispatch_section_backward(c, &hour.p, &hour.q_eps, &asm.depth.depth, &asm.store, &store_bar, use_cuda);
+    // B1
+    let g_depth = add2(&ctl.depth, &sec_s.d);
+    let gh_depth = dispatch_depth_backward(c, h, &asm.depth, &g_depth, &sec_e.d, &nw.h_down, use_cuda);
+    let g_h: Vec<f32> = (0..n).map(|i| rg.h[i] + ctl.h[i] + nw.h[i] + gh_depth[i]).collect();
+    let g_q = add2(&rhs.qc, &nw.qc);
+    // hour accumulators (BH1 weights i_delta)
+    add_into(&mut acc.n2, &nw.n2);
+    add_into(&mut acc.n_eff, &ctl.n_eff);
+    for part in [&sec_e.p, &sec_s.p, &ctl.p] {
+        add_into(&mut acc.p, part);
+    }
+    for part in [&sec_e.q_eps, &sec_s.q_eps, &ctl.q_eps] {
+        add_into(&mut acc.q_eps, part);
+    }
+    add_into(&mut acc.qp, &rhs.qp);
+    add_into(&mut acc.i_t, &rhs.i_mid);
+    let w = 0.5 * (f0 + f1);
+    for i in 0..n {
+        acc.i_delta[i] += rhs.i_mid[i] * w;
+    }
+    (g_h, g_q)
+}
+
+/// B6 to B1 for substep `s`, composed from the 16b fns. Adds into `acc`.
+/// Returns `(ḡh, ḡQ)` of the substep's start state.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_backward_host(
+    c: &StageOpConsts,
+    hour: &HourHost,
+    s: usize,
+    h: &[f32],
+    qc: &[f32],
+    asm: &Assembled,
+    rg: &ReadoutGrads,
+    g_r: &[f32],
+    g_a_values: &[f32],
+    acc: &mut HourAcc,
+) -> (Vec<f32>, Vec<f32>) {
+    assemble_backward_impl(c, hour, s, h, qc, asm, rg, g_r, g_a_values, acc, false)
+}
+
+/// BH0: `(ḡh_S, ḡQ_S, ḡq_next_mc direct)` from the `[2n]` output cotangent.
+#[doc(hidden)]
+pub fn output_backward_host(c: &StageOpConsts, g_out: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let n = c.n;
+    assert_eq!(g_out.len(), 2 * n, "g_out must have length 2n");
+    let g_h = g_out[..n].to_vec();
+    let g_q: Vec<f32> = (0..n).map(|i| g_out[n + i] * c.in_stage[i]).collect();
+    let g_mc: Vec<f32> = (0..n).map(|i| g_out[n + i] * keep_of(c.in_stage[i])).collect();
+    (g_h, g_q, g_mc)
+}
+
+/// The gradients of the seven parents.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct HourGrads {
+    pub n: Vec<f32>,
+    pub q: Vec<f32>,
+    pub p: Vec<f32>,
+    pub h_t: Vec<f32>,
+    pub q_t: Vec<f32>,
+    pub q_next_mc: Vec<f32>,
+    pub q_prime: Vec<f32>,
+}
+
+/// BH2 and BH3.
+#[doc(hidden)]
+pub fn prologue_backward_host(
+    c: &StageOpConsts,
+    hour: &HourHost,
+    acc: &HourAcc,
+    g_h0: &[f32],
+    g_q0: &[f32],
+    g_qmc_direct: &[f32],
+) -> HourGrads {
+    let n = c.n;
+    // BH2
+    let g_i_t: Vec<f32> = (0..n).map(|i| acc.i_t[i] - acc.i_delta[i]).collect();
+    let mut g_q_t = g_q0.to_vec();
+    let mut g_mc = g_qmc_direct.to_vec();
+    for k in 0..c.nnz {
+        g_q_t[c.col[k]] += g_i_t[c.row[k]] * c.adj_mc[k];
+        g_mc[c.col[k]] += acc.i_delta[c.row[k]] * c.adj_mc[k];
+    }
+    // BH3
+    let g_qp: Vec<f32> = (0..n).map(|i| acc.qp[i] * c.in_stage[i]).collect();
+    let g_n: Vec<f32> = (0..n)
+        .map(|i| {
+            let g_n_eff = acc.n_eff[i] + 2.0 * hour.n_eff[i] * acc.n2[i];
+            if c.has_table {
+                g_n_eff * keep_of(c.t_mask[i])
+            } else {
+                g_n_eff
+            }
+        })
+        .collect();
+    HourGrads {
+        n: g_n,
+        q: acc.q_eps.clone(),
+        p: acc.p.clone(),
+        h_t: g_h0.to_vec(),
+        q_t: g_q_t,
+        q_next_mc: g_mc,
+        q_prime: g_qp,
+    }
+}
+
 // -------------------------------------------------------------- dispatch
 
 #[doc(hidden)]
@@ -1237,6 +1579,307 @@ pub(crate) fn dispatch_stage_epilogue(
     stage_epilogue_host(c, hour, qc)
 }
 
+// ------------------------------------------------- backward dispatch (16c)
+
+macro_rules! cuda_guard {
+    ($use_cuda:expr) => {
+        if $use_cuda {
+            unimplemented!("{}", CUDA_TODO)
+        }
+    };
+}
+
+pub(crate) fn dispatch_stage_output_backward(
+    c: &StageOpConsts,
+    g_out: &[f32],
+    use_cuda: bool,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    cuda_guard!(use_cuda);
+    output_backward_host(c, g_out)
+}
+
+pub(crate) fn dispatch_stage_readout_backward(
+    c: &StageOpConsts,
+    h: &[f32],
+    asm: &Assembled,
+    dh: &[f32],
+    g_h_new: &[f32],
+    g_q_new: &[f32],
+    use_cuda: bool,
+) -> ReadoutGrads {
+    cuda_guard!(use_cuda);
+    readout_backward_host(c, h, asm, dh, g_h_new, g_q_new)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_stage_assemble_backward(
+    c: &StageOpConsts,
+    hour: &HourHost,
+    s: usize,
+    h: &[f32],
+    qc: &[f32],
+    asm: &Assembled,
+    rg: &ReadoutGrads,
+    g_r: &[f32],
+    g_a_values: &[f32],
+    acc: &mut HourAcc,
+    use_cuda: bool,
+) -> (Vec<f32>, Vec<f32>) {
+    cuda_guard!(use_cuda);
+    assemble_backward_impl(c, hour, s, h, qc, asm, rg, g_r, g_a_values, acc, use_cuda)
+}
+
+pub(crate) fn dispatch_stage_prologue_backward(
+    c: &StageOpConsts,
+    hour: &HourHost,
+    acc: &HourAcc,
+    g_h0: &[f32],
+    g_q0: &[f32],
+    g_qmc_direct: &[f32],
+    use_cuda: bool,
+) -> HourGrads {
+    cuda_guard!(use_cuda);
+    prologue_backward_host(c, hour, acc, g_h0, g_q0, g_qmc_direct)
+}
+
+// One dispatch fn per 16b/16c block adjoint, so every per-reach loop of the
+// backward sits behind a `use_cuda` arm (the GPU-ready rule).
+
+pub(crate) fn dispatch_rhs_backward(c: &StageOpConsts, asm: &Assembled, g_r: &[f32], use_cuda: bool) -> RhsGrads {
+    cuda_guard!(use_cuda);
+    rhs_backward_host(c, asm, g_r)
+}
+
+pub(crate) fn dispatch_matrix_backward(c: &StageOpConsts, g_a_values: &[f32], use_cuda: bool) -> MatrixGrads {
+    cuda_guard!(use_cuda);
+    matrix_backward_host(c, g_a_values)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_control_backward(
+    c: &StageOpConsts,
+    dt_s: f32,
+    h: &[f32],
+    p: &[f32],
+    q_eps: &[f32],
+    n_eff: &[f32],
+    depth: &[f32],
+    store: &SectionHost,
+    d_s: &[f32],
+    o: &ControlOut,
+    bar: &ControlBar,
+    use_cuda: bool,
+) -> ControlGrads {
+    cuda_guard!(use_cuda);
+    control_backward_host(c, dt_s, h, p, q_eps, n_eff, depth, store, d_s, o, bar)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_newton_backward(
+    c: &StageOpConsts,
+    dt_s: f32,
+    h: &[f32],
+    qc: &[f32],
+    n2: &[f32],
+    dep: &DepthOut,
+    edge: &SectionHost,
+    o: &NewtonOut,
+    bar: &NewtonBar,
+    use_cuda: bool,
+) -> NewtonGrads {
+    cuda_guard!(use_cuda);
+    newton_backward_host(c, dt_s, h, qc, n2, dep, edge, o, bar)
+}
+
+pub(crate) fn dispatch_section_backward(
+    c: &StageOpConsts,
+    p: &[f32],
+    q_eps: &[f32],
+    d: &[f32],
+    s: &SectionHost,
+    bar: &SectionBar,
+    use_cuda: bool,
+) -> SectionGrads {
+    cuda_guard!(use_cuda);
+    section_backward_host(c, p, q_eps, d, s, bar)
+}
+
+pub(crate) fn dispatch_depth_backward(
+    c: &StageOpConsts,
+    h: &[f32],
+    dep: &DepthOut,
+    g_depth: &[f32],
+    g_d_edge: &[f32],
+    g_h_down: &[f32],
+    use_cuda: bool,
+) -> Vec<f32> {
+    cuda_guard!(use_cuda);
+    depth_backward_host(c, h, dep, g_depth, g_d_edge, g_h_down)
+}
+
+/// The hour backward: BH0, then for `s = S-1..0` the rematerialized assembly,
+/// the readout adjoint, the solve adjoint (`CsrSolveOp` rule on both halves, as
+/// in `TreeSolveOp::backward`) and the assembly adjoint; then BH2 and BH3.
+/// Loops over substeps only.
+#[doc(hidden)]
+pub fn stage_hour_backward(
+    c: &StageOpConsts,
+    pattern: &CsrPattern,
+    hour: &HourHost,
+    subs: &[SubstepSaved],
+    g_out: &[f32],
+    use_cuda: bool,
+) -> HourGrads {
+    let (mut g_h, mut g_q, g_mc) = dispatch_stage_output_backward(c, g_out, use_cuda);
+    let mut acc = HourAcc::default();
+    for s in (0..subs.len()).rev() {
+        let sv = &subs[s];
+        let asm = dispatch_stage_assemble(c, hour, s, &sv.h, &sv.qc, use_cuda);
+        let rg = dispatch_stage_readout_backward(c, &sv.h, &asm, &sv.dh, &g_h, &g_q, use_cuda);
+        // g = A^{-T} ḡdh: Uᵀ z = ḡdh, then Lᵀ g = z, on the saved factors.
+        let z = dispatch_ut_solve(pattern, &sv.factors.u_values, &rg.dh, use_cuda);
+        let g_r = dispatch_lt_solve(pattern, &sv.factors.l_values, &z, use_cuda);
+        let g_a = dispatch_grad_a(pattern, &g_r, &sv.dh, use_cuda);
+        let (nh, nq) = dispatch_stage_assemble_backward(
+            c, hour, s, &sv.h, &sv.qc, &asm, &rg, &g_r, &g_a, &mut acc, use_cuda,
+        );
+        g_h = nh;
+        g_q = nq;
+    }
+    dispatch_stage_prologue_backward(c, hour, &acc, &g_h, &g_q, &g_mc, use_cuda)
+}
+
+// ------------------------------------------------------------------ the op
+
+/// Saved state of one routing hour. Everything is behind an `Arc`, so a clone
+/// onto the tape is a refcount bump.
+#[derive(Clone, Debug)]
+pub(crate) struct StageTimestepState {
+    consts: Arc<StageOpConsts>,
+    pattern: Arc<CsrPattern>,
+    hour: Arc<HourHost>,
+    subs: Arc<Vec<SubstepSaved>>,
+    use_cuda: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct StageTimestepOp;
+
+impl<B: Backend + 'static> Backward<B, 7> for StageTimestepOp
+where
+    B::FloatTensorPrimitive: 'static,
+{
+    type State = StageTimestepState;
+
+    fn backward(self, ops: Ops<Self::State, 7>, grads: &mut Gradients, _checkpointer: &mut Checkpointer) {
+        let StageTimestepState { consts, pattern, hour, subs, use_cuda } = ops.state;
+        let [p_n, p_q, p_p, p_ht, p_qt, p_mc, p_qp] = ops.parents;
+        let grad_out = grads.consume::<B>(&ops.node);
+        let device = B::float_device(&grad_out);
+        let g_out = primitive_to_vec::<B>(grad_out);
+        let g = stage_hour_backward(&consts, &pattern, &hour, &subs, &g_out, use_cuda);
+        let n = consts.n;
+        macro_rules! reg {
+            ($p:expr, $v:expr) => {
+                if let Some(p) = $p {
+                    grads.register::<B>(p.id, B::float_from_data(TensorData::new($v, [n]), &device));
+                }
+            };
+        }
+        reg!(p_n, g.n);
+        reg!(p_q, g.q);
+        reg!(p_p, g.p);
+        reg!(p_ht, g.h_t);
+        reg!(p_qt, g.q_t);
+        reg!(p_mc, g.q_next_mc);
+        reg!(p_qp, g.q_prime);
+    }
+}
+
+/// One routing hour as one autodiff node. Slots: `[n, q_spatial, p_spatial,
+/// h_t, q_t, q_next_mc, q_prime_t]`. The `[2n]` output is `[h_end, q_next]`;
+/// the host side outputs come back in `HourForward` (its `subs` is empty).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_timestep<I: Backend + 'static>(
+    consts: &Arc<StageOpConsts>,
+    pattern: &Arc<CsrPattern>,
+    n: Tensor<Autodiff<I>, 1>,
+    q_spatial: Tensor<Autodiff<I>, 1>,
+    p_spatial: Tensor<Autodiff<I>, 1>,
+    h_t: Tensor<Autodiff<I>, 1>,
+    q_t: Tensor<Autodiff<I>, 1>,
+    q_next_mc: Tensor<Autodiff<I>, 1>,
+    q_prime_t: Tensor<Autodiff<I>, 1>,
+    b0: f32,
+    b1: f32,
+    use_cuda: bool,
+) -> (Tensor<Autodiff<I>, 1>, HourForward)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let float = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
+        TensorPrimitive::Float(a) => a,
+        TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+    };
+    let (a_n, a_q, a_p, a_h, a_qt, a_mc, a_qp) = (
+        float(n),
+        float(q_spatial),
+        float(p_spatial),
+        float(h_t),
+        float(q_t),
+        float(q_next_mc),
+        float(q_prime_t),
+    );
+    let device = I::float_device(&a_n.primitive);
+    // `prepare` before the forward: the forward saves state only when tracked.
+    let kind = StageTimestepOp
+        .prepare::<NoCheckpointing>([
+            a_n.node.clone(),
+            a_q.node.clone(),
+            a_p.node.clone(),
+            a_h.node.clone(),
+            a_qt.node.clone(),
+            a_mc.node.clone(),
+            a_qp.node.clone(),
+        ])
+        .compute_bound()
+        .stateful();
+    let save = matches!(kind, OpsKind::Tracked(_));
+    let (n_h, q_h, p_h) = (
+        primitive_to_vec::<I>(a_n.primitive),
+        primitive_to_vec::<I>(a_q.primitive),
+        primitive_to_vec::<I>(a_p.primitive),
+    );
+    let (h_h, qt_h, mc_h, qp_h) = (
+        primitive_to_vec::<I>(a_h.primitive),
+        primitive_to_vec::<I>(a_qt.primitive),
+        primitive_to_vec::<I>(a_mc.primitive),
+        primitive_to_vec::<I>(a_qp.primitive),
+    );
+    let hour = dispatch_stage_prologue(consts, &n_h, &q_h, &p_h, &qt_h, &mc_h, &qp_h, b0, b1, use_cuda);
+    let mut fwd = stage_hour_forward(consts, pattern, &hour, &h_h, &qt_h, save, use_cuda);
+    let nn = consts.n;
+    let out = I::float_from_data(
+        TensorData::new([fwd.h_end.as_slice(), fwd.q_out.as_slice()].concat(), [2 * nn]),
+        &device,
+    );
+    let result = match kind {
+        OpsKind::Tracked(prep) => {
+            let state = StageTimestepState {
+                consts: consts.clone(),
+                pattern: pattern.clone(),
+                hour: Arc::new(hour),
+                subs: Arc::new(std::mem::take(&mut fwd.subs)),
+                use_cuda,
+            };
+            prep.finish(state, out)
+        }
+        OpsKind::UnTracked(prep) => prep.finish(out),
+    };
+    (Tensor::from_primitive(TensorPrimitive::Float(result)), fwd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1247,6 +1890,20 @@ mod tests {
         let c = StageOpConsts { n: 1, in_stage: vec![1.0], ..Default::default() };
         let hour = HourHost { q_next_mc: vec![0.0], ..Default::default() };
         let _ = dispatch_stage_epilogue(&c, &hour, &[1.0], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "stage_routing CUDA path: Phase G")]
+    fn backward_dispatch_cuda_branch_is_unimplemented() {
+        let c = StageOpConsts { n: 1, in_stage: vec![1.0], ..Default::default() };
+        let _ = dispatch_stage_output_backward(&c, &[0.0, 0.0], true);
+    }
+
+    #[test]
+    fn output_backward_splits_the_discharge_cotangent() {
+        let c = StageOpConsts { n: 2, in_stage: vec![1.0, 0.0], ..Default::default() };
+        let (gh, gq, gmc) = dispatch_stage_output_backward(&c, &[1.0, 2.0, 3.0, 4.0], false);
+        assert_eq!((gh, gq, gmc), (vec![1.0, 2.0], vec![3.0, 0.0], vec![0.0, 4.0]));
     }
 
     #[test]

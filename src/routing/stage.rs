@@ -10,16 +10,14 @@ use std::sync::Arc;
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive};
+use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::DownstreamBoundary;
 use crate::data::store::ChannelGeometryRows;
 use crate::geometry::{compute_trapezoidal_geometry, trapezoid_depth_derivatives, trapezoid_from_depth};
-use crate::routing::stage_op::{
-    dispatch_stage_prologue, stage_hour_forward, Assembled, StageOpConsts,
-};
+use crate::routing::stage_op::{stage_timestep, Assembled, StageOpConsts};
 use crate::sparse::tree_lu::{assert_tree, tree_lu_solve};
-use crate::sparse::{primitive_to_vec, CsrPattern, SparseAdjacency};
+use crate::sparse::{CsrPattern, SparseAdjacency};
 
 const SECONDS_PER_DAY: f32 = 86_400.0;
 
@@ -1165,8 +1163,8 @@ where
         out
     }
 
-    /// One routing hour through the fused host forward (Task 16a): forward
-    /// only, the output is untracked. Same arguments and result as
+    /// One routing hour through the fused op (Task 16c): one autodiff node
+    /// with a hand-written backward. Same arguments and result as
     /// `step_reference`.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
@@ -1203,18 +1201,12 @@ where
             (0.0, 0.0)
         };
         let consts = self.op_consts(pattern);
-        let host = |t: Tensor<Ad<I>, 1>| -> Vec<f32> {
-            match t.into_primitive() {
-                TensorPrimitive::Float(a) => primitive_to_vec::<I>(a.primitive),
-                TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
-            }
-        };
-        let (n_h, q_h, p_h) = (host(n_man), host(q), host(p));
-        let (h_h, qt_h, mc_h, qp_h) = (host(h_t), host(q_t), host(q_next_mc), host(q_prime_t));
-        let hour = dispatch_stage_prologue(&consts, &n_h, &q_h, &p_h, &qt_h, &mc_h, &qp_h, b0, b1, pr.use_cuda);
-        let fwd = stage_hour_forward(&consts, pattern, &hour, &h_h, &qt_h, false, pr.use_cuda);
-        let h_end = Tensor::<Ad<I>, 1>::from_floats(fwd.h_end.as_slice(), &device);
-        let q_out = Tensor::<Ad<I>, 1>::from_floats(fwd.q_out.as_slice(), &device);
+        let nn = self.net.n;
+        let (out, fwd) = stage_timestep::<I>(
+            &consts, pattern, n_man, q, p, h_t, q_t, q_next_mc, q_prime_t, b0, b1, pr.use_cuda,
+        );
+        let h_end = out.clone().slice([0..nn]);
+        let q_out = out.slice([nn..2 * nn]);
         // Epilogue.
         self.acc = self.acc.clone() + Tensor::<I, 1>::from_floats(fwd.mass, &device);
         self.steps += 1;
