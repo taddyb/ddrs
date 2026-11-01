@@ -10,12 +10,14 @@ use std::sync::Arc;
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData};
+use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive};
 
 use crate::config::DownstreamBoundary;
 use crate::data::store::ChannelGeometryRows;
 use crate::geometry::{compute_trapezoidal_geometry, trapezoid_depth_derivatives, trapezoid_from_depth};
+use crate::routing::stage_cuda::StageOpConstsDev;
 use crate::routing::stage_op::{stage_timestep, Assembled, StageOpConsts};
+use crate::sparse::cube_buf::into_cube;
 use crate::sparse::tree_lu::{assert_tree, tree_lu_solve};
 use crate::sparse::{CsrPattern, SparseAdjacency};
 
@@ -411,6 +413,8 @@ pub struct StageBlock<I: Backend> {
     last_host: Option<Assembled>,
     /// Host copy of the constants for the fused op; cleared when the table or the slots change.
     op_consts: Option<Arc<StageOpConsts>>,
+    /// Device copy of `op_consts`; cleared with it.
+    op_consts_dev: Option<Arc<StageOpConstsDev>>,
     reference_step: bool,
     record: bool,
     coeff_record: Vec<(Vec<f32>, Vec<f32>)>,
@@ -509,6 +513,7 @@ where
             last_coeffs: None,
             last_host: None,
             op_consts: None,
+            op_consts_dev: None,
             reference_step: false,
             record: false,
             coeff_record: Vec::new(),
@@ -605,6 +610,7 @@ where
             }
         }
         self.op_consts = None;
+        self.op_consts_dev = None;
         let device = self.c.z_mid.device();
         self.net.z_mid = bed;
         self.c.z_mid = f32_tensor::<I>(&self.net.z_mid, &device);
@@ -797,6 +803,7 @@ where
             }
         }
         self.op_consts = None;
+        self.op_consts_dev = None;
         let nnz = pattern.nnz();
         assert_eq!(pattern.n, self.net.n, "pattern and stage network differ in size");
         assert_eq!(self.net.adj_stage_to_stage.len(), nnz, "pattern and stage masks differ in nnz");
@@ -1178,6 +1185,24 @@ where
         let out = Arc::new(out);
         self.op_consts = Some(out.clone());
         out
+    }
+
+    /// Device copy of `op_consts`, cached and cleared with it. Panics unless
+    /// the block's backend is `Cuda<f32, i32>`.
+    #[doc(hidden)]
+    pub fn op_consts_dev(&mut self, pattern: &Arc<CsrPattern>) -> Arc<StageOpConstsDev> {
+        let host = self.op_consts(pattern);
+        if let Some(d) = &self.op_consts_dev {
+            return d.clone();
+        }
+        let prim = match self.c.z_mid.clone().inner().into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+        };
+        let like = into_cube::<I>(prim);
+        let dev = Arc::new(StageOpConstsDev::upload(&host, pattern, &like));
+        self.op_consts_dev = Some(dev.clone());
+        dev
     }
 
     /// One routing hour through the fused op: one autodiff node
