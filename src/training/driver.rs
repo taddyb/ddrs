@@ -910,7 +910,8 @@ mod tests {
 
     /// One `run_micro_batch` on the Juniata bundle with `tidal_filter` set to
     /// `tidal` (`None` leaves the key out). Returns the loss and whether the
-    /// backward pass gives a finite gradient on the head.
+    /// gradient of the head's output weight is finite with at least one
+    /// non-zero element.
     fn one_batch(tidal: Option<&str>, tag: &str) -> (f32, bool) {
         let mut yaml = std::fs::read_to_string(STAGE_YAML).unwrap();
         if let Some(t) = tidal {
@@ -949,24 +950,33 @@ mod tests {
         .unwrap()
         .expect("the gauge has observations");
         let grads = out.loss.backward();
-        let g = GradientsParams::from_grads(grads, &head);
-        let _ = g;
-        (out.loss_f32, out.loss_f32.is_finite())
+        let gw: Vec<f32> = head
+            .output
+            .weight
+            .val()
+            .grad(&grads)
+            .expect("the head output weight has a gradient")
+            .into_data()
+            .to_vec()
+            .unwrap();
+        let grad_ok = gw.iter().all(|v| v.is_finite()) && gw.iter().any(|v| *v != 0.0);
+        (out.loss_f32, grad_ok)
     }
 
     #[test]
     fn tidal_filter_none_parses_as_absent_in_training() {
-        let (absent, ok_a) = one_batch(None, "absent");
-        let (none, ok_n) = one_batch(Some("none"), "none");
-        assert!(ok_a && ok_n);
+        let (absent, grad_a) = one_batch(None, "absent");
+        let (none, grad_n) = one_batch(Some("none"), "none");
+        assert!(grad_a && grad_n, "control: the off path must give a real head gradient");
         assert_eq!(absent.to_bits(), none.to_bits());
     }
 
     #[test]
     fn training_loss_applies_the_filter() {
-        let (none, _) = one_batch(Some("none"), "n2");
-        let (godin, finite) = one_batch(Some("godin"), "g2");
-        assert!(finite, "godin loss {godin}");
+        let (none, grad_none) = one_batch(Some("none"), "n2");
+        let (godin, grad_godin) = one_batch(Some("godin"), "g2");
+        assert!(grad_none, "control: off path head gradient");
+        assert!(grad_godin, "godin path: head gradient must be finite and non-zero (loss {godin})");
         assert_ne!(none.to_bits(), godin.to_bits(), "godin must change the loss");
     }
 }
