@@ -684,7 +684,7 @@ fn use_cuda_on_a_cpu_backend_falls_back_bitwise() {
 // Gradient parity of the fused op against Burn autodiff of
 // `step_reference`, and a central-difference gradcheck of the op.
 //
-// Gradient bar (overview 16.6): per entry `|g_f - g_r| <= 1e-4 max(|g_f|, |g_r|)`
+// Gradient bar: per entry `|g_f - g_r| <= 1e-4 max(|g_f|, |g_r|)`
 // or `<= 1e-6 max(1, max_j |g_r,j|)` per parent. Loss
 // `L = sum_t sum_i w[t][i] q_next[t][i] + sum_i v_i (h_end_i - z_mid_i)`, with
 // `w` and `v` seeded uniform in [0.5, 1.5].

@@ -149,7 +149,7 @@ pub fn tree_lu_grad_a_host(pattern: &CsrPattern, grad_b: &[f32], x: &[f32]) -> V
     out
 }
 
-/// Panic text of the CUDA arms until Phase G fills them in.
+/// Panic text of the CUDA arms until the CUDA path exists.
 pub(crate) const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
 
 // =================================================================================

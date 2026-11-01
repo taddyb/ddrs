@@ -1,5 +1,5 @@
-//! CUDA arm of the fused stage op. Stub until Task 5 of Phase G (changed
-//! there, removed in Task 8).
+//! CUDA arm of the fused stage op. Stub until the device stage step exists; the
+//! real CPU/CUDA parity tests replace it.
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;

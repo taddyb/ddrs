@@ -13,9 +13,9 @@
 //! [`stage_timestep`] (and `tree_lu_solve` in `src/sparse/tree_lu.rs`) pick the
 //! backend once, on `effective_use_cuda`. The host block fns in this file are
 //! the CPU path and the reference for the device mirrors. The device arms live
-//! in `src/routing/stage_cuda/` (from Task 4 of Phase G). The orchestration
+//! in the CUDA kernels for the stage op, once they exist. The orchestration
 //! fns [`stage_hour_forward`] and [`stage_hour_backward`] loop over substeps
-//! only and call the host fns directly. Until Phase G fills it in, the CUDA arm
+//! only and call the host fns directly. Until the CUDA path exists, the CUDA arm
 //! is `unimplemented!`. `use_cuda: true` on a backend that is not CUDA falls
 //! back to the host path.
 //!
@@ -777,7 +777,7 @@ pub fn stage_readout_host(
 //
 // The adjoints of the elementwise blocks (B1 to B4), one loop over reaches
 // each. These are the CPU path; the device mirrors are chosen at the op. Masks use the
-// forward line's comparison (overview 16.5). An empty cotangent Vec is zeros.
+// forward line's comparison (see the tie table in the module doc). An empty cotangent Vec is zeros.
 
 /// `v[i]`, or 0.0 for an empty cotangent Vec.
 #[inline]
@@ -1351,7 +1351,7 @@ fn add_into(acc: &mut [f32], x: &[f32]) {
     }
 }
 
-/// B6 to B1 for substep `s`, composed from the 16b fns. Adds into `acc`.
+/// B6 to B1 for substep `s`, composed from the block adjoints `rhs_backward_host`, `matrix_backward_host`, `control_backward_host`, `newton_backward_host`, `section_backward_host` and `depth_backward_host`. Adds into `acc`.
 /// Returns `(ḡh, ḡQ)` of the substep's start state.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]

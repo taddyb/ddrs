@@ -1,5 +1,5 @@
-//! CUDA arm of `tree_lu_solve`. Stub until Task 3 of Phase G; this file's stub
-//! test is removed in Task 3.
+//! CUDA arm of `tree_lu_solve`. Stub until the device solve exists; the real
+//! device parity tests replace the stub test.
 #![cfg(feature = "cuda")]
 
 use std::sync::Arc;
