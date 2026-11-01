@@ -53,22 +53,6 @@ It trains the bundle with `examples/juniata/ddrs_stage.yaml` (stage block on,
 (rel <= 1e-4, N > 0, gross > 0; a block that never ran prints `no steps` and fails).
 It reads `run.log`, so it needs `--nocapture`.
 
-Hudson tidal example, local only (not in CI), release-only (about 150 s on CPU,
-about 2 GB):
-
-```bash
-cargo test --release --test hudson_acceptance -- --nocapture
-```
-
-It trains `examples/hudson/ddrs_mc_only.yaml` and `ddrs.yaml` (stage block,
-Godin filter at Poughkeepsie), computes per-gauge NSE/KGE from
-`eval/predictions.zarr` and joins them to the baseline by gauge id. It asserts
-`n_gauges_total` 4, `n_gauges_finite_nse` 3, a NaN harbor pseudo-gauge, stage
-Poughkeepsie NSE above the baseline and >= 0.26 / KGE >= 0.58 (measured 0.308 /
-0.625), Green Island within 0.02 of MC, and the `run.log` stage lines. Eval runs
-as one 2600-day chunk (`testing.batch_size`); 15-day chunks leak into the Godin
-filter. Run it by hand before a merge that touches the stage or filter paths.
-
 ```bash
 cargo test --release --test juniata_acceptance -- --nocapture   # ~53 s after build (3 trainings)
 ```
@@ -102,6 +86,28 @@ The gridded (DDM30) twin on `examples/juniata_gridded/`: floors NSE ≥ 0.70 /
 KGE ≥ 0.69 (seed-42 reference 0.751 / 0.730; seeds {42, 7, 123} span
 0.744–0.758 / 0.728–0.732), baseline NSE ∈ [0.57, 0.62] (deterministic 0.594,
 matches DDR). The baseline band is the one that catches a wrong `Qr` axis order.
+
+### Acceptance: Hudson tidal example
+
+Local only (not in CI), release-only (about 150 s on CPU, about 2 GB):
+
+```bash
+cargo test --release --test hudson_acceptance -- --nocapture
+cargo test --release --test hudson_stage -- --nocapture
+```
+
+`hudson_acceptance` trains `examples/hudson/ddrs_mc_only.yaml` and `ddrs.yaml`
+(stage block, Godin filter at Poughkeepsie), computes per-gauge NSE/KGE from
+`eval/predictions.zarr` and joins them to the baseline by gauge id. It asserts
+`n_gauges_total` 4, `n_gauges_finite_nse` 3, a NaN harbor pseudo-gauge, stage
+Poughkeepsie NSE above the baseline and >= 0.26 / KGE >= 0.58 (measured 0.308 /
+0.625), Green Island within 0.02 of MC, the `run.log` stage lines, and a single
+eval chunk (`chunk 1/1:`). Eval runs as one 2600-day chunk
+(`testing.batch_size`). 15-day chunks leak into the Godin filter, and eval prints
+a warning when godin is on with more than one chunk. `hudson_stage` also asserts
+the Poughkeepsie M2 stage amplitude is above 0.2 m. `hudson_bundle` runs in CI.
+Run the release tests by hand before a merge that touches the stage or filter
+paths.
 
 ### Tier B — KAN head
 `src/nn/`, `Cargo.toml` rskan tag

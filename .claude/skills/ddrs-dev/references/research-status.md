@@ -978,8 +978,15 @@ censuses**; that mismatch is exactly what produced the withdrawn 0.700-against-0
 Battery water-level boundary, scored at Poughkeepsie against USGS 72137 (Godin
 filtered in training and eval). On the fallback uniform geometry, seed 42, the
 stage run reaches Poughkeepsie NSE 0.308 / KGE 0.625 against MC-only 0.145 /
-0.604 and the summed-Q' baseline 0.144 / 0.560. Green Island and Croton do not
-change. The 14.77 day amplitude ratio (model over observed) is 0.96 for stage
+0.604 and the summed-Q' baseline 0.144 / 0.5605. Green Island and Croton do not
+change. Only the stage run gets the Godin filter. Control: MC with Godin
+applied at eval only gives Poughkeepsie 0.174 / 0.616 (Green Island
+0.793 / 0.886, Croton 0.819 / 0.849), so about 0.13 of the 0.16 NSE gain is
+the stage block and about 0.03 is the filter. Evidence limits: one seed (42),
+one tidal gauge, and 30 epochs with 4 gauges and `batch_size` 4 is 30 optimizer
+steps, so the head is not converged. The Battery boundary for Feb to May 2004
+is filled (tide plus an interpolated residual, no surge), and 217 hours of
+Nov 2003 are predictions plus an anchored residual. The 14.77 day amplitude ratio (model over observed) is 0.96 for stage
 and 0.54 for MC. Eval must run as one chunk: a 15-day chunk seam leaks into the
 71 h Godin filter (up to 125 m3/s daily at Poughkeepsie). The tide shape is
 unasserted until real bathymetry replaces the fallback. Test:

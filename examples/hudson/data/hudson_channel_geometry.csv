@@ -3,9 +3,11 @@
 # PLACEHOLDER: every row is the uniform fallback, not a survey. Rectangle 1000 m
 # wide, bed -10.0 m NAVD88, Manning n 0.022 (tag fallback_uniform). Real
 # bathymetry (NOAA ENC soundings or the Hudson River Estuary multibeam survey)
-# replaces it later; chart soundings are MLLW, convert to NAVD88 with the NOAA
-# Battery datum (MLLW is 0.844 m below NAVD88). The tide-shape check in the
-# tests stays off while any row carries a source tag.
+# replaces it later; chart soundings are MLLW, convert to NAVD88 with the offset
+# of the nearest station or with VDatum. The offset differs along the river:
+# Battery 0.84 m, Haverstraw 0.50 m, Albany 0.55 m. Do not use the Battery
+# value for all reaches. The tide-shape check in the tests stays off while any
+# row has a source tag that starts with fallback.
 # anchor_elevation_m in ddrs.yaml equals the outlet row's bed_z_m (-10.0).
 COMID,top_width_m,bed_z_m,n,source
 73001655,1000,-10.0,0.022,fallback_uniform

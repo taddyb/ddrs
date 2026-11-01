@@ -23,7 +23,8 @@ data_sources:
   attributes: examples/hudson/data/hudson_attributes.nc
   conus_adjacency: examples/hudson/data/hudson_conus_adjacency.zarr
   gages_adjacency: examples/hudson/data/hudson_gages_adjacency.zarr
-  # Daily Q' from 2001-05-01 (the Battery record starts then).
+  # Daily Q' from 2001-05-01. The hourly Battery product has a 4-month outage
+  # from 2001-01-01 to 2001-04-30, so the stores start 2001-05-01.
   streamflow: examples/hudson/data/hudson_qprime.ic
   # USGS daily discharge; Poughkeepsie is the merged 72137 series.
   observations: examples/hudson/data/hudson_obs.ic
@@ -84,14 +85,14 @@ params:
   # convention; matches DDR's tau: 9).
   tau: 9
   # Corrected physics (trapezoid-exact celerity β, Cunge-matched X, own-reach
-  # gauge readout) is the default — the same physics as DDR's Juniata example
+  # gauge readout) is the default, the same physics as DDR's Juniata example
   # since DDR PR #192.
   # CPU-friendly: no CUDA requirement anywhere in the sample.
   sparse_solver: cpu
   use_cuda_graphs: false
 
 # Evaluation overlay (2012-10-01 to 2019-08-31, inside the 72137 record).
-# CAUTION — batch_size changes meaning: GAUGES in training, DAYS here.
+# CAUTION: batch_size changes meaning: GAUGES in training, DAYS here.
 # 2600 days covers the whole test period (2,526 days) in ONE eval chunk. A 15-day
 # chunk seam leaks into the 71 h Godin filter at Poughkeepsie (see the README).
 testing:
