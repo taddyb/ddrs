@@ -25,8 +25,9 @@ cargo test --test leakance_reference_match  # the only DDR anchor leakance has
 cargo test --test reservoir_override    # the plain timestep op carries S19''/B19''
 # Stage routing (src/routing/stage*): the stage tests below
 cargo test --test stage_analytic --test stage_boundary_store --test stage_network \
-  --test stage_off_parity --test stage_option_c --test stage_roughness --test stage_step \
-  --test juniata_stage --test juniata_stage_diag \
+  --test stage_off_parity --test stage_option_c --test stage_step \
+  --test juniata_stage --test juniata_stage_diag --test juniata_bundle \
+  --test channel_geometry --test tree_lu --test tree_lu_gradcheck \
   --test stage_op_parity --test stage_op_adjoint --test stage_op_tape
 ```
 
@@ -39,7 +40,7 @@ form (per-reach table, PNG, `DDRS_FORCE_GRAPHS` GPU path).
 
 ### Acceptance — end-to-end metric floors (Juniata)
 
-Stage routing has its own acceptance test, release-only (about 14 min on CPU):
+Stage routing has its own acceptance test, release-only (about 36 s on CPU):
 
 ```bash
 cargo test --release --test juniata_stage_acceptance -- --nocapture
@@ -48,8 +49,9 @@ cargo test --release --test juniata_stage_acceptance -- --nocapture
 It trains the bundle with `examples/juniata/ddrs_stage.yaml` (stage block on,
 `theta: 1.0`, all 213 reaches). It asserts routed NSE >= 0.75 and KGE >= 0.84
 (seed-42 reference 0.7928 / 0.8808), NSE above the summed-Q' baseline, and the
-`stage routing:` and `stage mass balance: rel` log lines (rel <= 1e-4). It
-reads `run.log`, so it needs `--nocapture`.
+`stage routing:` and `stage mass balance: rel ... over N steps, gross ...` log lines
+(rel <= 1e-4, N > 0, gross > 0; a block that never ran prints `no steps` and fails).
+It reads `run.log`, so it needs `--nocapture`.
 
 ```bash
 cargo test --release --test juniata_acceptance -- --nocapture   # ~53 s after build (3 trainings)

@@ -241,10 +241,10 @@ Three matched CONUS arms off the 500-update `nse-batch` baseline, all on 2,365 g
 
 ## Stage routing on Juniata (2026-10-31)
 
-Stage routing (`stage:` config block, `src/routing/stage*`) solves for water depth instead of discharge. The
+Stage routing (`params.stage_routing` config block, `src/routing/stage*`) solves for water depth instead of discharge. The
 Juniata bundle trains and tests with it (`examples/juniata/ddrs_stage.yaml`, `theta: 1.0`, `normal_depth` outlet,
 all 213 reaches, seed 42, CPU). Result: median NSE 0.7928 / KGE 0.8808 against the summed-Q' baseline 0.6947 /
-0.8192, and mass balance rel 5.3e-9. The committed Muskingum-Cunge result is 0.7903 / 0.8810. Wall time is about
+0.8192, and mass balance rel under 1e-8 (5.85e-9 with the fused op). The committed Muskingum-Cunge result is 0.7903 / 0.8810. Wall time is about
 36 s against about 21 s for Muskingum-Cunge (about 1.7x). It was 853 s before `StageBlock::step` switched to the fused
 op `StageTimestepOp` (src/routing/stage_op.rs). A rho 90 mini-batch is 2.05x Muskingum-Cunge (was 65x), 3.8x at
 `substeps: 4`. The tape holds 3 autodiff nodes per hour instead of 334 (1297 at `substeps: 4`).

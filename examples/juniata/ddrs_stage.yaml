@@ -1,20 +1,20 @@
 # Juniata single-catchment sample, stage-routing variant of ddrs.yaml.
-# Juniata single-catchment sample — the ddrs mirror of DDR's
-# examples/juniata (DeepGroundwater/ddr PR #193).
+# Juniata single-catchment sample, based on DDR's examples/juniata
+# (DeepGroundwater/ddr PR #193).
 #
-# One gauge: Juniata River at Newport, PA (USGS 01567000, 8,657 km²,
+# One gauge: Juniata River at Newport, PA (USGS 01567000, 8,657 km2,
 # 213 MERIT reaches). The 8.9 MB bundle under examples/juniata/data/ is
-# self-contained — no CONUS store, S3, or HPC access required.
+# self-contained. It needs no CONUS store, S3, or HPC access.
 #
-# Run FROM THE REPO ROOT (data paths below are repo-root-relative):
+# Run from the repo root. Data paths below are relative to the repo root.
 #
-#   ddrs --config examples/juniata/ddrs.yaml plan
-#   ddrs --config examples/juniata/ddrs.yaml run --workflow train-and-test --backend cpu
+#   ddrs --config examples/juniata/ddrs_stage.yaml plan
+#   ddrs --config examples/juniata/ddrs_stage.yaml run --workflow train-and-test --backend cpu
 #
 # The workspace (.ddrs/) is created beside this file: examples/juniata/.ddrs/.
 #
-# Hyperparameters mirror DDR's examples/juniata/train_and_test.py::make_config
-# — keep them in sync when comparing against the Python implementation.
+# Hyperparameters mirror DDR's examples/juniata/train_and_test.py::make_config.
+# Keep them in sync when comparing against the Python implementation.
 
 mode: training
 workflow: train-and-test

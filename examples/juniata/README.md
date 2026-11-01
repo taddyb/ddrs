@@ -74,7 +74,7 @@ re-copy `data/` and re-copy the generated statistics JSON.
 
 ## Stage routing
 
-`ddrs_stage.yaml` is the same bundle with the `stage:` block on (`theta: 1.0`,
+`ddrs_stage.yaml` is the same bundle with `params.stage_routing` on (`theta: 1.0`,
 `normal_depth` outlet, all 213 reaches). Measured 2026-10-31, seed 42, CPU,
 `train-and-test`:
 
@@ -84,7 +84,7 @@ re-copy `data/` and re-copy the generated statistics JSON.
 | Muskingum-Cunge (`ddrs.yaml`) | 0.7903 | 0.8810 | about 21 s |
 | Stage routing (`ddrs_stage.yaml`) | 0.7928 | 0.8808 | about 36 s (853 s before the fused stage op) |
 
-Stage mass balance rel 5.3e-9. A rho 90 mini-batch takes 0.54 s with stage routing against 0.26 s with
+Stage mass balance rel is under 1e-8 (5.85e-9 with the fused op). The stage block matches MC skill on this one gauge and one seed; it is not a gain. A rho 90 mini-batch takes 0.54 s with stage routing against 0.26 s with
 Muskingum-Cunge (2.05x; the autodiff step took 17.6 s, 65x). At `substeps: 4` it takes 1.0 s (3.8x). There is no DDR reference for stage routing.
 Gate: `cargo test --release --test juniata_stage_acceptance -- --nocapture`.
 
