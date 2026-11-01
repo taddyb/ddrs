@@ -1,9 +1,9 @@
-//! The fused stage timestep: one autodiff node per routing hour (Task 16).
+//! The fused stage timestep: one autodiff node per routing hour.
 //!
 //! The definition is `StageBlock::step_reference` (`src/routing/stage.rs`).
-//! Forward (16a): every line keeps that step's op order and association, so
-//! the forward is bitwise. Block names (H0 to H5, 1a to 9) follow the Task 16
-//! overview. Adjoints (16b, 16c): hand-written host adjoints of every block
+//! Forward: every line keeps that step's op order and association, so
+//! the forward is bitwise. Block names (H0 to H5, 1a to 9) follow the order
+//! of the blocks in `step_reference`. Adjoints: hand-written host adjoints of every block
 //! (B1 to B8, BH0 to BH3), composed by [`stage_hour_backward`], and the op
 //! [`StageTimestepOp`] (`Backward<B, 7>`, parents `n, q, p, h_t, q_t,
 //! q_next_mc, q'`) built by [`stage_timestep`].
@@ -11,6 +11,8 @@
 //! The CPU branch of each dispatch fn is a plain host loop over reaches or
 //! slots. The CUDA branch is `unimplemented!` (Phase G). The orchestration fns
 //! [`stage_hour_forward`] and [`stage_hour_backward`] loop over substeps only.
+// `!(x < y)` is kept on purpose: with a NaN it is true, as in the Burn ops this file mirrors.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 use std::sync::Arc;
 
@@ -745,9 +747,9 @@ pub fn stage_readout_host(
 
 // ---------------------------------------------------------------- adjoints
 //
-// Task 16b: the adjoints of the elementwise blocks (B1 to B4 of the Task 16
-// overview), one loop over reaches each. These are the CPU branches; the
-// dispatch fns that wrap them with a `use_cuda` arm come in 16c. Masks use the
+// The adjoints of the elementwise blocks (B1 to B4), one loop over reaches
+// each. These are the CPU branches; the dispatch fns below wrap them with a
+// `use_cuda` arm. Masks use the
 // forward line's comparison (overview 16.5). An empty cotangent Vec is zeros.
 
 /// `v[i]`, or 0.0 for an empty cotangent Vec.
@@ -1145,7 +1147,7 @@ pub fn depth_backward_host(
 }
 
 // ---------------------------------------------------------------------------
-// Task 16c: B5 to B8 and the hour adjoints BH0 to BH3. One loop over reaches or
+// Adjoints of blocks B5 to B8 and the hour adjoints BH0 to BH3. One loop over reaches or
 // slots each; the CUDA arms are in the dispatch fns below.
 // ---------------------------------------------------------------------------
 
@@ -1473,7 +1475,6 @@ pub fn prologue_backward_host(
 
 // -------------------------------------------------------------- dispatch
 
-#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_stage_prologue(
     c: &StageOpConsts,

@@ -855,7 +855,7 @@ pub enum StageGeometry {
 pub enum TidalFilter {
     #[default]
     None,
-    /// Not implemented yet (Hudson plan Task 4); rejected at load.
+    /// Not implemented yet; rejected at load.
     Godin,
 }
 
@@ -2268,7 +2268,7 @@ fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
     }
     if s.tidal_filter == TidalFilter::Godin {
         return Err("params.stage_routing: tidal_filter: godin is not implemented yet \
-                    (Hudson plan Task 4)"
+"
             .to_string());
     }
     if !s.enabled {

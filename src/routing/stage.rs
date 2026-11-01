@@ -43,7 +43,7 @@ pub struct StageNetwork {
     pub z_out: Vec<f32>,
     /// `z_out + slope * length / 2` (raw slope, no floor).
     pub z_mid: Vec<f32>,
-    /// `(L_i + L_down)/2`; at a network outlet `L_i / 2` (C21).
+    /// `(L_i + L_down)/2`; at a network outlet `L_i / 2`.
     pub edge_length: Vec<f32>,
     /// Length nnz, 1.0 where the column is MC and the row is stage.
     pub adj_mc_to_stage: Vec<f32>,
@@ -51,7 +51,7 @@ pub struct StageNetwork {
     pub adj_stage_to_stage: Vec<f32>,
     /// Dams inside the stage set.
     pub dam_rows: Vec<usize>,
-    /// Dam residence time in seconds, converted from days (C30).
+    /// Dam residence time in seconds, converted from days.
     pub dam_t_seconds: Vec<f32>,
     /// Reach length in metres (the storage term `D_s` needs it).
     pub length_m: Vec<f32>,
@@ -70,7 +70,7 @@ fn down_of(adj: &SparseAdjacency) -> Vec<i32> {
 }
 
 /// Bed at the downstream end of each reach's edge. The outlet's downstream bed
-/// is `z_out[outlet]`, where `h_bc` sits (C21).
+/// is `z_out[outlet]`, where `h_bc` sits.
 fn z_down_of(net: &StageNetwork) -> Vec<f32> {
     (0..net.n)
         .map(|i| {
@@ -249,16 +249,16 @@ pub struct StageInputs {
     pub anchor_m: f32,
     /// Hourly boundary stage, one value per q' row (`StageBatch::boundary`).
     pub boundary_series: Option<Vec<f32>>,
-    /// Network row of `boundary_comid` (`StageBatch::boundary_row`, C1).
+    /// Network row of `boundary_comid` (`StageBatch::boundary_row`).
     pub boundary_row: Option<usize>,
-    /// Table rows and `strict` (= `geometry == Table`; C17).
+    /// Table rows and `strict` (= `geometry == Table`).
     pub geometry: Option<(ChannelGeometryRows, bool)>,
-    /// `(row, T in days)` of the window's active fixed-table dams (C30).
+    /// `(row, T in days)` of the window's active fixed-table dams.
     pub dams: Vec<(usize, f32)>,
 }
 
 /// The block's state at the end of a chunk, per reach in network order. Only
-/// the stage rows are read back (C9). `q` is the unclamped discharge.
+/// the stage rows are read back. `q` is the unclamped discharge.
 #[derive(Debug, Clone)]
 pub struct StageCarry {
     pub h: Vec<f32>,
@@ -274,16 +274,16 @@ pub struct StageMassBalance {
     pub net_flux_m3: f32,
     /// Volume the depth floor added.
     pub floor_created_m3: f32,
-    /// `sum (|in| + |out| + |q'|) dt_s` (C27).
+    /// `sum (|in| + |out| + |q'|) dt_s`.
     pub gross_flux_m3: f32,
-    /// `sum dt_s (I_start + I_end)/2` over the MC inflow edges (C22).
+    /// `sum dt_s (I_start + I_end)/2` over the MC inflow edges.
     pub mc_inflow_m3: f32,
     /// Routing hours stepped (one per `StageBlock::step` call).
     pub steps: usize,
 }
 
 impl StageMassBalance {
-    /// `|storage_change - net_flux - floor_created| / gross_flux` (C27).
+    /// `|storage_change - net_flux - floor_created| / gross_flux`.
     pub fn rel(&self) -> f32 {
         (self.storage_change_m3 - self.net_flux_m3 - self.floor_created_m3).abs()
             / self.gross_flux_m3.max(f32::MIN_POSITIVE)
@@ -300,7 +300,7 @@ impl StageMassBalance {
     }
 }
 
-/// Coefficients of the last substep, on the inner backend (test hook, C22).
+/// Coefficients of the last substep, on the inner backend (test hook).
 #[doc(hidden)]
 pub struct StageCoefficients<I: Backend> {
     /// `(1 + dt_s*phi)/(1 + 2*dt_s*phi)` on friction rows, 0 elsewhere.
@@ -325,7 +325,7 @@ struct RowConsts<I: Backend> {
     down_idx: Tensor<Ad<I>, 1, Int>,
     in_stage_b: Tensor<Ad<I>, 1, Bool>,
     in_stage: Tensor<Ad<I>, 1>,
-    /// Friction rows: stage, not a dam, not the normal-depth outlet (C8).
+    /// Friction rows: stage, not a dam, not the normal-depth outlet.
     friction: Tensor<Ad<I>, 1>,
     dam: Tensor<Ad<I>, 1>,
     /// Control rows: dams and the normal-depth outlet.
@@ -387,7 +387,7 @@ struct SlotConsts<I: Backend> {
     diag_slot: Tensor<Ad<I>, 1>,
     adj_stage: Tensor<Ad<I>, 1>,
     adj_mc: Tensor<Ad<I>, 1>,
-    /// `adj_stage_to_stage` with control-row columns removed (C8).
+    /// `adj_stage_to_stage` with control-row columns removed.
     adj_friction: Tensor<Ad<I>, 1>,
     /// Stage-to-stage slots whose column is a dam.
     dam_slot: Tensor<Ad<I>, 1>,
@@ -527,7 +527,7 @@ where
     ) -> Section<I> {
         let bw_lb = self.params.bottom_width_lb;
         let g = trapezoid_from_depth(p.clone(), q.clone(), depth.clone(), bw_lb);
-        let (a_d, p_d) = trapezoid_depth_derivatives(p.clone(), q.clone(), depth.clone(), &g, bw_lb);
+        let (a_d, p_d) = trapezoid_depth_derivatives(q.clone(), depth.clone(), &g, bw_lb);
         let Some(t) = &self.table else {
             return Section {
                 top_width: g.top_width,
@@ -560,7 +560,7 @@ where
     /// (it replaces the head's `z_mid` there) and, on dam rows, release
     /// reference `pool_z` (the bed when `None`). Table rows outside the stage
     /// set are ignored. With `strict` (`geometry: table`) a stage row without
-    /// a table row is an error; otherwise it keeps the head's geometry (C17).
+    /// a table row is an error; otherwise it keeps the head's geometry.
     /// Call before `hotstart`, after `new`.
     pub fn set_table_geometry(&mut self, rows: ChannelGeometryRows, strict: bool) -> Result<(), String> {
         let nn = self.net.n;
@@ -676,7 +676,7 @@ where
         self.step_index = 0;
     }
 
-    /// Table-row start stage (C10). Non-dam rows: the boundary at t0 under
+    /// Table-row start stage. Non-dam rows: the boundary at t0 under
     /// `PrescribedStage` (at least `bed + depth_lb`), else bed plus the
     /// wide-channel normal depth of the rectangle. Dam rows: option C on the
     /// active storage, `pool + T*Q0/(TW*L)`.
@@ -704,7 +704,7 @@ where
                 f32_tensor::<I>(&t.bed_h, &device) + dn
             }
         };
-        // Task 13: a non-dam row with `pool_z_m` starts full to normal pool.
+        // A non-dam row with `pool_z_m` starts full to normal pool.
         let h_flow = h_flow * one_minus::<I>(t.has_pool.clone()) + t.pool.clone() * t.has_pool.clone();
         h_dam * self.c.dam.clone() + h_flow * one_minus::<I>(self.c.dam.clone())
     }
@@ -831,7 +831,7 @@ where
         });
     }
 
-    /// `q_t` as the MC op must read it (C3): stage rows become
+    /// `q_t` as the MC op must read it: stage rows become
     /// `q_t.clamp_min(discharge_lb).detach()`, MC rows are unchanged. The
     /// stage rows of the MC output are discarded, so the clamp only keeps the
     /// MC op finite when a stage row carries backflow. The block's own `step`
@@ -961,7 +961,7 @@ where
             let (a_ds, p_ds) = (gs.a_d.clone(), gs.p_d.clone());
             let d_s = gs.top_width.clone() * c.length.clone() / dt_s;
 
-            // 3. friction, alpha, beta, Q*, kappa, a, b (zero on control and non-stage rows, C8)
+            // 3. friction, alpha, beta, Q*, kappa, a, b (zero on control and non-stage rows)
             let phi = n2.clone() * qc.clone().abs() * pr.g
                 / (ge.area.clone() * ge.hydraulic_radius.clone().powf_scalar(4.0 / 3.0));
             let dt_phi = phi * dt_s;
@@ -1180,7 +1180,7 @@ where
         out
     }
 
-    /// One routing hour through the fused op (Task 16c): one autodiff node
+    /// One routing hour through the fused op: one autodiff node
     /// with a hand-written backward. Same arguments and result as
     /// `step_reference`.
     #[doc(hidden)]

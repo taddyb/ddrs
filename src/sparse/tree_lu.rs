@@ -63,7 +63,15 @@ pub fn diag_slot(pattern: &CsrPattern, row: usize) -> usize {
 
 /// Check that the pattern is a forest: every off-diagonal has `row > col`, and
 /// every reach appears at most once as an upstream column (one downstream).
+/// Each row must also end with its diagonal entry, which `diag_slot` assumes.
 pub fn assert_tree(pattern: &CsrPattern) -> Result<(), String> {
+    // `diag_slot` assumes the last slot of each row is the diagonal.
+    for i in 0..pattern.n {
+        let (start, end) = (pattern.crow[i] as usize, pattern.crow[i + 1] as usize);
+        if end == start || pattern.col[end - 1] as usize != i {
+            return Err(format!("row {i} does not end with its diagonal entry"));
+        }
+    }
     let mut downstream_count = vec![0u32; pattern.n];
     for s in 0..pattern.nnz() {
         let r = pattern.row_for_nnz[s];

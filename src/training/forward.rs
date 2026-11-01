@@ -431,8 +431,8 @@ fn arm_flood_pool<I: Backend>(
 /// batch, the way [`apply_reservoir_rows`] does.
 ///
 /// Builds the `StageParams` from `cfg`, takes the dams active on
-/// `window_start` (`ReservoirRows::active_on`, C30) as `(row, T)`, and refuses
-/// a seasonal or rule-curve dam inside the stage set (C18). A batch with no
+/// `window_start` (`ReservoirRows::active_on`) as `(row, T)`, and refuses
+/// a seasonal or rule-curve dam inside the stage set. A batch with no
 /// stage seed (`StageBatch::seed_rows == Some([])`) leaves the engine on MC.
 pub fn apply_stage_block<I: Backend>(
     cfg: &Config,
@@ -481,7 +481,8 @@ pub fn apply_stage_block<I: Backend>(
         bottom_width_lb: cfg.params.attribute_minimums.bottom_width,
         dt: crate::routing::mmc::DT_SECONDS,
         g: 9.81,
-        use_cuda: false, // C2: the validator rejects `sparse_solver: cuda` with the block
+        // The validator rejects `sparse_solver: cuda` with the block, so this is false today.
+        use_cuda: cfg.params.sparse_solver == crate::config::SparseSolver::Cuda,
     };
     let inputs = crate::routing::stage::StageInputs {
         seeds: stage.seed_rows.clone(),
@@ -497,7 +498,7 @@ pub fn apply_stage_block<I: Backend>(
     engine.set_stage_block(params, inputs).unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// The stage block's state across the chunks of one eval (C9): the engine is
+/// The stage block's state across the chunks of one eval: the engine is
 /// rebuilt per chunk, so the end-of-chunk `(h, Q)` and the volume account
 /// live here, like `DamClampSums`.
 #[derive(Debug, Default)]

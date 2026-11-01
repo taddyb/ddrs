@@ -175,10 +175,9 @@ pub fn trapezoid_from_depth<B: Backend>(
 /// with the same `q_eps = q + 1e-6` and the same clamp branches: the side slope
 /// is constant where its clamp is active, and the bottom width is constant where
 /// its lower bound is active. `geom` must come from `trapezoid_from_depth` at
-/// the same `(p, q, depth, bottom_width_lb)`. The result stays on the tape: the stage step
+/// the same `(q, depth, bottom_width_lb)`. The result stays on the tape: the stage step
 /// differentiates through it.
 pub fn trapezoid_depth_derivatives<B: Backend>(
-    _p_spatial: Tensor<B, 1>,
     q_spatial: Tensor<B, 1>,
     depth: Tensor<B, 1>,
     geom: &DepthGeometry<B>,
@@ -188,12 +187,13 @@ pub fn trapezoid_depth_derivatives<B: Backend>(
     let tw = geom.top_width.clone();
     let ss = geom.side_slope.clone();
     let bw = geom.bottom_width.clone();
-    let depth = depth;
     let tw_d = q_eps.clone() * tw.clone() / depth.clone();
     // Branch masks from the unclamped values.
     let ss_raw = tw.clone() * q_eps / (depth.clone() * 2.0);
     let ss_active = ss_raw.clone().greater_elem(0.5).int() * ss_raw.clone().lower_elem(50.0).int();
     let ss_active = ss_active.float();
+    // `tw_d / tw * depth - 1` equals `q_eps - 1` in exact arithmetic. It stays in this form
+    // because `q_eps - 1` rounds differently, and the fused stage op matches this bit for bit.
     let ss_d = (ss_raw / depth.clone()) * (tw_d.clone() / tw.clone() * depth.clone() - 1.0) * ss_active;
     let bw_raw = tw.clone() - ss.clone() * depth.clone() * 2.0;
     let bw_active = bw_raw.greater_elem(bottom_width_lb).float();

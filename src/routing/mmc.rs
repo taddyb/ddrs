@@ -909,7 +909,8 @@ impl<I: Backend> MuskingumCunge<I> {
         self.stage = None;
         self.stage_skip = None;
         // Only the topology and geometry `StageNetwork::build` reads (no values).
-        self.stage_adj = Some(SparseAdjacency {
+        // Skipped when `params.stage_routing` is off, so the off path does no new work.
+        self.stage_adj = self.cfg.stage_routing_on().then(|| SparseAdjacency {
             n,
             rows: inputs.adjacency.rows.clone(),
             cols: inputs.adjacency.cols.clone(),
@@ -1103,6 +1104,13 @@ impl<I: Backend> MuskingumCunge<I> {
         let n = self
             .n_segments
             .ok_or("set_reservoir_rows: call setup_inputs first")?;
+        if self.stage.is_some() {
+            return Err(
+                "set_reservoir_rows: the stage block is already armed; arm the dams first, \
+                 then call set_stage_block"
+                    .into(),
+            );
+        }
         if self.release.is_some() {
             return Err(
                 "set_reservoir_rows: a dam release is already set with set_dam_release; \
@@ -1183,6 +1191,13 @@ impl<I: Backend> MuskingumCunge<I> {
         let n = self
             .n_segments
             .ok_or("set_dam_release: call setup_inputs first")?;
+        if self.stage.is_some() {
+            return Err(
+                "set_dam_release: the stage block is already armed; arm the release first, \
+                 then call set_stage_block"
+                    .into(),
+            );
+        }
         if self.reservoir.is_some() {
             return Err(
                 "set_dam_release: option C rows are already set with set_reservoir_rows; \
@@ -1542,7 +1557,7 @@ impl<I: Backend> MuskingumCunge<I> {
             )
         } else {
             // Stage block (plain branch only): the MC op reads the stage rows
-            // of `q_t` clamped and detached (`mc_view`, C3); the block then
+            // of `q_t` clamped and detached (`mc_view`); the block then
             // reads the unclamped `q_t` and the same clamped `q'` the MC op
             // gets. With no block both are skipped.
             let discharge_lb = self.cfg.params.attribute_minimums.discharge;
@@ -1945,13 +1960,15 @@ impl<I: Backend> MuskingumCunge<I> {
     }
 
     /// Arm the implicit stage block on the downstream closure of
-    /// `inputs.seeds`. Call after [`Self::setup_inputs`] and after the
-    /// reservoir rows. Refuses (`Err` naming "stage"): leakance params; a dam
-    /// release armed on a row inside the stage set (C30); `boundary_row` that
-    /// is not the stage set's outlet (names `boundary_comid`, C1);
+    /// `inputs.seeds`. Call after [`Self::setup_inputs`] (with
+    /// `params.stage_routing` on) and after the dams: `set_reservoir_rows_as` or
+    /// `set_dam_release` first, then this. Both refuse once the block is armed,
+    /// because a later dam would skip the release-inside-the-set check below. Refuses (`Err` naming "stage"): leakance params; a dam
+    /// release armed on a row inside the stage set; `boundary_row` that
+    /// is not the stage set's outlet (names `boundary_comid`);
     /// `prescribed_stage` without a boundary series.
     ///
-    /// Order (Task 10b): the block is built, then `set_boundary_series`,
+    /// Order: the block is built, then `set_boundary_series`,
     /// `set_table_geometry`, and last `hotstart` from the engine's
     /// `discharge_t`, because the table hotstart reads the first two.
     ///
@@ -1973,7 +1990,7 @@ impl<I: Backend> MuskingumCunge<I> {
         if self.k_d.is_some() || self.d_gw.is_some() || self.leakance_factor.is_some() {
             return Err("stage block: not supported with leakance params (params.use_leakance)".into());
         }
-        let adj = self.stage_adj.as_ref().ok_or("stage block: call setup_inputs first")?;
+        let adj = self.stage_adj.as_ref().ok_or("stage block: call setup_inputs first, with params.stage_routing on")?;
         let pattern = self.pattern.as_ref().ok_or("stage block: call setup_inputs first")?;
         let seeds = inputs.seeds.as_deref();
         let mut net = StageNetwork::build(adj, pattern, seeds, inputs.anchor_m, &inputs.dams)
@@ -2044,7 +2061,7 @@ impl<I: Backend> MuskingumCunge<I> {
         );
         // The block overwrites its rows, so MC-side diagnostics for them
         // would be MC numbers for rows MC does not route: leave stage-set
-        // dams out of the clamp account (Task 13).
+        // dams out of the clamp account.
         let inside = block.stage_rows().to_vec();
         if let Some(acc) = self.dam_account.as_mut() {
             if !acc.retain_outside(&inside, &self.device) {
@@ -2067,7 +2084,7 @@ impl<I: Backend> MuskingumCunge<I> {
     }
 
     /// The block's `(h, Q)` after `forward()`: `h_t` and the last hour's
-    /// unclamped `Q`, on the host, detached (C9). `None` without a block.
+    /// unclamped `Q`, on the host, detached. `None` without a block.
     pub fn stage_carry(&self) -> Option<StageCarry> {
         let block = self.stage.as_ref()?;
         let h: Vec<f32> = block.stage()?.inner().into_data().to_vec().ok()?;
@@ -2078,7 +2095,7 @@ impl<I: Backend> MuskingumCunge<I> {
     /// Start the block from `carry` (the previous chunk's end): `h_t` is
     /// replaced, and `discharge_t` on the stage rows (the MC rows keep the
     /// value `setup_inputs` gave them, with their tape). Call after
-    /// [`Self::set_stage_block`]. The carried `Q` stays unclamped (C9, C3).
+    /// [`Self::set_stage_block`]. The carried `Q` stays unclamped.
     pub fn set_stage_carry(&mut self, carry: &StageCarry) -> Result<(), String> {
         let block = self.stage.as_mut().ok_or("set_stage_carry: no stage block is armed")?;
         let n = self.n_segments.expect("setup_inputs ran");
@@ -2103,7 +2120,7 @@ impl<I: Backend> MuskingumCunge<I> {
         Ok(())
     }
 
-    /// Test hook: the armed stage block (Task 12 records coefficients; C22).
+    /// Test hook: the armed stage block (tests read the recorded coefficients).
     #[doc(hidden)]
     pub fn stage_block_mut(&mut self) -> Option<&mut StageBlock<I>> {
         self.stage.as_mut()
@@ -2159,5 +2176,48 @@ impl<I: Backend> MuskingumCunge<I> {
                 dims[0], n
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dam_account_tests {
+    use super::*;
+    use burn::backend::NdArray;
+
+    type B = NdArray<f32>;
+
+    fn vals(t: &Tensor<B, 1>) -> Vec<f32> {
+        t.clone().into_data().to_vec::<f32>().unwrap()
+    }
+
+    /// Two dams, one inside the stage set: the other keeps its row and its
+    /// per-dam values. With four dams the survivors keep their order.
+    #[test]
+    fn partial_dam_drop_keeps_rows_and_values_aligned() {
+        let device = Default::default();
+        let mut acc = DamAccount::<B>::new(&[5, 2], false, &device);
+        acc.created = Tensor::from_floats([10.0, 20.0], &device);
+        acc.owed = Tensor::from_floats([1.0, 2.0], &device);
+        let mut inside = vec![false; 8];
+        inside[5] = true;
+        assert!(acc.retain_outside(&inside, &device));
+        assert_eq!(acc.rows, vec![2]);
+        assert_eq!(vals(&acc.created), vec![20.0]);
+        assert_eq!(vals(&acc.owed), vec![2.0]);
+        let rows_t: Vec<i64> = acc.rows_t.clone().into_data().to_vec::<i64>().unwrap();
+        assert_eq!(rows_t, vec![2]);
+
+        let mut acc = DamAccount::<B>::new(&[6, 1, 4, 3], false, &device);
+        acc.created = Tensor::from_floats([6.0, 1.0, 4.0, 3.0], &device);
+        let mut inside = vec![false; 8];
+        inside[1] = true;
+        inside[4] = true;
+        assert!(acc.retain_outside(&inside, &device));
+        assert_eq!(acc.rows, vec![6, 3]);
+        assert_eq!(vals(&acc.created), vec![6.0, 3.0]);
+
+        // All inside: no dam is left.
+        let mut acc = DamAccount::<B>::new(&[1], false, &device);
+        assert!(!acc.retain_outside(&[false, true], &device));
     }
 }

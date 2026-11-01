@@ -475,9 +475,10 @@ fn check_table_covers_stage_set(
     }
     let seeds: Vec<usize> = match reaches {
         crate::config::StageReaches::All => (0..n).filter(|&i| routed[i]).collect(),
-        crate::config::StageReaches::Comids(ids) => (0..n)
-            .filter(|&i| routed[i] && ids.contains(&conus.order[i].0))
-            .collect(),
+        crate::config::StageReaches::Comids(ids) => {
+            let want: std::collections::HashSet<i64> = ids.iter().copied().collect();
+            (0..n).filter(|&i| routed[i] && want.contains(&conus.order[i].0)).collect()
+        }
     };
     let adj = SparseAdjacency {
         n,
