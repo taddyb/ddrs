@@ -23,7 +23,8 @@ const POUGHKEEPSIE: &str = "01372058";
 const GAUGES: [&str; 4] = ["01372058", "01358000", "01375000", "73005067"];
 const BATTERY_CSV: &str = "examples/hudson/data/hudson_battery_stage_navd88.csv";
 const GEOMETRY_CSV: &str = "examples/hudson/data/hudson_channel_geometry.csv";
-/// 2001-05-01 to 2019-12-31 inclusive, in days. The Battery has no data before 2001-05-01.
+/// 2001-05-01 to 2019-12-31 inclusive, in days. The hourly Battery product has a
+/// 4-month outage from 2001-01-01 to 2001-04-30, so the stores start 2001-05-01.
 const RECORD_DAYS: usize = 6_819;
 
 fn conus() -> ConusAdjacencyStore {
@@ -195,10 +196,34 @@ fn battery_series_is_contiguous_and_gap_log_matches() {
         assert!(seen.insert(t), "gap hour {t} is logged twice");
         *by_method.entry(method.to_string()).or_default() += 1;
     }
-    // The controller ruling replaces the 0.1 % target: the share stays under 3 %.
+    // The filled share stays under 3 %.
     let filled = seen.len();
     assert!(filled > 0 && (filled as f64) < 0.03 * n_hours as f64, "{filled} filled hours");
     assert_eq!(by_method.values().sum::<usize>(), filled);
+
+    // The per-method counts equal the numbers in the README table.
+    let want = [("6min_mean", 501usize), ("linear", 91), ("predictions_plus_residual", 3_121)];
+    let readme = std::fs::read_to_string("examples/hudson/README.md").expect("README");
+    for (m, n) in want {
+        assert_eq!(by_method.get(m).copied().unwrap_or(0), n, "gap log count for {m}");
+        let row = readme
+            .lines()
+            .find(|l| l.starts_with(&format!("| `{m}` |")))
+            .unwrap_or_else(|| panic!("README table lacks a row for {m}"));
+        let cell = row.split('|').nth(2).unwrap().trim().to_string();
+        assert_eq!(cell, format!("{}", fmt_thousands(n)), "README count for {m}");
+    }
+    assert_eq!(filled, 3_713);
+
+    // Stage range of the Battery series (observed -1.856 to 3.417 m NAVD88).
+    let v = store.slice(t0, n_hours).unwrap();
+    let (lo, hi) = v.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    assert!(lo > -3.0 && hi < 4.0, "Battery stage range {lo}..{hi} m is outside -3..+4 m");
+    assert!(lo < -1.0 && hi > 2.0, "Battery stage range {lo}..{hi} m is implausibly narrow");
+}
+
+fn fmt_thousands(n: usize) -> String {
+    if n >= 1000 { format!("{},{:03}", n / 1000, n % 1000) } else { n.to_string() }
 }
 
 /// COMIDs from the seed reach down to the outlet, walking the bundle's adjacency.
@@ -245,7 +270,7 @@ fn channel_geometry_covers_the_41_stage_reaches() {
     }
     assert_eq!(count, 41);
 
-    // The anchor in ddrs.yaml equals the outlet row's bed (L6).
+    // The anchor in ddrs.yaml equals the outlet row's bed.
     let cfg = example_cfg("ddrs.yaml");
     let anchor = cfg.params.stage_routing.as_ref().expect("stage_routing").anchor_elevation_m;
     let outlet = closure.iter().position(|c| c.0 == HARBOR).unwrap();
@@ -268,7 +293,18 @@ fn example_configs_parse() {
     assert!(sr.enabled);
     assert_eq!(sr.boundary_comid, Some(HARBOR));
     assert_eq!(full.experiment.as_ref().unwrap().batch_size, 4);
+    assert_eq!(sr.tidal_filter, ddrs::config::TidalFilter::Godin);
+    assert_eq!(sr.anchor_elevation_m, -10.0);
     let mc = example_cfg("ddrs_mc_only.yaml");
     assert!(mc.params.stage_routing.is_none());
     assert_eq!(mc.experiment.as_ref().unwrap().batch_size, 4);
+
+    // The `testing:` overlay is not applied to a training-mode load, so read the
+    // raw YAML. 2600 days covers the 2,526-day test period in ONE eval chunk,
+    // which keeps chunk seams out of the 71 h Godin filter.
+    for name in ["ddrs.yaml", "ddrs_mc_only.yaml"] {
+        let text = std::fs::read_to_string(format!("examples/hudson/{name}")).unwrap();
+        let v: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        assert_eq!(v["testing"]["batch_size"].as_u64(), Some(2600), "{name}: testing.batch_size");
+    }
 }

@@ -20,14 +20,22 @@ Optional fills for runs longer than 6 h, each an explicit flag (never default):
       (NAVD, metric, GMT). Only samples with all quality flags 0 (O/I, F, R, L)
       count. The hour value is the mean of the flag-0 samples within +-24 min of
       the hour (up to 9 samples at 6-minute spacing, symmetric about the hour),
-      and at least 5 are required. An hour with fewer falls back to
-      predictions plus residual, as below, using the span's own bounds.
-      Method tag: `6min_mean` (fallback hours: `predictions_plus_residual`).
+      and at least 5 are required. Hours with fewer form fallback runs. A run of
+      at most 6 h is filled linearly between its real neighbours (method
+      `linear`). A longer run uses predictions plus a residual anchored on the
+      filled or observed hour just before and just after that run (method
+      `predictions_plus_residual`), not on the span bounds.
+      Method tag: `6min_mean`.
   --fill-pred START:END   Hours in the span are filled with the CO-OPS hourly
       `predictions` (NAVD, `interval=h`) plus a residual. The residual runs
       linearly across the span between two values: the 7-day mean of
       (observed - predicted) just before the span and the same just after it
       (valid observed hours only). Method tag: `predictions_plus_residual`.
+
+After the fills, the script prints the largest hour-to-hour step that touches a
+`linear` or `predictions_plus_residual` hour and stops (exit code 1) if it
+exceeds the 99.9th percentile of the steps between two observed hours. Steps at
+`6min_mean` hours are real measurements and are only printed.
 
 START and END are `YYYY-MM-DD` (END inclusive, through 23:00). A span that does
 not cover a >6 h run does not remove the stop: any other run longer than 6 h
@@ -248,16 +256,25 @@ def main() -> None:
             years |= {(a - timedelta(days=8)).year, (b + timedelta(days=8)).year}
         pred = predictions(args.station, years, args.cache_dir)
 
-    def pred_residual_fill(a: int, b: int, hours: list[int]) -> None:
-        """Fill `hours` in the run a..b with predictions + a linear residual."""
-        def mean_resid(lo: int, hi: int) -> float:
-            d = [obs[k] - pred[times[k]] for k in range(max(lo, 0), min(hi, n))
-                 if not np.isnan(obs[k]) and times[k] in pred]
-            if len(d) < 24:
-                raise SystemExit(f"fewer than 24 valid hours for the residual near {times[a]}")
-            return float(np.mean(d))
-        before = mean_resid(a - 168, a)
-        after = mean_resid(b + 1, b + 1 + 168)
+    def pred_residual_fill(a: int, b: int, hours: list[int],
+                           anchors: tuple[float, float] | None = None) -> None:
+        """Fill `hours` in the run a..b with predictions + a linear residual.
+
+        `anchors` is the residual just before and just after the run. Without
+        it, the residual is the 7-day mean of (observed - predicted) on each
+        side of the run.
+        """
+        if anchors is None:
+            def mean_resid(lo: int, hi: int) -> float:
+                d = [obs[k] - pred[times[k]] for k in range(max(lo, 0), min(hi, n))
+                     if not np.isnan(obs[k]) and times[k] in pred]
+                if len(d) < 24:
+                    raise SystemExit(f"fewer than 24 valid hours for the residual near {times[a]}")
+                return float(np.mean(d))
+            before = mean_resid(a - 168, a)
+            after = mean_resid(b + 1, b + 1 + 168)
+        else:
+            before, after = anchors
         for k in hours:
             if times[k] not in pred:
                 raise SystemExit(f"no prediction for {times[k]}")
@@ -279,10 +296,34 @@ def main() -> None:
                 method[k] = "6min_mean"
             else:
                 fallback.append(k)
-        if fallback:
-            print(f"{len(fallback)} hours in {span[0]:%Y-%m-%d}..{span[1]:%Y-%m-%d} fall back to "
-                  f"predictions_plus_residual", file=sys.stderr)
-            pred_residual_fill(a, b, fallback)
+        # Group the fallback hours into runs of consecutive hours. Each run is
+        # filled from its own neighbours, so the fill never jumps back and forth
+        # between real 6-minute values and a span-wide ramp.
+        fb_runs: list[tuple[int, int]] = []
+        for k in fallback:
+            if fb_runs and fb_runs[-1][1] == k - 1:
+                fb_runs[-1] = (fb_runs[-1][0], k)
+            else:
+                fb_runs.append((k, k))
+        n_lin = n_pred = 0
+        for c, d in fb_runs:
+            if c == 0 or d == n - 1 or np.isnan(y[c - 1]) or np.isnan(y[d + 1]):
+                raise SystemExit(f"fallback run {times[c]}..{times[d]} has no filled or observed neighbour")
+            if d - c + 1 <= args.max_gap_hours:
+                for k in range(c, d + 1):
+                    y[k] = y[c - 1] + (y[d + 1] - y[c - 1]) * (k - (c - 1)) / (d + 1 - (c - 1))
+                    method[k] = "linear"
+                n_lin += d - c + 1
+            else:
+                for k in (c - 1, d + 1):
+                    if times[k] not in pred:
+                        raise SystemExit(f"no prediction for {times[k]}")
+                anchors = (y[c - 1] - pred[times[c - 1]], y[d + 1] - pred[times[d + 1]])
+                pred_residual_fill(c, d, list(range(c, d + 1)), anchors)
+                n_pred += d - c + 1
+        if fb_runs:
+            print(f"{span[0]:%Y-%m-%d}..{span[1]:%Y-%m-%d}: {len(fb_runs)} fallback runs, "
+                  f"{n_lin} hours linear, {n_pred} hours predictions_plus_residual", file=sys.stderr)
     for span in spans_p:
         a, b = idx_span(span)
         pred_residual_fill(a, b, [k for k in range(a, b + 1) if missing[k]])
@@ -313,6 +354,26 @@ def main() -> None:
         for idx in range(a, b + 1):
             y[idx] = lo + (hi - lo) * (idx - (a - 1)) / (b + 1 - (a - 1))
             method[idx] = "linear"
+    # Step check: no step that touches a filled hour may exceed the 99.9th
+    # percentile of the steps between two observed hours.
+    step = np.abs(np.diff(y))
+    # `6min_mean` hours are measurements, so a large tidal step there is real.
+    # The limit applies to hours made by `linear` and `predictions_plus_residual`.
+    synthetic = np.zeros(n, dtype=bool)
+    synthetic[[k for k, m in method.items() if m != "6min_mean"]] = True
+    anyfill = np.zeros(n, dtype=bool)
+    anyfill[list(method)] = True
+    touches = synthetic[:-1] | synthetic[1:]
+    obs_steps = step[~(anyfill[:-1] | anyfill[1:]) & ~np.isnan(obs[:-1]) & ~np.isnan(obs[1:])]
+    max_any = float(step[anyfill[:-1] | anyfill[1:]].max())
+    p999 = float(np.percentile(obs_steps, 99.9))
+    max_fill = float(step[touches].max())
+    worst = int(np.flatnonzero(touches & (step == max_fill))[0])
+    print(f"max step touching a linear or predictions fill {max_fill:.3f} m at {times[worst]:%Y-%m-%d %H}h "
+          f"(any fill incl. 6-minute means {max_any:.3f} m); "
+          f"observed p99.9 {p999:.3f} m, p99 {float(np.percentile(obs_steps, 99)):.3f} m", file=sys.stderr)
+    if max_fill > p999:
+        raise SystemExit(f"filled-span step {max_fill:.3f} m exceeds the observed p99.9 {p999:.3f} m")
     log = [f"{times[k].strftime(TIME_FORMAT)},{method[k]}" for k in sorted(method)]
     counts = {m: sum(1 for v in method.values() if v == m) for m in sorted(set(method.values()))}
 
