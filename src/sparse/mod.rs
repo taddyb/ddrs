@@ -11,9 +11,11 @@
 //! See `docs/book/reference/burn-autograd.md` for the BURN-0.21 custom-backward
 //! recipe this module uses.
 
+pub mod cube_buf;
 pub mod cusparse;
 pub(crate) mod dispatch;
 pub mod tree_lu;
+pub mod tree_lu_cuda;
 
 use std::sync::Arc;
 
@@ -405,10 +407,16 @@ pub fn host_reads_on_this_thread_for_test() -> u64 {
     HOST_READS.with(|c| c.get())
 }
 
+/// Count one host copy on this thread. `primitive_to_vec` and the device
+/// buffer test hooks call it.
+pub(crate) fn count_host_read() {
+    HOST_READS.with(|c| c.set(c.get() + 1));
+}
+
 /// Wrap a raw `FloatTensorPrimitive` in a `Tensor` wrapper just long enough to
 /// call `.to_data()` synchronously, then yield a `Vec<f32>`.
 pub(crate) fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
-    HOST_READS.with(|c| c.set(c.get() + 1));
+    count_host_read();
     let t: Tensor<B, 1> = Tensor::from_primitive(TensorPrimitive::Float(prim));
     t.to_data().to_vec::<f32>().expect("expected f32 tensor")
 }

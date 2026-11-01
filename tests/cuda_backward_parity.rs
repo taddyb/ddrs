@@ -534,6 +534,7 @@ where
         slope_t,
         xst_t,
         false,
+        None, // skip_rows: count every row
         None, // gamma: no stage roughness in this fixture
     );
 

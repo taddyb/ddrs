@@ -93,6 +93,81 @@ pub fn assert_tree(pattern: &CsrPattern) -> Result<(), String> {
     Ok(())
 }
 
+/// The tree structure of a pattern for level-scheduled kernels. Built once per pattern.
+#[derive(Clone, Debug)]
+pub struct TreeLevels {
+    pub n: usize,
+    pub nnz: usize,
+    pub n_levels: usize,
+    pub crow: Vec<i32>,
+    pub col: Vec<i32>,
+    pub row: Vec<i32>,
+    /// `diag_slot(pattern, col[s])` for every slot `s`.
+    pub col_diag: Vec<i32>,
+    /// The downstream reach, -1 at an outlet.
+    pub down: Vec<i32>,
+    /// The slot of `(down[i], i)`, -1 at an outlet.
+    pub down_slot: Vec<i32>,
+    /// Level boundaries, length `n_levels + 1`.
+    pub lvl_ptr: Vec<i32>,
+    /// Reaches by level. Ascending reach index inside a level.
+    pub lvl_idx: Vec<i32>,
+}
+
+/// `level[i]` = 0 with no upstream reach, else 1 + the largest upstream level.
+/// Runs `assert_tree` first. Reaches go in index order because `row > col`.
+pub fn tree_levels(pattern: &CsrPattern) -> Result<TreeLevels, String> {
+    assert_tree(pattern)?;
+    let (n, nnz) = (pattern.n, pattern.nnz());
+    let mut down = vec![-1i32; n];
+    let mut down_slot = vec![-1i32; n];
+    let mut col_diag = vec![0i32; nnz];
+    for s in 0..nnz {
+        let c = pattern.col[s] as usize;
+        col_diag[s] = diag_slot(pattern, c) as i32;
+        let r = pattern.row_for_nnz[s];
+        if r as usize != c {
+            down[c] = r;
+            down_slot[c] = s as i32;
+        }
+    }
+    let mut level = vec![0usize; n];
+    for i in 0..n {
+        if down[i] >= 0 {
+            let d = down[i] as usize;
+            level[d] = level[d].max(level[i] + 1);
+        }
+    }
+    let n_levels = level.iter().copied().max().map_or(0, |m| m + 1);
+    let mut lvl_ptr = vec![0i32; n_levels + 1];
+    for &l in &level {
+        lvl_ptr[l + 1] += 1;
+    }
+    for l in 0..n_levels {
+        lvl_ptr[l + 1] += lvl_ptr[l];
+    }
+    let mut fill = lvl_ptr.clone();
+    let mut lvl_idx = vec![0i32; n];
+    for i in 0..n {
+        let l = level[i];
+        lvl_idx[fill[l] as usize] = i as i32;
+        fill[l] += 1;
+    }
+    Ok(TreeLevels {
+        n,
+        nnz,
+        n_levels,
+        crow: pattern.crow.clone(),
+        col: pattern.col.clone(),
+        row: pattern.row_for_nnz.clone(),
+        col_diag,
+        down,
+        down_slot,
+        lvl_ptr,
+        lvl_idx,
+    })
+}
+
 /// Zero-fill LU. `a_values.len() == 2 * nnz` (layout in the module doc).
 pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
     let nnz = pattern.nnz();

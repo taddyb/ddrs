@@ -323,3 +323,93 @@ fn juniata_pattern_is_a_tree() {
     assert_eq!(n, 213);
     assert_tree(&p).expect("juniata is a tree");
 }
+
+fn pattern_of(adj: &SparseAdjacency) -> CsrPattern {
+    CsrPattern::from_sparse(adj)
+}
+
+#[test]
+fn tree_levels_of_random_trees() {
+    for (n, seed) in [(5usize, 1u64), (40, 2), (300, 3)] {
+        let p = pattern_of(&random_tree(n, seed));
+        let t = ddrs::sparse::tree_lu::tree_levels(&p).expect("tree");
+        assert_eq!((t.n, t.nnz), (n, p.nnz()));
+        let mut seen = t.lvl_idx.clone();
+        seen.sort();
+        assert_eq!(seen, (0..n as i32).collect::<Vec<_>>(), "lvl_idx is a permutation");
+        assert_eq!(t.lvl_ptr.len(), t.n_levels + 1);
+        assert_eq!(t.lvl_ptr[0], 0);
+        assert_eq!(t.lvl_ptr[t.n_levels] as usize, n);
+        assert!(t.lvl_ptr.windows(2).all(|w| w[0] < w[1]), "lvl_ptr ascending");
+        let mut level = vec![0usize; n];
+        for l in 0..t.n_levels {
+            let (a, b) = (t.lvl_ptr[l] as usize, t.lvl_ptr[l + 1] as usize);
+            assert!(t.lvl_idx[a..b].windows(2).all(|w| w[0] < w[1]), "ascending in a level");
+            for &i in &t.lvl_idx[a..b] {
+                level[i as usize] = l;
+            }
+        }
+        let mut is_col = vec![false; n];
+        for s in 0..p.nnz() {
+            assert_eq!(t.col_diag[s] as usize, diag_slot(&p, p.col[s] as usize));
+            let (r, c) = (p.row_for_nnz[s] as usize, p.col[s] as usize);
+            if r == c {
+                continue;
+            }
+            assert!(level[r] > level[c], "level({r}) > level({c})");
+            assert_eq!((t.down[c], t.down_slot[c]), (r as i32, s as i32));
+            is_col[c] = true;
+        }
+        for i in 0..n {
+            assert_eq!(t.down[i] == -1, !is_col[i], "outlet iff no off-diagonal column use");
+            assert_eq!(t.down_slot[i] == -1, !is_col[i]);
+        }
+    }
+}
+
+fn max_upstream(p: &CsrPattern) -> usize {
+    (0..p.n)
+        .map(|i| (p.crow[i + 1] - p.crow[i]) as usize - 1)
+        .max()
+        .unwrap()
+}
+
+#[test]
+fn tree_levels_of_the_bundles() {
+    for (dir, name, n_levels, max_up) in [
+        ("examples/juniata/data", "juniata", 39usize, 2usize),
+        ("examples/hudson/data", "hudson", 83, 3),
+    ] {
+        let store = ConusAdjacencyStore::open(format!("{dir}/{name}_conus_adjacency.zarr"))
+            .expect("open bundle adjacency");
+        let adj = SparseAdjacency {
+            n: store.n,
+            rows: store.indices_0.clone(),
+            cols: store.indices_1.clone(),
+            values: vec![1.0; store.nnz],
+            length_m: store.length_m.to_vec(),
+            slope: store.slope.to_vec(),
+            parent_offset: None,
+        };
+        let p = pattern_of(&adj);
+        let t = ddrs::sparse::tree_lu::tree_levels(&p).expect("tree");
+        eprintln!("{name}: n_levels {} max upstream {}", t.n_levels, max_upstream(&p));
+        assert_eq!(t.n_levels, n_levels, "{name} levels");
+        assert_eq!(max_upstream(&p), max_up, "{name} max upstream");
+    }
+}
+
+#[test]
+fn tree_levels_rejects_a_non_tree() {
+    let adj = SparseAdjacency {
+        n: 3,
+        rows: vec![1, 2],
+        cols: vec![0, 0],
+        values: vec![1.0, 1.0],
+        length_m: vec![1000.0; 3],
+        slope: vec![1e-3; 3],
+        parent_offset: None,
+    };
+    let err = ddrs::sparse::tree_lu::tree_levels(&pattern_of(&adj)).unwrap_err();
+    assert!(err.contains("two downstream"), "{err}");
+}
