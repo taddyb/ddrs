@@ -849,13 +849,15 @@ pub enum StageGeometry {
     Mixed,
 }
 
-/// Tidal filter applied to the boundary series.
+/// Tidal filter on the hourly routed discharge at gauges on stage rows. It runs
+/// in training and in eval, before the hourly-to-daily pooling. A daily mean of
+/// an hourly M2 tide aliases to 14.8 days, the period of the spring-neap cycle.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TidalFilter {
     #[default]
     None,
-    /// Not implemented yet; rejected at load.
+    /// 24, 24 and 25 h running means; needs `enabled: true`.
     Godin,
 }
 
@@ -1370,6 +1372,14 @@ impl Config {
     /// True when `params.stage_routing` is present and `enabled`.
     pub fn stage_routing_on(&self) -> bool {
         self.params.stage_routing.as_ref().is_some_and(|s| s.enabled)
+    }
+
+    /// True when the stage block is on and `tidal_filter: godin` is set.
+    pub fn godin_filter_on(&self) -> bool {
+        self.params
+            .stage_routing
+            .as_ref()
+            .is_some_and(|s| s.enabled && s.tidal_filter == TidalFilter::Godin)
     }
 
     /// True when the routing head is frozen for release-only training
@@ -2266,9 +2276,9 @@ fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
     if s.substeps == 0 {
         return Err("params.stage_routing: `substeps` must be >= 1".to_string());
     }
-    if s.tidal_filter == TidalFilter::Godin {
-        return Err("params.stage_routing: tidal_filter: godin is not implemented yet \
-"
+    if s.tidal_filter == TidalFilter::Godin && !s.enabled {
+        return Err("params.stage_routing: `tidal_filter: godin` needs `enabled: true`; the \
+                    filter acts on gauges on stage rows"
             .to_string());
     }
     if !s.enabled {
@@ -4827,14 +4837,16 @@ data_sources:
     }
 
     #[test]
-    fn stage_routing_rejects_godin_until_implemented() {
-        for en in ["true", "false"] {
-            let p = format!("  stage_routing:\n    enabled: {en}\n    tidal_filter: godin\n");
-            stage_rejection(
-                stage_yaml(&format!("ddrs_sr_godin_{en}.yaml"), "", &p, ""),
-                &["tidal_filter", "not implemented"],
-            );
-        }
+    fn stage_routing_godin_needs_the_block() {
+        let p = "  stage_routing:\n    enabled: false\n    tidal_filter: godin\n";
+        stage_rejection(
+            stage_yaml("ddrs_sr_godin_false.yaml", "", p, ""),
+            &["stage_routing", "tidal_filter", "enabled"],
+        );
+        let p = format!("{SR_ON}    tidal_filter: godin\n");
+        let cfg = Config::from_yaml_file(stage_yaml("ddrs_sr_godin_true.yaml", "", &p, ""))
+            .expect("godin with the block on loads");
+        assert_eq!(cfg.params.stage_routing.unwrap().tidal_filter, TidalFilter::Godin);
     }
 
     #[test]

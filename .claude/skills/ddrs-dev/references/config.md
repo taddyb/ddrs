@@ -309,7 +309,7 @@ when subdivision is enabled), plus one at dataset open.
 | `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
 | `validate_reservoirs` | `use_reservoirs: true` without `data_sources.reservoirs` | `"use_reservoirs"` + `"data_sources.reservoirs"` |
 | | `use_reservoirs: true` + `use_leakance`, `use_cuda_graphs`, `ddr_match`, `subdivision.enabled` or `gridded_network` | `"use_reservoirs"` + the offending key. Runs before `validate_ddr_match`, so `use_cuda_graphs` reports the reservoir error first |
-| `validate_stage_routing` | `theta` outside `[0.5, 1]`, `theta_control` outside `(0, 1]`, `substeps: 0`, `tidal_filter: godin` (block on or off) | `"params.stage_routing"` + the key; godin: `"not implemented"` |
+| `validate_stage_routing` | `theta` outside `[0.5, 1]`, `theta_control` outside `(0, 1]`, `substeps: 0`, `tidal_filter: godin` with `enabled: false` | `"params.stage_routing"` + the key; godin: `tidal_filter` + `enabled` |
 | | enabled + `use_cuda_graphs`, `sparse_solver: cuda`, `use_leakance`, `ddr_match`, `subdivision.enabled`, `gridded_network`, `reservoir_release: learned`, `stage_roughness`, learned `gamma`, `reservoir_dam_row: additive`, `reservoir_flood_pool: true`, `reservoir_dam_floor: carry`, `experiment.state_cache`, or empty `reaches` | `"params.stage_routing"` + the offending key |
 | | `prescribed_stage` without `boundary_comid`; `prescribed_stage` without `data_sources.stage_boundary` (and the converse); `geometry: table`/`mixed` without `data_sources.channel_geometry` (and the converse) | the source key |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
@@ -789,7 +789,7 @@ params:
     boundary_comid: null    # when set, the stage set's outlet must be this COMID
     anchor_elevation_m: 0.0
     geometry: head          # or table / mixed (need data_sources.channel_geometry)
-    tidal_filter: none      # godin is rejected until implemented
+    tidal_filter: none      # none | godin (Godin filter on routed discharge at stage-row gauges, in training and eval)
 ```
 
 ### Rules and data files

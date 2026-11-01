@@ -8,7 +8,8 @@
 # USGS tidally filtered discharge 72137), Green Island (01358000), Croton (01375000).
 #
 # The channel geometry is a uniform placeholder (see data/hudson_channel_geometry.csv).
-# tidal_filter is none until the Godin filter lands.
+# tidal_filter: godin filters the hourly routed discharge at Poughkeepsie before
+# daily pooling, to match USGS parameter 72137.
 #
 # Run FROM THE REPO ROOT. Give --workspace explicitly (the default would put
 # .ddrs/ beside this file):
@@ -105,7 +106,7 @@ params:
     boundary_comid: 73005067            # the harbor outlet; refuses a stage set that drains elsewhere
     anchor_elevation_m: -10.0           # the table outlet's bed_z_m (NAVD88); change both together
     geometry: table
-    tidal_filter: none
+    tidal_filter: godin                 # Godin filter on stage-row gauges, in training and eval
 
 # Evaluation overlay (2012-10-01 to 2019-08-31, inside the 72137 record).
 # CAUTION — batch_size changes meaning: GAUGES in training, DAYS here.

@@ -325,6 +325,21 @@ pub fn evaluate<I: Backend>(
     let pred_full_t: burn::tensor::Tensor<I, 2> =
         burn::tensor::Tensor::<I, 1>::from_floats(pred_full_vec.as_slice(), device)
             .reshape([n_all_gauges, n_hours_full]);
+    // Godin filter on the concatenated hourly series of gauges on stage rows,
+    // before daily pooling. The chunking of the eval does not matter here.
+    let godin_rows = if cfg.godin_filter_on() {
+        crate::training::tidal_filter::stage_gauge_rows(cfg, &probe_batch, dataset.full_observations()?)
+    } else {
+        Vec::new()
+    };
+    let pred_full_t = if godin_rows.is_empty() {
+        pred_full_t
+    } else {
+        let ids: Vec<crate::data::Staid> =
+            godin_rows.iter().map(|&r| gauge_staids[r].clone()).collect();
+        eprintln!("{}", crate::training::tidal_filter::godin_log_line("eval", &ids));
+        crate::training::tidal_filter::godin_filter(pred_full_t, &godin_rows)
+    };
     let daily_t = tau_trim_and_downsample(pred_full_t, cfg.params.tau);
     let daily_dims = daily_t.dims();
     let daily_vec: Vec<f32> = daily_t.into_data().into_vec().unwrap();
