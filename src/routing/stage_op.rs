@@ -727,6 +727,407 @@ pub fn stage_readout_host(
     Readout { h_solved, h_new, dh_down, q_new, mass: [storage, net, floor, gross, mc_in] }
 }
 
+// ---------------------------------------------------------------- adjoints
+//
+// Task 16b: the adjoints of the elementwise blocks (B1 to B4 of the Task 16
+// overview), one loop over reaches each. These are the CPU branches; the
+// dispatch fns that wrap them with a `use_cuda` arm come in 16c. Masks use the
+// forward line's comparison (overview 16.5). An empty cotangent Vec is zeros.
+
+/// `v[i]`, or 0.0 for an empty cotangent Vec.
+#[inline]
+fn at(v: &[f32], i: usize) -> f32 {
+    if v.is_empty() {
+        0.0
+    } else {
+        v[i]
+    }
+}
+
+/// Burn's `abs` gradient factor: `sign(0) = 0`.
+#[inline]
+fn sign0(x: f32) -> f32 {
+    if x > 0.0 {
+        1.0
+    } else if x < 0.0 {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
+/// Cotangents of the six outputs of block 2g. Empty means zeros.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct SectionBar {
+    pub top_width: Vec<f32>,
+    pub area: Vec<f32>,
+    pub perim: Vec<f32>,
+    pub radius: Vec<f32>,
+    pub a_d: Vec<f32>,
+    pub p_d: Vec<f32>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct SectionGrads {
+    pub p: Vec<f32>,
+    pub q_eps: Vec<f32>,
+    pub d: Vec<f32>,
+}
+
+/// B2: the reverse of 2g to 2a at the depths `d`. `q_eps` is `q + 1e-6`, so
+/// `SectionGrads::q_eps` is also the gradient to `q`.
+#[doc(hidden)]
+pub fn section_backward_host(
+    c: &StageOpConsts,
+    p: &[f32],
+    q_eps: &[f32],
+    d: &[f32],
+    s: &SectionHost,
+    bar: &SectionBar,
+) -> SectionGrads {
+    let n = c.n;
+    let bwlb = c.bw_lb;
+    let mut out = SectionGrads { p: vec![0.0; n], q_eps: vec![0.0; n], d: vec![0.0; n] };
+    for i in 0..n {
+        let (e, dd) = (q_eps[i], d[i]);
+        let (mut g_tw, mut g_a, mut g_p) = (at(&bar.top_width, i), at(&bar.area, i), at(&bar.perim, i));
+        let (mut g_r, mut g_ad, mut g_pd) = (at(&bar.radius, i), at(&bar.a_d, i), at(&bar.p_d, i));
+        let mut gd = 0.0f32;
+        let mut ge = 0.0f32;
+        if c.has_table {
+            // The rectangle depends on d; the head gets the cotangents times keep.
+            let m = c.t_mask[i];
+            let keep = keep_of(m);
+            let ttw = c.t_tw[i];
+            let perim_r = ttw + dd * 2.0;
+            gd += m
+                * (g_a * ttw
+                    + g_p * 2.0
+                    + g_r * ((ttw * perim_r - (ttw * dd) * 2.0) / (perim_r * perim_r)));
+            g_tw *= keep;
+            g_a *= keep;
+            g_p *= keep;
+            g_r *= keep;
+            g_ad *= keep;
+            g_pd *= keep;
+        }
+        let (pw, tw, ssr, ss, bwr, bw) = (s.pw[i], s.tw[i], s.ss_raw[i], s.ss[i], s.bw_raw[i], s.bw[i]);
+        let (area, rt, perim) = (s.area[i], s.root[i], s.perim[i]);
+        let (twd, ssd, bwd) = (s.tw_d[i], s.ss_d[i], s.bw_d[i]);
+        let sa = ind(ssr > 0.5) * ind(ssr < 50.0);
+        let ba = ind(bwr > bwlb);
+        let (mut g_ss, mut g_bw, mut g_rt) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut g_twd, mut g_bwd, mut g_ssd, mut g_ssr) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+
+        // 2f: Pd = (bwd + rt*2) + (((d*ss)*ssd)*2)/rt
+        let u = ((dd * ss) * ssd) * 2.0;
+        g_bwd += g_pd;
+        g_rt += g_pd * 2.0;
+        g_rt += g_pd * (-(u / (rt * rt)));
+        let g_u = g_pd / rt;
+        let g_dss_ssd = g_u * 2.0;
+        let g_dss = g_dss_ssd * ssd;
+        g_ssd += g_dss_ssd * (dd * ss);
+        gd += g_dss * ss;
+        g_ss += g_dss * dd;
+        // 2f: Ad = (tw + bw)/2 + (d*(twd + bwd))/2
+        g_tw += g_ad / 2.0;
+        g_bw += g_ad / 2.0;
+        let g_x = g_ad / 2.0;
+        gd += g_x * (twd + bwd);
+        g_twd += g_x * dd;
+        g_bwd += g_x * dd;
+
+        // 2e: bwd = ((twd - ss*2) - (d*ssd)*2) * ba
+        let g_b = g_bwd * ba;
+        g_twd += g_b;
+        g_ss += g_b * (-2.0);
+        let g_dssd = g_b * (-2.0);
+        gd += g_dssd * ssd;
+        g_ssd += g_dssd * dd;
+
+        // 2d: ssd = ((ssr/d) * ((twd/tw)*d - 1)) * sa
+        let g_s = g_ssd * sa;
+        let ratio = ssr / dd;
+        let u2 = (twd / tw) * dd - 1.0;
+        let g_ratio = g_s * u2;
+        let g_u2 = g_s * ratio;
+        g_ssr += g_ratio / dd;
+        gd += -g_ratio * ssr / (dd * dd);
+        let g_tt = g_u2 * dd;
+        gd += g_u2 * (twd / tw);
+        g_twd += g_tt / tw;
+        g_tw += -g_tt * twd / (tw * tw);
+        // 2d: twd = (e*tw)/d
+        ge += g_twd * tw / dd;
+        g_tw += g_twd * e / dd;
+        gd += -g_twd * (e * tw) / (dd * dd);
+
+        // 2c: R = A/P; P = bw + (d*rt)*2; rt = sqrt(ss*ss + 1); A = ((tw + bw)*d)/2
+        let g_area = g_a + g_r / perim;
+        let g_perim = g_p - g_r * area / (perim * perim);
+        g_bw += g_perim;
+        gd += g_perim * 2.0 * rt;
+        g_rt += g_perim * 2.0 * dd;
+        g_ss += g_rt * ss / rt;
+        g_tw += g_area * dd / 2.0;
+        g_bw += g_area * dd / 2.0;
+        gd += g_area * (tw + bw) / 2.0;
+
+        // 2b: bw = clamp_min(bwr, bwlb); bwr = tw - (ss*d)*2
+        let g_bwr = g_bw * ind(!(bwr < bwlb));
+        g_tw += g_bwr;
+        g_ss += g_bwr * (-2.0 * dd);
+        gd += g_bwr * (-2.0 * ss);
+
+        // 2a: ss = clamp(ssr, 0.5, 50); ssr = (tw*e)/(d*2); tw = p*pw; pw = d^e
+        g_ssr += g_ss * ind(ssr >= 0.5 && ssr <= 50.0);
+        g_tw += g_ssr * e / (dd * 2.0);
+        ge += g_ssr * tw / (dd * 2.0);
+        gd += -g_ssr * (tw * e) / (2.0 * dd * dd);
+        out.p[i] = g_tw * pw;
+        let g_pw = g_tw * p[i];
+        gd += g_pw * e * dd.powf(e - 1.0);
+        ge += g_pw * pw * dd.ln();
+
+        out.q_eps[i] = ge;
+        out.d[i] = gd;
+    }
+    out
+}
+
+/// Cotangents of the Newton block outputs `Q*`, `a`, `b`.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct NewtonBar {
+    pub q_star: Vec<f32>,
+    pub a_up: Vec<f32>,
+    pub b_down: Vec<f32>,
+}
+
+/// `edge` holds the cotangents of the edge section's `A`, `P`, `R`, `A_d`,
+/// `P_d`; `edge.top_width` stays empty.
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct NewtonGrads {
+    pub qc: Vec<f32>,
+    pub n2: Vec<f32>,
+    pub h: Vec<f32>,
+    pub h_down: Vec<f32>,
+    pub edge: SectionBar,
+}
+
+/// B3: the reverse of 3f to 3a.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn newton_backward_host(
+    c: &StageOpConsts,
+    dt_s: f32,
+    h: &[f32],
+    qc: &[f32],
+    n2: &[f32],
+    dep: &DepthOut,
+    edge: &SectionHost,
+    o: &NewtonOut,
+    bar: &NewtonBar,
+) -> NewtonGrads {
+    let n = c.n;
+    let _ = h; // dh_edge is saved in `o`
+    let th = c.theta;
+    let gdt = c.g * dt_s;
+    let v = || vec![0.0f32; n];
+    let mut out = NewtonGrads {
+        qc: v(),
+        n2: v(),
+        h: v(),
+        h_down: v(),
+        edge: SectionBar { top_width: vec![], area: v(), perim: v(), radius: v(), a_d: v(), p_d: v() },
+    };
+    for i in 0..n {
+        let f = c.friction[i];
+        let q = qc[i];
+        let (a_e, r_e, ad_e, pd_e, p_e) =
+            (edge.out_area[i], edge.out_radius[i], edge.out_a_d[i], edge.out_p_d[i], edge.out_perim[i]);
+        let (phi, tau, den) = (o.phi[i], o.dt_phi[i], o.den[i]);
+        let (alpha, beta, phi_d, dhe, k1) = (o.alpha[i], o.beta[i], o.phi_d[i], o.dh_edge[i], o.k1[i]);
+        let le = c.edge_length[i];
+        let (s_up, s_dn) = (dep.s_up[i], dep.s_dn[i]);
+        let (g_qs, g_a, g_b) = (at(&bar.q_star, i), at(&bar.a_up, i), at(&bar.b_down, i));
+
+        // 3f
+        let g_ra = g_a * f * ind(!(o.ra[i] < 0.0));
+        let g_rb = g_b * f * ind(!(o.rb[i] < 0.0));
+        let g_beta = (g_ra + g_rb) * th + g_qs * dhe;
+        let g_kappa = g_ra * s_up - g_rb * s_dn;
+        // 3e
+        let g_alpha = g_qs * q;
+        let mut g_q = g_qs * alpha;
+        let mut g_dhe = g_qs * beta;
+        // 3d
+        let g_k1 = g_kappa * f / den;
+        let mut g_den = -g_kappa * f * k1 / (den * den);
+        // 3b
+        let mut g_a_e = g_beta * f * gdt / (le * den);
+        g_den += -g_beta * f * (a_e * gdt) / (le * den * den);
+        g_den += -g_alpha * f * (tau + 1.0) / (den * den);
+        let mut g_tau = g_alpha * f / den;
+        // 3d: K1 = (tau*Q)*phi_d + ((Ad*dhe)*g*dt)/Le
+        g_tau += g_k1 * q * phi_d;
+        g_q += g_k1 * tau * phi_d;
+        let g_phi_d = g_k1 * tau * q;
+        let mut g_ad_e = g_k1 * dhe * gdt / le;
+        g_dhe += g_k1 * ad_e * gdt / le;
+        // 3a: den = tau*2 + 1
+        g_tau += 2.0 * g_den;
+        // 3c: phi_d = Ad/A + (Ad/A - Pd/P)*4/3
+        g_ad_e += g_phi_d * (1.0 + F43) / a_e;
+        g_a_e -= g_phi_d * (1.0 + F43) * ad_e / (a_e * a_e);
+        out.edge.p_d[i] -= g_phi_d * F43 / p_e;
+        out.edge.perim[i] += g_phi_d * F43 * pd_e / (p_e * p_e);
+        // 3a: tau = phi*dt; phi = ((n2*|Q|)*g)/(A*R^(4/3))
+        let g_phi = g_tau * dt_s;
+        let cc = c.g / (a_e * r_e.powf(F43));
+        out.n2[i] += g_phi * q.abs() * cc;
+        g_q += g_phi * n2[i] * cc * sign0(q);
+        g_a_e -= g_phi * phi / a_e;
+        out.edge.radius[i] -= g_phi * phi * F43 / r_e;
+
+        out.qc[i] += g_q;
+        out.edge.area[i] += g_a_e;
+        out.edge.a_d[i] += g_ad_e;
+        out.h[i] += g_dhe;
+        out.h_down[i] -= g_dhe;
+    }
+    out
+}
+
+/// Cotangents of `R` (`r_t`) and the clamped `R'` (`r_prime`).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct ControlBar {
+    pub r_t: Vec<f32>,
+    pub r_prime: Vec<f32>,
+}
+
+/// `store.top_width` stays empty: the caller adds `ḡD_s·L/Δ` (B2).
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct ControlGrads {
+    pub h: Vec<f32>,
+    pub depth: Vec<f32>,
+    pub p: Vec<f32>,
+    pub q_eps: Vec<f32>,
+    pub n_eff: Vec<f32>,
+    pub d_s: Vec<f32>,
+    pub store: SectionBar,
+}
+
+/// B4: the reverse of 4d to 4a.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn control_backward_host(
+    c: &StageOpConsts,
+    dt_s: f32,
+    h: &[f32],
+    p: &[f32],
+    q_eps: &[f32],
+    n_eff: &[f32],
+    depth: &[f32],
+    store: &SectionHost,
+    d_s: &[f32],
+    o: &ControlOut,
+    bar: &ControlBar,
+) -> ControlGrads {
+    let _ = (h, d_s);
+    let n = c.n;
+    let v = || vec![0.0f32; n];
+    let mut out = ControlGrads {
+        h: v(),
+        depth: v(),
+        p: v(),
+        q_eps: v(),
+        n_eff: v(),
+        d_s: v(),
+        store: SectionBar { top_width: vec![], area: v(), perim: v(), radius: v(), a_d: v(), p_d: v() },
+    };
+    for i in 0..n {
+        let (g_rt, g_rp) = (at(&bar.r_t, i), at(&bar.r_prime, i));
+        let s0s = c.s0_sqrt[i];
+        // 4d
+        let g_rpr = g_rp * ind(!(o.rpr[i] < 0.0));
+        let g_rpd = g_rpr * c.dam[i];
+        let g_rpnd = g_rpr * c.nd[i];
+        let mut g_rd = g_rt * c.dam[i];
+        let g_rnd = g_rt * c.nd[i];
+        // 4c
+        let (a_s, r_s, ad_s, pd_s, p_s) =
+            (store.out_area[i], store.out_radius[i], store.out_a_d[i], store.out_p_d[i], store.out_perim[i]);
+        let (kk, w) = (o.kk[i], o.w[i]);
+        let g_dk = g_rpnd * s0s;
+        let g_kk = g_rnd * s0s + g_dk * w;
+        let g_w = g_dk * kk;
+        out.store.a_d[i] += g_w * F53 / a_s;
+        out.store.area[i] -= g_w * F53 * ad_s / (a_s * a_s);
+        out.store.p_d[i] -= g_w * F23 / p_s;
+        out.store.perim[i] += g_w * F23 * pd_s / (p_s * p_s);
+        out.store.area[i] += g_kk * r_s.powf(F23) / n_eff[i];
+        out.store.radius[i] += g_kk * (a_s / n_eff[i]) * F23 * r_s.powf(F23 - 1.0);
+        out.n_eff[i] -= g_kk * kk / n_eff[i];
+        // 4b
+        let mut g_rpd_head = g_rpd;
+        if c.has_table {
+            let m = c.t_mask[i];
+            let keep = keep_of(m);
+            let g_rtb = g_rd * m;
+            let g_rptb = g_rpd * m;
+            g_rd *= keep;
+            g_rpd_head = g_rpd * keep + g_rptb * o.act[i];
+            out.h[i] += g_rtb * ((c.t_tw[i] * c.length[i]) / c.dam_t[i]) * ind(!(o.ex[i] < 0.0));
+        }
+        // 4a
+        out.d_s[i] += g_rpd_head * dt_s / c.dam_t[i];
+        let e1 = q_eps[i] + 1.0;
+        let u = depth[i].powf(e1);
+        let lp = (c.length[i] * p[i]) / (e1 * c.dam_t[i]);
+        out.p[i] += g_rd * (c.length[i] * u) / (e1 * c.dam_t[i]);
+        out.depth[i] += g_rd * lp * e1 * depth[i].powf(e1 - 1.0);
+        out.q_eps[i] += g_rd * (lp * u * depth[i].ln() - o.rd_head[i] / e1);
+    }
+    out
+}
+
+/// B1: returns `ḡh` of blocks 1a to 1e. `g_h_down` is the cotangent of the
+/// `h_down` output (after the PrescribedStage mix), which B3 fills with `−ḡdhe`.
+#[doc(hidden)]
+pub fn depth_backward_host(
+    c: &StageOpConsts,
+    h: &[f32],
+    dep: &DepthOut,
+    g_depth: &[f32],
+    g_d_edge: &[f32],
+    g_h_down: &[f32],
+) -> Vec<f32> {
+    let n = c.n;
+    let lb = c.depth_lb;
+    let mut gh = vec![0.0f32; n];
+    let mut ghd = vec![0.0f32; n];
+    for i in 0..n {
+        let hd = dep.h_down[i];
+        let g_der = at(g_d_edge, i) * ind(!(dep.der[i] < lb));
+        let lt = h[i] < hd;
+        gh[i] += g_der * ind(!lt);
+        ghd[i] += g_der * ind(lt) + at(g_h_down, i);
+        gh[i] += at(g_depth, i) * ind(!(dep.x[i] < lb));
+    }
+    for i in 0..n {
+        let g = if c.prescribed { ghd[i] * keep_of(c.outlet[i]) } else { ghd[i] };
+        gh[c.down[i]] += g;
+    }
+    gh
+}
+
 // -------------------------------------------------------------- dispatch
 
 #[doc(hidden)]
