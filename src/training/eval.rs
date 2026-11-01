@@ -251,6 +251,12 @@ pub fn evaluate<I: Backend>(
     // prev_final_state stays None and every chunk cold-restarts. This is
     // intentional — see the FrozenParams arm comment above.
     let n_chunks_total = n_days_total.div_ceil(batch_size_days);
+    if cfg.godin_filter_on() && n_chunks_total > 1 {
+        eprintln!(
+            "warning: tidal_filter godin with {n_chunks_total} eval chunks; chunk seams leak into \
+             the 71 h filter (set testing.batch_size to cover the test period)"
+        );
+    }
     let mut prev_final_state: Option<Vec<f32>> = None;
     let mut day_offset = 0usize;
     let mut chunk_idx = 0usize;
@@ -326,7 +332,8 @@ pub fn evaluate<I: Backend>(
         burn::tensor::Tensor::<I, 1>::from_floats(pred_full_vec.as_slice(), device)
             .reshape([n_all_gauges, n_hours_full]);
     // Godin filter on the concatenated hourly series of gauges on stage rows,
-    // before daily pooling. The chunking of the eval does not matter here.
+    // before daily pooling. Chunk seams leak into the 71 h filter, hence the
+    // warning above when the eval runs in more than one chunk.
     let godin_rows = if cfg.godin_filter_on() {
         crate::training::tidal_filter::stage_gauge_rows(cfg, &probe_batch, dataset.full_observations()?)
     } else {
