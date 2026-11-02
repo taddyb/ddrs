@@ -1602,7 +1602,7 @@ fn assemble_backward_matches_host() {
     let hour = chain_hour(&ct, &q0, &[0.5, 0.4, 0.3], -5.0);
     assemble_bwd_case("assemble bwd table_rect", &ct, &hour, &h0, &q0, &[0, 3]);
 
-    // copied from tests/stage_op_parity.rs::table_and_mixed_cases (entries [1], pool_dam_1m, and [2]) and the 3 m sibling: a dam on a table row.
+    // copied from tests/stage_op_parity.rs::table_and_mixed_cases (entries [1] (pool_dam_1m) and [2] (pool_dam_3m)): a dam on a table row.
     // At 1 m the stage is below the pool (ex < 0), so the release is clamped; the 3 m case has ex > 0,
     // so the 4b release adjoint carries cotangent into h.
     for above in [1.0f32, 3.0] {

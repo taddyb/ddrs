@@ -1675,11 +1675,12 @@ struct GBars {
 
 /// Hour-1 runs, `mc_inflow` and Juniata hour 1 (forward bar 1e-5).
 const BARS_SHORT: GBars = GBars { rel: 1e-4, floor: 1e-5, loss_rel: 1e-5 };
-/// The stiff 3-hour families: gradient bar as hour 1, loss under the 2e-3 sanity bar of their forward gate.
+/// The stiff multi-hour families (3 hours, 6 for depth_floor): gradient bar as hour 1, loss under the 2e-3 sanity bar of their forward gate.
 const BARS_STIFF: GBars = GBars { rel: 1e-4, floor: 1e-5, loss_rel: 2e-3 };
 /// The 48 h runs (forward bar 1e-4).
 const BARS_48H: GBars = GBars { rel: 1e-3, floor: 1e-4, loss_rel: 1e-4 };
 
+// copied from tests/stage_op_parity.rs::Tally (adapted: counts for the structural zeros and entry failures)
 #[derive(Default)]
 struct GTally {
     compared: usize,
@@ -1689,6 +1690,8 @@ struct GTally {
     /// Per parent: entries inside the structural sets.
     zero_set_size: [usize; 7],
     failures: Vec<String>,
+    /// Failures of single gradient entries only (the loss-value line and the structural-zero lines are not counted).
+    entry_failures: usize,
 }
 
 /// Per parent, which entries must be exactly 0 on both backends: `n`, `q`, `p` on table rows and
@@ -1725,6 +1728,8 @@ fn structural_zero_failures(tag: &str, who: &str, run: &GradRun, sets: &[Vec<boo
 
 /// One state, one backend pair. Compares the loss and every gradient entry; pushes every failure into
 /// `t.failures`. With `strict_only` every miss of the bar fails. Returns the worst `err / allowed` per parent.
+// copied from tests/stage_op_parity.rs::grad_pair (adapted: CPU against CUDA instead of reference against fused,
+// failures collected instead of asserted)
 fn grad_pair_xb(
     family: &str,
     case: &Case,
@@ -1775,6 +1780,7 @@ fn grad_pair_xb(
                 continue;
             }
             if strict_only {
+                t.entry_failures += 1;
                 t.failures.push(format!(
                     "{tag} {}[{i}]: cuda {a} vs cpu {b} (err {err:e}, allowed {allowed:e}, err/max|g| {:e})",
                     PARENTS[pi],
@@ -1795,11 +1801,13 @@ fn grad_pair_xb(
                 PARENTS[pi], nz[pi]
             );
             if err > NOISE_FACTOR * nz[pi] {
+                t.entry_failures += 1;
                 t.failures.push(format!(
                     "{tag} {}[{i}]: cuda {a} vs cpu {b}: err {err:e} exceeds {NOISE_FACTOR} x noise {:e} (err/noise {ratio:.2}, bar {allowed:e}, err/max|g| {rel_max:e})",
                     PARENTS[pi], nz[pi]
                 ));
             } else if err > NOISE_CAP_FRAC * gmax {
+                t.entry_failures += 1;
                 t.failures.push(format!(
                     "{tag} {}[{i}]: cuda {a} vs cpu {b}: err {err:e} exceeds the cap {NOISE_CAP_FRAC} x max|g| {gmax:e} (err/noise {ratio:.2}, bar {allowed:e})",
                     PARENTS[pi]
@@ -1814,6 +1822,7 @@ fn grad_pair_xb(
 }
 
 /// Print the family summary and every failure; assert none and the budget.
+// copied from tests/stage_op_parity.rs::grad_family_budget (adapted: the summary and asserts part)
 fn finish_grad(family: &str, t: &GTally, budget: f64) {
     println!(
         "GRADFAMILY {family}: compared {}, accepted {} strict-bar misses (budget {}), failures {}",
@@ -1836,6 +1845,7 @@ fn finish_grad(family: &str, t: &GTally, budget: f64) {
     );
 }
 
+// copied from tests/stage_op_parity.rs::grad_family_budget (adapted: CPU against CUDA, bars as a parameter)
 fn grad_family_xb(family: &str, cases: &[Case], grid: &[(f32, u32)], strict_only: bool, budget: f64, bars: GBars) {
     let mut t = GTally::default();
     for case in cases {
@@ -1873,7 +1883,7 @@ fn gradient_parity_hour1_strict() {
         ("mc_inflow", vec![mc_inflow_case(&device)], full_grid()),
     ];
     if !cfg!(debug_assertions) {
-        families.push(("juniata_48h", vec![juniata_case(&device)], vec![(1.0, 1), (0.6, 4)]));
+        families.push(("juniata", vec![juniata_case(&device)], vec![(1.0, 1), (0.6, 4)]));
     }
     for (name, cases, grid) in families {
         grad_family_xb(&format!("{name} (hour 1)"), &hour1(cases), &grid, true, 0.0, BARS_SHORT);
@@ -1996,6 +2006,7 @@ fn structural_cell(case: &Case, theta: f32, substeps: u32) -> Vec<String> {
     let mut mism = [0usize; 7];
     let mut size = [0usize; 7];
     let mut nonzero_sets = [0usize; 7];
+    let mut nonzero_cuda = [0usize; 7];
     for pi in 0..7 {
         size[pi] = sets[pi].iter().filter(|&&s| s).count();
         for i in 0..c.grads[pi].len() {
@@ -2006,10 +2017,18 @@ fn structural_cell(case: &Case, theta: f32, substeps: u32) -> Vec<String> {
             if !sets[pi][i] && c.grads[pi][i] != 0.0 {
                 nonzero_sets[pi] += 1;
             }
+            if !sets[pi][i] && g.grads[pi][i] != 0.0 {
+                nonzero_cuda[pi] += 1;
+            }
         }
     }
     println!("STRUCT {tag}: structural set sizes {size:?}, non-zero cpu entries off the sets {nonzero_sets:?}, zero-set mismatches off the sets {mism:?} (parents {PARENTS:?})");
-    // The rows of the sets must exist, and the head gradients must be non-zero off the table rows.
+    // The sets must exist, and n, q, p must have non-zero entries off the table rows on both backends.
+    for pi in 0..3 {
+        if nonzero_sets[pi] == 0 || nonzero_cuda[pi] == 0 {
+            out.push(format!("{tag}: {} has no non-zero entry off the table rows (cpu {}, cuda {})", PARENTS[pi], nonzero_sets[pi], nonzero_cuda[pi]));
+        }
+    }
     if size[0] == 0 || size[6] == 0 {
         out.push(format!("{tag}: a structural set is empty (n {} / q_prime {})", size[0], size[6]));
     }
@@ -2168,14 +2187,17 @@ fn negative_control_rejects_a_perturbed_parent() {
         t.failures.len(),
         t.failures.first()
     );
-    assert!(!t.failures.is_empty(), "the gradient gate must reject n x (1 + 1e-3) on the CUDA run");
+    println!("negative control gradient: {} gradient-entry failures ({} failures in all, loss line included)", t.entry_failures, t.failures.len());
+    assert!(t.entry_failures > 0, "some gradient entry must fail the gradient gate for n x (1 + 1e-3) on the CUDA run");
 }
 
 // ---------------------------------------------- synced-state backward (strict level)
 //
 // The host forward runs with saving on. For each hour the host `stage_hour_backward` and the device
 // `stage_hour_backward_dev` get the SAME saved state and the SAME fixed-seed cotangent, and every
-// field of `HourGrads` is compared with the block bar 1e-5 x max|host| and the same zero set. The
+// field of `HourGrads` is compared with the per-entry bar max(1e-5 x max|host field|, 1e-6 x T_i) and the same zero set.
+// T_i is the host's own response to a one-ulp change of the cotangent (two fixed seeds) divided by 2^-24,
+// the size of the terms that cancel in entry i. The
 // structural-zero rule holds on both. No acceptance, no budget.
 
 // copied from tests/stage_cuda_blocks.rs::bar
