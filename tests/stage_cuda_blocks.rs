@@ -1,9 +1,12 @@
 //! The elementwise forward blocks of the stage op on CUDA, against the host
 //! block fns of `src/routing/stage_op.rs`, on the same inputs.
 //!
-//! Bar (plan D7, block row): `max|dev - host| <= 1e-5 * max|host|` per field,
+//! Bar (block row): `max|dev - host| <= 1e-5 * max|host|` per field,
 //! 0/1 indicator fields bitwise equal, `same_zero_set` on the clamped
-//! outputs. Device inputs come from the `upload` fns, never from another
+//! outputs. Forward fields whose chain has no `powf` or `ln` (prologue, depth,
+//! `i_mid`, matrix, right-hand side, readout) must also be bitwise equal;
+//! the section, Newton and control blocks keep only the bar, because CUDA's
+//! `powf` differs from glibc by a few ulp. Device inputs come from the `upload` fns, never from another
 //! device fn. Every test prints the worst relative difference per field.
 //! Gather kernels run on the Juniata network (it has confluences and
 //! outlets). Exact IEEE ties are inputs and are checked on the host first.
@@ -83,6 +86,13 @@ fn exact(what: &str, dev: &[f32], host: &[f32]) {
     for (i, (d, h)) in dev.iter().zip(host).enumerate() {
         assert!(d.to_bits() == h.to_bits(), "{what}[{i}]: dev {d} vs host {h}");
     }
+}
+
+/// The block bar plus bitwise equality, for a forward field whose chain has no `powf` or
+/// `ln` (the fused multiply-adds are explicit on both sides, so the bits must match).
+fn close_bits(what: &str, dev: &[f32], host: &[f32]) {
+    close(what, dev, host);
+    bitwise(what, dev, host);
 }
 
 /// Per entry `(d == 0.0) == (h == 0.0)`, with -0.0 == 0.0.
@@ -340,14 +350,14 @@ fn consts_dev_match_host() {
 
 fn compare_hour(what: &str, dev: &HourDev, host: &HourHost) {
     let d = hour_to_host(dev);
-    close(&format!("{what} p"), &d.p, &host.p);
-    close(&format!("{what} q_eps"), &d.q_eps, &host.q_eps);
-    close(&format!("{what} n_eff"), &d.n_eff, &host.n_eff);
-    close(&format!("{what} n2"), &d.n2, &host.n2);
-    close(&format!("{what} qp_stage"), &d.qp_stage, &host.qp_stage);
-    close(&format!("{what} i_t"), &d.i_t, &host.i_t);
-    close(&format!("{what} i_delta"), &d.i_delta, &host.i_delta);
-    close(&format!("{what} q_next_mc"), &d.q_next_mc, &host.q_next_mc);
+    close_bits(&format!("{what} p"), &d.p, &host.p);
+    close_bits(&format!("{what} q_eps"), &d.q_eps, &host.q_eps);
+    close_bits(&format!("{what} n_eff"), &d.n_eff, &host.n_eff);
+    close_bits(&format!("{what} n2"), &d.n2, &host.n2);
+    close_bits(&format!("{what} qp_stage"), &d.qp_stage, &host.qp_stage);
+    close_bits(&format!("{what} i_t"), &d.i_t, &host.i_t);
+    close_bits(&format!("{what} i_delta"), &d.i_delta, &host.i_delta);
+    close_bits(&format!("{what} q_next_mc"), &d.q_next_mc, &host.q_next_mc);
     assert_eq!((d.b0, d.b1), (host.b0, host.b1), "{what}: b0, b1");
 }
 
@@ -369,7 +379,7 @@ fn prologue_case(what: &str, c: &Consts) {
     let h: Vec<f32> = c.host.z_mid.iter().map(|z| z + 0.5).collect();
     for s in 0..subs {
         let asm = stage_assemble_host(&c.host, &host, s, &h, &q_t);
-        close(&format!("{what} i_mid s={s}"), &cube_to_host(&i_mid_dev(&c.dev, &hd, s)), &asm.i_mid);
+        close_bits(&format!("{what} i_mid s={s}"), &cube_to_host(&i_mid_dev(&c.dev, &hd, s)), &asm.i_mid);
     }
 }
 
@@ -393,11 +403,11 @@ fn prologue_matches_host() {
 
 fn compare_depth(what: &str, dev: &DepthDev, host: &DepthOut) {
     let d = depth_to_host(dev);
-    close(&format!("{what} x"), &d.x, &host.x);
-    close(&format!("{what} depth"), &d.depth, &host.depth);
-    close(&format!("{what} h_down"), &d.h_down, &host.h_down);
-    close(&format!("{what} der"), &d.der, &host.der);
-    close(&format!("{what} d_edge"), &d.d_edge, &host.d_edge);
+    close_bits(&format!("{what} x"), &d.x, &host.x);
+    close_bits(&format!("{what} depth"), &d.depth, &host.depth);
+    close_bits(&format!("{what} h_down"), &d.h_down, &host.h_down);
+    close_bits(&format!("{what} der"), &d.der, &host.der);
+    close_bits(&format!("{what} d_edge"), &d.d_edge, &host.d_edge);
     exact(&format!("{what} s_up"), &d.s_up, &host.s_up);
     exact(&format!("{what} s_dn"), &d.s_dn, &host.s_dn);
     same_zero_set(&format!("{what} depth"), &d.depth, &host.depth);
@@ -793,7 +803,7 @@ fn matrix_matches_host() {
         let host = matrix_host(&c.host, d_s, a_up, b_down, r_prime);
         let dev = cube_to_host(&matrix_dev(&c.dev, &up(d_s), &up(a_up), &up(b_down), &up(r_prime)));
         assert_eq!(dev.len(), 2 * c.host.nnz);
-        close(what, &dev, &host);
+        close_bits(what, &dev, &host);
         same_zero_set(what, &dev, &host);
     };
     // Juniata state: a confluence row gives a sibling sum over two slots.
@@ -825,7 +835,7 @@ fn rhs_matches_host() {
         let i_mid = bar(seed + 5, n, false);
         let host = rhs_host(&c.host, &qc, &q_star, &r_t, &b_down, &qp, &i_mid, hb0, hb1);
         let dev = rhs_dev(&c.dev, &up(&qc), &up(&q_star), &up(&r_t), &up(&b_down), &up(&qp), &up(&i_mid), hb0, hb1);
-        close(what, &cube_to_host(&dev), &host);
+        close_bits(what, &cube_to_host(&dev), &host);
     };
     // Juniata: its own state.
     let st = juniata_state(0.6, 4);
@@ -838,7 +848,7 @@ fn rhs_matches_host() {
         &st.c.dev, &up(&st.qc), &up(&asm.newton.q_star), &up(&asm.control.r_t), &up(&asm.newton.b_down),
         &up(&st.hour.qp_stage), &up(&asm.i_mid), asm.hb0, asm.hb1,
     );
-    close("rhs juniata", &cube_to_host(&dev), &host);
+    close_bits("rhs juniata", &cube_to_host(&dev), &host);
     close("rhs juniata vs asm.r", &host, &asm.r);
     case("rhs juniata random", &st.c, 11, 0.0, 0.0);
     // PrescribedStage 3-chain: the outlet term (hb1 - hb0) is live.
@@ -867,10 +877,10 @@ fn compare_readout(
     let hd = HourDev::upload(hour, &like());
     let ro = stage_readout_dev(&c.dev, &hd, &up(h), &up(qc), asm_dev, &up(dh));
     let d = readout_to_host(&ro);
-    close(&format!("{what} h_solved"), &d.h_solved, &host.h_solved);
-    close(&format!("{what} h_new"), &d.h_new, &host.h_new);
-    close(&format!("{what} dh_down"), &d.dh_down, &host.dh_down);
-    close(&format!("{what} q_new"), &d.q_new, &host.q_new);
+    close_bits(&format!("{what} h_solved"), &d.h_solved, &host.h_solved);
+    close_bits(&format!("{what} h_new"), &d.h_new, &host.h_new);
+    close_bits(&format!("{what} dh_down"), &d.dh_down, &host.dh_down);
+    close_bits(&format!("{what} q_new"), &d.q_new, &host.q_new);
     same_zero_set(&format!("{what} h_new"), &d.h_new, &host.h_new);
     let tol = 1e-5 * host.mass[3].abs();
     for (k, name) in ["storage", "net", "floor", "gross", "mc_in"].iter().enumerate() {
@@ -1051,7 +1061,7 @@ fn assert_fields_nonzero(zero_by_design: &[&str]) {
     });
 }
 
-/// D7 bar, same zero set and bitwise, for one field.
+/// block bar, same zero set and bitwise, for one field.
 fn all_bars(what: &str, dev: &[f32], host: &[f32]) {
     note_nonzero(what, host);
     close(what, dev, host);
@@ -1059,7 +1069,7 @@ fn all_bars(what: &str, dev: &[f32], host: &[f32]) {
     bitwise(what, dev, host);
 }
 
-/// D7 bar and same zero set for a field whose chain has a `powf` or `ln`. The CUDA
+/// block bar and same zero set for a field whose chain has a `powf` or `ln`. The CUDA
 /// and glibc versions differ by a few ulp, so bitwise equality is reported, not asserted.
 fn lib_bars(what: &str, dev: &[f32], host: &[f32]) {
     note_nonzero(what, host);
@@ -1274,7 +1284,7 @@ fn matrix_backward_matches_host() {
 // ------------------------------- backward blocks (B4 to B1), glue and prologue
 //
 // Bitwise expectation per field: a field whose chain has no `powf` or `ln` call must be
-// bitwise equal to the host (`all_bars`). A field with one is held to the D7 bar and the
+// bitwise equal to the host (`all_bars`). A field with one is held to the block bar and the
 // same zero set, and its bitwise state is printed (`lib_bars`). The saved values the
 // kernels read are uploaded from the host structs, so both sides start from the same bits.
 

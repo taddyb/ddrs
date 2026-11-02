@@ -2,8 +2,9 @@
 """FFMA counts of the dumped stage kernels.
 
 usage: python3 scripts/fma_sass_check.py <cubecl debug log> <out json>
-Dump the kernel source first: run one CUDA block test with CUBECL_DEBUG_LOG=<file> set, for example
-  CUBECL_DEBUG_LOG=/tmp/kernels.log cargo test --features cuda --test stage_cuda_blocks
+Dump the kernel source first: run the CUDA tests with CUBECL_DEBUG_LOG=<file> set. They must launch every
+kernel below (the block tests, the factor tests and the hour tests); see .claude/skills/ddrs-dev/references/testing.md
+for the exact command. The script prints the kernel names it did not find.
 The env var SM names the GPU architecture (default sm_89). nvcc and cuobjdump must be on PATH.
 For each of our kernels (names below) the dumped C++ is compiled with nvcc -cubin at --fmad=true and --fmad=false
 and the FFMA lines of cuobjdump -sass are counted. 'fma(' counts the explicit calls in the source."""
@@ -52,3 +53,6 @@ json.dump(res, open(out, "w"), indent=1)
 for n in NAMES:
     for i, r in enumerate(res.get(n, [])):
         print(f"{n}[{i}] explicit_fma={r['explicit_fma']} ffma_true={r['ffma_true']} ffma_false={r['ffma_false']}")
+missing = [n for n in NAMES if n not in res]
+if missing:
+    print("NOT FOUND in the log (no test launched them): " + ", ".join(missing))

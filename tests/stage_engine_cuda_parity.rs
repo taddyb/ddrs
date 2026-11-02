@@ -19,9 +19,9 @@
 //! - Structural zeros: the gradients of `n`, `q_spatial` and `p_spatial` on table rows are exactly 0 on both
 //!   backends. These entries are asserted on their own and are NOT counted in `compared`, so they do not enlarge
 //!   the 1 % budget. Off that set, entries that are exactly 0 on one backend only are counted and printed.
-//! - The CUDA arms ran: the number of host copies made on the calling thread during the CUDA forward and backward
-//!   (`ddrs::sparse::host_reads_on_this_thread_for_test`) must stay below what the host arm of the stage op would
-//!   make (7 per hour).
+//! - No host copies: the number of host copies made on the calling thread during the CUDA forward and backward
+//!   (`ddrs::sparse::host_reads_on_this_thread_for_test`) must be exactly 0. The CPU control run must make at least
+//!   what the host arm of the stage op makes (7 per hour), so a counter that sees nothing fails the test.
 //! - Printed wall times include kernel JIT and are taken without a device sync while the two tests run in parallel
 //!   threads. They are not timing data. The scale test (`tests/stage_cuda_scale.rs`) holds the timings.
 //!
@@ -262,8 +262,8 @@ fn engine_cpu_vs_cuda(label: &str, config: &str, start: (i32, u32, u32), expect_
     if c.host_reads < host_arm_reads {
         failures.push(format!("cpu control made {} host copies, expected at least {host_arm_reads}: the counter sees nothing", c.host_reads));
     }
-    if g.host_reads >= host_arm_reads {
-        failures.push(format!("cuda run made {} host copies, the host arm would make {host_arm_reads}: the CUDA arms did not run", g.host_reads));
+    if g.host_reads != 0 {
+        failures.push(format!("cuda run made {} host copies, expected 0 (the host arm would make {host_arm_reads})", g.host_reads));
     }
 
     // Forward: bar 1e-4 * max|cpu| of each hour.

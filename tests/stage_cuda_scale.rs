@@ -267,13 +267,14 @@ where
             outs.push(out);
         }
         let grads = loss.unwrap().backward();
-        // Keep the gradients alive until the queue is empty.
+        // Free the gradients; the caller syncs.
         drop(grads);
         outs
     };
     let _ = go(WARMUP_HOURS, &mut q);
     sync();
-    // Cut the warm-up graph, so the timed backward walks only the timed hours.
+    // The detach cuts `q`. The block's `h_t` still links to warm-up nodes, but the warm-up
+    // backward already consumed their steps, so the timed backward walks only the timed hours.
     q = q.detach().require_grad();
     let t = Instant::now();
     let outs = go(TIMED_HOURS, &mut q);

@@ -7,7 +7,7 @@
 //! - the scalars `theta`, `g`, `dt_s`, `depth_lb`, `bw_lb`, `F43`, `F23`, `F53`
 //!   and `1e-6` are f32 arguments read from the host, not retyped literals;
 //! - one thread per reach; the row sums are gathers over the CSR rows, in
-//!   slot order (rule G1 of the plan).
+//!   slot order, the host's loop order.
 
 use cubecl::cuda::CudaRuntime;
 use cubecl::prelude::*;
@@ -815,7 +815,7 @@ pub fn control_dev(
 // ------------------------------------------------------------------ matrix
 
 /// 5a to 5d. Mirrors `matrix_host`: one thread per slot. The row sum `sib` is
-/// a gather over the slot's row in slot order (rule G1), recomputed per slot.
+/// a gather over the slot's row in slot order, the host's loop order, recomputed per slot.
 #[cube(launch)]
 fn matrix_kernel(
     d_s: &Tensor<f32>,

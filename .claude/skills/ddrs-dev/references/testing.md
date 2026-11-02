@@ -133,8 +133,8 @@ grep -rnE "into_data|to_data|into_scalar|primitive_to_vec|read_one|\.read\(|read
   src/routing/stage_cuda src/sparse/tree_lu_cuda.rs
 ```
 
-`tree_lu_cuda::factor_matches_host_on_conus` skips unless `DDRS_CONUS_ADJ` names the
-CONUS adjacency zarr (`.ddrs/adjacency/<key>/merit_conus_adjacency.zarr`). Set it
+`tree_lu_cuda::factor_matches_host_on_conus` runs in release builds only, and only when
+`DDRS_CONUS_ADJ` names the CONUS adjacency zarr (`.ddrs/adjacency/<key>/merit_conus_adjacency.zarr`). Set it
 for the CONUS factor check. The tests compare the CUDA arm with the host fns, never
 with a stored number, so they need the GPU.
 
@@ -161,7 +161,8 @@ So:
 - The engine test (`stage_engine_cuda_parity`) routes 6 days (120 output hours,
   `RhoWindow::n_hourly` is `(rho_days - 1) * 24`) of Juniata and of the Hudson on both
   backends and compares the routed q, the five mass sums and the gradients of
-  `n`, `q_spatial`, `p_spatial`. It also checks that the CUDA run made no host copies.
+  `n`, `q_spatial`, `p_spatial`. It also asserts that the CUDA run made exactly 0 host copies
+  (the CPU control must make at least 7 per hour).
   Its printed wall times include kernel JIT and are not timing data.
 
 **Parked test.** `tests/stage_op_cuda_parity.rs::gradient_parity_depth_floor_stiff_cell`
@@ -176,7 +177,8 @@ into one rounding. Every stage kernel therefore writes the fused sites as explic
 CUDA or cubecl, run the check:
 
 ```bash
-CUBECL_DEBUG_LOG=/tmp/kernels.log cargo test --features cuda --test stage_cuda_blocks
+CUBECL_DEBUG_LOG=/tmp/kernels.log cargo test --features cuda --test stage_cuda_blocks \
+  --test tree_lu_cuda --test stage_op_cuda_parity -- --test-threads=1
 SM=sm_89 python3 scripts/fma_sass_check.py /tmp/kernels.log /tmp/fma.json
 ```
 
@@ -186,7 +188,16 @@ with `nvcc -cubin` at `--fmad=true` and `--fmad=false` and counts `FFMA` in
 bit-neutral doublings (`(a*b)*2.0`, written `x + x` by the compiler) may stay. Any other gap
 is an unfused site: find it with the PTX `.loc` line map, write it as an explicit `fma`
 on the kernel, the host fn and `StageBlock::step_reference` together, and rerun.
-`SM` is the GPU architecture (default `sm_89`).
+`SM` is the GPU architecture (default `sm_89`). The three tests together launch every
+kernel in the script's list (`tree_lu_cuda` launches `tree_factor_kernel`;
+`stage_op_cuda_parity` launches `mass_add_kernel` and `epilogue_kernel`). The script
+prints the names it did not find, so a missing kernel is visible.
+
+Measured 2026-11-02 on sm_89: the gap is 0 for every kernel except `section_kernel`
+(+5 on both variants), `newton_kernel` (+1) and `section_backward_kernel` (+1 and +2).
+These are the `*2.0` doublings of the section and Newton chains. The forward blocks
+are held to the bar of their `powf` chain and the backward blocks are bitwise, and
+both pass.
 
 **Wall time (`tests/stage_cuda_scale.rs`).** Release only (a debug build skips it).
 It prints CPU and CUDA ms per hour for Juniata, Hudson and, with

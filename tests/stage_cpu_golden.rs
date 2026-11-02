@@ -1,12 +1,9 @@
-//! Bitwise pin of the CPU fused stage step, captured before Phase G.
-//!
-//! Phase G adds a CUDA path next to the host path. The host path must keep its
-//! bits. This test hashes (FNV-1a 64 over the f32 bits) the outputs and the
-//! gradients of `StageBlock::step` (the fused op) on `NdArray` with
-//! `use_cuda: false`, for five (case, theta, substeps) rows. The hashes in
-//! `GOLDEN` were captured at the Phase G base commit and must never be
-//! recaptured on CI. If CI differs from a local run, gate the test on an env
-//! var for local runs and record why.
+//! Bitwise pin of the CPU fused stage step. The hashes cover `StageBlock::step` (the
+//! fused op) on `NdArray` with `use_cuda: false`, for five (case, theta, substeps) rows.
+//! They hash (FNV-1a 64 over the f32 bits) the outputs and the gradients. They were
+//! captured on this machine's glibc. Re-pin them only on purpose, and record the old
+//! values and the reason above `GOLDEN`. Never recapture them on CI. If CI differs from a
+//! local run, gate the test on an env var for local runs and record why.
 //!
 //! The case builders are copies of `tests/stage_op_parity.rs`.
 
@@ -373,8 +370,8 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
     h
 }
 
-/// (case label, theta, substeps, hash). First captured at the worktree's base commit before any Phase G
-/// change. Re-pinned 2026-11-01 (user ruling): the CPU forward now fuses every `a*b + c` site
+/// (case label, theta, substeps, hash). First captured before the CUDA stage work changed any stage
+/// arithmetic. Re-pinned 2026-11-01 (user ruling): the CPU forward now fuses every `a*b + c` site
 /// like the CUDA kernels do (`f32::mul_add`), so the forward bits and the gradients computed from them change.
 /// Old values: juniata 1/1 0x2ae92b67fad3d5e1, juniata 0.6/4 0x22e3e3b39497095d, table_rect 0.6/1
 /// 0x3eb5586bb6085ac2, flow_reversal 0.55/4 0x041ea849e871639d, dam_edge 1/1 0x030531fdfcc73026.

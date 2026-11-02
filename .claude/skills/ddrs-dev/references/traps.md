@@ -341,12 +341,38 @@ runs as a single cube of 32 threads. It takes 11 ms per call and 62 % of the GPU
 (cuSPARSE `spsm_v2` 19 %, `tree_factor_kernel` 11 %). Without it CONUS would run near
 7 ms per hour. This is not optimized.
 
-**Theta 0.6 goes NaN on the CPU path itself.** With theta 0.6 and the scale test's
-uniform input (n 0.035, p 21, q 0.5, q' 1.0 on every reach), the stage scheme blows up
-to NaN on large CONUS networks even on the CPU: at 1 substep on the 51,441-reach basin
-and the full network, at 4 substeps on the full network (hour 21). Theta 1.0 is
-stable on every row. So the scale test runs the CONUS rows at theta 1.0. The op does the
-same work at any theta. This is a measured fact. It was not investigated.
+**Theta 0.6 goes NaN on large CONUS networks, on the CPU path too.** With the scale test's
+uniform input (n 0.035, p 21, q 0.5, q' 1.0 on every reach) and the normal-depth hotstart,
+the stage scheme blows up at theta 0.6: at 1 substep on the 51,441-reach basin and the
+full network (about hour 20), and at 4 substeps on the full network (about hour 23).
+Theta 1.0 is stable on every row, so the scale test runs the CONUS rows at theta 1.0. The
+op does the same work at any theta.
+
+Cause (measured on the CPU, 2026-11-02): a nonlinear instability of the theta < 1 scheme,
+set off by the start state. The hotstart puts each reach at its own normal depth, so
+tributaries and short steep reaches start up to 40 m (51 m on the full network) below the
+water surface downstream. Each such edge gives a backflow predictor with almost no
+friction, because the friction term is linearised about `|Q^t|`, which is small. At
+theta < 1 the `(1 - theta)*Q^t` term flips the flux sign on storage-poor reaches every
+step (factor `-(1 - theta)/theta`, -0.67 at theta 0.6). Each flip passes `|Q|` through
+zero, so the friction collapses again, and the amplitude grows 5 to 30 times per hour
+until f32 overflows. At theta 1.0 the same overshoots decay in about 13 hours.
+
+It predates the CUDA work: the commit before the fused multiply-adds and the reciprocal
+solve fails the same way at the same stability boundary, and only the NaN hour moves. The
+CPU/CUDA divergence of the scale test from hour 3 fits the same chaos, not a kernel error.
+
+Stability map (uniform input, hotstart, 100 hours): the critical theta falls as substeps
+rise, from between 0.65 and 0.7 at 1 substep to 0.55 to 0.65 at 4 and 0.5 to 0.6 at 8.
+Juniata stays finite from 0.5 to 1.0. The Hudson network fails only at theta 0.5 with
+1 substep.
+
+A consistent start (fill each reach up to the stage downstream, or run 24 hours at theta
+1.0 first) keeps theta 0.6 finite on the 51,441-reach basin, but a disturbance of 100 % of
+the flow brings the blow-up back. **No fix is chosen.** Candidates: a consistent hotstart,
+theta 1.0 for non-tidal networks (the current setting), theta 1.0 only on storage-poor or
+floored edges, and a friction linearisation that cannot collapse. Not checked: the Hudson
+tidal input with its table geometry, the engine's real start state, and the backward pass.
 
 ---
 ## T16 — Forward-only Autodiff evaluations retain the tape
@@ -572,8 +598,11 @@ A change to the stage cross-section, for example a power-law section selected by
 `params.geometry_form`, must change all of these together: `section_host` and
 `section_backward_host` in `src/routing/stage_op.rs`, `section_kernel` and
 `section_backward_kernel` in `src/routing/stage_cuda/`, and the reference copy in
-`StageBlock::section`. Changing `src/geometry.rs` alone moves the hotstart and leaves
-the stage step on the old section. `tests/stage_op_parity.rs` (fused equals reference,
+`StageBlock::section`. It must also change `StageBlock::hotstart`, which takes the start
+depth from `compute_trapezoidal_geometry`. A hotstart left on the trapezoid gives an
+inconsistent start state, and the theta 0.6 blow-up (T13) shows the start state matters.
+Changing `src/geometry.rs` alone moves the hotstart and leaves the stage step on the old
+section. `tests/stage_op_parity.rs` (fused equals reference,
 bitwise) and `stage_cuda_blocks` fail if one side is missed.
 
 ---

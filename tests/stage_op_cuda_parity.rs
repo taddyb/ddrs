@@ -386,6 +386,10 @@ fn run_pair_xb(case: &Case, theta: f32, substeps: u32, bar: f32, gate: Gate) -> 
             let (d, c) = (&gb[k].stage, &cb[k].stage);
             let scale = c.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             let worst = max_abs_diff(d, c);
+            // `max_abs_diff` folds with `f32::max`, which drops NaN, so check finiteness first.
+            if let Some(i) = d.iter().zip(c).position(|(x, y)| !x.is_finite() || !y.is_finite()) {
+                return Err(format!("{tag} stage reach {i}: non-finite dev {} cpu {}", d[i], c[i]));
+            }
             if gate == Gate::Sanity {
                 for (i, (x, y)) in d.iter().zip(c).enumerate() {
                     let err = (x - y).abs();
@@ -1517,7 +1521,8 @@ fn dh_is_bitwise_equal_to_the_host_solve() {
 // `|g - c| <= floor * max(1, max_j |c_j|)`. The hour-1 runs of `chain_states`, `prescribed_boundary`,
 // `mc_inflow` and Juniata are strict: every miss fails. Elsewhere a miss is accepted only if
 // `err <= 4 * (noise_cpu + noise_cuda)` of its parent AND `err <= 5e-4 * max|g|` of its parent, and the
-// accepted entries are capped at a share of the compared entries. Every accepted entry is printed.
+// accepted entries are capped at a share of the compared entries. Entries in the structural-zero sets
+// are asserted exactly 0 on both backends and are not counted as compared. Every accepted entry is printed.
 // A failing family reports every failing entry and never widens a bar.
 
 // copied from tests/stage_op_parity.rs::Rng
@@ -1768,9 +1773,13 @@ fn grad_pair_xb(
                 t.failures.push(format!("{tag} {}[{i}]: non-finite cuda {a} cpu {b}", PARENTS[pi]));
                 continue;
             }
-            t.compared += 1;
-            if !sets[pi][i] && (*a == 0.0) != (*b == 0.0) {
-                t.zero_mismatch[pi] += 1;
+            // Structural zeros are asserted exactly 0 on both backends above. They are not
+            // counted here, so they do not enlarge the budgets.
+            if !sets[pi][i] {
+                t.compared += 1;
+                if (*a == 0.0) != (*b == 0.0) {
+                    t.zero_mismatch[pi] += 1;
+                }
             }
             let err = (a - b).abs();
             let allowed = (bars.rel * a.abs().max(b.abs())).max(bars.floor * scale);

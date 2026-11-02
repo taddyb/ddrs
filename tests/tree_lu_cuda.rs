@@ -162,6 +162,12 @@ fn dev_tree(p: &CsrPattern, like: &Cube) -> TreeDev {
     TreeDev::upload(&tree_levels(p).expect("tree"), like)
 }
 
+/// Number of entries whose bits differ.
+fn bit_mismatches(got: &[f32], want: &[f32]) -> usize {
+    assert_eq!(got.len(), want.len());
+    got.iter().zip(want).filter(|(g, w)| g.to_bits() != w.to_bits()).count()
+}
+
 fn check_factor(name: &str, adj: &SparseAdjacency, p: &CsrPattern, seed: u64) -> f32 {
     let a = random_tree_matrix(adj, p, seed, adj.n / 7);
     let host = tree_lu_factor(p, &a);
@@ -172,6 +178,8 @@ fn check_factor(name: &str, adj: &SparseAdjacency, p: &CsrPattern, seed: u64) ->
     let (el, eu) = (rel_worst(&dl, &host.l_values), rel_worst(&du, &host.u_values));
     println!("{name}: worst factor diff, l {el:e}, u {eu:e}");
     assert!(el <= 1e-6 && eu <= 1e-6, "{name}: l {el:e} u {eu:e}");
+    let (bl, bu) = (bit_mismatches(&dl, &host.l_values), bit_mismatches(&du, &host.u_values));
+    assert!(bl == 0 && bu == 0, "{name}: factor not bitwise: {bl} l and {bu} u entries differ");
     el.max(eu)
 }
 
@@ -224,6 +232,8 @@ fn factor_matches_host_on_conus() {
     let (el, eu) = (rel_worst(&dl, &host.l_values), rel_worst(&du, &host.u_values));
     println!("CONUS n {} levels {levels}: worst factor diff, l {el:e}, u {eu:e}", adj.n);
     assert!(el <= 1e-6 && eu <= 1e-6, "CONUS: l {el:e} u {eu:e}");
+    let (bl, bu) = (bit_mismatches(&dl, &host.l_values), bit_mismatches(&du, &host.u_values));
+    assert!(bl == 0 && bu == 0, "CONUS: factor not bitwise: {bl} l and {bu} u entries differ");
 
     // Warm up, then time a batch of factors with a sync at the end.
     let dev = device();
