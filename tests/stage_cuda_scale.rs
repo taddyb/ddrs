@@ -15,7 +15,11 @@
 //! `q_next` forward. The test runs in release builds only; a debug build skips it.
 //!
 //! `DDRS_SCALE_NET` (a label substring) and `DDRS_SCALE_SUBSTEPS` (1 or 4) limit the run to one row,
-//! which is how a profiler is pointed at it.
+//! which is how a profiler is pointed at it. A `DDRS_SCALE_SUBSTEPS` that is not 1 or 4 panics. A filter
+//! that matches no row fails the test, so a typo cannot pass by running nothing.
+//!
+//! Each row is one sample. The small-network CUDA rows are launch bound and vary by up to about 1.5x
+//! between runs of the same binary. The CPU rows stay within about 1 %.
 //!
 //! Run: `DDRS_CONUS_ADJ=<zarr> cargo test --release --features cuda --test stage_cuda_scale -- --nocapture`
 #![cfg(feature = "cuda")]
@@ -65,10 +69,12 @@ struct Net {
     q0: Vec<f32>,
 }
 
-// copied from tests/stage_op_cuda_parity.rs::params, with use_cuda a parameter
+/// Stage parameters, with `use_cuda` a parameter.
+// copied from tests/stage_op_cuda_parity.rs::params
 ///
-/// Theta: the bundle rows use the shipped values, 1.0 with one substep (as in
-/// `examples/juniata/ddrs_stage.yaml`) and 0.6 with four (as in `examples/hudson/ddrs.yaml`).
+/// Theta: the bundle rows use 1.0 with one substep (as shipped in
+/// `examples/juniata/ddrs_stage.yaml`) and 0.6 with four (as shipped in `examples/hudson/ddrs.yaml`).
+/// Juniata with four substeps and Hudson with one substep are not shipped. They are measured only.
 /// The CONUS rows use 1.0 at both substep counts. With theta 0.6 the uniform input
 /// (q' of 1.0 on every reach) blows up to NaN on the CPU path itself on the large networks,
 /// so those rows would time a diverged state. The op does the same work at any theta.
@@ -117,6 +123,7 @@ fn net_from_adjacency(label: &str, conus: bool, adj: SparseAdjacency, device: &T
     Net { label: label.to_string(), conus, adj, pattern, h0, q0: q_init }
 }
 
+// copied from tests/stage_op_cuda_parity.rs::bundle_case (adjacency block)
 fn adjacency_of(store: &ConusAdjacencyStore) -> SparseAdjacency {
     SparseAdjacency {
         n: store.n,
@@ -266,6 +273,8 @@ where
     };
     let _ = go(WARMUP_HOURS, &mut q);
     sync();
+    // Cut the warm-up graph, so the timed backward walks only the timed hours.
+    q = q.detach().require_grad();
     let t = Instant::now();
     let outs = go(TIMED_HOURS, &mut q);
     sync();
@@ -317,7 +326,13 @@ fn stage_op_wall_time_cpu_vs_cuda() {
     let mut failures = vec![];
     // Optional filters for profiling one row: a label substring and a substep count.
     let only_net = std::env::var("DDRS_SCALE_NET").ok().filter(|s| !s.is_empty());
-    let only_sub: Option<u32> = std::env::var("DDRS_SCALE_SUBSTEPS").ok().and_then(|s| s.parse().ok());
+    let only_sub: Option<u32> = std::env::var("DDRS_SCALE_SUBSTEPS").ok().filter(|s| !s.is_empty()).map(|s| {
+        match s.parse::<u32>() {
+            Ok(k @ (1 | 4)) => k,
+            _ => panic!("DDRS_SCALE_SUBSTEPS must be 1 or 4, got {s:?}"),
+        }
+    });
+    let mut rows_run = 0usize;
     for net in &nets {
         if only_net.as_ref().is_some_and(|f| !net.label.contains(f.as_str())) {
             continue;
@@ -327,6 +342,7 @@ fn stage_op_wall_time_cpu_vs_cuda() {
             if only_sub.is_some_and(|k| k != substeps) {
                 continue;
             }
+            rows_run += 1;
             let theta = if net.conus || substeps == 1 { 1.0f32 } else { 0.6 };
             let cpu = run_backend::<Cpu>(net, substeps, theta, false, &device, || {});
             let gpu = run_backend::<Gpu>(net, substeps, theta, true, &dg, || {
@@ -392,5 +408,6 @@ fn stage_op_wall_time_cpu_vs_cuda() {
             );
         }
     }
+    assert!(rows_run > 0, "no row matched the filters");
     assert!(failures.is_empty(), "scale test failures:\n{}", failures.join("\n"));
 }

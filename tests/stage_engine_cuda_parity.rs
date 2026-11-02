@@ -1,6 +1,8 @@
 //! The whole engine (spatial parameters, Muskingum-Cunge rows, stage block, loss) on CUDA against the CPU.
 //!
-//! Each test routes a 5-day window of a committed example bundle twice. The CPU run uses NdArray with
+//! Each test routes a 6-day window of a committed example bundle twice. A window of `rho_days` days gives
+//! `(rho_days - 1) * 24` output hours (`src/data/dates.rs::RhoWindow::n_hourly`), so 6 days give 120 hours and each
+//! half of the gradient noise test gets 60. The CPU run uses NdArray with
 //! `sparse_solver: cpu`. The CUDA run uses `Cuda<f32, i32>` with `sparse_solver: cuda`, which turns on the CUDA arms
 //! of the stage op, the tree solve and the Muskingum-Cunge solve. The spatial parameters `n`, `q_spatial` and
 //! `p_spatial` are `require_grad` leaves, so the gradients are those the KAN head would receive.
@@ -8,14 +10,20 @@
 //! Gates:
 //! - Forward: routed q of every reach, per hour, within `1e-4 * max|cpu|` of that hour. The five mass sums within
 //!   `1e-5 * gross` and the step counts equal. No acceptance budget.
-//! - Gradients (48 h bar of the stage op parity tests): per entry `1e-3 * max(|g|, |c|)` or
-//!   `1e-4 * max(1, max|c|)`. A miss is accepted only if `err <= 4 * (noise_cpu + noise_cuda)` and
-//!   `err <= 5e-4 * max|g|` of its parameter, with at most 1 % of the compared entries accepted. Every accepted
+//! - Gradients (48 h bar of the stage op parity tests): `g` is the CUDA gradient and `c` the CPU gradient of one
+//!   entry. A miss is `|g - c| > max(1e-3 * max(|g|, |c|), 1e-4 * max(1, max|c|))`. A miss is accepted only if
+//!   `err <= 4 * (noise_cpu + noise_cuda)` and `err <= 5e-4 * max|c|` of its parameter, with at most 1 % of the
+//!   compared entries accepted. The floor and the cap use the maximum over the CPU gradient `c`. Every accepted
 //!   entry is printed. `noise_*` is the linearity noise of the loss on that backend, `max_i |gA + gB - gboth|`,
-//!   where A weights the first half of the output hours and B the second half (the 5-day window gives 96 output hours,
-//!   so 48 each).
+//!   where A weights the first half of the output hours and B the second half (60 and 60 hours).
 //! - Structural zeros: the gradients of `n`, `q_spatial` and `p_spatial` on table rows are exactly 0 on both
-//!   backends. Off that set, entries that are exactly 0 on one backend only are counted and printed.
+//!   backends. These entries are asserted on their own and are NOT counted in `compared`, so they do not enlarge
+//!   the 1 % budget. Off that set, entries that are exactly 0 on one backend only are counted and printed.
+//! - The CUDA arms ran: the number of host copies made on the calling thread during the CUDA forward and backward
+//!   (`ddrs::sparse::host_reads_on_this_thread_for_test`) must stay below what the host arm of the stage op would
+//!   make (7 per hour).
+//! - Printed wall times include kernel JIT and are taken without a device sync while the two tests run in parallel
+//!   threads. They are not timing data. The scale test (`tests/stage_cuda_scale.rs`) holds the timings.
 //!
 //! Run: `cargo test --features cuda --test stage_engine_cuda_parity -- --nocapture` (debug) and the `--release` form.
 #![cfg(feature = "cuda")]
@@ -37,7 +45,7 @@ type Gpu = burn_cuda::Cuda<f32, i32>;
 
 const JUNIATA_CONFIG: &str = "examples/juniata/ddrs_stage.yaml";
 const HUDSON_CONFIG: &str = "examples/hudson/ddrs.yaml";
-const DAYS: usize = 5;
+const DAYS: usize = 6;
 const NOISE_FACTOR: f32 = 4.0;
 const NOISE_CAP_FRAC: f32 = 5e-4;
 const BUDGET_FRAC: f64 = 0.01;
@@ -87,6 +95,8 @@ struct EngineRun {
     /// Table geometry rows (empty without a table).
     table_rows: Vec<usize>,
     wall: Duration,
+    /// Host copies made on this thread during the forward and the backward.
+    host_reads: u64,
 }
 
 /// Route one window on backend `B` and take the gradient of `sum(w * q)` with respect to the three spatial
@@ -164,6 +174,7 @@ where
         tensors.reservoir_rows.as_ref(),
         tensors.window.window_start,
     );
+    let reads0 = ddrs::sparse::host_reads_on_this_thread_for_test();
     let t0 = Instant::now();
     let out = engine.forward();
     let [rows, t] = out.dims();
@@ -186,6 +197,7 @@ where
     let loss = (out.clone() * wt).sum();
     let g = loss.backward();
     let wall = t0.elapsed();
+    let host_reads = ddrs::sparse::host_reads_on_this_thread_for_test() - reads0;
     let q: Vec<f32> = out.inner().into_data().to_vec().unwrap();
     let loss_v = loss.inner().into_data().to_vec::<f32>().unwrap()[0];
     let get = |x: &Tensor<Ad<B>, 1>, what: &str| -> Vec<f32> {
@@ -200,6 +212,7 @@ where
         mass: engine.stage_mass_balance(),
         table_rows,
         wall,
+        host_reads,
     }
 }
 
@@ -232,7 +245,7 @@ fn engine_cpu_vs_cuda(label: &str, config: &str, start: (i32, u32, u32), expect_
     let (dc, dg): (<Cpu as BackendTypes>::Device, <Gpu as BackendTypes>::Device) = (Default::default(), Default::default());
     let c = run::<Cpu>(config, start, false, Hours::All, &dc);
     let g = run::<Gpu>(config, start, true, Hours::All, &dg);
-    println!("{label} ({}): wall forward+backward, cpu {:.2} s, cuda {:.2} s", mode(), c.wall.as_secs_f64(), g.wall.as_secs_f64());
+    println!("{label} ({}): wall (includes JIT, not a benchmark) forward+backward, cpu {:.2} s, cuda {:.2} s", mode(), c.wall.as_secs_f64(), g.wall.as_secs_f64());
     assert_eq!((c.n, c.t), (g.n, g.t));
     let (n, t) = (c.n, c.t);
     println!("{label}: {n} reaches, {t} hours, table rows {}", c.table_rows.len());
@@ -240,6 +253,18 @@ fn engine_cpu_vs_cuda(label: &str, config: &str, start: (i32, u32, u32), expect_
         assert_eq!(c.table_rows.len(), k, "table row count");
     }
     let mut failures: Vec<String> = Vec::new();
+
+    // The CUDA arms ran. The host arm of the stage op makes 7 host copies per hour (see `stage_op.rs`), so a run
+    // that fell back to it would reach at least that many.
+    let host_arm_reads = 7 * (t as u64 - 1);
+    println!("{label}: host copies in forward+backward, cuda {} (host arm would make at least {host_arm_reads}), cpu {}", g.host_reads, c.host_reads);
+    // The CPU run takes the host arm, so it is the control: a counter that sees nothing would pass the CUDA check.
+    if c.host_reads < host_arm_reads {
+        failures.push(format!("cpu control made {} host copies, expected at least {host_arm_reads}: the counter sees nothing", c.host_reads));
+    }
+    if g.host_reads >= host_arm_reads {
+        failures.push(format!("cuda run made {} host copies, the host arm would make {host_arm_reads}: the CUDA arms did not run", g.host_reads));
+    }
 
     // Forward: bar 1e-4 * max|cpu| of each hour.
     let mut worst = (0.0f32, 0usize, 0usize);
@@ -352,6 +377,10 @@ fn engine_cpu_vs_cuda(label: &str, config: &str, start: (i32, u32, u32), expect_
         let scale = cc.iter().fold(1.0f32, |m, v| m.max(v.abs()));
         let gmax = cc.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         for i in 0..n {
+            if is_table[i] {
+                // Structural zeros: asserted above, not part of the budget.
+                continue;
+            }
             let (a, b) = (gg[i], cc[i]);
             if !a.is_finite() || !b.is_finite() {
                 failures.push(format!("{}[{i}]: non-finite cuda {a} cpu {b}", NAMES[pi]));
