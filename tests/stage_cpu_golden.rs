@@ -384,13 +384,16 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
 /// Re-pinned 2026-11-02: the CPU adjoint of the readout, RHS and matrix blocks now fuses the same sites as
 /// the CUDA backward kernels. Values before that change: juniata 0.6/4 0xc92e200f90dc88e7, table_rect 0.6/1
 /// 0x0422c60a9e076e5d, flow_reversal 0.55/4 0x61f847bd464e6d11 (juniata 1/1 and dam_edge 1/1 did not change).
-/// Task 7 fuses the remaining CPU adjoint blocks and will pin these again.
+/// Re-pinned again 2026-11-02: the CPU adjoint of the section, Newton, control, depth, assemble-glue
+/// and prologue blocks now fuses the same sites as the CUDA backward kernels. Values before that change:
+/// juniata 1/1 0x17261ad23acc08a9, juniata 0.6/4 0x1fde63b5606e2832, table_rect 0.6/1 0x431b2de1e30bc9e0,
+/// flow_reversal 0.55/4 0xe78b0648c482edb3, dam_edge 1/1 0xd7c87cb2dfed1762.
 const GOLDEN: &[(&str, f32, u32, u64)] = &[
-    ("juniata", 1.0, 1, 0x17261ad23acc08a9),
-    ("juniata", 0.6, 4, 0x1fde63b5606e2832),
-    ("table_rect", 0.6, 1, 0x431b2de1e30bc9e0),
-    ("flow_reversal", 0.55, 4, 0xe78b0648c482edb3),
-    ("dam_edge", 1.0, 1, 0xd7c87cb2dfed1762),
+    ("juniata", 1.0, 1, 0x11f8076cfa233298),
+    ("juniata", 0.6, 4, 0xfa72cab1155ba8d6),
+    ("table_rect", 0.6, 1, 0xccb63562455dd578),
+    ("flow_reversal", 0.55, 4, 0xa82c2cc3d74bc201),
+    ("dam_edge", 1.0, 1, 0xaae366862eb36ca5),
 ];
 
 fn case_for(label: &str, device: &TestDevice) -> Case {

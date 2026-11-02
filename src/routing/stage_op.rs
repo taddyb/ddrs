@@ -838,74 +838,79 @@ pub fn section_backward_host(
     let n = c.n;
     let bwlb = c.bw_lb;
     let mut out = SectionGrads { p: vec![0.0; n], q_eps: vec![0.0; n], d: vec![0.0; n] };
+    // Fusing rule of this fn (the CUDA kernel writes the same sites as explicit `fma`): every
+    // add or subtract that takes a product is one fused multiply-add, also when the product has
+    // other uses, because NVRTC fuses those too. A product by an exact constant (2.0, 0.5, a 0/1
+    // indicator, the 0/1 `keep`) gives the same bits fused or not, but it is written fused so
+    // the compiler has nothing left to contract on its own. The left product of `a*b + c*d` fuses.
     for i in 0..n {
         let (e, dd) = (q_eps[i], d[i]);
-        let (mut g_tw, mut g_a, mut g_p) = (at(&bar.top_width, i), at(&bar.area, i), at(&bar.perim, i));
-        let (mut g_r, mut g_ad, mut g_pd) = (at(&bar.radius, i), at(&bar.a_d, i), at(&bar.p_d, i));
+        let (r_tw, r_a, r_p) = (at(&bar.top_width, i), at(&bar.area, i), at(&bar.perim, i));
+        let (r_r, r_ad, r_pd) = (at(&bar.radius, i), at(&bar.a_d, i), at(&bar.p_d, i));
+        // gd and ge start at 0; the adds keep the host's `0 + x`, so a -0 becomes +0, as in the kernel.
         let mut gd = 0.0f32;
         let mut ge = 0.0f32;
+        // keep is 1.0 without a table, so `x * keep` is exact and the code below is one path.
+        let mut keep = 1.0f32;
         if c.has_table {
             // The rectangle depends on d; the head gets the cotangents times keep.
             let m = c.t_mask[i];
-            let keep = keep_of(m);
+            keep = keep_of(m);
             let ttw = c.t_tw[i];
             let perim_r = ttw + dd * 2.0;
-            gd += m
-                * (g_a * ttw
-                    + g_p * 2.0
-                    + g_r * ((ttw * perim_r - (ttw * dd) * 2.0) / (perim_r * perim_r)));
-            g_tw *= keep;
-            g_a *= keep;
-            g_p *= keep;
-            g_r *= keep;
-            g_ad *= keep;
-            g_pd *= keep;
+            let num = ttw.mul_add(perim_r, -((ttw * dd) * 2.0));
+            let inner = r_a.mul_add(ttw, r_p * 2.0);
+            let sum = r_r.mul_add(num / (perim_r * perim_r), inner);
+            gd = m.mul_add(sum, gd);
         }
+        // The scaled cotangents that have a non-add use. The adds below take the raw value and keep.
+        let g_r = r_r * keep;
+        let g_ad = r_ad * keep;
+        let g_pd = r_pd * keep;
         let (pw, tw, ssr, ss, bwr, bw) = (s.pw[i], s.tw[i], s.ss_raw[i], s.ss[i], s.bw_raw[i], s.bw[i]);
         let (area, rt, perim) = (s.area[i], s.root[i], s.perim[i]);
         let (twd, ssd, bwd) = (s.tw_d[i], s.ss_d[i], s.bw_d[i]);
         let sa = ind(ssr > 0.5) * ind(ssr < 50.0);
         let ba = ind(bwr > bwlb);
-        let (mut g_ss, mut g_bw, mut g_rt) = (0.0f32, 0.0f32, 0.0f32);
-        let (mut g_twd, mut g_bwd, mut g_ssd, mut g_ssr) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
 
         // 2f: Pd = (bwd + rt*2) + (((d*ss)*ssd)*2)/rt
         let u = ((dd * ss) * ssd) * 2.0;
-        g_bwd += g_pd;
-        g_rt += g_pd * 2.0;
-        g_rt += g_pd * (-(u / (rt * rt)));
+        let mut g_bwd = r_pd.mul_add(keep, 0.0);
+        let mut g_rt = g_pd.mul_add(2.0, 0.0);
+        g_rt = g_pd.mul_add(-(u / (rt * rt)), g_rt);
         let g_u = g_pd / rt;
         let g_dss_ssd = g_u * 2.0;
         let g_dss = g_dss_ssd * ssd;
-        g_ssd += g_dss_ssd * (dd * ss);
-        gd += g_dss * ss;
-        g_ss += g_dss * dd;
+        let mut g_ssd = g_dss_ssd.mul_add(dd * ss, 0.0);
+        gd = g_dss.mul_add(ss, gd);
+        let mut g_ss = g_dss.mul_add(dd, 0.0);
         // 2f: Ad = (tw + bw)/2 + (d*(twd + bwd))/2
-        g_tw += g_ad / 2.0;
-        g_bw += g_ad / 2.0;
-        let g_x = g_ad / 2.0;
-        gd += g_x * (twd + bwd);
-        g_twd += g_x * dd;
-        g_bwd += g_x * dd;
+        let g_ad_half = g_ad * 0.5;
+        let mut g_tw = r_tw.mul_add(keep, g_ad_half);
+        let mut g_bw = g_ad.mul_add(0.5, 0.0);
+        let g_x = g_ad_half;
+        gd = g_x.mul_add(twd + bwd, gd);
+        let mut g_twd = g_x.mul_add(dd, 0.0);
+        g_bwd = g_x.mul_add(dd, g_bwd);
 
         // 2e: bwd = ((twd - ss*2) - (d*ssd)*2) * ba
         let g_b = g_bwd * ba;
-        g_twd += g_b;
-        g_ss += g_b * (-2.0);
-        let g_dssd = g_b * (-2.0);
-        gd += g_dssd * ssd;
-        g_ssd += g_dssd * dd;
+        g_twd = g_bwd.mul_add(ba, g_twd);
+        g_ss = g_b.mul_add(-2.0, g_ss);
+        let g_dssd = g_b * -2.0;
+        gd = g_dssd.mul_add(ssd, gd);
+        g_ssd = g_dssd.mul_add(dd, g_ssd);
 
         // 2d: ssd = ((ssr/d) * ((twd/tw)*d - 1)) * sa
         let g_s = g_ssd * sa;
         let ratio = ssr / dd;
-        let u2 = (twd / tw) * dd - 1.0;
+        let u2 = (twd / tw).mul_add(dd, -1.0);
         let g_ratio = g_s * u2;
         let g_u2 = g_s * ratio;
-        g_ssr += g_ratio / dd;
+        let mut g_ssr = 0.0f32 + g_ratio / dd;
         gd += -g_ratio * ssr / (dd * dd);
         let g_tt = g_u2 * dd;
-        gd += g_u2 * (twd / tw);
+        gd = g_u2.mul_add(twd / tw, gd);
         g_twd += g_tt / tw;
         g_tw += -g_tt * twd / (tw * tw);
         // 2d: twd = (e*tw)/d
@@ -914,31 +919,33 @@ pub fn section_backward_host(
         gd += -g_twd * (e * tw) / (dd * dd);
 
         // 2c: R = A/P; P = bw + (d*rt)*2; rt = sqrt(ss*ss + 1); A = ((tw + bw)*d)/2
-        let g_area = g_a + g_r / perim;
-        let g_perim = g_p - g_r * area / (perim * perim);
+        let g_area = r_a.mul_add(keep, g_r / perim);
+        let g_perim = r_p.mul_add(keep, -(g_r * area / (perim * perim)));
         g_bw += g_perim;
-        gd += g_perim * 2.0 * rt;
-        g_rt += g_perim * 2.0 * dd;
+        let g_perim2 = g_perim * 2.0;
+        gd = g_perim2.mul_add(rt, gd);
+        g_rt = g_perim2.mul_add(dd, g_rt);
         g_ss += g_rt * ss / rt;
-        g_tw += g_area * dd / 2.0;
-        g_bw += g_area * dd / 2.0;
-        gd += g_area * (tw + bw) / 2.0;
+        g_tw = (g_area * dd).mul_add(0.5, g_tw);
+        g_bw = (g_area * dd).mul_add(0.5, g_bw);
+        gd = (g_area * (tw + bw)).mul_add(0.5, gd);
 
         // 2b: bw = clamp_min(bwr, bwlb); bwr = tw - (ss*d)*2
-        let g_bwr = g_bw * ind(!(bwr < bwlb));
-        g_tw += g_bwr;
-        g_ss += g_bwr * (-2.0 * dd);
-        gd += g_bwr * (-2.0 * ss);
+        let ib = ind(!(bwr < bwlb));
+        let g_bwr = g_bw * ib;
+        g_tw = g_bw.mul_add(ib, g_tw);
+        g_ss = g_bwr.mul_add(-2.0 * dd, g_ss);
+        gd = g_bwr.mul_add(-2.0 * ss, gd);
 
         // 2a: ss = clamp(ssr, 0.5, 50); ssr = (tw*e)/(d*2); tw = p*pw; pw = d^e
-        g_ssr += g_ss * ind(ssr >= 0.5 && ssr <= 50.0);
+        g_ssr = g_ss.mul_add(ind(ssr >= 0.5 && ssr <= 50.0), g_ssr);
         g_tw += g_ssr * e / (dd * 2.0);
         ge += g_ssr * tw / (dd * 2.0);
         gd += -g_ssr * (tw * e) / (2.0 * dd * dd);
         out.p[i] = g_tw * pw;
         let g_pw = g_tw * p[i];
-        gd += g_pw * e * dd.powf(e - 1.0);
-        ge += g_pw * pw * dd.ln();
+        gd = (g_pw * e).mul_add(dd.powf(e - 1.0), gd);
+        ge = (g_pw * pw).mul_add(dd.ln(), ge);
 
         out.q_eps[i] = ge;
         out.d[i] = gd;
@@ -1007,12 +1014,11 @@ pub fn newton_backward_host(
         // 3f
         let g_ra = g_a * f * ind(!(o.ra[i] < 0.0));
         let g_rb = g_b * f * ind(!(o.rb[i] < 0.0));
-        let g_beta = (g_ra + g_rb) * th + g_qs * dhe;
-        let g_kappa = g_ra * s_up - g_rb * s_dn;
+        // Fused as the CUDA kernel writes it: the left product of `a*b + c*d` fuses.
+        let g_beta = (g_ra + g_rb).mul_add(th, g_qs * dhe);
+        let g_kappa = g_ra.mul_add(s_up, -(g_rb * s_dn));
         // 3e
         let g_alpha = g_qs * q;
-        let mut g_q = g_qs * alpha;
-        let mut g_dhe = g_qs * beta;
         // 3d
         let g_k1 = g_kappa * f / den;
         let mut g_den = -g_kappa * f * k1 / (den * den);
@@ -1022,13 +1028,15 @@ pub fn newton_backward_host(
         g_den += -g_alpha * f * (tau + 1.0) / (den * den);
         let mut g_tau = g_alpha * f / den;
         // 3d: K1 = (tau*Q)*phi_d + ((Ad*dhe)*g*dt)/Le
-        g_tau += g_k1 * q * phi_d;
-        g_q += g_k1 * tau * phi_d;
+        g_tau = (g_k1 * q).mul_add(phi_d, g_tau);
+        // `g_q` starts as `g_qs * alpha` and `g_dhe` as `g_qs * beta`. The first `+=` of each
+        // fuses that left product, as the CUDA kernel does.
+        let mut g_q = g_qs.mul_add(alpha, (g_k1 * tau) * phi_d);
         let g_phi_d = g_k1 * tau * q;
         let mut g_ad_e = g_k1 * dhe * gdt / le;
-        g_dhe += g_k1 * ad_e * gdt / le;
+        let g_dhe = g_qs.mul_add(beta, g_k1 * ad_e * gdt / le);
         // 3a: den = tau*2 + 1
-        g_tau += 2.0 * g_den;
+        g_tau = 2.0f32.mul_add(g_den, g_tau);
         // 3c: phi_d = Ad/A + (Ad/A - Pd/P)*4/3
         g_ad_e += g_phi_d * (1.0 + F43) / a_e;
         g_a_e -= g_phi_d * (1.0 + F43) * ad_e / (a_e * a_e);
@@ -1037,8 +1045,9 @@ pub fn newton_backward_host(
         // 3a: tau = phi*dt; phi = ((n2*|Q|)*g)/(A*R^(4/3))
         let g_phi = g_tau * dt_s;
         let cc = c.g / (a_e * r_e.powf(F43));
-        out.n2[i] += g_phi * q.abs() * cc;
-        g_q += g_phi * n2[i] * cc * sign0(q);
+        // `out.n2` starts at 0 and the add keeps the host's `0 + x`, as the kernel does.
+        out.n2[i] = (g_phi * q.abs()).mul_add(cc, out.n2[i]);
+        g_q = ((g_phi * n2[i]) * cc).mul_add(sign0(q), g_q);
         g_a_e -= g_phi * phi / a_e;
         out.edge.radius[i] -= g_phi * phi * F43 / r_e;
 
@@ -1114,14 +1123,16 @@ pub fn control_backward_host(
             (store.out_area[i], store.out_radius[i], store.out_a_d[i], store.out_p_d[i], store.out_perim[i]);
         let (kk, w) = (o.kk[i], o.w[i]);
         let g_dk = g_rpnd * s0s;
-        let g_kk = g_rnd * s0s + g_dk * w;
+        // Fused as the CUDA kernel writes it: the left product of `a*b + c*d` fuses.
+        let g_kk = g_rnd.mul_add(s0s, g_dk * w);
         let g_w = g_dk * kk;
         out.store.a_d[i] += g_w * F53 / a_s;
         out.store.area[i] -= g_w * F53 * ad_s / (a_s * a_s);
         out.store.p_d[i] -= g_w * F23 / p_s;
         out.store.perim[i] += g_w * F23 * pd_s / (p_s * p_s);
         out.store.area[i] += g_kk * r_s.powf(F23) / n_eff[i];
-        out.store.radius[i] += g_kk * (a_s / n_eff[i]) * F23 * r_s.powf(F23 - 1.0);
+        // `out.store.radius` starts at 0 and the add keeps the host's `0 + x`, as the kernel does.
+        out.store.radius[i] = (g_kk * (a_s / n_eff[i]) * F23).mul_add(r_s.powf(F23 - 1.0), out.store.radius[i]);
         out.n_eff[i] -= g_kk * kk / n_eff[i];
         // 4b
         let mut g_rpd_head = g_rpd;
@@ -1131,8 +1142,8 @@ pub fn control_backward_host(
             let g_rtb = g_rd * m;
             let g_rptb = g_rpd * m;
             g_rd *= keep;
-            g_rpd_head = g_rpd * keep + g_rptb * o.act[i];
-            out.h[i] += g_rtb * ((c.t_tw[i] * c.length[i]) / c.dam_t[i]) * ind(!(o.ex[i] < 0.0));
+            g_rpd_head = g_rpd.mul_add(keep, g_rptb * o.act[i]);
+            out.h[i] = (g_rtb * ((c.t_tw[i] * c.length[i]) / c.dam_t[i])).mul_add(ind(!(o.ex[i] < 0.0)), out.h[i]);
         }
         // 4a
         out.d_s[i] += g_rpd_head * dt_s / c.dam_t[i];
@@ -1140,8 +1151,9 @@ pub fn control_backward_host(
         let u = depth[i].powf(e1);
         let lp = (c.length[i] * p[i]) / (e1 * c.dam_t[i]);
         out.p[i] += g_rd * (c.length[i] * u) / (e1 * c.dam_t[i]);
-        out.depth[i] += g_rd * lp * e1 * depth[i].powf(e1 - 1.0);
-        out.q_eps[i] += g_rd * (lp * u * depth[i].ln() - o.rd_head[i] / e1);
+        out.depth[i] = ((g_rd * lp) * e1).mul_add(depth[i].powf(e1 - 1.0), out.depth[i]);
+        let x = (lp * u).mul_add(depth[i].ln(), -(o.rd_head[i] / e1));
+        out.q_eps[i] = g_rd.mul_add(x, out.q_eps[i]);
     }
     out
 }
@@ -1165,9 +1177,10 @@ pub fn depth_backward_host(
         let hd = dep.h_down[i];
         let g_der = at(g_d_edge, i) * ind(!(dep.der[i] < lb));
         let lt = h[i] < hd;
-        gh[i] += g_der * ind(!lt);
-        ghd[i] += g_der * ind(lt) + at(g_h_down, i);
-        gh[i] += at(g_depth, i) * ind(!(dep.x[i] < lb));
+        // Fused as the CUDA kernel writes it. `gh` and `ghd` start at 0 and keep the host's `0 + x`.
+        gh[i] = g_der.mul_add(ind(!lt), gh[i]);
+        ghd[i] += g_der.mul_add(ind(lt), at(g_h_down, i));
+        gh[i] = at(g_depth, i).mul_add(ind(!(dep.x[i] < lb)), gh[i]);
     }
     for i in 0..n {
         let g = if c.prescribed { ghd[i] * keep_of(c.outlet[i]) } else { ghd[i] };
@@ -1419,7 +1432,7 @@ pub fn assemble_backward_host(
     add_into(&mut acc.i_t, &rhs.i_mid);
     let w = 0.5 * (f0 + f1);
     for i in 0..n {
-        acc.i_delta[i] += rhs.i_mid[i] * w;
+        acc.i_delta[i] = rhs.i_mid[i].mul_add(w, acc.i_delta[i]);
     }
     (g_h, g_q)
 }
@@ -1464,14 +1477,16 @@ pub fn prologue_backward_host(
     let mut g_q_t = g_q0.to_vec();
     let mut g_mc = g_qmc_direct.to_vec();
     for k in 0..c.nnz {
-        g_q_t[c.col[k]] += g_i_t[c.row[k]] * c.adj_mc[k];
-        g_mc[c.col[k]] += acc.i_delta[c.row[k]] * c.adj_mc[k];
+        // Fused as the CUDA kernel writes it (explicit `fma`).
+        g_q_t[c.col[k]] = g_i_t[c.row[k]].mul_add(c.adj_mc[k], g_q_t[c.col[k]]);
+        g_mc[c.col[k]] = acc.i_delta[c.row[k]].mul_add(c.adj_mc[k], g_mc[c.col[k]]);
     }
     // BH3
     let g_qp: Vec<f32> = (0..n).map(|i| acc.qp[i] * c.in_stage[i]).collect();
     let g_n: Vec<f32> = (0..n)
         .map(|i| {
-            let g_n_eff = acc.n_eff[i] + 2.0 * hour.n_eff[i] * acc.n2[i];
+            // The last multiply fuses; `2.0 * n_eff` is exact.
+            let g_n_eff = (2.0 * hour.n_eff[i]).mul_add(acc.n2[i], acc.n_eff[i]);
             if c.has_table {
                 g_n_eff * keep_of(c.t_mask[i])
             } else {

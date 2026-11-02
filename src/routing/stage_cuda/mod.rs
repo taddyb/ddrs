@@ -12,7 +12,7 @@ use burn::tensor::backend::Backend;
 
 use crate::routing::stage_op::{ControlOut, DepthOut, HourHost, NewtonOut, SectionHost, StageOpConsts};
 use crate::sparse::cube_buf::{cube_to_host, from_cube, into_cube, upload_f32, upload_i32, zeros_f32, Cube};
-use crate::sparse::tree_lu::tree_levels;
+use crate::sparse::tree_lu::{tree_levels, TreeLevels};
 use crate::sparse::tree_lu_cuda::TreeDev;
 use crate::sparse::CsrPattern;
 
@@ -67,6 +67,64 @@ pub struct StageOpConstsDev {
     pub dam_slot: Cube,
 }
 
+/// One-time host check that the device gathers and the host loops read the same
+/// network. The backward kernels gather over the pattern structure (`tree.crow`,
+/// `tree.col`, `tree.down`, `tree.down_slot`), while the host adjoint loops and
+/// `readout_backward_kernel` use `StageOpConsts::down`, `row` and `col`. Nothing else
+/// ties the two together, so a mismatch would give silently wrong gradients.
+/// Reads host vectors only. Panics with the first mismatch.
+fn check_tree_matches_consts(h: &StageOpConsts, tree: &TreeLevels) {
+    let n = h.n;
+    assert_eq!(tree.n, n, "StageOpConstsDev::upload: tree has {} reaches but the consts have {n}", tree.n);
+    assert_eq!(h.down.len(), n, "StageOpConstsDev::upload: down has length {} but n is {n}", h.down.len());
+    for i in 0..n {
+        let (s0, s1) = (tree.crow[i] as usize, tree.crow[i + 1] as usize);
+        if tree.down[i] >= 0 {
+            assert!(
+                h.down[i] == tree.down[i] as usize && tree.down_slot[i] >= 0,
+                "StageOpConstsDev::upload: reach {i} has down {} in the consts but {} in the tree",
+                h.down[i],
+                tree.down[i]
+            );
+        } else {
+            assert!(
+                h.down[i] == i && tree.down_slot[i] < 0,
+                "StageOpConstsDev::upload: reach {i} is an outlet in the tree but has down {} in the consts",
+                h.down[i]
+            );
+        }
+        // The diagonal is the last slot of the row; the other columns ascend and lie below it.
+        assert!(
+            s1 > s0 && tree.col[s1 - 1] as usize == i,
+            "StageOpConstsDev::upload: row {i} does not end with its diagonal slot"
+        );
+        for s in s0..s1 - 1 {
+            let cs = tree.col[s] as usize;
+            assert!(
+                cs < i && (s + 1 == s1 - 1 || cs < tree.col[s + 1] as usize),
+                "StageOpConstsDev::upload: row {i}: off-diagonal columns are not ascending below the diagonal"
+            );
+        }
+    }
+    assert!(
+        h.row.len() == tree.nnz && h.col.len() == tree.nnz,
+        "StageOpConstsDev::upload: row/col have length {}/{} but nnz is {}",
+        h.row.len(),
+        h.col.len(),
+        tree.nnz
+    );
+    for k in 0..tree.nnz {
+        assert!(
+            h.row[k] == tree.row[k] as usize && h.col[k] == tree.col[k] as usize,
+            "StageOpConstsDev::upload: slot {k} is ({}, {}) in the consts but ({}, {}) in the tree",
+            h.row[k],
+            h.col[k],
+            tree.row[k],
+            tree.col[k]
+        );
+    }
+}
+
 impl StageOpConstsDev {
     /// Copy every array of `host` to the device of `like`.
     pub fn upload(host: &Arc<StageOpConsts>, pattern: &CsrPattern, like: &Cube) -> Self {
@@ -78,6 +136,7 @@ impl StageOpConstsDev {
             }
         }
         let tree = tree_levels(pattern).expect("stage pattern is a tree");
+        check_tree_matches_consts(h, &tree);
         let down: Vec<i32> = h.down.iter().map(|&d| d as i32).collect();
         Self {
             host: host.clone(),

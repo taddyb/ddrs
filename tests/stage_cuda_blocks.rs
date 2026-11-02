@@ -25,18 +25,24 @@ use ddrs::routing::stage_cuda::forward::{
     stage_prologue_dev, stage_readout_dev, storage_rate_dev, AssembledDev,
 };
 use ddrs::routing::stage_cuda::backward::{
-    matrix_backward_dev, matrix_grads_to_host, output_backward_dev, readout_backward_dev, readout_grads_to_host,
-    rhs_backward_dev, rhs_grads_to_host,
+    assemble_backward_dev, control_backward_dev, control_grads_to_host, depth_backward_dev, hour_acc_to_host,
+    hour_grads_to_host, matrix_backward_dev, matrix_grads_to_host, newton_backward_dev, newton_grads_to_host,
+    output_backward_dev, prologue_backward_dev, readout_backward_dev, readout_grads_to_host, rhs_backward_dev,
+    rhs_grads_to_host, section_backward_dev, section_grads_to_host, ControlBarDev, HourAccDev, NewtonBarDev,
+    ReadoutGradsDev, SectionBarDev,
 };
 use ddrs::routing::stage_cuda::{ControlDev, DepthDev, HourDev, NewtonDev, SectionDev, StageOpConstsDev};
 use ddrs::routing::stage_op::{
-    matrix_backward_host, output_backward_host, readout_backward_host, rhs_backward_host,
-    control_host, depth_host, matrix_host, newton_host, rhs_host, section_host, stage_assemble_host,
-    stage_prologue_host, stage_readout_host, Assembled, ControlOut, DepthOut, HourHost, NewtonOut, SectionHost,
-    StageOpConsts,
+    assemble_backward_host, control_backward_host, depth_backward_host, matrix_backward_host, newton_backward_host,
+    output_backward_host, prologue_backward_host, readout_backward_host, rhs_backward_host, section_backward_host,
+    stage_hour_forward, control_host, depth_host, matrix_host, newton_host, rhs_host, section_host,
+    stage_assemble_host, stage_prologue_host, stage_readout_host, Assembled, ControlBar, ControlOut, DepthOut,
+    HourAcc, HourHost, NewtonBar, NewtonOut, SectionBar, SectionHost, StageOpConsts,
 };
 use ddrs::sparse::cube_buf::{cube_from_host, cube_to_host, cube_to_host_i32, Cube, Gpu};
-use ddrs::sparse::tree_lu::{tree_levels, tree_lu_factor, tree_lu_solve_host};
+use ddrs::sparse::tree_lu::{
+    tree_levels, tree_lu_factor, tree_lu_grad_a_host, tree_lu_solve_host, tree_lu_solve_transposed_host,
+};
 use ddrs::sparse::{CsrPattern, SparseAdjacency};
 
 type Cpu = NdArray<f32>;
@@ -157,9 +163,13 @@ fn juniata() -> (SparseAdjacency, Arc<CsrPattern>) {
 }
 
 fn params(theta: f32, substeps: u32, prescribed: bool) -> StageParams {
+    params_tc(theta, substeps, prescribed, 0.5)
+}
+
+fn params_tc(theta: f32, substeps: u32, prescribed: bool, theta_control: f32) -> StageParams {
     StageParams {
         theta,
-        theta_control: 0.5,
+        theta_control,
         substeps,
         boundary: if prescribed { DownstreamBoundary::PrescribedStage } else { DownstreamBoundary::NormalDepth },
         depth_lb: DEPTH_LB,
@@ -625,8 +635,21 @@ fn newton_matches_host() {
     }
 }
 
+/// Inputs of one control block case.
+struct ControlCase {
+    c: Consts,
+    dt_s: f32,
+    h: Vec<f32>,
+    p: Vec<f32>,
+    q_eps: Vec<f32>,
+    n_eff: Vec<f32>,
+    depth: Vec<f32>,
+    d_s: Vec<f32>,
+    store: SectionHost,
+}
+
 // copied from tests/stage_op_adjoint.rs::control_run (inputs and edits)
-fn control_run(with_table: bool) {
+fn control_case(with_table: bool) -> ControlCase {
     let n = 8;
     let (adj, pat) = chain(n);
     let base = consts_of(&adj, &pat, None, None, params(0.6, 1, false));
@@ -649,13 +672,12 @@ fn control_run(with_table: bool) {
             c.t_pool = vec![];
         }
     });
-    let dt_s = 3600.0f32;
-    let h = [3.0f32, 2.0, 1.5, 3.5, 1.5, 2.5, 2.2, 3.1];
-    let p = [21.0f32, 25.0, 18.0, 30.0, 22.0, 19.0, 24.0, 26.0];
+    let h = vec![3.0f32, 2.0, 1.5, 3.5, 1.5, 2.5, 2.2, 3.1];
+    let p = vec![21.0f32, 25.0, 18.0, 30.0, 22.0, 19.0, 24.0, 26.0];
     let q = [0.5f32, 0.4, 0.6, 0.5, 0.45, 0.55, 0.35, 0.65];
-    let n_eff = [0.03f32, 0.035, 0.04, 0.03, 0.05, 0.045, 0.03, 0.04];
-    let depth = [1.2f32, 0.8, 0.5, 1.5, 0.4, 1.0, 0.7, 1.3];
-    let d_s = [50.0f32, 40.0, 30.0, 60.0, 25.0, 45.0, 35.0, -20.0];
+    let n_eff = vec![0.03f32, 0.035, 0.04, 0.03, 0.05, 0.045, 0.03, 0.04];
+    let depth = vec![1.2f32, 0.8, 0.5, 1.5, 0.4, 1.0, 0.7, 1.3];
+    let d_s = vec![50.0f32, 40.0, 30.0, 60.0, 25.0, 45.0, 35.0, -20.0];
     let a_s = [40.0f32, 30.0, 20.0, 50.0, 15.0, 35.0, 10.0, 28.0];
     let p_s = [30.0f32, 25.0, 20.0, 35.0, 18.0, 28.0, 20.0, 26.0];
     let r_s: Vec<f32> = (0..n).map(|i| a_s[i] / p_s[i]).collect();
@@ -670,6 +692,11 @@ fn control_run(with_table: bool) {
         out_p_d: pd_s.to_vec(),
         ..Default::default()
     };
+    ControlCase { c, dt_s: 3600.0, h, p, q_eps, n_eff, depth, d_s, store }
+}
+
+fn control_run(with_table: bool) {
+    let ControlCase { c, dt_s, h, p, q_eps, n_eff, depth, d_s, store } = control_case(with_table);
     let host = control_host(&c.host, dt_s, &h, &p, &q_eps, &n_eff, &depth, &store, &d_s);
     assert_eq!(host.r_prime[6], 0.0, "nd clamp row must bind");
     if with_table {
@@ -995,11 +1022,49 @@ fn bitwise(what: &str, dev: &[f32], host: &[f32]) {
     assert!(bad.is_empty(), "{what}: not bitwise: {bad:?}");
 }
 
+thread_local! {
+    /// Per field name (the last word of the label): did any case give a non-zero host value?
+    static SEEN: std::cell::RefCell<std::collections::BTreeMap<String, bool>> = Default::default();
+}
+
+/// Record whether the host field has a non-zero value in this case.
+fn note_nonzero(what: &str, host: &[f32]) {
+    let key = what.rsplit(' ').next().unwrap_or(what).to_string();
+    let nz = host.iter().any(|&v| v != 0.0);
+    SEEN.with(|m| *m.borrow_mut().entry(key).or_insert(false) |= nz);
+}
+
+/// End of a test: every compared field was non-zero in at least one case, so a
+/// fixture change cannot silently turn a field into an all-zero field. `zero_by_design`
+/// names fields that are all zero in every case on purpose.
+fn assert_fields_nonzero(zero_by_design: &[&str]) {
+    SEEN.with(|m| {
+        for (k, nz) in m.borrow().iter() {
+            if zero_by_design.contains(&k.as_str()) {
+                assert!(!*nz, "field {k} is listed as all zero but has a non-zero value");
+            } else {
+                assert!(*nz, "field {k} is zero in every case of this test");
+            }
+        }
+    });
+}
+
 /// D7 bar, same zero set and bitwise, for one field.
 fn all_bars(what: &str, dev: &[f32], host: &[f32]) {
+    note_nonzero(what, host);
     close(what, dev, host);
     same_zero_set(what, dev, host);
     bitwise(what, dev, host);
+}
+
+/// D7 bar and same zero set for a field whose chain has a `powf` or `ln`. The CUDA
+/// and glibc versions differ by a few ulp, so bitwise equality is reported, not asserted.
+fn lib_bars(what: &str, dev: &[f32], host: &[f32]) {
+    note_nonzero(what, host);
+    close(what, dev, host);
+    same_zero_set(what, dev, host);
+    let nbad = dev.iter().zip(host).filter(|(d, h)| d.to_bits() != h.to_bits()).count();
+    println!("{what}: bitwise {} ({nbad} of {} entries differ; libdevice powf/ln in the chain)", if nbad == 0 { "yes" } else { "NO" }, dev.len());
 }
 
 #[test]
@@ -1014,6 +1079,7 @@ fn output_backward_matches_host() {
     all_bars("output g_h", &cube_to_host(&dg), &hg);
     all_bars("output g_q", &cube_to_host(&dq), &hq);
     all_bars("output g_mc", &cube_to_host(&dm), &hm);
+    assert_fields_nonzero(&[]);
 }
 
 /// Compare every field of `readout_backward_dev` with `readout_backward_host`.
@@ -1141,6 +1207,7 @@ fn readout_backward_matches_host() {
     for &t in &[no[50], no[70]] {
         assert_eq!(host.h[t], 0.0, "floor row blocks the cotangent");
     }
+    assert_fields_nonzero(&[]);
 }
 
 #[test]
@@ -1170,6 +1237,13 @@ fn rhs_backward_matches_host() {
     assert!(cp.host.prescribed);
     let host = case("rhs bwd prescribed 3-chain", &cp, 0.4, 0.9);
     assert!(host.b_down[2] != 0.0, "the outlet b_down term is live");
+    // The dam 5-chain of readout_solve_run: w_ctrl is non-zero on the dam row, so r_t is live.
+    let (adj5, pat5) = chain(5);
+    let c5 = consts_with(&adj5, &pat5, Some(&[1]), &[(2, 1.23)], None, params(0.7, 1, true));
+    assert!(c5.host.w_ctrl.iter().any(|&v| v != 0.0), "a dam row has w_ctrl != 0");
+    let host5 = case("rhs bwd dam 5-chain", &c5, 0.4, 0.9);
+    assert!(host5.r_t.iter().any(|&v| v != 0.0));
+    assert_fields_nonzero(&[]);
 }
 
 #[test]
@@ -1192,4 +1266,412 @@ fn matrix_backward_matches_host() {
     let c5 = consts_with(&adj, &pat5, Some(&[1]), &[(2, 1.23)], None, params(0.7, 1, true));
     assert!(c5.host.dam_slot.iter().any(|&v| v != 0.0), "a dam slot exists");
     case("matrix bwd dam chain", &c5);
+    assert_fields_nonzero(&[]);
+}
+
+// ------------------------------- backward blocks (B4 to B1), glue and prologue
+//
+// Bitwise expectation per field: a field whose chain has no `powf` or `ln` call must be
+// bitwise equal to the host (`all_bars`). A field with one is held to the D7 bar and the
+// same zero set, and its bitwise state is printed (`lib_bars`). The saved values the
+// kernels read are uploaded from the host structs, so both sides start from the same bits.
+
+fn section_bwd_run(label: &str, with_table: bool) {
+    let (p, q, d) = section_cases();
+    let n = p.len();
+    let (adj, pat) = chain(n);
+    let base = consts_of(&adj, &pat, None, None, params(1.0, 1, false));
+    // copied from section_run: every other reach is a table row.
+    let c = if with_table {
+        edited(&base, |h| {
+            h.has_table = true;
+            h.t_mask = (0..n).map(|i| (i % 2) as f32).collect();
+            h.t_tw = vec![500.0; n];
+            h.t_n = vec![0.03; n];
+            h.t_pool = vec![0.0; n];
+        })
+    } else {
+        base
+    };
+    let q_eps: Vec<f32> = q.iter().map(|v| v + 1e-6f32).collect();
+    let mut s = section_host(&c.host, &p, &q_eps, &d);
+    // Ties come in through the saved values (powf results cannot be steered on both backends):
+    // ss_raw exactly 0.5 and 50, bw_raw exactly the bottom-width floor. Rows 2, 4, 6 are head rows.
+    s.ss_raw[2] = 0.5;
+    s.ss_raw[4] = 50.0;
+    s.bw_raw[6] = c.host.bw_lb;
+    let sbar = SectionBar {
+        top_width: bar(40, n, true),
+        area: bar(41, n, true),
+        perim: bar(42, n, true),
+        radius: bar(43, n, true),
+        a_d: bar(44, n, true),
+        p_d: bar(45, n, true),
+    };
+    let host = section_backward_host(&c.host, &p, &q_eps, &d, &s, &sbar);
+    let dev = section_backward_dev(
+        &c.dev,
+        &up(&p),
+        &up(&q_eps),
+        &up(&d),
+        &SectionDev::upload(&s, &like()),
+        &SectionBarDev::upload(&sbar, &like()),
+    );
+    let g = section_grads_to_host(&dev);
+    // p has no powf or ln in its chain (the saved pw is read); q_eps and d do.
+    all_bars(&format!("{label} p"), &g.p, &host.p);
+    lib_bars(&format!("{label} q_eps"), &g.q_eps, &host.q_eps);
+    lib_bars(&format!("{label} d"), &g.d, &host.d);
+    if with_table {
+        for i in (1..n).step_by(2) {
+            assert_eq!((host.p[i], host.q_eps[i]), (0.0, 0.0), "host table row {i}: p and q gradients exactly 0");
+            assert_eq!((g.p[i], g.q_eps[i]), (0.0, 0.0), "device table row {i}: p and q gradients exactly 0");
+        }
+    }
+}
+
+#[test]
+fn section_backward_matches_host() {
+    section_bwd_run("section bwd", false);
+    section_bwd_run("section bwd+table", true);
+    assert_fields_nonzero(&[]);
+}
+
+#[test]
+fn newton_backward_matches_host() {
+    let (adj, pattern) = juniata();
+    let n = adj.n;
+    let (h0, q0) = hotstart_stage(&adj, &pattern);
+    let pert = bar(9, n, false);
+    let h: Vec<f32> = (0..n).map(|i| h0[i] + 0.2 * (pert[i] - 1.0)).collect();
+    let dt_s = 3600.0f32;
+    for theta in [0.55f32, 1.0] {
+        let c = consts_of(&adj, &pattern, None, None, params(theta, 1, false));
+        let no = non_outlets(&c.host);
+        let mut qc = q0.clone();
+        for &i in &[no[3], no[30], no[90]] {
+            qc[i] = 0.0;
+        }
+        for &i in &[no[7], no[50], no[120]] {
+            qc[i] = -qc[i];
+        }
+        let n_eff = gen(11, n, 0.02, 0.06);
+        let n2: Vec<f32> = n_eff.iter().map(|v| v * v).collect();
+        let p = vec![21.0f32; n];
+        let q_eps: Vec<f32> = vec![0.5f32 + 1e-6; n];
+        let dep = depth_host(&c.host, &h, 0.0);
+        let edge = section_host(&c.host, &p, &q_eps, &dep.d_edge);
+        let mut o = newton_host(&c.host, dt_s, &h, &qc, &n2, &dep, &edge);
+        // Saved ra = rb = 0 exactly on two rows: the tie of the 3f clamps.
+        for &i in &[no[5], no[40]] {
+            o.ra[i] = 0.0;
+            o.rb[i] = 0.0;
+        }
+        let nbar = NewtonBar { q_star: bar(47, n, true), a_up: bar(48, n, true), b_down: bar(49, n, true) };
+        let host = newton_backward_host(&c.host, dt_s, &h, &qc, &n2, &dep, &edge, &o, &nbar);
+        let dev = newton_backward_dev(
+            &c.dev,
+            dt_s,
+            &up(&h),
+            &up(&qc),
+            &up(&n2),
+            &DepthDev::upload(&dep, &like()),
+            &SectionDev::upload(&edge, &like()),
+            &NewtonDev::upload(&o, &like()),
+            &NewtonBarDev::upload(&nbar, &like()),
+        );
+        let g = newton_grads_to_host(&dev);
+        let w = format!("newton bwd theta {theta}");
+        // qc and n2 carry the powf of R^(4/3); the other seven fields do not.
+        lib_bars(&format!("{w} qc"), &g.qc, &host.qc);
+        lib_bars(&format!("{w} n2"), &g.n2, &host.n2);
+        all_bars(&format!("{w} h"), &g.h, &host.h);
+        all_bars(&format!("{w} h_down"), &g.h_down, &host.h_down);
+        all_bars(&format!("{w} edge_area"), &g.edge.area, &host.edge.area);
+        all_bars(&format!("{w} edge_perim"), &g.edge.perim, &host.edge.perim);
+        all_bars(&format!("{w} edge_radius"), &g.edge.radius, &host.edge.radius);
+        all_bars(&format!("{w} edge_a_d"), &g.edge.a_d, &host.edge.a_d);
+        all_bars(&format!("{w} edge_p_d"), &g.edge.p_d, &host.edge.p_d);
+        assert!(g.edge.top_width.is_empty() && host.edge.top_width.is_empty());
+    }
+    assert_fields_nonzero(&[]);
+}
+
+fn control_bwd_run(with_table: bool) {
+    let ControlCase { c, dt_s, h, p, q_eps, n_eff, depth, d_s, store } = control_case(with_table);
+    let mut o = control_host(&c.host, dt_s, &h, &p, &q_eps, &n_eff, &depth, &store, &d_s);
+    // Saved rpr exactly 0 on row 1: the tie of the 4d clamp. Row 6's clamp binds on its own,
+    // and with a table, row 5 keeps the ex == 0 tie of control_run.
+    o.rpr[1] = 0.0;
+    if with_table {
+        assert_eq!(o.ex[5], 0.0, "tie row: h == pool exactly");
+    }
+    let n = h.len();
+    let cbar = ControlBar { r_t: bar(50, n, true), r_prime: bar(51, n, true) };
+    let host = control_backward_host(&c.host, dt_s, &h, &p, &q_eps, &n_eff, &depth, &store, &d_s, &o, &cbar);
+    let dev = control_backward_dev(
+        &c.dev,
+        dt_s,
+        &up(&h),
+        &up(&p),
+        &up(&q_eps),
+        &up(&n_eff),
+        &up(&depth),
+        &SectionDev::upload(&store, &like()),
+        &up(&d_s),
+        &ControlDev::upload(&o, &like()),
+        &ControlBarDev::upload(&cbar, &like()),
+    );
+    let g = control_grads_to_host(&dev);
+    let w = if with_table { "control bwd+table" } else { "control bwd" };
+    // p, depth and q_eps carry the powf of the 4a power; store.area and store.radius carry the
+    // powf of R^(2/3). h, n_eff, d_s and the other three store fields do not.
+    lib_bars(&format!("{w} p"), &g.p, &host.p);
+    lib_bars(&format!("{w} depth"), &g.depth, &host.depth);
+    lib_bars(&format!("{w} q_eps"), &g.q_eps, &host.q_eps);
+    lib_bars(&format!("{w} store_area"), &g.store.area, &host.store.area);
+    lib_bars(&format!("{w} store_radius"), &g.store.radius, &host.store.radius);
+    all_bars(&format!("{w} h"), &g.h, &host.h);
+    all_bars(&format!("{w} n_eff"), &g.n_eff, &host.n_eff);
+    all_bars(&format!("{w} d_s"), &g.d_s, &host.d_s);
+    all_bars(&format!("{w} store_perim"), &g.store.perim, &host.store.perim);
+    all_bars(&format!("{w} store_a_d"), &g.store.a_d, &host.store.a_d);
+    all_bars(&format!("{w} store_p_d"), &g.store.p_d, &host.store.p_d);
+    assert!(g.store.top_width.is_empty() && host.store.top_width.is_empty());
+}
+
+#[test]
+fn control_backward_matches_host() {
+    control_bwd_run(false);
+    control_bwd_run(true);
+    assert_fields_nonzero(&[]);
+}
+
+#[test]
+fn depth_backward_matches_host() {
+    let case = |what: &str, c: &Consts, h: &[f32], hb0: f32| {
+        let n = c.host.n;
+        let dep = depth_host(&c.host, h, hb0);
+        let (g_depth, g_d_edge, g_h_down) = (bar(52, n, true), bar(53, n, true), bar(54, n, true));
+        let host = depth_backward_host(&c.host, h, &dep, &g_depth, &g_d_edge, &g_h_down);
+        let dev = depth_backward_dev(
+            &c.dev,
+            &up(h),
+            &DepthDev::upload(&dep, &like()),
+            &up(&g_depth),
+            &up(&g_d_edge),
+            &up(&g_h_down),
+        );
+        all_bars(&format!("{what} gh"), &cube_to_host(&dev), &host);
+        dep
+    };
+    // Juniata: the tie rows of depth_matches_host (x == lb, der == lb, h == hd), floor rows, an outlet.
+    let (adj, pattern) = juniata();
+    let n = adj.n;
+    let c = consts_of(&adj, &pattern, None, None, params(1.0, 1, false));
+    let (h0, _) = hotstart_stage(&adj, &pattern);
+    let pert = bar(7, n, false);
+    let no = non_outlets(&c.host);
+    let (f1, f2, a, b, cc) = (no[60], no[80], no[5], no[20], no[40]);
+    // copied from depth_matches_host: the tie rows get z_mid = z_down = 0 in the host copy of the consts.
+    let c = edited(&c, |h| {
+        h.z_mid[a] = 0.0;
+        h.z_mid[b] = 0.0;
+        h.z_down[b] = 0.0;
+    });
+    let mut h: Vec<f32> = (0..n).map(|i| h0[i] + 0.3 * (pert[i] - 1.0)).collect();
+    let (zm, lb) = (&c.host.z_mid, DEPTH_LB);
+    let (bd, cd) = (c.host.down[b], c.host.down[cc]);
+    h[f1] = zm[f1] - 0.5;
+    h[f2] = zm[f2] - 0.2;
+    h[a] = lb;
+    h[b] = lb;
+    h[bd] = h[b] - 0.5;
+    h[cc] = h[cd];
+    let dep = case("depth bwd juniata", &c, &h, 0.0);
+    assert_eq!(dep.x[a], lb, "x tie");
+    assert_eq!(dep.der[b], lb, "der tie");
+    assert_eq!(dep.h_down[cc], h[cc], "h == hd tie");
+    assert!(dep.x[f1] < lb && dep.x[f2] < lb, "floor rows bind");
+    let pat = &c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3), "a confluence row exists");
+
+    // NormalDepth 3-chain: the outlet self-adds in the gather's transpose.
+    let (adj3, pat3) = chain(3);
+    let cn = consts_of(&adj3, &pat3, None, None, params(1.0, 1, false));
+    assert!(!cn.host.prescribed && cn.host.down[2] == 2);
+    let hn: Vec<f32> = cn.host.z_mid.iter().zip([0.8f32, 0.5, 0.3]).map(|(z, d)| z + d).collect();
+    case("depth bwd normal-depth 3-chain", &cn, &hn, 0.0);
+
+    // PrescribedStage 3-chain with hb0 = 0.4: the outlet reads hb0 and its h_down cotangent is masked.
+    let cp = consts_of(&adj3, &pat3, None, None, params(1.0, 1, true));
+    assert!(cp.host.prescribed);
+    let dep3 = case("depth bwd prescribed 3-chain", &cp, &hn, 0.4);
+    assert_eq!(dep3.h_down[2], 0.4);
+
+    // A floored state: every depth is below the floor, so the floor mask blocks g_depth.
+    let hf: Vec<f32> = cp.host.z_mid.iter().map(|z| z - 0.5).collect();
+    let depf = case("depth bwd prescribed 3-chain floored", &cp, &hf, 0.4);
+    assert!(depf.x.iter().all(|&x| x < DEPTH_LB), "every row is floored");
+    assert_fields_nonzero(&[]);
+}
+
+/// One whole substep adjoint (readout adjoint, transposed solve, grad A, B6 to B1) on the
+/// host and on the device. The device sees uploaded copies of the host inputs only.
+fn assemble_bwd_case(what: &str, c: &Consts, hour: &HourHost, h0: &[f32], q0: &[f32], substeps: &[usize]) {
+    let n = c.host.n;
+    let fwd = stage_hour_forward(&c.host, &c.pattern, hour, h0, q0, true);
+    for &s in substeps {
+        let sv = &fwd.subs[s];
+        let asm = stage_assemble_host(&c.host, hour, s, &sv.h, &sv.qc);
+        let g_h_new = bar(70, n, true);
+        let g_q_new = bar(71, n, true);
+        let rg = readout_backward_host(&c.host, &sv.h, &asm, &sv.dh, &g_h_new, &g_q_new);
+        let g_r = tree_lu_solve_transposed_host(&c.pattern, &sv.factors, &rg.dh);
+        let g_a = tree_lu_grad_a_host(&c.pattern, &g_r, &sv.dh);
+        // A non-zero start, so the order of every accumulation is exercised.
+        let acc0 = HourAcc {
+            i_t: bar(72, n, true),
+            i_delta: bar(73, n, true),
+            n2: bar(74, n, true),
+            n_eff: bar(75, n, true),
+            p: bar(76, n, true),
+            q_eps: bar(77, n, true),
+            qp: bar(78, n, true),
+        };
+        let mut acc_h = acc0.clone();
+        let (gh, gq) = assemble_backward_host(&c.host, hour, s, &sv.h, &sv.qc, &asm, &rg, &g_r, &g_a, &mut acc_h);
+
+        let hd = HourDev::upload(hour, &like());
+        let asm_dev = AssembledDev::upload(&asm, &like(), c.host.nnz);
+        let rg_dev = ReadoutGradsDev::upload(&rg, &like());
+        let mut acc_d = HourAccDev::upload(&acc0, &like());
+        let (dgh, dgq) = assemble_backward_dev(
+            &c.dev,
+            &hd,
+            s,
+            &up(&sv.h),
+            &up(&sv.qc),
+            &asm_dev,
+            &rg_dev,
+            &up(&g_r),
+            &up(&g_a),
+            &mut acc_d,
+        );
+        let da = hour_acc_to_host(&acc_d);
+        let w = format!("{what} s={s}");
+        // Every chain below runs through section, Newton or control, which call powf or ln:
+        // g_h (depth adjoint of the section depths), g_q (Newton cc), n2, p, q_eps.
+        // These four accumulators have none: n_eff (control, saved kk and w), qp, i_t and i_delta.
+        lib_bars(&format!("{w} g_h"), &cube_to_host(&dgh), &gh);
+        lib_bars(&format!("{w} g_q"), &cube_to_host(&dgq), &gq);
+        lib_bars(&format!("{w} acc_n2"), &da.n2, &acc_h.n2);
+        lib_bars(&format!("{w} acc_p"), &da.p, &acc_h.p);
+        lib_bars(&format!("{w} acc_q_eps"), &da.q_eps, &acc_h.q_eps);
+        all_bars(&format!("{w} acc_n_eff"), &da.n_eff, &acc_h.n_eff);
+        all_bars(&format!("{w} acc_qp"), &da.qp, &acc_h.qp);
+        all_bars(&format!("{w} acc_i_t"), &da.i_t, &acc_h.i_t);
+        all_bars(&format!("{w} acc_i_delta"), &da.i_delta, &acc_h.i_delta);
+    }
+}
+
+/// Hour prologue of a small chain case (copied from `Case::new` of tests/stage_op_parity.rs:
+/// n, q, p, and the MC inflow of zeros).
+fn chain_hour(c: &Consts, q_t0: &[f32], qp: &[f32], b: f32) -> HourHost {
+    let n = c.host.n;
+    let nm: Vec<f32> = (0..n).map(|i| 0.03 + 0.005 * i as f32).collect();
+    let q: Vec<f32> = (0..n).map(|i| 0.45 + 0.05 * (i % 3) as f32).collect();
+    let p: Vec<f32> = (0..n).map(|i| 18.0 + 2.0 * (i % 4) as f32).collect();
+    stage_prologue_host(&c.host, &nm, &q, &p, q_t0, &vec![0.0; n], qp, b, b)
+}
+
+#[test]
+fn assemble_backward_matches_host() {
+    // Juniata: confluences, outlets and MC rows.
+    let st = juniata_state(0.6, 4);
+    assemble_bwd_case("assemble bwd juniata", &st.c, &st.hour, &st.h, &st.qc, &[0, 3]);
+
+    // copied from tests/stage_op_parity.rs::table_and_mixed_cases()[0] (table_rect).
+    let (adj3, pat3) = chain(3);
+    let ct = consts_of(&adj3, &pat3, None, Some(table_rows()), params(0.6, 4, true));
+    let mut h0: Vec<f32> = ct.host.z_mid.iter().map(|z| z + 1.0).collect();
+    h0[2] = 1.5;
+    let q0 = [3.0f32, 5.0, 7.0];
+    let hour = chain_hour(&ct, &q0, &[0.5, 0.4, 0.3], -5.0);
+    assemble_bwd_case("assemble bwd table_rect", &ct, &hour, &h0, &q0, &[0, 3]);
+
+    // copied from table_and_mixed_cases()[1] (pool_dam_1m) and the 3 m sibling: a dam on a table row.
+    // At 1 m the stage is below the pool (ex < 0), so the release is clamped; the 3 m case has ex > 0,
+    // so the 4b release adjoint carries cotangent into h.
+    for above in [1.0f32, 3.0] {
+        let rows = ChannelGeometryRows {
+            rows: vec![0, 1, 2],
+            top_width: vec![400.0; 3],
+            bed_z: vec![10.0; 3],
+            n: vec![0.03; 3],
+            pool_z: vec![Some(12.0), None, None],
+        };
+        let cd = consts_with(&adj3, &pat3, None, &[(0, 1.5)], Some(rows), params_tc(0.6, 4, true, 1.0));
+        let hd0 = vec![10.0 + above, 12.0, 12.0];
+        let qd0 = [0.0f32; 3];
+        let hour = chain_hour(&cd, &qd0, &[0.0; 3], -5.0);
+        let label = format!("assemble bwd pool_dam_{above}m");
+        assemble_bwd_case(&label, &cd, &hour, &hd0, &qd0, &[0, 3]);
+        let fwd = stage_hour_forward(&cd.host, &cd.pattern, &hour, &hd0, &qd0, true);
+        let asm = stage_assemble_host(&cd.host, &hour, 0, &fwd.subs[0].h, &fwd.subs[0].qc);
+        if above > 2.0 {
+            assert!(asm.control.ex[0] > 0.0, "the release is active at 3 m");
+        } else {
+            assert!(asm.control.ex[0] < 0.0, "the release is clamped at 1 m");
+        }
+    }
+    assert_fields_nonzero(&[]);
+}
+
+fn prologue_bwd_case(what: &str, c: &Consts, hour: &HourHost) {
+    let n = c.host.n;
+    let acc = HourAcc {
+        i_t: bar(60, n, true),
+        i_delta: bar(61, n, true),
+        n2: bar(62, n, true),
+        n_eff: bar(63, n, true),
+        p: bar(64, n, true),
+        q_eps: bar(65, n, true),
+        qp: bar(66, n, true),
+    };
+    let (g_h0, g_q0, g_mc) = (bar(67, n, true), bar(68, n, true), bar(69, n, true));
+    let host = prologue_backward_host(&c.host, hour, &acc, &g_h0, &g_q0, &g_mc);
+    let dev = prologue_backward_dev(
+        &c.dev,
+        &HourDev::upload(hour, &like()),
+        &HourAccDev::upload(&acc, &like()),
+        &up(&g_h0),
+        &up(&g_q0),
+        &up(&g_mc),
+    );
+    let g = hour_grads_to_host(&dev);
+    all_bars(&format!("{what} n"), &g.n, &host.n);
+    all_bars(&format!("{what} q"), &g.q, &host.q);
+    all_bars(&format!("{what} p"), &g.p, &host.p);
+    all_bars(&format!("{what} h_t"), &g.h_t, &host.h_t);
+    all_bars(&format!("{what} q_t"), &g.q_t, &host.q_t);
+    all_bars(&format!("{what} q_next_mc"), &g.q_next_mc, &host.q_next_mc);
+    all_bars(&format!("{what} q_prime"), &g.q_prime, &host.q_prime);
+}
+
+#[test]
+fn prologue_backward_matches_host() {
+    // Juniata with seeds: MC rows, so adj_mc slots are live and in_stage has zeros.
+    let st = juniata_state(0.6, 4);
+    assert!(st.c.host.adj_mc.iter().any(|&w| w != 0.0), "MC-to-stage slots must exist");
+    let pat = &st.c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3), "a confluence row exists");
+    prologue_bwd_case("prologue bwd juniata", &st.c, &st.hour);
+
+    // Table chain: the n_eff gradient is masked by keep on the table row.
+    let (adj3, pat3) = chain(3);
+    let ct = consts_of(&adj3, &pat3, None, Some(table_rows()), params(1.0, 1, true));
+    let hour = chain_hour(&ct, &[3.0, 5.0, 7.0], &[0.5, 0.4, 0.3], -5.0);
+    prologue_bwd_case("prologue bwd table chain", &ct, &hour);
+    assert_fields_nonzero(&[]);
 }
