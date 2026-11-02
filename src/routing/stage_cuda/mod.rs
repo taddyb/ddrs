@@ -16,6 +16,7 @@ use crate::sparse::tree_lu::tree_levels;
 use crate::sparse::tree_lu_cuda::TreeDev;
 use crate::sparse::CsrPattern;
 
+pub mod backward;
 pub mod forward;
 
 use forward::{stage_hour_forward_dev, stage_prologue_dev, HourForwardDev, SubstepDev};

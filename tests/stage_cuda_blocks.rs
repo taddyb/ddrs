@@ -24,8 +24,13 @@ use ddrs::routing::stage_cuda::forward::{
     newton_dev, newton_to_host, readout_to_host, rhs_dev, section_dev, section_to_host, stage_assemble_dev,
     stage_prologue_dev, stage_readout_dev, storage_rate_dev, AssembledDev,
 };
+use ddrs::routing::stage_cuda::backward::{
+    matrix_backward_dev, matrix_grads_to_host, output_backward_dev, readout_backward_dev, readout_grads_to_host,
+    rhs_backward_dev, rhs_grads_to_host,
+};
 use ddrs::routing::stage_cuda::{ControlDev, DepthDev, HourDev, NewtonDev, SectionDev, StageOpConstsDev};
 use ddrs::routing::stage_op::{
+    matrix_backward_host, output_backward_host, readout_backward_host, rhs_backward_host,
     control_host, depth_host, matrix_host, newton_host, rhs_host, section_host, stage_assemble_host,
     stage_prologue_host, stage_readout_host, Assembled, ControlOut, DepthOut, HourHost, NewtonOut, SectionHost,
     StageOpConsts,
@@ -970,4 +975,221 @@ fn assemble_matches_host() {
         close(&format!("{w} a_values"), &d.a_values, &host.a_values);
         close(&format!("{w} r"), &d.r, &host.r);
     }
+}
+
+// ------------------------------------------------- backward blocks (B8 to B5)
+
+/// The backward kernels fuse the same sites as the host adjoint fns, so
+/// every output field must match the host bit for bit.
+fn bitwise(what: &str, dev: &[f32], host: &[f32]) {
+    assert_eq!(dev.len(), host.len(), "{what}: length");
+    let bad: Vec<String> = dev
+        .iter()
+        .zip(host)
+        .enumerate()
+        .filter(|(_, (d, h))| d.to_bits() != h.to_bits())
+        .take(5)
+        .map(|(i, (d, h))| format!("[{i}]: dev {d} host {h}"))
+        .collect();
+    println!("{what}: bitwise {}", if bad.is_empty() { "yes" } else { "NO" });
+    assert!(bad.is_empty(), "{what}: not bitwise: {bad:?}");
+}
+
+/// D7 bar, same zero set and bitwise, for one field.
+fn all_bars(what: &str, dev: &[f32], host: &[f32]) {
+    close(what, dev, host);
+    same_zero_set(what, dev, host);
+    bitwise(what, dev, host);
+}
+
+#[test]
+fn output_backward_matches_host() {
+    let st = juniata_state(0.6, 4);
+    let c = &st.c;
+    let n = c.host.n;
+    assert!(c.host.in_stage.iter().any(|&v| v == 0.0) && c.host.in_stage.iter().any(|&v| v == 1.0), "MC rows present");
+    let g_out = bar(31, 2 * n, true);
+    let (hg, hq, hm) = output_backward_host(&c.host, &g_out);
+    let (dg, dq, dm) = output_backward_dev(&c.dev, &up(&g_out));
+    all_bars("output g_h", &cube_to_host(&dg), &hg);
+    all_bars("output g_q", &cube_to_host(&dq), &hq);
+    all_bars("output g_mc", &cube_to_host(&dm), &hm);
+}
+
+/// Compare every field of `readout_backward_dev` with `readout_backward_host`.
+#[allow(clippy::too_many_arguments)]
+fn readout_bwd_case(
+    what: &str,
+    c: &Consts,
+    asm: &Assembled,
+    h: &[f32],
+    dh: &[f32],
+    g_h_new: &[f32],
+    g_q_new: &[f32],
+) -> ddrs::routing::stage_op::ReadoutGrads {
+    let host = readout_backward_host(&c.host, h, asm, dh, g_h_new, g_q_new);
+    let asm_dev = AssembledDev::upload(asm, &like(), c.host.nnz);
+    let dev = readout_backward_dev(&c.dev, &up(h), &asm_dev, &up(dh), &up(g_h_new), &up(g_q_new));
+    let d = readout_grads_to_host(&dev);
+    all_bars(&format!("{what} dh"), &d.dh, &host.dh);
+    all_bars(&format!("{what} h"), &d.h, &host.h);
+    all_bars(&format!("{what} q_star"), &d.q_star, &host.q_star);
+    all_bars(&format!("{what} a_up"), &d.a_up, &host.a_up);
+    all_bars(&format!("{what} b_down"), &d.b_down, &host.b_down);
+    all_bars(&format!("{what} r_t"), &d.r_t, &host.r_t);
+    all_bars(&format!("{what} r_prime"), &d.r_prime, &host.r_prime);
+    host
+}
+
+// copied from tests/stage_op_adjoint.rs::readout_solve_run (inputs; the host oracle is readout_backward_host)
+fn readout_bwd_chain_run(floored: bool) {
+    let n = 5;
+    let (adj, pat) = chain(n);
+    let c = consts_with(&adj, &pat, Some(&[1]), &[(2, 1.23)], None, params(0.7, 1, true));
+    assert!(c.host.prescribed && c.host.dam.iter().any(|&v| v == 1.0));
+    let pos = |seed, lo: f32, hi: f32| gen(seed, n, lo, hi);
+    let d_s = pos(1, 1.0, 2.0);
+    let a_up = pos(2, 0.0, 0.3);
+    let b_down = pos(3, 0.0, 0.3);
+    let r_prime = pos(4, 0.0, 0.3);
+    let r_t = bar(5, n, true);
+    let q_star = bar(6, n, true);
+    let qc = bar(7, n, true);
+    let qp: Vec<f32> = bar(8, n, false).iter().zip(&c.host.in_stage).map(|(v, m)| v * m).collect();
+    let i_mid = bar(9, n, false);
+    let h: Vec<f32> = if floored {
+        c.host.z_mid.iter().map(|z| z - 3.0).collect()
+    } else {
+        c.host.z_mid.iter().enumerate().map(|(i, z)| z + 0.5 + 0.1 * i as f32).collect()
+    };
+    let (hb0, hb1) = (0.4f32, 0.9f32);
+    let a_values = matrix_host(&c.host, &d_s, &a_up, &b_down, &r_prime);
+    let r = rhs_host(&c.host, &qc, &q_star, &r_t, &b_down, &qp, &i_mid, hb0, hb1);
+    let f = tree_lu_factor(&c.pattern, &a_values);
+    let dh = tree_lu_solve_host(&c.pattern, &f, &r);
+    let asm = Assembled {
+        i_mid,
+        hb0,
+        hb1,
+        dt_s: 3600.0,
+        d_s,
+        newton: NewtonOut { q_star, a_up, b_down, ..Default::default() },
+        control: ControlOut { r_t, r_prime, ..Default::default() },
+        ..Default::default()
+    };
+    let label = if floored { "readout bwd chain floored" } else { "readout bwd chain" };
+    let host = readout_bwd_case(label, &c, &asm, &h, &dh, &bar(20, n, true), &bar(21, n, true));
+    if floored {
+        assert!(host.h.iter().all(|&v| v == 0.0), "every row is on the floor, so the floor passes nothing");
+    } else {
+        assert!(host.h.iter().all(|&v| v != 0.0), "no row is floored");
+    }
+}
+
+#[test]
+fn readout_backward_matches_host() {
+    readout_bwd_chain_run(false);
+    readout_bwd_chain_run(true);
+
+    // NormalDepth 3-chain: the outlet self-adds in the gather's transpose.
+    let n = 3;
+    let (adj3, pat3) = chain(n);
+    let c3 = consts_of(&adj3, &pat3, None, None, params(0.6, 1, false));
+    assert!(!c3.host.prescribed && c3.host.down[n - 1] == n - 1);
+    let asm3 = Assembled {
+        hb0: 0.0,
+        hb1: 0.0,
+        newton: NewtonOut {
+            q_star: bar(41, n, true),
+            a_up: gen(42, n, 0.0, 0.3),
+            b_down: gen(43, n, 0.0, 0.3),
+            ..Default::default()
+        },
+        control: ControlOut { r_t: bar(44, n, true), r_prime: gen(45, n, 0.0, 0.3), ..Default::default() },
+        ..Default::default()
+    };
+    let h3: Vec<f32> = c3.host.z_mid.iter().enumerate().map(|(i, z)| z + 0.3 + 0.2 * i as f32).collect();
+    readout_bwd_case("readout bwd normal-depth 3-chain", &c3, &asm3, &h3, &bar(46, n, true), &bar(20, n, true), &bar(21, n, true));
+
+    // Juniata: confluence rows, tie rows (hs == hf) and floor rows (hs < hf).
+    let st = juniata_state(0.6, 4);
+    let c = &st.c;
+    let nn = c.host.n;
+    let asm = stage_assemble_host(&c.host, &st.hour, 0, &st.h, &st.qc);
+    let f = tree_lu_factor(&c.pattern, &asm.a_values);
+    let mut dh = tree_lu_solve_host(&c.pattern, &f, &asm.r);
+    let mut h = st.h.clone();
+    let (zm, lb) = (&c.host.z_mid, c.host.depth_lb);
+    let no = non_outlets(&c.host);
+    for &t in &[no[10], no[30]] {
+        h[t] = zm[t] + lb;
+        dh[t] = 0.0;
+    }
+    for &t in &[no[50], no[70]] {
+        h[t] = zm[t] - 0.5;
+        dh[t] = 0.0;
+    }
+    let pat = &c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3), "a confluence row exists");
+    let g_h_new = bar(20, nn, true);
+    let g_q_new = bar(21, nn, true);
+    let host = readout_bwd_case("readout bwd juniata", c, &asm, &h, &dh, &g_h_new, &g_q_new);
+    for &t in &[no[10], no[30]] {
+        assert_eq!(h[t] + dh[t], zm[t] + lb, "tie: hs == hf on the host");
+        assert_eq!(host.h[t], g_h_new[t], "tie row passes the cotangent");
+    }
+    for &t in &[no[50], no[70]] {
+        assert_eq!(host.h[t], 0.0, "floor row blocks the cotangent");
+    }
+}
+
+#[test]
+fn rhs_backward_matches_host() {
+    let case = |what: &str, c: &Consts, hb0: f32, hb1: f32| {
+        let n = c.host.n;
+        let asm = Assembled { hb0, hb1, ..Default::default() };
+        let g_r = bar(22, n, true);
+        let host = rhs_backward_host(&c.host, &asm, &g_r);
+        let asm_dev = AssembledDev::upload(&asm, &like(), c.host.nnz);
+        let d = rhs_grads_to_host(&rhs_backward_dev(&c.dev, &asm_dev, &up(&g_r)));
+        all_bars(&format!("{what} qp"), &d.qp, &host.qp);
+        all_bars(&format!("{what} i_mid"), &d.i_mid, &host.i_mid);
+        all_bars(&format!("{what} q_star"), &d.q_star, &host.q_star);
+        all_bars(&format!("{what} qc"), &d.qc, &host.qc);
+        all_bars(&format!("{what} r_t"), &d.r_t, &host.r_t);
+        all_bars(&format!("{what} b_down"), &d.b_down, &host.b_down);
+        host
+    };
+    let st = juniata_state(0.6, 4);
+    let pat = &st.c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3), "a confluence row exists");
+    case("rhs bwd juniata", &st.c, 0.0, 0.0);
+    // PrescribedStage 3-chain: the outlet term (hb1 - hb0) is live.
+    let (adj3, pat3) = chain(3);
+    let cp = consts_of(&adj3, &pat3, None, None, params(0.6, 1, true));
+    assert!(cp.host.prescribed);
+    let host = case("rhs bwd prescribed 3-chain", &cp, 0.4, 0.9);
+    assert!(host.b_down[2] != 0.0, "the outlet b_down term is live");
+}
+
+#[test]
+fn matrix_backward_matches_host() {
+    let case = |what: &str, c: &Consts| {
+        let g_a = bar(23, 2 * c.host.nnz, true);
+        let host = matrix_backward_host(&c.host, &g_a);
+        let d = matrix_grads_to_host(&matrix_backward_dev(&c.dev, &up(&g_a)));
+        all_bars(&format!("{what} d_s"), &d.d_s, &host.d_s);
+        all_bars(&format!("{what} a_up"), &d.a_up, &host.a_up);
+        all_bars(&format!("{what} b_down"), &d.b_down, &host.b_down);
+        all_bars(&format!("{what} r_prime"), &d.r_prime, &host.r_prime);
+    };
+    let st = juniata_state(0.6, 4);
+    let pat = &st.c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3), "a confluence row exists");
+    case("matrix bwd juniata", &st.c);
+    // The dam 5-chain of readout_solve_run: a dam on row 2 makes r_prime live.
+    let (adj, pat5) = chain(5);
+    let c5 = consts_with(&adj, &pat5, Some(&[1]), &[(2, 1.23)], None, params(0.7, 1, true));
+    assert!(c5.host.dam_slot.iter().any(|&v| v != 0.0), "a dam slot exists");
+    case("matrix bwd dam chain", &c5);
 }

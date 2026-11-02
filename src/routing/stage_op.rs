@@ -1220,7 +1220,9 @@ pub fn readout_backward_host(
         o.q_star[i] = gq;
         o.a_up[i] = gq * dh[i];
         o.b_down[i] = -gq * dhd;
-        o.dh[i] += gq * asm.newton.a_up[i] + (gq * c.ctrl[i]) * asm.control.r_prime[i];
+        // The left product fuses; `gq * ctrl` has three uses and stays rounded. The CUDA kernel
+        // writes the same `fma`, so the CPU and the GPU round alike.
+        o.dh[i] += gq.mul_add(asm.newton.a_up[i], (gq * c.ctrl[i]) * asm.control.r_prime[i]);
         o.r_t[i] = gq * c.ctrl[i];
         o.r_prime[i] = (gq * c.ctrl[i]) * dh[i];
         let g = -gq * asm.newton.b_down[i];
@@ -1257,7 +1259,8 @@ pub fn rhs_backward_host(c: &StageOpConsts, asm: &Assembled, g_r: &[f32]) -> Rhs
     let th = c.theta;
     let mut g_eo: Vec<f32> = g_r.iter().map(|g| -g).collect();
     for k in 0..c.nnz {
-        g_eo[c.col[k]] += g_r[c.row[k]] * c.adj_stage[k];
+        // Fused, as the CUDA kernel writes it (explicit `fma`), so both backends round alike.
+        g_eo[c.col[k]] = g_r[c.row[k]].mul_add(c.adj_stage[k], g_eo[c.col[k]]);
     }
     let mut o = RhsGrads {
         qp: g_r.to_vec(),
@@ -1272,7 +1275,7 @@ pub fn rhs_backward_host(c: &StageOpConsts, asm: &Assembled, g_r: &[f32]) -> Rhs
             o.b_down[i] = (g_r[i] * c.outlet[i]) * (th * (asm.hb1 - asm.hb0));
         }
         o.q_star[i] = (g_eo[i] * c.friction[i]) * th;
-        o.qc[i] = g_eo[i] * (c.friction[i] * (1.0 - th) + (c.ctrl[i] - c.w_ctrl[i]));
+        o.qc[i] = g_eo[i] * c.friction[i].mul_add(1.0 - th, c.ctrl[i] - c.w_ctrl[i]);
         o.r_t[i] = g_eo[i] * c.w_ctrl[i];
     }
     o
@@ -1297,7 +1300,8 @@ pub fn matrix_backward_host(c: &StageOpConsts, g_a_values: &[f32]) -> MatrixGrad
     // 5d: low_k = (lowf + offd) + diag[row] * diag_slot
     let mut g_diag = vec![0.0f32; n];
     for k in 0..nnz {
-        g_diag[c.row[k]] += g_low[k] * c.diag_slot[k];
+        // Fused, as the CUDA kernel writes it (explicit `fma`), so both backends round alike.
+        g_diag[c.row[k]] = g_low[k].mul_add(c.diag_slot[k], g_diag[c.row[k]]);
     }
     let mut o = MatrixGrads {
         d_s: vec![0.0; n],
@@ -1312,14 +1316,14 @@ pub fn matrix_backward_host(c: &StageOpConsts, g_a_values: &[f32]) -> MatrixGrad
         o.d_s[i] += g_dst;
         o.a_up[i] += g_dst * th;
         g_sib[i] = g_dst * th;
-        o.r_prime[i] += g_diag[i] * c.w_ctrl[i];
+        o.r_prime[i] = g_diag[i].mul_add(c.w_ctrl[i], o.r_prime[i]);
     }
     // 5b, 5a, 5c's sib scatter
     for k in 0..nnz {
         let col = c.col[k];
-        o.a_up[col] += (-th * g_low[k]) * c.adj_friction[k];
-        o.b_down[col] += (g_sib[c.row[k]] - th * g_upf[k]) * c.adj_friction[k];
-        o.r_prime[col] += (-thc * g_low[k]) * c.dam_slot[k];
+        o.a_up[col] = (-th * g_low[k]).mul_add(c.adj_friction[k], o.a_up[col]);
+        o.b_down[col] = (-th).mul_add(g_upf[k], g_sib[c.row[k]]).mul_add(c.adj_friction[k], o.b_down[col]);
+        o.r_prime[col] = (-thc * g_low[k]).mul_add(c.dam_slot[k], o.r_prime[col]);
     }
     o
 }

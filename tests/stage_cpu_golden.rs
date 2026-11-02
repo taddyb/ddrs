@@ -381,12 +381,15 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
 /// Re-pinned again when the forward solve moved to the cuSPARSE reciprocal form (`tree_lu.rs`).
 /// Values before that change: juniata 1/1 0x299ce4709ea656c3, juniata 0.6/4 0xf59c6bf6f60e8ed7, table_rect 0.6/1
 /// 0x36234345f6cd664b, flow_reversal 0.55/4 0x33bd0272895f5336, dam_edge 1/1 0x088f4ef3393a5f3b.
-/// Tasks 6 and 7 fuse the CPU adjoint and will pin these again.
+/// Re-pinned 2026-11-02: the CPU adjoint of the readout, RHS and matrix blocks now fuses the same sites as
+/// the CUDA backward kernels. Values before that change: juniata 0.6/4 0xc92e200f90dc88e7, table_rect 0.6/1
+/// 0x0422c60a9e076e5d, flow_reversal 0.55/4 0x61f847bd464e6d11 (juniata 1/1 and dam_edge 1/1 did not change).
+/// Task 7 fuses the remaining CPU adjoint blocks and will pin these again.
 const GOLDEN: &[(&str, f32, u32, u64)] = &[
     ("juniata", 1.0, 1, 0x17261ad23acc08a9),
-    ("juniata", 0.6, 4, 0xc92e200f90dc88e7),
-    ("table_rect", 0.6, 1, 0x0422c60a9e076e5d),
-    ("flow_reversal", 0.55, 4, 0x61f847bd464e6d11),
+    ("juniata", 0.6, 4, 0x1fde63b5606e2832),
+    ("table_rect", 0.6, 1, 0x431b2de1e30bc9e0),
+    ("flow_reversal", 0.55, 4, 0xe78b0648c482edb3),
     ("dam_edge", 1.0, 1, 0xd7c87cb2dfed1762),
 ];
 
