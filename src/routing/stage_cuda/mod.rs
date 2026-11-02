@@ -8,13 +8,17 @@
 
 use std::sync::Arc;
 
+use burn::tensor::backend::Backend;
+
 use crate::routing::stage_op::{ControlOut, DepthOut, HourHost, NewtonOut, SectionHost, StageOpConsts};
-use crate::sparse::cube_buf::{cube_to_host, upload_f32, upload_i32, zeros_f32, Cube};
+use crate::sparse::cube_buf::{cube_to_host, from_cube, into_cube, upload_f32, upload_i32, zeros_f32, Cube};
 use crate::sparse::tree_lu::tree_levels;
 use crate::sparse::tree_lu_cuda::TreeDev;
 use crate::sparse::CsrPattern;
 
 pub mod forward;
+
+use forward::{stage_hour_forward_dev, stage_prologue_dev, HourForwardDev, SubstepDev};
 
 /// `v` on the device, or zeros of length `len` when `v` is empty.
 fn up(like: &Cube, v: &[f32], len: usize) -> Cube {
@@ -28,6 +32,7 @@ fn up(like: &Cube, v: &[f32], len: usize) -> Cube {
 /// Device copy of `StageOpConsts`, uploaded from the host copy (same bits).
 /// The scalars are read from `host`.
 #[doc(hidden)]
+#[derive(Debug)]
 pub struct StageOpConstsDev {
     pub host: Arc<StageOpConsts>,
     pub tree: TreeDev,
@@ -236,4 +241,36 @@ impl HourDev {
             b1: self.b1,
         }
     }
+}
+
+/// What the device backward needs from the forward (Task 8 reads it).
+#[derive(Clone, Debug)]
+pub(crate) struct HourSavedDev {
+    pub consts: Arc<StageOpConstsDev>,
+    pub hour: HourDev,
+    pub subs: Vec<SubstepDev>,
+}
+
+/// The op's device arm: converts the seven parents with `into_cube`, runs the
+/// hour on the device and returns the `[2n]` output primitive. Nothing here
+/// reads a device buffer to the host. When `save` is set it also returns the
+/// state the backward needs, and `HourForwardDev::subs` is left empty.
+/// Parents: `[n, q_spatial, p_spatial, h_t, q_t, q_next_mc, q_prime_t]`.
+pub(crate) fn stage_timestep_cuda<I: Backend + 'static>(
+    consts_dev: &Arc<StageOpConstsDev>,
+    pattern: &CsrPattern,
+    parents: [I::FloatTensorPrimitive; 7],
+    b0: f32,
+    b1: f32,
+    save: bool,
+) -> (I::FloatTensorPrimitive, HourForwardDev, Option<HourSavedDev>) {
+    let [n, q, p, h_t, q_t, q_next_mc, q_prime] = parents.map(into_cube::<I>);
+    let hour = stage_prologue_dev(consts_dev, &n, &q, &p, &q_t, &q_next_mc, &q_prime, b0, b1);
+    let mut fwd = stage_hour_forward_dev(consts_dev, pattern, &hour, &h_t, &q_t, save);
+    let saved = save.then(|| HourSavedDev {
+        consts: consts_dev.clone(),
+        hour,
+        subs: std::mem::take(&mut fwd.subs),
+    });
+    (from_cube::<I>(fwd.out.clone()), fwd, saved)
 }

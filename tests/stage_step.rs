@@ -807,7 +807,10 @@ fn gradcheck_state(
     let (l0, grads) = eval(base, true);
     println!("{label}: loss {l0}");
     let names = ["n", "q", "p", "h_t", "q_t"];
-    // f32 noise on the loss (about 1e-5) sets the lower bound; curvature the upper.
+    // f32 noise on the loss sets the lower bound; curvature the upper. The absolute floor is
+    // max(1e-4, 4 * ulp(l0) / eps) (ruling R3b, 2026-11-01). The loss sums the outputs and each carries
+    // its own rounding, so the finite difference resolves the loss only to a few ulps: at the dam row the
+    // measured loss quantum is 3.2e-6, which is 3.4 ulp(l0). The 5e-3 relative term is unchanged.
     const EPS: [f32; 5] = [1e-3, 1e-2, 0.2, 1e-2, 1e-2];
     for (pi, name) in names.iter().enumerate() {
         for i in 0..n {
@@ -824,8 +827,14 @@ fn gradcheck_state(
             let fd = (eval(bu, false).0 - eval(bd, false).0) / (2.0 * eps);
             let an = grads[pi][i];
             let err = (fd - an).abs();
+            let ulp = f32::from_bits(l0.abs().to_bits() + 1) - l0.abs();
+            let floor = (4.0 * ulp / eps).max(1e-4);
+            // Print every entry that passes only through the new floor.
+            if an.is_finite() && err > 1e-4 && err <= floor && err > 5e-3 * fd.abs().max(an.abs()) {
+                println!("FLOOR-ONLY {label}: {name}[{i}] fd {fd} analytic {an} floor {floor:e}");
+            }
             assert!(
-                an.is_finite() && (err <= 1e-4 || err <= 5e-3 * fd.abs().max(an.abs())),
+                an.is_finite() && (err <= floor || err <= 5e-3 * fd.abs().max(an.abs())),
                 "{label}: d loss/d {name}[{i}]: fd {fd} analytic {an}"
             );
         }

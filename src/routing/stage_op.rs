@@ -55,8 +55,10 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
+use crate::routing::stage_cuda::{stage_timestep_cuda, HourSavedDev, StageOpConstsDev};
+use crate::routing::stage_cuda::forward::HourForwardDev;
 use crate::sparse::dispatch::effective_use_cuda;
-use crate::sparse::tree_lu::{tree_lu_factor, tree_lu_grad_a_host, TreeFactors, CUDA_TODO};
+use crate::sparse::tree_lu::{tree_lu_factor, tree_lu_grad_a_host, tree_lu_solve_host, TreeFactors, CUDA_TODO};
 use crate::sparse::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
 
 // Scalars the reference passes as f64 literals; Burn casts them to f32.
@@ -265,7 +267,7 @@ pub struct HourForward {
 fn spmv(c: &StageOpConsts, x: &[f32], w: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; c.n];
     for k in 0..c.nnz {
-        out[c.row[k]] += x[c.col[k]] * w[k];
+        out[c.row[k]] = x[c.col[k]].mul_add(w[k], out[c.row[k]]);
     }
     out
 }
@@ -327,7 +329,7 @@ pub fn stage_prologue_host(
     let i_delta: Vec<f32> = (0..nn).map(|i| i_n[i] - i_t[i]).collect();
     let q_eps: Vec<f32> = (0..nn).map(|i| q[i] + 1e-6f32).collect();
     let n_eff: Vec<f32> = if c.has_table {
-        (0..nn).map(|i| n[i] * keep_of(c.t_mask[i]) + c.t_n[i] * c.t_mask[i]).collect()
+        (0..nn).map(|i| n[i].mul_add(keep_of(c.t_mask[i]), c.t_n[i] * c.t_mask[i])).collect()
     } else {
         n.to_vec()
     };
@@ -427,13 +429,13 @@ pub fn section_host(c: &StageOpConsts, p: &[f32], q_eps: &[f32], d: &[f32]) -> S
         let bw = clamp_min(bwr, bwlb);
         // 2c
         let area = ((tw + bw) * dd) / 2.0;
-        let rt = (ss * ss + 1.0).sqrt();
+        let rt = ss.mul_add(ss, 1.0).sqrt();
         let perim = bw + (dd * rt) * 2.0;
         let radius = area / perim;
         // 2d
         let twd = (e * tw) / dd;
         let sa = ind(ssr > 0.5) * ind(ssr < 50.0);
-        let ssd = ((ssr / dd) * ((twd / tw) * dd - 1.0)) * sa;
+        let ssd = ((ssr / dd) * (twd / tw).mul_add(dd, -1.0)) * sa;
         // 2e
         let ba = ind(bwr > bwlb);
         let bwd = ((twd - ss * 2.0) - (dd * ssd) * 2.0) * ba;
@@ -462,12 +464,12 @@ pub fn section_host(c: &StageOpConsts, p: &[f32], q_eps: &[f32], d: &[f32]) -> S
             let area_r = ttw * dd;
             let perim_r = ttw + dd * 2.0;
             let radius_r = area_r / perim_r;
-            s.out_tw[i] = tw * keep + ttw * m;
-            s.out_area[i] = area * keep + area_r * m;
-            s.out_perim[i] = perim * keep + perim_r * m;
-            s.out_radius[i] = radius * keep + radius_r * m;
-            s.out_a_d[i] = ad * keep + ttw * m;
-            s.out_p_d[i] = pd * keep + (1.0f32 * 2.0) * m;
+            s.out_tw[i] = tw.mul_add(keep, ttw * m);
+            s.out_area[i] = area.mul_add(keep, area_r * m);
+            s.out_perim[i] = perim.mul_add(keep, perim_r * m);
+            s.out_radius[i] = radius.mul_add(keep, radius_r * m);
+            s.out_a_d[i] = ad.mul_add(keep, ttw * m);
+            s.out_p_d[i] = pd.mul_add(keep, (1.0f32 * 2.0) * m);
         } else {
             s.out_tw[i] = tw;
             s.out_area[i] = area;
@@ -524,17 +526,17 @@ pub fn newton_host(
         let alpha = ((tau + 1.0) / den) * f;
         let beta = ((a_e * gdt) / (c.edge_length[i] * den)) * f;
         // 3c
-        let phi_d = ad_e / a_e + (ad_e / a_e - pd_e / p_e) * F43;
+        let phi_d = (ad_e / a_e - pd_e / p_e).mul_add(F43, ad_e / a_e);
         // 3d
         let dhe = h[i] - dep.h_down[i];
-        let k1 = (tau * q) * phi_d + ((ad_e * dhe) * gdt) / c.edge_length[i];
+        let k1 = (tau * q).mul_add(phi_d, ((ad_e * dhe) * gdt) / c.edge_length[i]);
         let kappa = (k1 / den) * f;
         // 3e
-        let q_star = alpha * q + beta * dhe;
+        let q_star = alpha.mul_add(q, beta * dhe);
         // 3f
-        let ra = beta * th + kappa * dep.s_up[i];
+        let ra = beta.mul_add(th, kappa * dep.s_up[i]);
         let a = clamp_min(ra, 0.0) * f;
-        let rb = beta * th - kappa * dep.s_dn[i];
+        let rb = beta.mul_add(th, -(kappa * dep.s_dn[i]));
         let b = clamp_min(rb, 0.0) * f;
         o.phi[i] = phi;
         o.dt_phi[i] = tau;
@@ -598,8 +600,8 @@ pub fn control_host(
             let act = ind(ex > 0.0);
             let rtb = ((c.t_tw[i] * c.length[i]) * clamp_min(ex, 0.0)) / c.dam_t[i];
             let rptb = rpd_head * act;
-            rd = rd_head * keep + rtb * m;
-            rpd = rpd_head * keep + rptb * m;
+            rd = rd_head.mul_add(keep, rtb * m);
+            rpd = rpd_head.mul_add(keep, rptb * m);
             o.ex[i] = ex;
             o.act[i] = act;
         }
@@ -608,12 +610,12 @@ pub fn control_host(
             (store.out_area[i], store.out_radius[i], store.out_a_d[i], store.out_p_d[i], store.out_perim[i]);
         let kk = (a_s * r_s.powf(F23)) / n_eff[i];
         let rnd = kk * c.s0_sqrt[i];
-        let w = (ad_s / a_s) * F53 - (pd_s / p_s) * F23;
+        let w = (ad_s / a_s).mul_add(F53, -((pd_s / p_s) * F23));
         let dk = kk * w;
         let rpnd = dk * c.s0_sqrt[i];
         // 4d
-        let r_t = c.dam[i] * rd + c.nd[i] * rnd;
-        let rpr = c.dam[i] * rpd + c.nd[i] * rpnd;
+        let r_t = c.dam[i].mul_add(rd, c.nd[i] * rnd);
+        let rpr = c.dam[i].mul_add(rpd, c.nd[i] * rpnd);
         o.rd_head[i] = rd_head;
         o.rpd_head[i] = rpd_head;
         o.rd[i] = rd;
@@ -636,21 +638,21 @@ pub fn matrix_host(c: &StageOpConsts, d_s: &[f32], a_up: &[f32], b_down: &[f32],
     let be: Vec<f32> = (0..nnz).map(|k| b_down[c.col[k]] * c.adj_friction[k]).collect();
     let mut sib = vec![0.0f32; n];
     for k in 0..nnz {
-        sib[c.row[k]] += be[k];
+        // be[k] = b_down[col] * adj_friction is fused into the sum; `be` itself stays rounded for `upf`.
+        sib[c.row[k]] = b_down[c.col[k]].mul_add(c.adj_friction[k], sib[c.row[k]]);
     }
     let diag: Vec<f32> = (0..n)
         .map(|i| {
-            let dst = d_s[i] + (a_up[i] + sib[i]) * th;
-            (dst * c.in_stage[i] + c.w_ctrl[i] * r_prime[i]) + keep_of(c.in_stage[i])
+            let dst = (a_up[i] + sib[i]).mul_add(th, d_s[i]);
+            dst.mul_add(c.in_stage[i], c.w_ctrl[i] * r_prime[i]) + keep_of(c.in_stage[i])
         })
         .collect();
     let mut out = vec![0.0f32; 2 * nnz];
     for k in 0..nnz {
         let ae = a_up[c.col[k]] * c.adj_friction[k];
-        let lowf = (-ae) * th;
         let upf = (-be[k]) * th;
         let offd = (r_prime[c.col[k]] * c.dam_slot[k]) * (-thc);
-        out[k] = (lowf + offd) + diag[c.row[k]] * c.diag_slot[k];
+        out[k] = diag[c.row[k]].mul_add(c.diag_slot[k], (-ae).mul_add(th, offd));
         out[nnz + k] = upf;
     }
     out
@@ -674,20 +676,20 @@ pub fn rhs_host(
     let th = c.theta;
     let eo: Vec<f32> = (0..n)
         .map(|i| {
-            let fo = c.friction[i] * ((q_star[i] * th) + qc[i] * (1.0 - th));
-            let co = c.w_ctrl[i] * r_t[i] + (c.ctrl[i] - c.w_ctrl[i]) * qc[i];
-            fo + co
+            let inner = q_star[i].mul_add(th, qc[i] * (1.0 - th));
+            let co = c.w_ctrl[i].mul_add(r_t[i], (c.ctrl[i] - c.w_ctrl[i]) * qc[i]);
+            c.friction[i].mul_add(inner, co)
         })
         .collect();
     let mut ine = vec![0.0f32; n];
     for k in 0..c.nnz {
-        ine[c.row[k]] += eo[c.col[k]] * c.adj_stage[k];
+        ine[c.row[k]] = eo[c.col[k]].mul_add(c.adj_stage[k], ine[c.row[k]]);
     }
     (0..n)
         .map(|i| {
             let mut r = ((qp[i] + i_mid[i]) + ine[i]) - eo[i];
             if c.prescribed {
-                r += (c.outlet[i] * b_down[i]) * (th * (hb1 - hb0));
+                r = (c.outlet[i] * b_down[i]).mul_add(th * (hb1 - hb0), r);
             }
             r
         })
@@ -705,7 +707,7 @@ pub fn stage_assemble_host(c: &StageOpConsts, hour: &HourHost, s: usize, h: &[f3
     let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
     // H4
     let i_mid: Vec<f32> =
-        (0..n).map(|i| (hour.i_t[i] * 2.0 + hour.i_delta[i] * (f0 + f1)) * 0.5).collect();
+        (0..n).map(|i| hour.i_delta[i].mul_add(f0 + f1, hour.i_t[i] * 2.0) * 0.5).collect();
     let (hb0, hb1) = (hour.b0 + (hour.b1 - hour.b0) * f0, hour.b0 + (hour.b1 - hour.b0) * f1);
     let depth = depth_host(c, h, hb0);
     let edge = section_host(c, &hour.p, &hour.q_eps, &depth.d_edge);
@@ -749,23 +751,24 @@ pub fn stage_readout_host(
         }
         dh_down[i] = dhd;
         // 8b
-        let q_fr = (nw.q_star[i] + nw.a_up[i] * dh[i]) - nw.b_down[i] * dhd;
-        let q_ctrl = (asm.control.r_t[i] + asm.control.r_prime[i] * dh[i]) * c.ctrl[i];
-        q_new[i] = q_fr + q_ctrl;
+        let q_fr = (-nw.b_down[i]).mul_add(dhd, nw.a_up[i].mul_add(dh[i], nw.q_star[i]));
+        let q_ctrl_sum = asm.control.r_prime[i].mul_add(dh[i], asm.control.r_t[i]);
+        q_new[i] = q_ctrl_sum.mul_add(c.ctrl[i], q_fr);
     }
     // 9
     let dt_s = asm.dt_s;
-    let fe: Vec<f32> = (0..n)
-        .map(|i| (c.w_edge[i] * q_new[i] + keep_of(c.w_edge[i]) * qc[i]) * c.in_stage[i])
-        .collect();
+    // fe = inner * in_stage with inner fused; `fe` stays rounded for the `into` gather, and the net
+    // term takes `fe` as a fused product (rule F1, "let m = a*b; out = m; y = m + c").
+    let fe_inner: Vec<f32> = (0..n).map(|i| c.w_edge[i].mul_add(q_new[i], keep_of(c.w_edge[i]) * qc[i])).collect();
+    let fe: Vec<f32> = (0..n).map(|i| fe_inner[i] * c.in_stage[i]).collect();
     let mut into = vec![0.0f32; n];
     for k in 0..c.nnz {
-        into[c.row[k]] += fe[c.col[k]] * c.adj_stage[k];
+        into[c.row[k]] = fe[c.col[k]].mul_add(c.adj_stage[k], into[c.row[k]]);
     }
     let net = sum((0..n).map(|i| ((into[i] + asm.i_mid[i]) + hour.qp_stage[i]) - fe[i])) * dt_s;
     let storage = sum((0..n).map(|i| (asm.d_s[i] * (h_new[i] - h[i])) * c.in_stage[i])) * dt_s;
     let floor = sum((0..n).map(|i| (asm.d_s[i] * (h_new[i] - h_solved[i])) * c.in_stage[i])) * dt_s;
-    let gross = ((sum((0..n).map(|i| fe[i].abs() * (c.in_stage[i] + c.has_down[i] * c.in_stage[i])))
+    let gross = ((sum((0..n).map(|i| fe[i].abs() * c.has_down[i].mul_add(c.in_stage[i], c.in_stage[i])))
         + sum(asm.i_mid.iter().map(|v| v.abs())))
         + sum(hour.qp_stage.iter().map(|v| v.abs())))
         * dt_s;
@@ -1505,8 +1508,8 @@ pub fn stage_hour_forward(
     for s in 0..subs {
         let asm = stage_assemble_host(c, hour, s, &h, &qc);
         let factors = tree_lu_factor(pattern, &asm.a_values);
-        let y = forward_sub_lower(pattern, &factors.l_values, &asm.r);
-        let dh = back_sub_upper_transposed(pattern, &factors.u_values, &y);
+        // The reciprocal-form host solve that matches cuSPARSE bit for bit (fma-ruling.md, R1).
+        let dh = tree_lu_solve_host(pattern, &factors, &asm.r);
         let ro = stage_readout_host(c, hour, &h, &qc, &asm, &dh);
         for (m, v) in mass.iter_mut().zip(ro.mass) {
             *m += v;
@@ -1566,6 +1569,15 @@ pub fn stage_hour_backward(
 #[derive(Clone, Debug)]
 pub(crate) enum HourSaved {
     Host { hour: Arc<HourHost>, subs: Arc<Vec<SubstepSaved>> },
+    Dev(Arc<HourSavedDev>),
+}
+
+/// The side outputs of one routing hour, from the arm that ran.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum HourOut {
+    Host(HourForward),
+    Dev(HourForwardDev),
 }
 
 /// Saved state of one routing hour. Everything is behind an `Arc`, so a clone
@@ -1588,7 +1600,10 @@ where
 
     fn backward(self, ops: Ops<Self::State, 7>, grads: &mut Gradients, _checkpointer: &mut Checkpointer) {
         let StageTimestepState { consts, pattern, saved } = ops.state;
-        let HourSaved::Host { hour, subs } = saved;
+        let HourSaved::Host { hour, subs } = saved else {
+            // The device backward comes in Phase G Task 8.
+            unimplemented!("{}", CUDA_TODO)
+        };
         let [p_n, p_q, p_p, p_ht, p_qt, p_mc, p_qp] = ops.parents;
         let grad_out = grads.consume::<B>(&ops.node);
         let device = B::float_device(&grad_out);
@@ -1618,6 +1633,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stage_timestep<I: Backend + 'static>(
     consts: &Arc<StageOpConsts>,
+    consts_dev: Option<&Arc<StageOpConstsDev>>,
     pattern: &Arc<CsrPattern>,
     n: Tensor<Autodiff<I>, 1>,
     q_spatial: Tensor<Autodiff<I>, 1>,
@@ -1629,14 +1645,12 @@ pub(crate) fn stage_timestep<I: Backend + 'static>(
     b0: f32,
     b1: f32,
     use_cuda: bool,
-) -> (Tensor<Autodiff<I>, 1>, HourForward)
+) -> (Tensor<Autodiff<I>, 1>, HourOut)
 where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
-    if effective_use_cuda::<I>(use_cuda) {
-        unimplemented!("{}", CUDA_TODO)
-    }
+    let on_device = effective_use_cuda::<I>(use_cuda);
     let float = |t: Tensor<Autodiff<I>, 1>| match t.into_primitive() {
         TensorPrimitive::Float(a) => a,
         TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
@@ -1665,6 +1679,24 @@ where
         .compute_bound()
         .stateful();
     let save = matches!(kind, OpsKind::Tracked(_));
+    if on_device {
+        // The device arm: no host read. The consts are built by the caller.
+        let consts_dev = consts_dev.expect("stage_timestep: the device arm needs consts_dev");
+        let parents = [a_n.primitive, a_q.primitive, a_p.primitive, a_h.primitive, a_qt.primitive, a_mc.primitive, a_qp.primitive];
+        let (out, fwd, saved) = stage_timestep_cuda::<I>(consts_dev, pattern, parents, b0, b1, save);
+        let result = match kind {
+            OpsKind::Tracked(prep) => {
+                let state = StageTimestepState {
+                    consts: consts.clone(),
+                    pattern: pattern.clone(),
+                    saved: HourSaved::Dev(Arc::new(saved.expect("tracked forward saves state"))),
+                };
+                prep.finish(state, out)
+            }
+            OpsKind::UnTracked(prep) => prep.finish(out),
+        };
+        return (Tensor::from_primitive(TensorPrimitive::Float(result)), HourOut::Dev(fwd));
+    }
     let (n_h, q_h, p_h) = (
         primitive_to_vec::<I>(a_n.primitive),
         primitive_to_vec::<I>(a_q.primitive),
@@ -1697,7 +1729,7 @@ where
         }
         OpsKind::UnTracked(prep) => prep.finish(out),
     };
-    (Tensor::from_primitive(TensorPrimitive::Float(result)), fwd)
+    (Tensor::from_primitive(TensorPrimitive::Float(result)), HourOut::Host(fwd))
 }
 
 #[cfg(test)]

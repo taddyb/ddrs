@@ -20,16 +20,18 @@ use ddrs::data::store::ChannelGeometryRows;
 use ddrs::data::ConusAdjacencyStore;
 use ddrs::routing::stage::{StageBlock, StageNetwork, StageParams};
 use ddrs::routing::stage_cuda::forward::{
-    control_dev, control_to_host, depth_dev, depth_to_host, hour_to_host, i_mid_dev, newton_dev,
-    newton_to_host, section_dev, section_to_host, stage_prologue_dev, storage_rate_dev,
+    assembled_to_host, control_dev, control_to_host, depth_dev, depth_to_host, hour_to_host, i_mid_dev, matrix_dev,
+    newton_dev, newton_to_host, readout_to_host, rhs_dev, section_dev, section_to_host, stage_assemble_dev,
+    stage_prologue_dev, stage_readout_dev, storage_rate_dev, AssembledDev,
 };
 use ddrs::routing::stage_cuda::{ControlDev, DepthDev, HourDev, NewtonDev, SectionDev, StageOpConstsDev};
 use ddrs::routing::stage_op::{
-    control_host, depth_host, newton_host, section_host, stage_assemble_host, stage_prologue_host, ControlOut, DepthOut,
-    HourHost, StageOpConsts,
+    control_host, depth_host, matrix_host, newton_host, rhs_host, section_host, stage_assemble_host,
+    stage_prologue_host, stage_readout_host, Assembled, ControlOut, DepthOut, HourHost, NewtonOut, SectionHost,
+    StageOpConsts,
 };
 use ddrs::sparse::cube_buf::{cube_from_host, cube_to_host, cube_to_host_i32, Cube, Gpu};
-use ddrs::sparse::tree_lu::tree_levels;
+use ddrs::sparse::tree_lu::{tree_levels, tree_lu_factor, tree_lu_solve_host};
 use ddrs::sparse::{CsrPattern, SparseAdjacency};
 
 type Cpu = NdArray<f32>;
@@ -177,7 +179,19 @@ fn consts_of(
     table: Option<ChannelGeometryRows>,
     p: StageParams,
 ) -> Consts {
-    let net = StageNetwork::build(adj, pattern, seeds, 0.0, &[]).unwrap();
+    consts_with(adj, pattern, seeds, &[], table, p)
+}
+
+/// `consts_of` with dam rows `(row, residence days)`.
+fn consts_with(
+    adj: &SparseAdjacency,
+    pattern: &Arc<CsrPattern>,
+    seeds: Option<&[usize]>,
+    dams: &[(usize, f32)],
+    table: Option<ChannelGeometryRows>,
+    p: StageParams,
+) -> Consts {
+    let net = StageNetwork::build(adj, pattern, seeds, 0.0, dams).unwrap();
     let mut block = StageBlock::<Gpu>::new(net, p, &gpu());
     if let Some(rows) = table {
         block.set_table_geometry(rows, false).unwrap();
@@ -711,4 +725,249 @@ fn op_consts_dev_is_cached_and_cleared() {
     assert!(!Arc::ptr_eq(&a, &c), "set_table_geometry clears the cache");
     assert!(c.host.has_table);
     assert!(Arc::ptr_eq(&c, &block.op_consts_dev(&pat)));
+}
+
+// ------------------------------------------------- matrix, rhs, readout
+
+/// The Juniata network with MC rows in its upper half, a perturbed hotstart
+/// stage and the hour prologue (copied from `prologue_case` and `depth_matches_host`).
+struct JuniataState {
+    c: Consts,
+    hour: HourHost,
+    h: Vec<f32>,
+    qc: Vec<f32>,
+}
+
+fn juniata_state(theta: f32, substeps: u32) -> JuniataState {
+    let (adj, pattern) = juniata();
+    let n = adj.n;
+    let lower: Vec<usize> = (n / 2..n).collect();
+    let c = consts_of(&adj, &pattern, Some(&lower), None, params(theta, substeps, false));
+    let (h0, q_init) = hotstart_stage(&adj, &pattern);
+    let pert = bar(7, n, false);
+    let h: Vec<f32> = (0..n).map(|i| h0[i] + 0.3 * (pert[i] - 1.0)).collect();
+    let nm = gen(1, n, 0.02, 0.08);
+    let q = gen(2, n, 0.3, 0.7);
+    let p = gen(3, n, 5.0, 40.0);
+    let q_next_mc = gen(5, n, 0.5, 30.0);
+    let qp = gen(6, n, 0.0, 3.0);
+    let hour = stage_prologue_host(&c.host, &nm, &q, &p, &q_init, &q_next_mc, &qp, 0.0, 0.0);
+    JuniataState { c, hour, h, qc: q_init }
+}
+
+#[test]
+fn matrix_matches_host() {
+    let case = |what: &str, c: &Consts, d_s: &[f32], a_up: &[f32], b_down: &[f32], r_prime: &[f32]| {
+        let host = matrix_host(&c.host, d_s, a_up, b_down, r_prime);
+        let dev = cube_to_host(&matrix_dev(&c.dev, &up(d_s), &up(a_up), &up(b_down), &up(r_prime)));
+        assert_eq!(dev.len(), 2 * c.host.nnz);
+        close(what, &dev, &host);
+        same_zero_set(what, &dev, &host);
+    };
+    // Juniata state: a confluence row gives a sibling sum over two slots.
+    let st = juniata_state(0.6, 4);
+    let asm = stage_assemble_host(&st.c.host, &st.hour, 0, &st.h, &st.qc);
+    let pat = &st.c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3), "a confluence row exists");
+    assert!(asm.newton.a_up.iter().any(|&v| v == 0.0), "the a clamp binds somewhere");
+    case("matrix juniata", &st.c, &asm.d_s, &asm.newton.a_up, &asm.newton.b_down, &asm.control.r_prime);
+    close("matrix juniata vs asm.a_values", &asm.a_values, &matrix_host(&st.c.host, &asm.d_s, &asm.newton.a_up, &asm.newton.b_down, &asm.control.r_prime));
+
+    // The dam 5-chain of readout_solve_run: MC headwater (row 0), a dam on row 2.
+    let (adj, pat5) = chain(5);
+    let c5 = consts_with(&adj, &pat5, Some(&[1]), &[(2, 1.23)], None, params(0.7, 1, true));
+    assert!(c5.host.dam_slot.iter().any(|&v| v != 0.0), "a dam slot exists");
+    let pos = |seed, lo: f32, hi: f32| gen(seed, 5, lo, hi);
+    case("matrix dam chain", &c5, &pos(1, 1.0, 2.0), &pos(2, 0.0, 0.3), &pos(3, 0.0, 0.3), &pos(4, 0.0, 0.3));
+}
+
+#[test]
+fn rhs_matches_host() {
+    let case = |what: &str, c: &Consts, seed: u32, hb0: f32, hb1: f32| {
+        let n = c.host.n;
+        let qc = bar(seed, n, true);
+        let q_star = bar(seed + 1, n, true);
+        let r_t = bar(seed + 2, n, true);
+        let b_down = gen(seed + 3, n, 0.0, 0.3);
+        let qp = gen(seed + 4, n, 0.0, 3.0);
+        let i_mid = bar(seed + 5, n, false);
+        let host = rhs_host(&c.host, &qc, &q_star, &r_t, &b_down, &qp, &i_mid, hb0, hb1);
+        let dev = rhs_dev(&c.dev, &up(&qc), &up(&q_star), &up(&r_t), &up(&b_down), &up(&qp), &up(&i_mid), hb0, hb1);
+        close(what, &cube_to_host(&dev), &host);
+    };
+    // Juniata: its own state.
+    let st = juniata_state(0.6, 4);
+    let asm = stage_assemble_host(&st.c.host, &st.hour, 1, &st.h, &st.qc);
+    let host = rhs_host(
+        &st.c.host, &st.qc, &asm.newton.q_star, &asm.control.r_t, &asm.newton.b_down, &st.hour.qp_stage, &asm.i_mid,
+        asm.hb0, asm.hb1,
+    );
+    let dev = rhs_dev(
+        &st.c.dev, &up(&st.qc), &up(&asm.newton.q_star), &up(&asm.control.r_t), &up(&asm.newton.b_down),
+        &up(&st.hour.qp_stage), &up(&asm.i_mid), asm.hb0, asm.hb1,
+    );
+    close("rhs juniata", &cube_to_host(&dev), &host);
+    close("rhs juniata vs asm.r", &host, &asm.r);
+    case("rhs juniata random", &st.c, 11, 0.0, 0.0);
+    // PrescribedStage 3-chain: the outlet term (hb1 - hb0) is live.
+    let (adj3, pat3) = chain(3);
+    let cp = consts_of(&adj3, &pat3, None, None, params(0.6, 1, true));
+    assert!(cp.host.prescribed);
+    case("rhs prescribed 3-chain", &cp, 21, 0.4, 0.9);
+    // MC-inflow 3-chain: row 0 is an MC reach.
+    let cm = consts_of(&adj3, &pat3, Some(&[1]), None, params(0.55, 1, false));
+    assert!(cm.host.in_stage[0] == 0.0 && cm.host.in_stage[1] == 1.0);
+    case("rhs mc-inflow 3-chain", &cm, 31, 0.0, 0.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_readout(
+    what: &str,
+    c: &Consts,
+    asm_dev: &AssembledDev,
+    hour: &HourHost,
+    h: &[f32],
+    qc: &[f32],
+    dh: &[f32],
+    asm: &Assembled,
+) {
+    let host = stage_readout_host(&c.host, hour, h, qc, asm, dh);
+    let hd = HourDev::upload(hour, &like());
+    let ro = stage_readout_dev(&c.dev, &hd, &up(h), &up(qc), asm_dev, &up(dh));
+    let d = readout_to_host(&ro);
+    close(&format!("{what} h_solved"), &d.h_solved, &host.h_solved);
+    close(&format!("{what} h_new"), &d.h_new, &host.h_new);
+    close(&format!("{what} dh_down"), &d.dh_down, &host.dh_down);
+    close(&format!("{what} q_new"), &d.q_new, &host.q_new);
+    same_zero_set(&format!("{what} h_new"), &d.h_new, &host.h_new);
+    let tol = 1e-5 * host.mass[3].abs();
+    for (k, name) in ["storage", "net", "floor", "gross", "mc_in"].iter().enumerate() {
+        println!("{what} mass {name}: dev {} host {} (tol {tol:e})", d.mass[k], host.mass[k]);
+        assert!(
+            (d.mass[k] - host.mass[k]).abs() <= tol,
+            "{what} mass {name}: dev {} vs host {} (tol {tol:e})",
+            d.mass[k],
+            host.mass[k]
+        );
+    }
+}
+
+// copied from tests/stage_op_adjoint.rs::readout_solve_run (inputs; the host oracle is stage_readout_host)
+fn readout_chain_run(floored: bool) {
+    let n = 5;
+    let (adj, pat) = chain(n);
+    let c = consts_with(&adj, &pat, Some(&[1]), &[(2, 1.23)], None, params(0.7, 1, true));
+    assert!(c.host.prescribed && c.host.dam.iter().any(|&v| v == 1.0));
+    let pos = |seed, lo: f32, hi: f32| gen(seed, n, lo, hi);
+    let d_s = pos(1, 1.0, 2.0);
+    let a_up = pos(2, 0.0, 0.3);
+    let b_down = pos(3, 0.0, 0.3);
+    let r_prime = pos(4, 0.0, 0.3);
+    let r_t = bar(5, n, true);
+    let q_star = bar(6, n, true);
+    let qc = bar(7, n, true);
+    let qp: Vec<f32> = bar(8, n, false).iter().zip(&c.host.in_stage).map(|(v, m)| v * m).collect();
+    let i_mid = bar(9, n, false);
+    let h: Vec<f32> = if floored {
+        c.host.z_mid.iter().map(|z| z - 3.0).collect()
+    } else {
+        c.host.z_mid.iter().enumerate().map(|(i, z)| z + 0.5 + 0.1 * i as f32).collect()
+    };
+    let (hb0, hb1) = (0.4f32, 0.9f32);
+    let a_values = matrix_host(&c.host, &d_s, &a_up, &b_down, &r_prime);
+    let r = rhs_host(&c.host, &qc, &q_star, &r_t, &b_down, &qp, &i_mid, hb0, hb1);
+    let f = tree_lu_factor(&c.pattern, &a_values);
+    let dh = tree_lu_solve_host(&c.pattern, &f, &r);
+    let hour = HourHost { qp_stage: qp.clone(), ..Default::default() };
+    let asm = Assembled {
+        i_mid: i_mid.clone(),
+        hb0,
+        hb1,
+        dt_s: 3600.0,
+        d_s: d_s.clone(),
+        newton: NewtonOut { q_star, a_up, b_down, ..Default::default() },
+        control: ControlOut { r_t, r_prime, ..Default::default() },
+        ..Default::default()
+    };
+    let asm_dev = AssembledDev::upload(&asm, &like(), c.host.nnz);
+    let label = if floored { "readout chain floored" } else { "readout chain" };
+    compare_readout(label, &c, &asm_dev, &hour, &h, &qc, &dh, &asm);
+    let host = stage_readout_host(&c.host, &hour, &h, &qc, &asm, &dh);
+    let hf: Vec<f32> = c.host.z_mid.iter().map(|z| z + c.host.depth_lb).collect();
+    if floored {
+        assert_eq!(host.h_new, hf, "every row is on the floor");
+    } else {
+        assert!(host.h_new != hf, "not floored");
+    }
+    // The outlet row reads hb1 - hb0 (PrescribedStage).
+    assert_eq!(host.dh_down[n - 1], hb1 - hb0);
+}
+
+#[test]
+fn readout_and_mass_match_host() {
+    readout_chain_run(false);
+    readout_chain_run(true);
+
+    // (b) the Juniata state, with ties and floor rows.
+    let st = juniata_state(0.6, 4);
+    let c = &st.c;
+    let asm = stage_assemble_host(&c.host, &st.hour, 0, &st.h, &st.qc);
+    let f = tree_lu_factor(&c.pattern, &asm.a_values);
+    let mut dh = tree_lu_solve_host(&c.pattern, &f, &asm.r);
+    let mut h = st.h.clone();
+    let (zm, lb) = (&c.host.z_mid, c.host.depth_lb);
+    let no = non_outlets(&c.host);
+    // (c) two tie rows hs == hf (dh = 0, h = z_mid + lb) and two floor rows (hs < hf).
+    for &t in &[no[10], no[30]] {
+        h[t] = zm[t] + lb;
+        dh[t] = 0.0;
+    }
+    for &t in &[no[50], no[70]] {
+        h[t] = zm[t] - 0.5;
+        dh[t] = 0.0;
+    }
+    let host = stage_readout_host(&c.host, &st.hour, &h, &st.qc, &asm, &dh);
+    for &t in &[no[10], no[30]] {
+        assert_eq!(h[t] + 0.0, zm[t] + lb, "tie: h + 0 == z_mid + lb on the host");
+        assert_eq!(host.h_new[t], host.h_solved[t], "tie row keeps h_solved");
+    }
+    for &t in &[no[50], no[70]] {
+        assert_eq!(host.h_new[t], zm[t] + lb, "floor row binds");
+    }
+    // A confluence row (two upstream reaches) feeds the `into` gather.
+    let pat = &c.pattern;
+    assert!((0..pat.n).any(|i| (pat.crow[i + 1] - pat.crow[i]) as usize >= 3));
+    let asm_dev = AssembledDev::upload(&asm, &like(), c.host.nnz);
+    compare_readout("readout juniata", c, &asm_dev, &st.hour, &h, &st.qc, &dh, &asm);
+}
+
+fn compare_section_host(what: &str, d: &SectionHost, h: &SectionHost) {
+    macro_rules! f {
+        ($($x:ident),*) => { $( close(&format!("{what} {}", stringify!($x)), &d.$x, &h.$x); )* };
+    }
+    f!(pw, tw, ss_raw, ss, bw_raw, bw, area, root, perim, radius, tw_d, ss_d, bw_d, a_d, p_d, out_tw, out_area,
+       out_perim, out_radius, out_a_d, out_p_d);
+}
+
+#[test]
+fn assemble_matches_host() {
+    let st = juniata_state(0.6, 4);
+    let c = &st.c;
+    let hd = HourDev::upload(&st.hour, &like());
+    for s in [0usize, 3] {
+        let host = stage_assemble_host(&c.host, &st.hour, s, &st.h, &st.qc);
+        let dev = stage_assemble_dev(&c.dev, &hd, s, &up(&st.h), &up(&st.qc));
+        let d = assembled_to_host(&dev);
+        let w = format!("assemble s={s}");
+        close(&format!("{w} i_mid"), &d.i_mid, &host.i_mid);
+        assert_eq!((d.hb0, d.hb1, d.dt_s), (host.hb0, host.hb1, host.dt_s), "{w}: hb0, hb1, dt_s");
+        compare_depth(&format!("{w} depth"), &dev.depth, &host.depth);
+        compare_section_host(&format!("{w} edge"), &d.edge, &host.edge);
+        compare_section_host(&format!("{w} store"), &d.store, &host.store);
+        close(&format!("{w} d_s"), &d.d_s, &host.d_s);
+        compare_newton(&format!("{w} newton"), &dev.newton, &host.newton);
+        compare_control(&format!("{w} control"), &dev.control, &host.control, false);
+        close(&format!("{w} a_values"), &d.a_values, &host.a_values);
+        close(&format!("{w} r"), &d.r, &host.r);
+    }
 }

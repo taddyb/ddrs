@@ -6,6 +6,7 @@ pub mod mmc_op;
 pub mod release;
 pub mod stage;
 pub mod stage_cuda;
+mod stage_fma;
 pub mod stage_op;
 
 pub use mmc::{MuskingumCunge, RoutingInputs, SpatialParameters, ZetaSumTensors};

@@ -264,7 +264,8 @@ fn one_way_edge_with_zero_slope_decouples() {
     let x1 = tree_lu_solve_host(&p, &f, &[1.0, 2.0, 3.0]);
     let x2 = tree_lu_solve_host(&p, &f, &[-40.0, 90.0, 3.0]);
     assert_eq!(x1[2], x2[2]);
-    assert_eq!(x1[2], 3.0 / d_s[2]);
+    // The host solve multiplies by the reciprocal of the diagonal, like cuSPARSE (fma-ruling.md, R1).
+    assert_eq!(x1[2], 3.0 * (1.0 / d_s[2]));
 }
 
 #[test]

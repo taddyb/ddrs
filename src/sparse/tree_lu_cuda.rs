@@ -89,7 +89,8 @@ fn tree_factor_kernel(
                 let up = a[nz + s];
                 l[s] = lv_;
                 u[s] = up;
-                d -= lv_ * up;
+                // Rule F1: the same fused site as `tree_lu_factor` on the host.
+                d = fma(-lv_, up, d);
             }
             l[ds] = 1.0f32;
             u[ds] = d;

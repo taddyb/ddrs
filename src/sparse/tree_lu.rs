@@ -189,7 +189,8 @@ pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
             let up = a_values[nnz + s];
             l_values[s] = l;
             u_values[s] = up;
-            diag -= l * up;
+            // Rule F1 (fma-ruling): one fused multiply-add, the same site as `tree_factor_kernel`.
+            diag = (-l).mul_add(up, diag);
         }
         l_values[ds] = 1.0;
         u_values[ds] = diag;
@@ -199,8 +200,60 @@ pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
 
 /// Solve `A x = b`.
 pub fn tree_lu_solve_host(pattern: &CsrPattern, f: &TreeFactors, b: &[f32]) -> Vec<f32> {
-    let y = forward_sub_lower(pattern, &f.l_values, b);
-    back_sub_upper_transposed(pattern, &f.u_values, &y)
+    let y = forward_sub_lower_recip(pattern, &f.l_values, b);
+    back_sub_upper_transposed_recip(pattern, &f.u_values, &y)
+}
+
+/// Stage-only copy of `forward_sub_lower` (`src/sparse/mod.rs`) with `/ diag` replaced by
+/// `* (1.0 / diag)`. This mirrors cuSPARSE's reciprocal form, so the host solve is bitwise
+/// equal to `tree_solve_dev` (fma-ruling.md, R1). The shared MC solve is unchanged.
+fn forward_sub_lower_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(a_values.len(), pattern.nnz());
+    debug_assert_eq!(b.len(), pattern.n);
+    let n = pattern.n;
+    let mut x = vec![0.0f32; n];
+    for i in 0..n {
+        let start = pattern.crow[i] as usize;
+        let end = pattern.crow[i + 1] as usize;
+        let mut sum = 0.0f32;
+        let mut diag = 0.0f32;
+        for k in start..end {
+            let j = pattern.col[k] as usize;
+            if j == i {
+                diag = a_values[k];
+            } else {
+                sum += a_values[k] * x[j];
+            }
+        }
+        x[i] = (b[i] - sum) * (1.0 / diag);
+    }
+    x
+}
+
+/// Stage-only copy of `back_sub_upper_transposed` (`src/sparse/mod.rs`) with `/ diag` replaced
+/// by `* (1.0 / diag)`. Mirrors cuSPARSE's reciprocal form (fma-ruling.md, R1).
+fn back_sub_upper_transposed_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(a_values.len(), pattern.nnz());
+    debug_assert_eq!(b.len(), pattern.n);
+    let n = pattern.n;
+    let mut y = vec![0.0f32; n];
+    for i in (0..n).rev() {
+        let start = pattern.trans_crow[i] as usize;
+        let end = pattern.trans_crow[i + 1] as usize;
+        let mut sum = 0.0f32;
+        let mut diag = 0.0f32;
+        for k in start..end {
+            let j = pattern.trans_col[k] as usize;
+            let val = a_values[pattern.trans_to_orig[k] as usize];
+            if j == i {
+                diag = val;
+            } else {
+                sum += val * y[j];
+            }
+        }
+        y[i] = (b[i] - sum) * (1.0 / diag);
+    }
+    y
 }
 
 /// Solve `Aᵀ y = g`.
@@ -209,8 +262,8 @@ pub fn tree_lu_solve_transposed_host(
     f: &TreeFactors,
     g: &[f32],
 ) -> Vec<f32> {
-    let z = forward_sub_lower(pattern, &f.u_values, g);
-    back_sub_upper_transposed(pattern, &f.l_values, &z)
+    let z = forward_sub_lower_recip(pattern, &f.u_values, g);
+    back_sub_upper_transposed_recip(pattern, &f.l_values, &z)
 }
 
 /// Gradient of the loss w.r.t. `A` (length `2 * nnz`), given `g = A⁻ᵀ·grad_x`
@@ -277,8 +330,8 @@ where
                 let grad_x = primitive_to_vec::<B>(grad_out);
 
                 // g = A^{-T} grad_x: Uᵀ z = grad_x, then Lᵀ g = z.
-                let z = forward_sub_lower(&pattern, &factors.u_values, &grad_x);
-                let g = back_sub_upper_transposed(&pattern, &factors.l_values, &z);
+                let z = forward_sub_lower_recip(&pattern, &factors.u_values, &grad_x);
+                let g = back_sub_upper_transposed_recip(&pattern, &factors.l_values, &z);
 
                 if let Some(p_a) = parent_a {
                     let ga = tree_lu_grad_a_host(&pattern, &g, &x);
@@ -343,8 +396,8 @@ where
     let a_host = primitive_to_vec::<I>(a_at.primitive.clone());
     let b_host = primitive_to_vec::<I>(b_at.primitive.clone());
     let factors = tree_lu_factor(pattern, &a_host);
-    let y = forward_sub_lower(pattern, &factors.l_values, &b_host);
-    let x = back_sub_upper_transposed(pattern, &factors.u_values, &y);
+    let y = forward_sub_lower_recip(pattern, &factors.l_values, &b_host);
+    let x = back_sub_upper_transposed_recip(pattern, &factors.u_values, &y);
     let n = x.len();
     let out_prim = I::float_from_data(TensorData::new(x.clone(), [n]), &device);
 
