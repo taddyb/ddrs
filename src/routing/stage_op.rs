@@ -13,11 +13,11 @@
 //! [`stage_timestep`] (and `tree_lu_solve` in `src/sparse/tree_lu.rs`) pick the
 //! backend once, on `effective_use_cuda`. The host block fns in this file are
 //! the CPU path and the reference for the device mirrors. The device arms live
-//! in the CUDA kernels for the stage op, once they exist. The orchestration
-//! fns [`stage_hour_forward`] and [`stage_hour_backward`] loop over substeps
-//! only and call the host fns directly. Until the CUDA path exists, the CUDA arm
-//! is `unimplemented!`. `use_cuda: true` on a backend that is not CUDA falls
-//! back to the host path.
+//! in `src/routing/stage_cuda/` (`stage_hour_forward_dev`,
+//! `stage_hour_backward_dev`). The orchestration fns [`stage_hour_forward`] and
+//! [`stage_hour_backward`] loop over substeps only and call the host fns
+//! directly. `use_cuda: true` on a backend that is not CUDA falls back to the
+//! host path.
 //!
 //! # Host tie rule per clamp
 //!
@@ -55,11 +55,14 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
-use crate::routing::stage_cuda::{stage_timestep_cuda, HourSavedDev, StageOpConstsDev};
+use crate::routing::stage_cuda::{stage_hour_backward_dev, stage_timestep_cuda, HourSavedDev, StageOpConstsDev};
+use crate::sparse::cube_buf::{from_cube, into_cube};
 use crate::routing::stage_cuda::forward::HourForwardDev;
 use crate::sparse::dispatch::effective_use_cuda;
-use crate::sparse::tree_lu::{tree_lu_factor, tree_lu_grad_a_host, tree_lu_solve_host, TreeFactors, CUDA_TODO};
-use crate::sparse::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
+use crate::sparse::tree_lu::{
+    tree_lu_factor, tree_lu_grad_a_host, tree_lu_solve_host, tree_lu_solve_transposed_host, TreeFactors,
+};
+use crate::sparse::{primitive_to_vec, CsrPattern};
 
 // Scalars the reference passes as f64 literals; Burn casts them to f32.
 pub(crate) const F43: f32 = (4.0f64 / 3.0) as f32;
@@ -875,21 +878,27 @@ pub fn section_backward_host(
 
         // 2f: Pd = (bwd + rt*2) + (((d*ss)*ssd)*2)/rt
         let u = ((dd * ss) * ssd) * 2.0;
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_bwd = r_pd.mul_add(keep, 0.0);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_rt = g_pd.mul_add(2.0, 0.0);
         g_rt = g_pd.mul_add(-(u / (rt * rt)), g_rt);
         let g_u = g_pd / rt;
         let g_dss_ssd = g_u * 2.0;
         let g_dss = g_dss_ssd * ssd;
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_ssd = g_dss_ssd.mul_add(dd * ss, 0.0);
         gd = g_dss.mul_add(ss, gd);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_ss = g_dss.mul_add(dd, 0.0);
         // 2f: Ad = (tw + bw)/2 + (d*(twd + bwd))/2
         let g_ad_half = g_ad * 0.5;
         let mut g_tw = r_tw.mul_add(keep, g_ad_half);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_bw = g_ad.mul_add(0.5, 0.0);
         let g_x = g_ad_half;
         gd = g_x.mul_add(twd + bwd, gd);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_twd = g_x.mul_add(dd, 0.0);
         g_bwd = g_x.mul_add(dd, g_bwd);
 
@@ -1568,9 +1577,9 @@ pub fn stage_hour_backward(
         let sv = &subs[s];
         let asm = stage_assemble_host(c, hour, s, &sv.h, &sv.qc);
         let rg = readout_backward_host(c, &sv.h, &asm, &sv.dh, &g_h, &g_q);
-        // g = A^{-T} ḡdh: Uᵀ z = ḡdh, then Lᵀ g = z, on the saved factors.
-        let z = forward_sub_lower(pattern, &sv.factors.u_values, &rg.dh);
-        let g_r = back_sub_upper_transposed(pattern, &sv.factors.l_values, &z);
+        // g = A^{-T} ḡdh on the saved factors. The stage-only transposed solve multiplies by the
+        // reciprocal of the diagonal, like cuSPARSE, so it is bitwise equal to `tree_solve_transposed_dev`.
+        let g_r = tree_lu_solve_transposed_host(pattern, &sv.factors, &rg.dh);
         let g_a = tree_lu_grad_a_host(pattern, &g_r, &sv.dh);
         let (nh, nq) = assemble_backward_host(
             c, hour, s, &sv.h, &sv.qc, &asm, &rg, &g_r, &g_a, &mut acc,
@@ -1619,30 +1628,49 @@ where
 
     fn backward(self, ops: Ops<Self::State, 7>, grads: &mut Gradients, _checkpointer: &mut Checkpointer) {
         let StageTimestepState { consts, pattern, saved } = ops.state;
-        let HourSaved::Host { hour, subs } = saved else {
-            // The device backward comes in Phase G Task 8.
-            unimplemented!("{}", CUDA_TODO)
-        };
         let [p_n, p_q, p_p, p_ht, p_qt, p_mc, p_qp] = ops.parents;
         let grad_out = grads.consume::<B>(&ops.node);
-        let device = B::float_device(&grad_out);
-        let g_out = primitive_to_vec::<B>(grad_out);
-        let g = stage_hour_backward(&consts, &pattern, &hour, &subs, &g_out);
         let n = consts.n;
-        macro_rules! reg {
-            ($p:expr, $v:expr) => {
-                if let Some(p) = $p {
-                    grads.register::<B>(p.id, B::float_from_data(TensorData::new($v, [n]), &device));
+        match saved {
+            HourSaved::Host { hour, subs } => {
+                let device = B::float_device(&grad_out);
+                let g_out = primitive_to_vec::<B>(grad_out);
+                let g = stage_hour_backward(&consts, &pattern, &hour, &subs, &g_out);
+                macro_rules! reg {
+                    ($p:expr, $v:expr) => {
+                        if let Some(p) = $p {
+                            grads.register::<B>(p.id, B::float_from_data(TensorData::new($v, [n]), &device));
+                        }
+                    };
                 }
-            };
+                reg!(p_n, g.n);
+                reg!(p_q, g.q);
+                reg!(p_p, g.p);
+                reg!(p_ht, g.h_t);
+                reg!(p_qt, g.q_t);
+                reg!(p_mc, g.q_next_mc);
+                reg!(p_qp, g.q_prime);
+            }
+            HourSaved::Dev(sd) => {
+                // The device arm: the cotangent stays on the device, nothing is read back.
+                let g = stage_hour_backward_dev(&sd.consts, &pattern, &sd.hour, &sd.subs, &into_cube::<B>(grad_out));
+                // The same rule as the host arm: an untracked slot only skips its registration.
+                macro_rules! reg {
+                    ($p:expr, $v:expr) => {
+                        if let Some(p) = $p {
+                            grads.register::<B>(p.id, from_cube::<B>($v));
+                        }
+                    };
+                }
+                reg!(p_n, g.n);
+                reg!(p_q, g.q);
+                reg!(p_p, g.p);
+                reg!(p_ht, g.h_t);
+                reg!(p_qt, g.q_t);
+                reg!(p_mc, g.q_next_mc);
+                reg!(p_qp, g.q_prime);
+            }
         }
-        reg!(p_n, g.n);
-        reg!(p_q, g.q);
-        reg!(p_p, g.p);
-        reg!(p_ht, g.h_t);
-        reg!(p_qt, g.q_t);
-        reg!(p_mc, g.q_next_mc);
-        reg!(p_qp, g.q_prime);
     }
 }
 

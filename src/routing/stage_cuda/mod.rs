@@ -13,13 +13,16 @@ use burn::tensor::backend::Backend;
 use crate::routing::stage_op::{ControlOut, DepthOut, HourHost, NewtonOut, SectionHost, StageOpConsts};
 use crate::sparse::cube_buf::{cube_to_host, from_cube, into_cube, upload_f32, upload_i32, zeros_f32, Cube};
 use crate::sparse::tree_lu::{tree_levels, TreeLevels};
-use crate::sparse::tree_lu_cuda::TreeDev;
+use crate::sparse::tree_lu_cuda::{tree_grad_a_dev, tree_solve_transposed_dev, TreeDev};
 use crate::sparse::CsrPattern;
 
 pub mod backward;
 pub mod forward;
 
-use forward::{stage_hour_forward_dev, stage_prologue_dev, HourForwardDev, SubstepDev};
+use backward::{
+    assemble_backward_dev, output_backward_dev, prologue_backward_dev, readout_backward_dev, HourAccDev, HourGradsDev,
+};
+use forward::{stage_assemble_dev, stage_hour_forward_dev, stage_prologue_dev, HourForwardDev, SubstepDev};
 
 /// `v` on the device, or zeros of length `len` when `v` is empty.
 fn up(like: &Cube, v: &[f32], len: usize) -> Cube {
@@ -303,7 +306,7 @@ impl HourDev {
     }
 }
 
-/// What the device backward needs from the forward (Task 8 reads it).
+/// What the device backward needs from the forward.
 #[derive(Clone, Debug)]
 pub(crate) struct HourSavedDev {
     pub consts: Arc<StageOpConstsDev>,
@@ -333,4 +336,66 @@ pub(crate) fn stage_timestep_cuda<I: Backend + 'static>(
         subs: std::mem::take(&mut fwd.subs),
     });
     (from_cube::<I>(fwd.out.clone()), fwd, saved)
+}
+
+/// The hour backward on the device. Mirrors `stage_hour_backward` step for step: the output
+/// split, then for each substep from last to first the rematerialized assemble, the readout
+/// adjoint, the transposed solve on the saved factors, the gradient of the matrix and the
+/// assemble adjoint, then the prologue adjoint. No host read.
+#[doc(hidden)]
+pub fn stage_hour_backward_dev(
+    c: &StageOpConstsDev,
+    pattern: &CsrPattern,
+    hour: &HourDev,
+    subs: &[SubstepDev],
+    g_out: &Cube,
+) -> HourGradsDev {
+    let (mut g_h, mut g_q, g_mc) = output_backward_dev(c, g_out);
+    let mut acc = HourAccDev::zeros(g_out, c.host.n);
+    for s in (0..subs.len()).rev() {
+        let sv = &subs[s];
+        let asm = stage_assemble_dev(c, hour, s, &sv.h, &sv.qc);
+        let rg = readout_backward_dev(c, &sv.h, &asm, &sv.dh, &g_h, &g_q);
+        // g = A^{-T} ḡdh on the saved factors.
+        let g_r = tree_solve_transposed_dev(pattern, &sv.factors, &rg.dh);
+        let g_a = tree_grad_a_dev(&c.tree, &g_r, &sv.dh);
+        let (nh, nq) = assemble_backward_dev(c, hour, s, &sv.h, &sv.qc, &asm, &rg, &g_r, &g_a, &mut acc);
+        g_h = nh;
+        g_q = nq;
+    }
+    prologue_backward_dev(c, hour, &acc, &g_h, &g_q, &g_mc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 3-reach chain 0 -> 1 -> 2 as a lower-triangular pattern. The consts read
+    /// `down` and the slot lists from the host, the kernels read the tree.
+    fn chain_consts(down: Vec<usize>) -> (StageOpConsts, TreeLevels) {
+        let pattern = CsrPattern::from_csr_structure(3, vec![0, 1, 3, 5], vec![0, 0, 1, 1, 2]);
+        let tree = tree_levels(&pattern).expect("a chain is a tree");
+        let h = StageOpConsts {
+            n: 3,
+            nnz: 5,
+            down,
+            row: vec![0, 1, 1, 2, 2],
+            col: vec![0, 0, 1, 1, 2],
+            ..Default::default()
+        };
+        (h, tree)
+    }
+
+    #[test]
+    fn matching_down_passes_the_tree_check() {
+        let (h, tree) = chain_consts(vec![1, 2, 2]);
+        check_tree_matches_consts(&h, &tree);
+    }
+
+    #[test]
+    #[should_panic(expected = "reach 0 has down 2 in the consts but 1 in the tree")]
+    fn mismatched_down_panics() {
+        let (h, tree) = chain_consts(vec![2, 2, 2]);
+        check_tree_matches_consts(&h, &tree);
+    }
 }

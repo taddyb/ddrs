@@ -38,15 +38,17 @@ use ddrs::routing::{MuskingumCunge, RoutingInputs};
 use ddrs::routing::stage_cuda::forward::{
     assembled_to_host, rhs_dev, stage_assemble_dev, stage_epilogue_dev, stage_readout_dev, readout_to_host, AssembledDev,
 };
-use ddrs::routing::stage_cuda::{HourDev, StageOpConstsDev};
+use ddrs::routing::stage_cuda::forward::SubstepDev;
+use ddrs::routing::stage_cuda::{stage_hour_backward_dev, HourDev, StageOpConstsDev};
+use ddrs::routing::stage_cuda::backward::hour_grads_to_host;
 use ddrs::routing::stage_cuda::forward::{hour_to_host, stage_hour_forward_dev, stage_prologue_dev};
 use ddrs::routing::stage_op::{
-    stage_assemble_host, stage_epilogue_host, stage_hour_forward, stage_prologue_host, stage_readout_host, Assembled,
+    stage_assemble_host, stage_epilogue_host, stage_hour_backward, stage_hour_forward, HourGrads, stage_prologue_host, stage_readout_host, Assembled,
     ControlOut, DepthOut, HourHost, NewtonOut, Readout, SectionHost, StageOpConsts,
 };
-use ddrs::sparse::tree_lu::{tree_lu_factor, tree_lu_solve_host};
+use ddrs::sparse::tree_lu::{tree_lu_factor, tree_lu_solve_host, tree_lu_solve_transposed_host};
 use ddrs::sparse::cube_buf::{cube_from_host, cube_to_host, Cube};
-use ddrs::sparse::tree_lu_cuda::{tree_factor_dev, tree_solve_dev, TreeFactorsDev};
+use ddrs::sparse::tree_lu_cuda::{tree_factor_dev, tree_solve_dev, tree_solve_transposed_dev, TreeFactorsDev};
 use ddrs::sparse::host_reads_on_this_thread_for_test;
 use ddrs::sparse::{CsrPattern, SparseAdjacency};
 
@@ -119,6 +121,8 @@ struct Case {
     qp: Vec<Vec<f32>>,
     mc: Vec<Vec<f32>>,
     hours: usize,
+    /// Test only: scale `n` by this factor in the CUDA runs (the negative controls).
+    n_scale_cuda: Option<f32>,
 }
 
 // copied from tests/stage_op_parity.rs::Case::new and Case::prescribed
@@ -144,6 +148,7 @@ impl Case {
             qp: vec![vec![1.0; n]],
             mc: vec![vec![0.0; n]],
             hours: 3,
+            n_scale_cuda: None,
         }
     }
     fn prescribed(mut self, base: f32, rate: f32) -> Self {
@@ -253,6 +258,14 @@ fn one_ulp(v: &[f32], seed: u32) -> Vec<f32> {
         .collect()
 }
 
+/// `case.n`, scaled by `n_scale_cuda` when the run is the CUDA run (the negative controls).
+fn scaled_n(case: &Case, use_cuda: bool) -> Vec<f32> {
+    match (use_cuda, case.n_scale_cuda) {
+        (true, Some(f)) => case.n.iter().map(|v| v * f).collect(),
+        _ => case.n.clone(),
+    }
+}
+
 /// What one run records per hour.
 struct HourRec {
     fields: Vec<Vec<f32>>,
@@ -275,7 +288,8 @@ where
     B::Device: 'static,
 {
     let mut block = make_block_p::<B>(case, theta, substeps, use_cuda, perturb, device);
-    let (nn, pp, qq) = (tv::<B>(&case.n, device), tv::<B>(&case.p, device), tv::<B>(&case.q, device));
+    let n_in = scaled_n(case, use_cuda);
+    let (nn, pp, qq) = (tv::<B>(&n_in, device), tv::<B>(&case.p, device), tv::<B>(&case.q, device));
     let mut q = if perturb { one_ulp(&case.q_t0, 2) } else { case.q_t0.clone() };
     let mut out = vec![];
     for k in 0..case.hours {
@@ -993,42 +1007,6 @@ fn untracked_forward_matches_tracked_on_cuda() {
     }
 }
 
-#[test]
-#[should_panic(expected = "stage_routing CUDA path: Phase G")]
-fn cuda_arm_is_the_phase_g_stub() {
-    // The forward runs on the device; the backward is still the stub (Task 8).
-    let device: <Gpu as BackendTypes>::Device = Default::default();
-    let tv = |v: &[f32]| Tensor::<Autodiff<Gpu>, 1>::from_floats(v, &device).require_grad();
-    let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
-    let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
-    let z = net.z_mid.clone();
-    let sp = StageParams {
-        theta: 1.0,
-        theta_control: 0.5,
-        substeps: 1,
-        boundary: DownstreamBoundary::NormalDepth,
-        depth_lb: DEPTH_LB,
-        bottom_width_lb: 0.1,
-        dt: 3600.0,
-        g: 9.81,
-        use_cuda: true,
-    };
-    let mut block = StageBlock::<Gpu>::new(net, sp, &device);
-    let h: Vec<f32> = z.iter().map(|z| z + 0.5).collect();
-    block.set_stage(tv(&h));
-    let out = block.step_fused(
-        &pattern,
-        tv(&[0.035; 3]),
-        tv(&[21.0; 3]),
-        tv(&[0.5; 3]),
-        tv(&[1.0; 3]),
-        tv(&[0.0; 3]),
-        tv(&[1.0; 3]),
-    );
-    let _ = out.sum().backward();
-}
-
-
 // ------------------------------------------- synced-state substep checks
 //
 // The CPU host trajectory is run; at every substep the device gets the HOST
@@ -1530,4 +1508,872 @@ fn dh_is_bitwise_equal_to_the_host_solve() {
     }
     println!("DH bitwise: {eq} of {tot} entries equal");
     assert_eq!(eq, tot, "tree_solve_dev and tree_lu_solve_host differ in {} entries", tot - eq);
+}
+
+// ====================================================== gradient parity
+//
+// The same seven-parent loss runs on NdArray (`use_cuda: false`) and on Cuda (`use_cuda: true`) and
+// the gradients are compared. The bar per entry is `|g - c| <= rel * max(|g|, |c|)` or
+// `|g - c| <= floor * max(1, max_j |c_j|)`. The hour-1 runs of `chain_states`, `prescribed_boundary`,
+// `mc_inflow` and Juniata are strict: every miss fails. Elsewhere a miss is accepted only if
+// `err <= 4 * (noise_cpu + noise_cuda)` of its parent AND `err <= 5e-4 * max|g|` of its parent, and the
+// accepted entries are capped at a share of the compared entries. Every accepted entry is printed.
+// A failing family reports every failing entry and never widens a bar.
+
+// copied from tests/stage_op_parity.rs::Rng
+struct Rng(u64);
+impl Rng {
+    fn unit(&mut self) -> f64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn range(&mut self, lo: f64, hi: f64) -> f64 {
+        lo + (hi - lo) * self.unit()
+    }
+}
+
+// copied from tests/stage_op_parity.rs::vec_b
+fn vec_b(n: usize, seed: u64, lo: f64, hi: f64) -> Vec<f32> {
+    let mut rng = Rng(seed);
+    (0..n).map(|_| rng.range(lo, hi) as f32).collect()
+}
+
+// copied from tests/stage_op_parity.rs::weights
+fn weights(seed: u64, len: usize) -> Vec<f32> {
+    vec_b(len, seed, 0.5, 1.5)
+}
+
+const PARENTS: [&str; 7] = ["n", "q", "p", "h_t", "q_t", "q_next_mc", "q_prime"];
+
+// copied from tests/stage_op_parity.rs::LossPart
+#[derive(Clone, Copy, PartialEq)]
+enum LossPart {
+    Both,
+    /// Only the `q_next` terms.
+    Q,
+    /// Only the `h_end` term.
+    H,
+}
+
+/// The loss, the gradient of each parent (hours concatenated for `q_next_mc` and `q_prime`) and the
+/// row sets of the structural zeros.
+struct GradRun {
+    value: f32,
+    grads: Vec<Vec<f32>>,
+    in_stage: Vec<f32>,
+    /// Empty without a table.
+    t_mask: Vec<f32>,
+}
+
+// copied from tests/stage_op_parity.rs::run_grads_part, generic in the inner backend
+fn run_grads_part<B: Backend + 'static>(
+    case: &Case,
+    theta: f32,
+    substeps: u32,
+    use_cuda: bool,
+    part: LossPart,
+    device: &B::Device,
+) -> GradRun
+where
+    B::FloatTensorPrimitive: 'static,
+    B::Device: 'static,
+{
+    let n = case.adj.n;
+    let mut block = make_block::<B>(case, theta, substeps, use_cuda, device);
+    let consts = block.op_consts(&case.pattern);
+    let z_mid = consts.z_mid.clone();
+    let lf = |v: &[f32]| tv::<B>(v, device).require_grad();
+    let h0 = to_vec1(block.stage().unwrap());
+    let h_leaf = lf(&h0);
+    block.set_stage(h_leaf.clone());
+    let (nn, pp, qq) = (lf(&scaled_n(case, use_cuda)), lf(&case.p), lf(&case.q));
+    let qt_leaf = lf(&case.q_t0);
+    let mut q_t = qt_leaf.clone();
+    let (mut qp_l, mut mc_l) = (vec![], vec![]);
+    let mut loss: Option<Tensor<Autodiff<B>, 1>> = None;
+    for k in 0..case.hours {
+        let qpl = lf(&pick(&case.qp, k));
+        let mcl = lf(&pick(&case.mc, k));
+        qp_l.push(qpl.clone());
+        mc_l.push(mcl.clone());
+        let out = block.step_fused(&case.pattern, nn.clone(), pp.clone(), qq.clone(), q_t.clone(), mcl, qpl);
+        let wq = if part == LossPart::H { vec![0.0; n] } else { weights(1 + k as u64, n) };
+        let term = (out.clone() * tv::<B>(&wq, device)).sum();
+        loss = Some(match loss {
+            None => term,
+            Some(l) => l + term,
+        });
+        q_t = out;
+    }
+    let h_end = block.stage().unwrap();
+    let off = h_end - tv::<B>(&z_mid, device);
+    let wv = if part == LossPart::Q { vec![0.0; n] } else { weights(9999, n) };
+    let loss = loss.unwrap() + (off * tv::<B>(&wv, device)).sum();
+    let value = loss.clone().into_data().to_vec::<f32>().unwrap()[0];
+    let g = loss.backward();
+    let get = |t: &Tensor<Autodiff<B>, 1>, what: &str| -> Vec<f32> {
+        match t.grad(&g) {
+            Some(v) => to_vec1(v),
+            None => panic!("no gradient registered for tracked parent {what}"),
+        }
+    };
+    let cat = |ts: &[Tensor<Autodiff<B>, 1>], what: &str| -> Vec<f32> { ts.iter().flat_map(|t| get(t, what)).collect() };
+    let grads = vec![
+        get(&nn, "n"),
+        get(&qq, "q"),
+        get(&pp, "p"),
+        get(&h_leaf, "h_t"),
+        get(&qt_leaf, "q_t"),
+        cat(&mc_l, "q_next_mc"),
+        cat(&qp_l, "q_prime"),
+    ];
+    GradRun { value, grads, in_stage: consts.in_stage.clone(), t_mask: consts.t_mask.clone() }
+}
+
+// copied from tests/stage_op_parity.rs::linearity_noise, generic in the inner backend
+fn linearity_noise<B: Backend + 'static>(
+    case: &Case,
+    theta: f32,
+    substeps: u32,
+    use_cuda: bool,
+    both: &[Vec<f32>],
+    device: &B::Device,
+) -> [f32; 7]
+where
+    B::FloatTensorPrimitive: 'static,
+    B::Device: 'static,
+{
+    let gq = run_grads_part::<B>(case, theta, substeps, use_cuda, LossPart::Q, device).grads;
+    let gh = run_grads_part::<B>(case, theta, substeps, use_cuda, LossPart::H, device).grads;
+    let mut out = [0.0f32; 7];
+    for pi in 0..7 {
+        for i in 0..both[pi].len() {
+            out[pi] = out[pi].max((gq[pi][i] + gh[pi][i] - both[pi][i]).abs());
+        }
+    }
+    out
+}
+
+// copied from tests/stage_op_parity.rs (NOISE_FACTOR, NOISE_CAP_FRAC, NOISE_BUDGET_FRAC and
+// NOISE_BUDGET_FRAC_TABLE_HOUR1)
+const NOISE_FACTOR: f32 = 4.0;
+const NOISE_CAP_FRAC: f32 = 5e-4;
+const NOISE_BUDGET_FRAC: f64 = 0.01;
+const NOISE_BUDGET_FRAC_TABLE_HOUR1: f64 = 0.02;
+
+/// The bars of one gradient run: the per-entry relative bar and floor, and the relative bar of the loss
+/// value (the forward bar of the family; the forwards differ at the f32 floor, so the loss is not bitwise).
+#[derive(Clone, Copy)]
+struct GBars {
+    rel: f32,
+    floor: f32,
+    loss_rel: f32,
+}
+
+/// Hour-1 runs, `mc_inflow` and Juniata hour 1 (forward bar 1e-5).
+const BARS_SHORT: GBars = GBars { rel: 1e-4, floor: 1e-5, loss_rel: 1e-5 };
+/// The stiff 3-hour families: gradient bar as hour 1, loss under the 2e-3 sanity bar of their forward gate.
+const BARS_STIFF: GBars = GBars { rel: 1e-4, floor: 1e-5, loss_rel: 2e-3 };
+/// The 48 h runs (forward bar 1e-4).
+const BARS_48H: GBars = GBars { rel: 1e-3, floor: 1e-4, loss_rel: 1e-4 };
+
+#[derive(Default)]
+struct GTally {
+    compared: usize,
+    accepted: usize,
+    /// Per parent: entries exactly 0 on one backend and not the other, off the structural sets.
+    zero_mismatch: [usize; 7],
+    /// Per parent: entries inside the structural sets.
+    zero_set_size: [usize; 7],
+    failures: Vec<String>,
+}
+
+/// Per parent, which entries must be exactly 0 on both backends: `n`, `q`, `p` on table rows and
+/// `q_prime` on MC rows (every hour).
+fn structural_sets(run: &GradRun, n: usize, hours: usize) -> Vec<Vec<bool>> {
+    let mut sets: Vec<Vec<bool>> = run.grads.iter().map(|g| vec![false; g.len()]).collect();
+    if !run.t_mask.is_empty() {
+        for pi in 0..3 {
+            for i in 0..n {
+                sets[pi][i] = run.t_mask[i] == 1.0;
+            }
+        }
+    }
+    for k in 0..hours {
+        for i in 0..n {
+            sets[6][k * n + i] = run.in_stage[i] == 0.0;
+        }
+    }
+    sets
+}
+
+/// Assert the structural-zero rule on one backend's gradients. Returns the failures.
+fn structural_zero_failures(tag: &str, who: &str, run: &GradRun, sets: &[Vec<bool>]) -> Vec<String> {
+    let mut out = vec![];
+    for pi in 0..7 {
+        for (i, &s) in sets[pi].iter().enumerate() {
+            if s && run.grads[pi][i] != 0.0 {
+                out.push(format!("{tag} {who} {}[{i}]: structural zero is {}", PARENTS[pi], run.grads[pi][i]));
+            }
+        }
+    }
+    out
+}
+
+/// One state, one backend pair. Compares the loss and every gradient entry; pushes every failure into
+/// `t.failures`. With `strict_only` every miss of the bar fails. Returns the worst `err / allowed` per parent.
+fn grad_pair_xb(
+    family: &str,
+    case: &Case,
+    theta: f32,
+    substeps: u32,
+    strict_only: bool,
+    bars: GBars,
+    t: &mut GTally,
+) -> [f32; 7] {
+    let (dc, dg): (<Cpu as BackendTypes>::Device, <Gpu as BackendTypes>::Device) = (Default::default(), Default::default());
+    let c = run_grads_part::<Cpu>(case, theta, substeps, false, LossPart::Both, &dc);
+    let g = run_grads_part::<Gpu>(case, theta, substeps, true, LossPart::Both, &dg);
+    let tag = format!("{} theta {theta} substeps {substeps}", case.label);
+    // the loss value, with the forward bar
+    let dl = (c.value - g.value).abs();
+    let lbar = bars.loss_rel * c.value.abs().max(1.0);
+    println!("{family}: {tag}: loss cpu {} cuda {} diff {dl:e} (bar {lbar:e})", c.value, g.value);
+    if !(dl <= lbar) {
+        t.failures.push(format!("{tag}: loss cpu {} vs cuda {} (diff {dl:e}, bar {lbar:e})", c.value, g.value));
+    }
+    // structural zeros: asserted on both backends
+    let sets = structural_sets(&c, case.adj.n, case.hours);
+    t.failures.extend(structural_zero_failures(&tag, "cpu", &c, &sets));
+    t.failures.extend(structural_zero_failures(&tag, "cuda", &g, &sets));
+    let mut worst = [0.0f32; 7];
+    let mut worst_err = [0.0f32; 7];
+    let mut noise: Option<[f32; 7]> = None;
+    for pi in 0..7 {
+        let (gg, cc) = (&g.grads[pi], &c.grads[pi]);
+        assert_eq!(gg.len(), cc.len(), "{tag} {}: length", PARENTS[pi]);
+        let scale = cc.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+        let gmax = cc.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        t.zero_set_size[pi] += sets[pi].iter().filter(|&&s| s).count();
+        for (i, (a, b)) in gg.iter().zip(cc).enumerate() {
+            if !a.is_finite() || !b.is_finite() {
+                t.failures.push(format!("{tag} {}[{i}]: non-finite cuda {a} cpu {b}", PARENTS[pi]));
+                continue;
+            }
+            t.compared += 1;
+            if !sets[pi][i] && (*a == 0.0) != (*b == 0.0) {
+                t.zero_mismatch[pi] += 1;
+            }
+            let err = (a - b).abs();
+            let allowed = (bars.rel * a.abs().max(b.abs())).max(bars.floor * scale);
+            worst[pi] = worst[pi].max(err / allowed);
+            worst_err[pi] = worst_err[pi].max(err);
+            if err <= allowed {
+                continue;
+            }
+            if strict_only {
+                t.failures.push(format!(
+                    "{tag} {}[{i}]: cuda {a} vs cpu {b} (err {err:e}, allowed {allowed:e}, err/max|g| {:e})",
+                    PARENTS[pi],
+                    err / gmax.max(f32::MIN_POSITIVE)
+                ));
+                continue;
+            }
+            let nz = *noise.get_or_insert_with(|| {
+                let nc = linearity_noise::<Cpu>(case, theta, substeps, false, &c.grads, &dc);
+                let ng = linearity_noise::<Gpu>(case, theta, substeps, true, &g.grads, &dg);
+                std::array::from_fn(|k| nc[k] + ng[k])
+            });
+            let ratio = err / nz[pi].max(f32::MIN_POSITIVE);
+            let rel_max = err / gmax.max(f32::MIN_POSITIVE);
+            let verdict = if err > NOISE_FACTOR * nz[pi] || err > NOISE_CAP_FRAC * gmax { "REJECTED" } else { "accepted" };
+            println!(
+                "{verdict}: {family} {tag} {}[{i}]: cuda {a} vs cpu {b} err {err:e}, err/max|g| {rel_max:e}, err/noise {ratio:.2} (bar {allowed:e}, noise sum {:e})",
+                PARENTS[pi], nz[pi]
+            );
+            if err > NOISE_FACTOR * nz[pi] {
+                t.failures.push(format!(
+                    "{tag} {}[{i}]: cuda {a} vs cpu {b}: err {err:e} exceeds {NOISE_FACTOR} x noise {:e} (err/noise {ratio:.2}, bar {allowed:e}, err/max|g| {rel_max:e})",
+                    PARENTS[pi], nz[pi]
+                ));
+            } else if err > NOISE_CAP_FRAC * gmax {
+                t.failures.push(format!(
+                    "{tag} {}[{i}]: cuda {a} vs cpu {b}: err {err:e} exceeds the cap {NOISE_CAP_FRAC} x max|g| {gmax:e} (err/noise {ratio:.2}, bar {allowed:e})",
+                    PARENTS[pi]
+                ));
+            } else {
+                t.accepted += 1;
+            }
+        }
+    }
+    println!("{family}: {tag}: worst err/allowed {worst:?} worst err {worst_err:?} (parents {PARENTS:?})");
+    worst
+}
+
+/// Print the family summary and every failure; assert none and the budget.
+fn finish_grad(family: &str, t: &GTally, budget: f64) {
+    println!(
+        "GRADFAMILY {family}: compared {}, accepted {} strict-bar misses (budget {}), failures {}",
+        t.compared,
+        t.accepted,
+        (budget * t.compared as f64).floor(),
+        t.failures.len()
+    );
+    println!("GRADFAMILY {family}: structural-zero set sizes {:?} (parents {PARENTS:?})", t.zero_set_size);
+    println!("GRADFAMILY {family}: zero-set mismatches off the structural sets {:?} (parents {PARENTS:?})", t.zero_mismatch);
+    for f in &t.failures {
+        println!("GRADFAIL {family}: {f}");
+    }
+    assert!(t.failures.is_empty(), "{family}: {} gradient failures (see GRADFAIL lines)", t.failures.len());
+    assert!(
+        (t.accepted as f64) <= budget * t.compared as f64,
+        "{family}: {} accepted misses exceed {budget} of {} compared entries",
+        t.accepted,
+        t.compared
+    );
+}
+
+fn grad_family_xb(family: &str, cases: &[Case], grid: &[(f32, u32)], strict_only: bool, budget: f64, bars: GBars) {
+    let mut t = GTally::default();
+    for case in cases {
+        for &(theta, substeps) in grid {
+            grad_pair_xb(family, case, theta, substeps, strict_only, bars, &mut t);
+        }
+    }
+    finish_grad(family, &t, budget);
+}
+
+// copied from tests/stage_op_parity.rs::full_grid
+fn full_grid() -> Vec<(f32, u32)> {
+    let mut g = vec![];
+    for theta in [0.55f32, 0.6, 1.0] {
+        for substeps in [1u32, 4] {
+            g.push((theta, substeps));
+        }
+    }
+    g
+}
+
+fn hour1(mut cases: Vec<Case>) -> Vec<Case> {
+    for c in cases.iter_mut() {
+        c.hours = 1;
+    }
+    cases
+}
+
+#[test]
+fn gradient_parity_hour1_strict() {
+    let device = TestDevice::default();
+    let mut families: Vec<(&str, Vec<Case>, Vec<(f32, u32)>)> = vec![
+        ("chain_states", chain_state_cases(), full_grid()),
+        ("prescribed_boundary", prescribed_boundary_cases(), full_grid()),
+        ("mc_inflow", vec![mc_inflow_case(&device)], full_grid()),
+    ];
+    if !cfg!(debug_assertions) {
+        families.push(("juniata_48h", vec![juniata_case(&device)], vec![(1.0, 1), (0.6, 4)]));
+    }
+    for (name, cases, grid) in families {
+        grad_family_xb(&format!("{name} (hour 1)"), &hour1(cases), &grid, true, 0.0, BARS_SHORT);
+    }
+}
+
+#[test]
+fn gradient_parity_hour1_table_and_mixed() {
+    grad_family_xb(
+        "table_and_mixed (hour 1)",
+        &hour1(table_and_mixed_cases()),
+        &full_grid(),
+        false,
+        NOISE_BUDGET_FRAC_TABLE_HOUR1,
+        BARS_STIFF,
+    );
+}
+
+/// The parked stiff cell: `chain_states` depth_floor, theta 0.6, substeps 4.
+fn is_stiff_cell(case: &Case, theta: f32, substeps: u32) -> bool {
+    case.label == "depth_floor" && theta == 0.6 && substeps == 4
+}
+
+#[test]
+fn gradient_parity_chain_states() {
+    // Every cell except the parked stiff one (see `gradient_parity_depth_floor_stiff_cell`).
+    let mut t = GTally::default();
+    for case in &chain_state_cases() {
+        for &(theta, substeps) in &full_grid() {
+            if !is_stiff_cell(case, theta, substeps) {
+                grad_pair_xb("chain_states", case, theta, substeps, false, BARS_STIFF, &mut t);
+            }
+        }
+    }
+    finish_grad("chain_states", &t, NOISE_BUDGET_FRAC);
+}
+
+#[test]
+#[ignore = "fails the gradient noise gate on a stiff trajectory (err/noise up to 303, err/max|g| up to 1.5e-4); waiting for the user's ruling, 2026-11-02"]
+fn gradient_parity_depth_floor_stiff_cell() {
+    let mut t = GTally::default();
+    let mut ran = 0;
+    for case in &chain_state_cases() {
+        for &(theta, substeps) in &full_grid() {
+            if is_stiff_cell(case, theta, substeps) {
+                grad_pair_xb("depth_floor_stiff", case, theta, substeps, false, BARS_STIFF, &mut t);
+                ran += 1;
+            }
+        }
+    }
+    assert_eq!(ran, 1, "exactly one stiff cell");
+    finish_grad("depth_floor_stiff", &t, NOISE_BUDGET_FRAC);
+}
+
+#[test]
+fn gradient_parity_table_and_mixed() {
+    grad_family_xb("table_and_mixed", &table_and_mixed_cases(), &full_grid(), false, NOISE_BUDGET_FRAC, BARS_STIFF);
+}
+
+#[test]
+fn gradient_parity_prescribed_boundary() {
+    grad_family_xb("prescribed_boundary", &prescribed_boundary_cases(), &full_grid(), false, NOISE_BUDGET_FRAC, BARS_STIFF);
+}
+
+#[test]
+fn gradient_parity_mc_inflow() {
+    let device = TestDevice::default();
+    grad_family_xb("mc_inflow", &[mc_inflow_case(&device)], &[(0.6, 1), (1.0, 4)], false, NOISE_BUDGET_FRAC, BARS_SHORT);
+}
+
+#[test]
+fn gradient_parity_juniata_48h() {
+    if cfg!(debug_assertions) {
+        eprintln!("skipped in debug builds: run with --release");
+        return;
+    }
+    let device = TestDevice::default();
+    grad_family_xb("juniata_48h", &[juniata_case(&device)], &[(1.0, 1), (0.6, 4)], false, NOISE_BUDGET_FRAC, BARS_48H);
+}
+
+#[test]
+fn gradient_parity_hudson_net_48h() {
+    if cfg!(debug_assertions) {
+        eprintln!("skipped in debug builds: run with --release");
+        return;
+    }
+    let device = TestDevice::default();
+    grad_family_xb("hudson_net_48h", &[hudson_net_case(&device)], &[(0.6, 4)], false, NOISE_BUDGET_FRAC, BARS_48H);
+}
+
+// ------------------------------------------------- structural zeros on the bundles
+
+/// A bundle network with a stage set that leaves MC rows (`seeds = first_seed..n`) and a table on the
+/// first 5 stage rows (bed at the row's `z_mid`, so the hotstart stage stays valid).
+fn struct_case(label: &str, adjacency: &str, first_seed: impl Fn(usize) -> usize, device: &TestDevice) -> Case {
+    let mut case = bundle_case(label, adjacency, device);
+    let n = case.adj.n;
+    let seeds: Vec<usize> = (first_seed(n)..n).collect();
+    let net = StageNetwork::build(&case.adj, &case.pattern, Some(&seeds), 0.0, &[]).unwrap();
+    assert!(net.n_stage < n, "{label}: the stage set must leave MC rows");
+    let rows: Vec<usize> = (0..n).filter(|&i| net.in_stage[i]).take(5).collect();
+    assert_eq!(rows.len(), 5, "{label}: need 5 stage rows for the table");
+    let bed: Vec<f32> = rows.iter().map(|&i| net.z_mid[i]).collect();
+    case.table = Some((table(&rows, 80.0, &bed, 0.03, &[None; 5]), false));
+    case.seeds = Some(seeds);
+    case.mc = vec![vec![1.0; n]];
+    case.hours = 6;
+    println!("{label}: n {n}, stage rows {}, MC rows {}, table rows {rows:?}", net.n_stage, n - net.n_stage);
+    case
+}
+
+fn structural_cell(case: &Case, theta: f32, substeps: u32) -> Vec<String> {
+    let (dc, dg): (<Cpu as BackendTypes>::Device, <Gpu as BackendTypes>::Device) = (Default::default(), Default::default());
+    let c = run_grads_part::<Cpu>(case, theta, substeps, false, LossPart::Both, &dc);
+    let g = run_grads_part::<Gpu>(case, theta, substeps, true, LossPart::Both, &dg);
+    let sets = structural_sets(&c, case.adj.n, case.hours);
+    let tag = format!("{} theta {theta} substeps {substeps}", case.label);
+    let mut out = structural_zero_failures(&tag, "cpu", &c, &sets);
+    out.extend(structural_zero_failures(&tag, "cuda", &g, &sets));
+    let mut mism = [0usize; 7];
+    let mut size = [0usize; 7];
+    let mut nonzero_sets = [0usize; 7];
+    for pi in 0..7 {
+        size[pi] = sets[pi].iter().filter(|&&s| s).count();
+        for i in 0..c.grads[pi].len() {
+            if !sets[pi][i] && (c.grads[pi][i] == 0.0) != (g.grads[pi][i] == 0.0) {
+                mism[pi] += 1;
+            }
+            // a set that is empty of non-zero entries off it would make the check vacuous
+            if !sets[pi][i] && c.grads[pi][i] != 0.0 {
+                nonzero_sets[pi] += 1;
+            }
+        }
+    }
+    println!("STRUCT {tag}: structural set sizes {size:?}, non-zero cpu entries off the sets {nonzero_sets:?}, zero-set mismatches off the sets {mism:?} (parents {PARENTS:?})");
+    // The rows of the sets must exist, and the head gradients must be non-zero off the table rows.
+    if size[0] == 0 || size[6] == 0 {
+        out.push(format!("{tag}: a structural set is empty (n {} / q_prime {})", size[0], size[6]));
+    }
+    out
+}
+
+#[test]
+fn structural_zeros_match_on_the_bundles() {
+    let device = TestDevice::default();
+    let mut fails = vec![];
+    let jc = struct_case("juniata_struct", JUNIATA, |n| n / 2, &device);
+    fails.extend(structural_cell(&jc, 0.6, 4));
+    if cfg!(debug_assertions) {
+        eprintln!("hudson part skipped in debug builds: run with --release");
+    } else {
+        let hc = struct_case("hudson_struct", HUDSON, |n| n - 41, &device);
+        fails.extend(structural_cell(&hc, 0.6, 4));
+    }
+    for f in &fails {
+        println!("STRUCTFAIL {f}");
+    }
+    assert!(fails.is_empty(), "{} structural-zero failures (see STRUCTFAIL lines)", fails.len());
+}
+
+// ------------------------------------------------------------ backward host reads
+
+#[test]
+fn backward_makes_no_host_copy_on_cuda() {
+    let device = TestDevice::default();
+    let mut case = juniata_case(&device);
+    case.hours = 3;
+    let reads = |use_cuda: bool| -> u64 {
+        let (outs, _, _) = three_tracked_hours(&case, use_cuda);
+        let loss = outs.into_iter().map(|o| o.sum()).reduce(|a, b| a + b).unwrap();
+        let before = host_reads_on_this_thread_for_test();
+        let _g = loss.backward();
+        host_reads_on_this_thread_for_test() - before
+    };
+    // Control: Gpu with use_cuda false takes the host path on device tensors. It must read.
+    let control = reads(false);
+    println!("control backward host reads: {control}");
+    assert!(control > 0, "the control arm must read the device in the backward");
+    // Gate: the device arm reads nothing in the backward.
+    let gate = reads(true);
+    println!("gate backward host reads: {gate}");
+    assert_eq!(gate, 0, "the device backward made {gate} host reads");
+}
+
+// ------------------------------------------------------------ central differences
+
+// copied from tests/stage_op_parity.rs::fused_op_gradcheck_by_central_differences, with the inner
+// backend Gpu and use_cuda true (same eps and bars)
+#[test]
+fn fused_op_gradcheck_on_cuda() {
+    // 5-chain, stage set closure([1]): row 0 is MC, so q_t and q_next_mc enter
+    // through N_mc. Dam on row 2 (T 1.23 d), NormalDepth, theta 0.8.
+    let device: <Gpu as BackendTypes>::Device = Default::default();
+    let (adj, pattern) = chain(&[1000.0; 5], &[1e-3; 5]);
+    let n = 5;
+    let net0 = StageNetwork::build(&adj, &pattern, Some(&[1]), 0.0, &[(2, 1.23)]).unwrap();
+    let depth0 = [0.45f32, 0.55, 0.8, 0.6, 0.7];
+    let h0: Vec<f32> = (0..n).map(|i| net0.z_mid[i] + depth0[i]).collect();
+    let z_mid = net0.z_mid.clone();
+    let base: [Vec<f32>; 7] = [
+        (0..n).map(|i| 0.03 + 0.005 * i as f32).collect(),
+        (0..n).map(|i| 0.45 + 0.05 * (i % 3) as f32).collect(),
+        (0..n).map(|i| 18.0 + 2.0 * (i % 4) as f32).collect(),
+        h0,
+        vec![1.1, 2.3, 3.2, 4.6, 5.1],
+        vec![1.4, 0.0, 0.0, 0.0, 0.0],
+        vec![1.0; n],
+    ];
+    // n, q, p, h_t, q_t, q_next_mc, q'
+    const EPS: [f32; 7] = [1e-3, 1e-2, 0.2, 1e-2, 1e-2, 1e-2, 1e-2];
+    let w = weights(5, n);
+    let v = weights(6, n);
+    for substeps in [1u32, 4] {
+        let mut case = Case::new("gradcheck", adj.clone(), pattern.clone(), H0::Abs(base[3].clone()), base[4].clone());
+        case.seeds = Some(vec![1]);
+        case.dams = vec![(2, 1.23)];
+        case.hours = 1;
+        let eval = |x: &[Vec<f32>; 7], with_grad: bool| -> (f32, Vec<Vec<f32>>) {
+            let mut block = make_block::<Gpu>(&case, 0.8, substeps, true, &device);
+            let ts: Vec<Tensor<Autodiff<Gpu>, 1>> = x.iter().map(|a| tv::<Gpu>(a, &device).require_grad()).collect();
+            block.set_stage(ts[3].clone());
+            let out = block.step_fused(
+                &pattern, ts[0].clone(), ts[2].clone(), ts[1].clone(), ts[4].clone(), ts[5].clone(), ts[6].clone(),
+            );
+            let h_end = block.stage().unwrap();
+            let loss = (out * tv::<Gpu>(&w, &device)).sum() + ((h_end - tv::<Gpu>(&z_mid, &device)) * tv::<Gpu>(&v, &device)).sum();
+            let l = loss.clone().into_data().to_vec::<f32>().unwrap()[0];
+            if !with_grad {
+                return (l, vec![]);
+            }
+            let g = loss.backward();
+            (l, ts.iter().map(|t| to_vec1(t.grad(&g).expect("grad"))).collect())
+        };
+        let (l0, grads) = eval(&base, true);
+        println!("gradcheck on cuda, substeps {substeps}: loss {l0}");
+        let mut worst = [0.0f32; 7];
+        for pi in 0..7 {
+            for i in 0..n {
+                let eps = EPS[pi];
+                let mut up = base.clone();
+                let mut dn = base.clone();
+                up[pi][i] += eps;
+                dn[pi][i] -= eps;
+                let fd = (eval(&up, false).0 - eval(&dn, false).0) / (2.0 * eps);
+                let an = grads[pi][i];
+                let err = (fd - an).abs();
+                let allowed = (5e-3 * fd.abs().max(an.abs())).max(1e-4);
+                assert!(
+                    an.is_finite() && err <= allowed,
+                    "substeps {substeps}: d loss/d {}[{i}]: fd {fd} analytic {an}",
+                    PARENTS[pi]
+                );
+                worst[pi] = worst[pi].max(err / allowed);
+            }
+        }
+        println!("gradcheck on cuda, substeps {substeps}: worst err/allowed {worst:?} (parents {PARENTS:?})");
+    }
+}
+
+// ------------------------------------------------------------ negative control
+
+#[test]
+fn negative_control_rejects_a_perturbed_parent() {
+    let device = TestDevice::default();
+    let mut case = juniata_case(&device);
+    case.hours = 3;
+    let scale = 1.0f32 + 1e-3;
+    case.n_scale_cuda = Some(scale);
+    let (theta, substeps) = (0.6f32, 4u32);
+    // Forward: n x (1 + 1e-3) on every stage row in the CUDA run only. Q moves by about 1e-3 everywhere,
+    // 100 times the 1e-5 bar.
+    let (dc, dg): (<Cpu as BackendTypes>::Device, <Gpu as BackendTypes>::Device) = (Default::default(), Default::default());
+    let cb = run_series::<Cpu>(&case, theta, substeps, false, false, &dc);
+    let gb = run_series::<Gpu>(&case, theta, substeps, true, false, &dg);
+    let mut seen = 0.0f32;
+    for (c, g) in cb.iter().zip(&gb) {
+        let sc = c.fields[0].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        seen = seen.max(max_abs_diff(&c.fields[0], &g.fields[0]) / sc);
+    }
+    println!("negative control forward: predicted relative excess about 1e-3 (bar 1e-5, ratio about 100); seen max|dq|/max|q| {seen:e} (ratio {:.1})", seen / 1e-5);
+    let r = run_pair_xb(&case, theta, substeps, 1e-5, Gate::Strict);
+    match &r {
+        Err(e) => println!("negative control forward: rejected: {e}"),
+        Ok(_) => println!("negative control forward: NOT rejected"),
+    }
+    assert!(r.is_err(), "the forward gate must reject n x (1 + 1e-3) on the CUDA run");
+    // Gradient: the same perturbation must fail the gradient gate.
+    let mut t = GTally::default();
+    let worst = grad_pair_xb("negative_control", &case, theta, substeps, false, BARS_SHORT, &mut t);
+    println!(
+        "negative control gradient: worst err/allowed {worst:?}; {} failures (first: {:?})",
+        t.failures.len(),
+        t.failures.first()
+    );
+    assert!(!t.failures.is_empty(), "the gradient gate must reject n x (1 + 1e-3) on the CUDA run");
+}
+
+// ---------------------------------------------- synced-state backward (strict level)
+//
+// The host forward runs with saving on. For each hour the host `stage_hour_backward` and the device
+// `stage_hour_backward_dev` get the SAME saved state and the SAME fixed-seed cotangent, and every
+// field of `HourGrads` is compared with the block bar 1e-5 x max|host| and the same zero set. The
+// structural-zero rule holds on both. No acceptance, no budget.
+
+// copied from tests/stage_cuda_blocks.rs::bar
+fn bar(seed: u32, len: usize, signed: bool) -> Vec<f32> {
+    let mut s = 0x9E3779B9u32.wrapping_mul(seed.wrapping_add(1));
+    (0..len)
+        .map(|i| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let m = 0.5 + (s >> 8) as f32 / (1u32 << 24) as f32;
+            if signed && (s >> 7) & 1 == 1 && i % 2 == 0 {
+                -m
+            } else {
+                m
+            }
+        })
+        .collect()
+}
+
+fn backward_synced_cell(case: &Case, theta: f32, substeps: u32, rec: &mut Rec) {
+    let dc: <Cpu as BackendTypes>::Device = Default::default();
+    let mut block = make_block::<Cpu>(case, theta, substeps, false, &dc);
+    let c = block.op_consts(&case.pattern);
+    let mut h = to_vec1(block.stage().unwrap());
+    let like = cube_from_host(&[0.0], &Default::default());
+    let cd = Arc::new(StageOpConstsDev::upload(&c, &case.pattern, &like));
+    let up = |v: &[f32]| -> Cube { cube_from_host(v, &Default::default()) };
+    let mut qt = case.q_t0.clone();
+    for k in 0..case.hours {
+        let (qp, mc) = (pick(&case.qp, k), pick(&case.mc, k));
+        let (b0, b1) = hour_b(case, k);
+        let hour = stage_prologue_host(&c, &case.n, &case.q, &case.p, &qt, &mc, &qp, b0, b1);
+        let fwd = stage_hour_forward(&c, &case.pattern, &hour, &h, &qt, true);
+        let g_out = bar(1000 + 17 * k as u32 + substeps, 2 * c.n, true);
+        let host = stage_hour_backward(&c, &case.pattern, &hour, &fwd.subs, &g_out);
+        let hd = HourDev::upload(&hour, &like);
+        let subs: Vec<SubstepDev> = fwd.subs.iter().map(|s| SubstepDev::upload(s, &like)).collect();
+        let dev = hour_grads_to_host(&stage_hour_backward_dev(&cd, &case.pattern, &hd, &subs, &up(&g_out)));
+        // Per-entry bar: max(1e-5 * max|host field|, 1e-6 * T_i). T_i is the size of the terms that
+        // cancel in entry i, measured as the host's own response to a one-ulp move of every entry of the
+        // cotangent (two fixed-seed sign patterns), divided by 2^-24. The only source of difference
+        // between host and device here is libdevice powf/ln entering sums that cancel.
+        let host_k: Vec<HourGrads> = [1u32, 2]
+            .iter()
+            .map(|&k| stage_hour_backward(&c, &case.pattern, &hour, &fwd.subs, &one_ulp(&g_out, k)))
+            .collect();
+        let fields = |g: &HourGrads| -> [(&'static str, Vec<f32>); 7] {
+            [
+                ("grad n", g.n.clone()),
+                ("grad q", g.q.clone()),
+                ("grad p", g.p.clone()),
+                ("grad h_t", g.h_t.clone()),
+                ("grad q_t", g.q_t.clone()),
+                ("grad q_next_mc", g.q_next_mc.clone()),
+                ("grad q_prime", g.q_prime.clone()),
+            ]
+        };
+        let ctx = format!("BWD {} theta {theta} substeps {substeps} hour {k}:", case.label);
+        let (fd, fh) = (fields(&dev), fields(&host));
+        let fk: Vec<_> = host_k.iter().map(|g| fields(g)).collect();
+        for f in 0..7 {
+            let (name, d) = (&fd[f].0, &fd[f].1);
+            let hh = &fh[f].1;
+            let t: Vec<f32> = (0..hh.len())
+                .map(|i| fk.iter().map(|x| (x[f].1[i] - hh[i]).abs()).fold(0.0f32, f32::max) / 5.9604645e-8)
+                .collect();
+            rec.close_t(&ctx, name, d, hh, Some(&t));
+            rec.zero_set(&ctx, name, d, hh);
+            let scale = hh.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            for i in 0..hh.len() {
+                let err = (d[i] - hh[i]).abs();
+                if err > 1e-5 * scale && 1e-6 * t[i] > 1e-5 * scale {
+                    println!(
+                        "CANCELBAR {ctx} {name} reach {i}: dev {} host {} err {err:e}, bar {:e} (1e-5 max {:e}, T {:e}), err/bar {:.3}",
+                        d[i], hh[i], 1e-6 * t[i], 1e-5 * scale, t[i], err / (1e-6 * t[i])
+                    );
+                }
+            }
+        }
+        // the structural-zero rule on both
+        for (who, g) in [("host", &host), ("device", &dev)] {
+            if !c.t_mask.is_empty() {
+                for (name, v) in [("n", &g.n), ("q", &g.q), ("p", &g.p)] {
+                    for i in 0..c.n {
+                        if c.t_mask[i] == 1.0 && v[i] != 0.0 {
+                            rec.misses.push(format!("{ctx} {who} {name}[{i}] on a table row is {}", v[i]));
+                        }
+                    }
+                }
+            }
+            for i in 0..c.n {
+                if c.in_stage[i] == 0.0 && g.q_prime[i] != 0.0 {
+                    rec.misses.push(format!("{ctx} {who} q_prime[{i}] on an MC row is {}", g.q_prime[i]));
+                }
+            }
+        }
+        h = fwd.h_end;
+        qt = fwd.q_out;
+    }
+}
+
+fn backward_synced_family(name: &str, cases: &[Case]) -> usize {
+    let mut rec = Rec { worst: BTreeMap::new(), bits: BTreeMap::new(), misses: vec![] };
+    for c in cases {
+        for theta in [0.55f32, 0.6, 1.0] {
+            for substeps in [1u32, 4] {
+                backward_synced_cell(c, theta, substeps, &mut rec);
+            }
+        }
+    }
+    print_rec(&format!("BWD {name}"), &rec);
+    finish_rec(&format!("BWD {name}"), &rec)
+}
+
+#[test]
+fn backward_hour_matches_host_from_synced_state() {
+    let device = TestDevice::default();
+    let mut misses = 0usize;
+    misses += backward_synced_family("chain_states", &chain_state_cases());
+    misses += backward_synced_family("table_and_mixed", &table_and_mixed_cases());
+    misses += backward_synced_family("prescribed_boundary", &prescribed_boundary_cases());
+    misses += backward_synced_family("mc_inflow", &[mc_inflow_case(&device)]);
+    // Juniata and Hudson: 6 hours, (1.0, 1) and (0.6, 4).
+    let mut rec = Rec { worst: BTreeMap::new(), bits: BTreeMap::new(), misses: vec![] };
+    let mut jc = juniata_case(&device);
+    jc.hours = 6;
+    for (th, sub) in [(1.0f32, 1u32), (0.6, 4)] {
+        backward_synced_cell(&jc, th, sub, &mut rec);
+    }
+    print_rec("BWD juniata_6h", &rec);
+    misses += finish_rec("BWD juniata_6h", &rec);
+    if cfg!(debug_assertions) {
+        eprintln!("hudson part skipped in debug builds: run with --release");
+        assert_eq!(misses, 0, "{misses} synced-backward misses (see SYNCMISS lines)");
+        return;
+    }
+    let mut rec = Rec { worst: BTreeMap::new(), bits: BTreeMap::new(), misses: vec![] };
+    let mut hc = hudson_net_case(&device);
+    hc.hours = 6;
+    backward_synced_cell(&hc, 0.6, 4, &mut rec);
+    print_rec("BWD hudson_net_6h", &rec);
+    misses += finish_rec("BWD hudson_net_6h", &rec);
+    assert_eq!(misses, 0, "{misses} synced-backward misses (see SYNCMISS lines)");
+}
+
+// ------------------------------------------------- the transposed solve is bitwise
+//
+// `tree_solve_transposed_dev` (cuSPARSE) and `tree_lu_solve_transposed_host` on the same factors and the
+// same fixed-seed right-hand side. The host solve multiplies by the reciprocal of the diagonal, like cuSPARSE.
+
+fn dht_bitwise_cell(case: &Case, theta: f32, substeps: u32, equal: &mut usize, total: &mut usize) {
+    let dc: <Cpu as BackendTypes>::Device = Default::default();
+    let mut block = make_block::<Cpu>(case, theta, substeps, false, &dc);
+    let c = block.op_consts(&case.pattern);
+    let mut h = to_vec1(block.stage().unwrap());
+    let up = |v: &[f32]| -> Cube { cube_from_host(v, &Default::default()) };
+    let mut qt = case.q_t0.clone();
+    for k in 0..case.hours {
+        let (qp, mc) = (pick(&case.qp, k), pick(&case.mc, k));
+        let (b0, b1) = hour_b(case, k);
+        let hour = stage_prologue_host(&c, &case.n, &case.q, &case.p, &qt, &mc, &qp, b0, b1);
+        let fwd = stage_hour_forward(&c, &case.pattern, &hour, &h, &qt, true);
+        for (s, sv) in fwd.subs.iter().enumerate() {
+            let asm = stage_assemble_host(&c, &hour, s, &sv.h, &sv.qc);
+            let f = tree_lu_factor(&case.pattern, &asm.a_values);
+            let fd = TreeFactorsDev { l_values: up(&f.l_values), u_values: up(&f.u_values) };
+            let rhs = bar(500 + 13 * k as u32 + s as u32, c.n, true);
+            let dev = cube_to_host(&tree_solve_transposed_dev(&case.pattern, &fd, &up(&rhs)));
+            let host = tree_lu_solve_transposed_host(&case.pattern, &f, &rhs);
+            for (i, (a, b)) in dev.iter().zip(&host).enumerate() {
+                *total += 1;
+                if a.to_bits() == b.to_bits() {
+                    *equal += 1;
+                } else {
+                    println!("DHTDIFF {} th{theta} s{substeps} hour {k} substep {s} reach {i}: dev {a} host {b}", case.label);
+                }
+            }
+        }
+        h = fwd.h_end;
+        qt = fwd.q_out;
+    }
+}
+
+#[test]
+fn transposed_solve_is_bitwise_equal_to_the_host_solve() {
+    let device = TestDevice::default();
+    let (mut eq, mut tot) = (0usize, 0usize);
+    let mut jc = juniata_case(&device);
+    jc.hours = 6;
+    for (th, sub) in [(1.0f32, 1u32), (0.6, 4)] {
+        dht_bitwise_cell(&jc, th, sub, &mut eq, &mut tot);
+    }
+    for c in chain_state_cases() {
+        for theta in [0.55f32, 0.6, 1.0] {
+            for substeps in [1u32, 4] {
+                dht_bitwise_cell(&c, theta, substeps, &mut eq, &mut tot);
+            }
+        }
+    }
+    println!("DHT bitwise: {eq} of {tot} entries equal");
+    assert_eq!(eq, tot, "tree_solve_transposed_dev and tree_lu_solve_transposed_host differ in {} entries", tot - eq);
 }

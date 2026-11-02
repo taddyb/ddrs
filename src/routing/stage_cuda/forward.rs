@@ -19,9 +19,9 @@ use burn_cubecl::ops::numeric::empty_device_contiguous_dtype;
 
 use super::{up, ControlDev, DepthDev, HourDev, NewtonDev, SectionDev, StageOpConstsDev};
 use crate::routing::stage_op::{
-    Assembled, ControlOut, DepthOut, HourHost, NewtonOut, Readout, SectionHost, F23, F43, F53,
+    Assembled, ControlOut, DepthOut, HourHost, NewtonOut, Readout, SectionHost, SubstepSaved, F23, F43, F53,
 };
-use crate::sparse::cube_buf::{cube_to_host, empty_f32, from_cube, grid, into_cube, zeros_f32, Cube, Gpu};
+use crate::sparse::cube_buf::{cube_to_host, empty_f32, from_cube, grid, into_cube, upload_f32, zeros_f32, Cube, Gpu};
 use crate::sparse::tree_lu_cuda::{tree_factor_dev, tree_solve_dev, TreeFactorsDev};
 use crate::sparse::CsrPattern;
 
@@ -1345,6 +1345,23 @@ pub struct SubstepDev {
     pub qc: Cube,
     pub dh: Cube,
     pub factors: TreeFactorsDev,
+}
+
+impl SubstepDev {
+    /// Copy a host `SubstepSaved` (start state, solve output, factors) to the device of `like`.
+    /// Tests use it to feed the device backward the host's own saved state.
+    #[doc(hidden)]
+    pub fn upload(h: &SubstepSaved, like: &Cube) -> Self {
+        Self {
+            h: upload_f32(like, &h.h),
+            qc: upload_f32(like, &h.qc),
+            dh: upload_f32(like, &h.dh),
+            factors: TreeFactorsDev {
+                l_values: upload_f32(like, &h.factors.l_values),
+                u_values: upload_f32(like, &h.factors.u_values),
+            },
+        }
+    }
 }
 
 /// The hour forward on the device (the twin of `HourForward`).

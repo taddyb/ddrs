@@ -388,12 +388,15 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
 /// and prologue blocks now fuses the same sites as the CUDA backward kernels. Values before that change:
 /// juniata 1/1 0x17261ad23acc08a9, juniata 0.6/4 0x1fde63b5606e2832, table_rect 0.6/1 0x431b2de1e30bc9e0,
 /// flow_reversal 0.55/4 0xe78b0648c482edb3, dam_edge 1/1 0xd7c87cb2dfed1762.
+/// Re-pinned 2026-11-02: the CPU hour backward now solves with the reciprocal of the diagonal, like
+/// cuSPARSE. Values before that change: juniata 1/1 0x11f8076cfa233298, juniata 0.6/4 0xfa72cab1155ba8d6,
+/// table_rect 0.6/1 0xccb63562455dd578, flow_reversal 0.55/4 0xa82c2cc3d74bc201, dam_edge 1/1 0xaae366862eb36ca5.
 const GOLDEN: &[(&str, f32, u32, u64)] = &[
-    ("juniata", 1.0, 1, 0x11f8076cfa233298),
-    ("juniata", 0.6, 4, 0xfa72cab1155ba8d6),
-    ("table_rect", 0.6, 1, 0xccb63562455dd578),
-    ("flow_reversal", 0.55, 4, 0xa82c2cc3d74bc201),
-    ("dam_edge", 1.0, 1, 0xaae366862eb36ca5),
+    ("juniata", 1.0, 1, 0xb2fbdd2d1c96f413),
+    ("juniata", 0.6, 4, 0xf04ab68dba5abe8b),
+    ("table_rect", 0.6, 1, 0xff3bfb69f44131b0),
+    ("flow_reversal", 0.55, 4, 0xcdef69ad8a8e1432),
+    ("dam_edge", 1.0, 1, 0xf65e6fa6c1ea0678),
 ];
 
 fn case_for(label: &str, device: &TestDevice) -> Case {

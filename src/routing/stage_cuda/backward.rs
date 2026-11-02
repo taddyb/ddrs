@@ -8,8 +8,11 @@
 //!
 //! Rules (see the tie table in the `stage_op.rs` module doc):
 //! - every add that takes a product is one explicit `fma`, at the same site
-//!   and in the same operand order as the `f32::mul_add` of the host fn. A
-//!   product with several uses stays a plain multiply on both sides;
+//!   and in the same operand order as the `f32::mul_add` of the host fn.
+//!   NVRTC fuses a product that feeds an add even when the product has other
+//!   uses, so the per-kernel SASS gap (FFMA with --fmad=true against
+//!   --fmad=false) decides which sites are fused. Every such site is written
+//!   as an explicit `fma` here and `mul_add` on the host;
 //! - the mask of the floor uses the host comparison, `!(hs < hf)`;
 //! - a scatter of the host (`x[down[i]] += ...`, `x[col[k]] += ...`) is a
 //!   gather here, in the host's slot order. In a tree every reach has one
@@ -551,8 +554,11 @@ fn sign0(x: f32) -> f32 {
 
 /// B2 per reach: the reverse of 2g to 2a. Mirrors `section_backward_host`. This
 /// is the one backward section kernel of the CUDA path. Fused sites are the
-/// `mul_add` calls of the host fn, in the same operand order. A product by 2.0
-/// is exact, so it needs no `fma`; a product with several uses stays plain.
+/// `mul_add` calls of the host fn, in the same operand order. NVRTC fuses a
+/// product that feeds an add even when the product has other uses, and some
+/// products by 2.0 too. The per-kernel SASS gap (FFMA at --fmad=true against
+/// --fmad=false) decides which sites are fused; each one is an explicit `fma`
+/// here and `mul_add` on the host.
 #[cube(launch)]
 fn section_backward_kernel(
     p: &Tensor<f32>,
@@ -630,21 +636,27 @@ fn section_backward_kernel(
 
         // 2f: Pd = (bwd + rt*2) + (((d*ss)*ssd)*2)/rt
         let u = ((dd * ss) * ssd) * 2.0f32;
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_bwd = fma(r_pd, keep, 0.0f32);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_rt = fma(g_pd, 2.0f32, 0.0f32);
         g_rt = fma(g_pd, -(u / (rt * rt)), g_rt);
         let g_u = g_pd / rt;
         let g_dss_ssd = g_u * 2.0f32;
         let g_dss = g_dss_ssd * ssd;
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_ssd = fma(g_dss_ssd, dd * ss, 0.0f32);
         gd = fma(g_dss, ss, gd);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_ss = fma(g_dss, dd, 0.0f32);
         // 2f: Ad = (tw + bw)/2 + (d*(twd + bwd))/2
         let g_ad_half = g_ad * 0.5f32;
         let mut g_tw = fma(r_tw, keep, g_ad_half);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_bw = fma(g_ad, 0.5f32, 0.0f32);
         let g_x = g_ad_half;
         gd = fma(g_x, twd + bwd, gd);
+        // The start at 0 copies the host's add onto a zeroed Vec (a -0 becomes +0). Do not simplify it to a plain product.
         let mut g_twd = fma(g_x, dd, 0.0f32);
         g_bwd = fma(g_x, dd, g_bwd);
 
