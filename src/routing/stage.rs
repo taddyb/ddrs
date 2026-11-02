@@ -240,7 +240,8 @@ pub struct StageParams {
     pub dt: f32,
     /// Gravity, 9.81.
     pub g: f32,
-    /// Passed to `tree_lu_solve` and `stage_timestep`. True runs the CUDA arms of the stage op and the tree solve.
+    /// Passed to `tree_lu_solve` and `stage_timestep`. True runs the CUDA arms on a `Cuda<f32, i32>` backend.
+    /// On any other backend the host path runs, with a one-shot warning.
     pub use_cuda: bool,
 }
 
@@ -560,8 +561,9 @@ where
         depth: Tensor<Ad<I>, 1>,
     ) -> Section<I> {
         // The reference section is written out here, with the fused multiply-adds (NVRTC
-        // contracts a*b+c into one rounding, so the CPU fuses the same sites), line for line with `stage_op.rs::section_host`. `src/geometry.rs`
-        // (shared with the hotstart) keeps its unfused form.
+        // contracts a*b+c into one rounding, so the CPU fuses the same sites), line for
+        // line with `stage_op.rs::section_host`. `src/geometry.rs` (shared with the
+        // hotstart) keeps its unfused form.
         let bw_lb = self.params.bottom_width_lb;
         let one = Tensor::<Ad<I>, 1>::ones_like(&depth);
         let q_eps = q.clone() + 1e-6;

@@ -27,6 +27,9 @@ is what a future session needs, not the narrative.
 | A log-space parameter never moves off one end of its range, yet gradient checks pass | T17 |
 | `training_step_layer_b` step3 (MC forward max abs 1.01e-1) and `training_step_layer_c` step2 fail locally, green in CI | T18 |
 | Same checkpoint, same gauge, different prediction when evaluated with a different gauge CSV | T19 |
+| Stage op CPU and CUDA differ by 1 ulp, then diverge on a stiff cell; or an edit to a stage kernel changes CPU/GPU bits | T20 |
+| The stage reference step (`step_reference`) stops matching the fused op after a cross-section change | T21 |
+| CPU stage training got about 1.3x slower after the fused multiply-add change | T22 |
 
 ---
 
@@ -288,6 +291,63 @@ preference for CPU in experiments); for training on this network it is simply
 faster. Check `head -1 <run>/run.log` to see which backend any historical run
 actually used before quoting its wall clock.
 
+### The stage op on CUDA (measured 2026-11-02)
+
+The stage block has CUDA arms now, and the same rule holds: CUDA is slower for the
+examples. `tests/stage_cuda_scale.rs` times the fused op (24 timed hours, forward
+plus one backward, warm-up history cut) on uniform input. Release build, idle machine,
+one sample per row. Theta is 1.0 except Juniata and Hudson at 4 substeps (0.6).
+
+| network | reaches | substeps | CPU ms/h | CUDA ms/h | CUDA/CPU |
+|---|---|---|---|---|---|
+| juniata | 213 | 1 | 0.168 | 2.05 | 12.2 |
+| juniata | 213 | 4 | 0.454 | 8.32 | 18.3 |
+| hudson | 756 | 1 | 0.498 | 2.08 | 4.17 |
+| hudson | 756 | 4 | 1.536 | 8.49 | 5.53 |
+| CONUS sub-basin | 1,000 | 1 | 0.653 | 2.09 | 3.20 |
+| CONUS sub-basin | 1,000 | 4 | 2.024 | 6.55 | 3.23 |
+| CONUS sub-basin | 10,002 | 1 | 6.51 | 1.62 | 0.25 |
+| CONUS sub-basin | 10,002 | 4 | 20.46 | 6.34 | 0.31 |
+| CONUS sub-basin | 51,441 | 1 | 36.2 | 5.09 | 0.14 |
+| CONUS sub-basin | 51,441 | 4 | 110.9 | 19.7 | 0.18 |
+| CONUS full | 346,321 | 1 | 245.4 | 18.4 | 0.07 |
+| CONUS full | 346,321 | 4 | 765.3 | 71.6 | 0.09 |
+
+**Crossover: about 10,000 reaches.** CUDA is 3 to 18 times slower at 1,000 reaches and
+below, and 11 to 13 times faster on the full CONUS network. The small-network CUDA
+rows are launch bound and move by up to about 1.5x between runs of one binary (the
+CPU rows stay within about 1 %). Use them as a range, not a point.
+
+**End to end it is far slower.** Seconds per mini-batch (`run.log`, 1 s resolution,
+epoch 1 skipped):
+
+| example | CPU | CUDA | CUDA/CPU |
+|---|---|---|---|
+| Juniata stage, rho 90 | 0.615 | 135.3 | 220 |
+| Juniata stage, 4 substeps | 1.316 | 465.0 | 353 |
+| Juniata MC only (no stage block) | 0.263 | 32.3 | 123 |
+| Hudson | 4.333 | 335.3 | 77 |
+
+The MC-only example is 123 times slower on CUDA, so most of the gap is in the engine
+path and not in the stage op. For one rho 90 Juniata batch the scale table predicts 3.0
+to 4.4 s for the op alone, against 135 s measured. The rest was not profiled. Keep
+`--backend cpu` for both examples.
+
+**Why.** Small networks are launch bound: Juniata at 1 substep makes about 110 kernel
+launches per hour (2,852 for 26 hours), the GPU kernels total 7.5 ms inside about 46 ms
+of wall time, and the GPU sits idle between launches. At full CONUS one mass-balance
+`float_sum_dim` per hour (the reduction in `src/routing/stage_cuda/forward.rs::stage_readout_dev`)
+runs as a single cube of 32 threads. It takes 11 ms per call and 62 % of the GPU time
+(cuSPARSE `spsm_v2` 19 %, `tree_factor_kernel` 11 %). Without it CONUS would run near
+7 ms per hour. This is not optimized.
+
+**Theta 0.6 goes NaN on the CPU path itself.** With theta 0.6 and the scale test's
+uniform input (n 0.035, p 21, q 0.5, q' 1.0 on every reach), the stage scheme blows up
+to NaN on large CONUS networks even on the CPU: at 1 substep on the 51,441-reach basin
+and the full network, at 4 substeps on the full network (hour 21). Theta 1.0 is
+stable on every row. So the scale test runs the CONUS rows at theta 1.0. The op does the
+same work at any theta. This is a measured fact. It was not investigated.
+
 ---
 ## T16 — Forward-only Autodiff evaluations retain the tape
 
@@ -457,3 +517,84 @@ differed.
 subset eval's absolute metrics with a full-population table. Fix options (not applied):
 apply `FLOW_SCALE` to the gauge's output rather than the reach inflow (breaks DDR parity),
 or always evaluate on the full population and subset afterwards.
+
+---
+
+## T20: Stage op CPU and CUDA must fuse the same multiply-adds (2026-11-01)
+
+**Discriminating test.** Run the `scripts/fma_sass_check.py` check (procedure in
+`testing.md` "Stage on CUDA"). For each stage kernel, `FFMA` at `--fmad=true` minus
+`FFMA` at `--fmad=false` must be 0, or only named bit-neutral doublings
+(`(a*b)*2.0`, which the compiler writes as `x + x`).
+
+**Why.** NVRTC contracts `a*b + c` into one rounding by default, and the cubecl fork
+passes no `--fmad` option. The CPU rounds twice. On a line that cancels (`q_new` on a
+dam cell, the depth-floor drain) a 1 ulp difference grows into a branch flip. The user
+ruled on 2026-11-01 that the CPU does the same fusing as the GPU. So every site is now
+written as an explicit fused multiply-add on all sides, line for line:
+
+- the kernels in `src/routing/stage_cuda/` and `src/sparse/tree_lu_cuda.rs`, with the
+  cubecl `fma`;
+- the host fns of `src/routing/stage_op.rs` and `src/sparse/tree_lu.rs`, with
+  `f32::mul_add`;
+- the reference `StageBlock::step_reference`, through the ops of
+  `src/routing/stage_fma.rs` (used only by the reference).
+
+**What is bitwise.** CPU equals GPU bitwise on every forward and backward block field
+whose chain has no `powf` or `ln`. The tree solves are bitwise because the stage host
+solves copy the form cuSPARSE uses, `x = (b - sum) * (1 / diag)`
+(`src/sparse/tree_lu.rs::tree_lu_solve_host` and `tree_lu_solve_transposed_host`). The
+shared Muskingum-Cunge solves in `src/sparse/mod.rs` keep `/ diag`, so the DDR sandbox
+match does not move. CUDA's `powf` uses a hardware reciprocal approximation that the CPU
+cannot copy, so fields with `powf` or `ln` in the chain differ by a few ulp. That
+residue is why the trajectory gates are two-level (see `testing.md`).
+
+**Compiler facts.** A product by `2.0` is not a fusing candidate (NVRTC writes `x*2`
+as `x + x`, and fusing it is bit-neutral). `hb0 = b0 + (b1 - b0) * f0` stays unfused. A
+product with several uses stays unfused only when none of its uses feeds an add or a
+subtract. When one use does, NVRTC fuses it (this happened in the section, Newton and
+depth backward kernels). So the rule is: the SASS gap decides, per kernel.
+
+**After a CUDA or cubecl update, rerun the check.** The compiler's choices can change.
+A site that was unfused can become fused, and the GPU bits then move away from the CPU.
+
+---
+
+## T21: The stage reference has its own fused cross-section (2026-11-01)
+
+`StageBlock::section` in `src/routing/stage.rs` does not call the shared trapezoid fns
+of `src/geometry.rs` for its arithmetic. It writes the section out with its own fused
+multiply-adds (`fma3` from `src/routing/stage_fma.rs` at the fused sites), line for line
+with `src/routing/stage_op.rs::section_host`, so that it stays bitwise equal to the fused
+op. `src/geometry.rs` (shared with the hotstart) keeps its unfused form.
+
+A change to the stage cross-section, for example a power-law section selected by
+`params.geometry_form`, must change all of these together: `section_host` and
+`section_backward_host` in `src/routing/stage_op.rs`, `section_kernel` and
+`section_backward_kernel` in `src/routing/stage_cuda/`, and the reference copy in
+`StageBlock::section`. Changing `src/geometry.rs` alone moves the hotstart and leaves
+the stage step on the old section. `tests/stage_op_parity.rs` (fused equals reference,
+bitwise) and `stage_cuda_blocks` fail if one side is missed.
+
+---
+
+## T22: The fused CPU stage step is about 1.3x slower without the `fma` target feature (2026-11-02)
+
+`f32::mul_add` is a libm `fmaf` call unless the build has the `fma` CPU feature.
+The default x86-64 build has none. Measured with the stage training examples
+(`run.log` has 1 s resolution, so 3 to 5 % noise on a 3 s figure):
+
+| build | Juniata stage, rho 90 (s/mb) | Juniata stage, 4 substeps (s/mb) | Hudson (s/mb) |
+|---|---|---|---|
+| before the fused multiply-add change | 0.538 | 1.000 | 3.000 |
+| default | 0.615 to 0.641 | 1.263 to 1.316 | 4.333 to 4.444 |
+| `-C target-cpu=native` | 0.538 | 0.947 | not measured |
+| `-C target-cpu=x86-64-v3` | 0.538 | 0.947 | 2.889 |
+
+A native or x86-64-v3 build removes the slowdown on this host and keeps the golden
+bits (`stage_cpu_golden` passes on both). The Hudson figures come from a separate
+check on an idle machine on 2026-11-02, interleaved: default 4.444 and 4.333,
+x86-64-v3 2.889 and 2.889. A pure-Muskingum-Cunge run does not change (0.263
+against 0.273). **The build choice is open.** The user has not decided whether to set
+a target feature in `.cargo/config.toml` or accept the default.
+

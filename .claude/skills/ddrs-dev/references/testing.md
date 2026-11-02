@@ -28,8 +28,14 @@ cargo test --test stage_analytic --test stage_boundary_store --test stage_networ
   --test stage_off_parity --test stage_option_c --test stage_step \
   --test juniata_stage --test juniata_stage_diag --test juniata_bundle \
   --test channel_geometry --test tree_lu --test tree_lu_gradcheck \
-  --test stage_op_parity --test stage_op_adjoint --test stage_op_tape
+  --test stage_op_parity --test stage_op_adjoint --test stage_op_tape \
+  --test stage_cpu_golden
 ```
+
+`stage_cpu_golden` pins the bits of the CPU stage step (five hashes). It must stay
+bitwise. A change in these hashes means a change in the arithmetic of the stage
+op, the tree factors or the tree solves. Re-pin only on purpose, and say why in
+the test comment.
 
 Since 2026-09-02 the sandbox gate is machine-enforced twice over:
 `tests/ddr_sandbox_match.rs` asserts max abs < 1e-3 in-process (CPU NdArray,
@@ -108,6 +114,94 @@ a warning when godin is on with more than one chunk. `hudson_stage` also asserts
 the Poughkeepsie M2 stage amplitude is above 0.2 m. `hudson_bundle` runs in CI.
 Run the release tests by hand before a merge that touches the stage or filter
 paths.
+
+### Stage on CUDA (`--features cuda`)
+
+The stage op has CUDA arms for the forward and the backward (`src/routing/stage_cuda/`,
+`src/sparse/tree_lu_cuda.rs`). `sparse_solver: cuda` with `params.stage_routing` is accepted;
+`use_cuda_graphs` is still rejected. Run these after any change to the stage op, the
+tree factors, the tree solves or a stage kernel (a CUDA host with no other compute
+process; CI has no GPU).
+
+```bash
+cargo test --features cuda --test cube_buf --test tree_lu_cuda --test stage_cuda_blocks \
+  --test stage_op_cuda_parity --test stage_engine_cuda_parity --test cuda_backward_parity
+cargo test --release --features cuda --test tree_lu_cuda --test stage_op_cuda_parity \
+  --test stage_engine_cuda_parity
+# No host reads in the device step. The output must be empty:
+grep -rnE "into_data|to_data|into_scalar|primitive_to_vec|read_one|\.read\(|read_async|read_tensor" \
+  src/routing/stage_cuda src/sparse/tree_lu_cuda.rs
+```
+
+`tree_lu_cuda::factor_matches_host_on_conus` skips unless `DDRS_CONUS_ADJ` names the
+CONUS adjacency zarr (`.ddrs/adjacency/<key>/merit_conus_adjacency.zarr`). Set it
+for the CONUS factor check. The tests compare the CUDA arm with the host fns, never
+with a stored number, so they need the GPU.
+
+**Why the gates have two levels.** The CPU and the GPU run the same arithmetic, but
+the inputs of a trajectory drift apart by an ulp, and a stiff cell can amplify that.
+So:
+
+- Strict where the inputs are identical. The block tests feed the GPU the host's own
+  inputs. `forward_substeps_match_host_from_synced_state` feeds the GPU the CPU state at
+  every substep, and `reverse_substeps_match_host_from_gpu_state` feeds the host the GPU
+  state. These have no budget and no accepted misses. The
+  synced tests use a per-entry bar that allows for cancellation in the host line
+  (`max(1e-5 * max|host|, 1e-6 * sum|terms|)`).
+- Trajectories. Juniata (48 h) is strict (1e-4). The Hudson net (48 h) is under the
+  forward noise gate: a miss is accepted only under `4 * (noise_cpu + noise_cuda)` and
+  `5e-4 * max|cpu|`, at most 1 % of the entries, and every accepted entry is printed.
+  The stiff synthetic families (`chain_states`, `table_and_mixed`,
+  `prescribed_boundary`) print every entry over the strict bar and are held by a
+  sanity bar of `2e-3 * max|cpu|` per field and hour (user ruling, 2026-11-01).
+- The 48-hour trajectory tests skip themselves in debug builds. Run the release form
+  above for them.
+- Gradients use the same noise gate (`noise` is the linearity noise of the loss,
+  `max_i |gA + gB - gboth|`). The hour-1 runs stay strict.
+- The engine test (`stage_engine_cuda_parity`) routes 6 days (120 output hours,
+  `RhoWindow::n_hourly` is `(rho_days - 1) * 24`) of Juniata and of the Hudson on both
+  backends and compares the routed q, the five mass sums and the gradients of
+  `n`, `q_spatial`, `p_spatial`. It also checks that the CUDA run made no host copies.
+  Its printed wall times include kernel JIT and are not timing data.
+
+**Parked test.** `tests/stage_op_cuda_parity.rs::gradient_parity_depth_floor_stiff_cell`
+is `#[ignore]`. It fails the gradient noise gate on one stiff synthetic cell (15 of 51
+compared entries; last run 2026-11-02). It waits for the user to decide how to gate
+stiff gradient trajectories. Do not change its gate. Run it on purpose with
+`cargo test --features cuda --test stage_op_cuda_parity gradient_parity_depth_floor_stiff_cell -- --ignored`.
+
+**Fused multiply-add check (`scripts/fma_sass_check.py`).** NVRTC contracts `a*b + c`
+into one rounding. Every stage kernel therefore writes the fused sites as explicit
+`fma`, and the CPU twin does the same (see trap T20). After a change to a kernel, or to
+CUDA or cubecl, run the check:
+
+```bash
+CUBECL_DEBUG_LOG=/tmp/kernels.log cargo test --features cuda --test stage_cuda_blocks
+SM=sm_89 python3 scripts/fma_sass_check.py /tmp/kernels.log /tmp/fma.json
+```
+
+For each stage kernel and `tree_factor_kernel` the script compiles the dumped source
+with `nvcc -cubin` at `--fmad=true` and `--fmad=false` and counts `FFMA` in
+`cuobjdump -sass`. The difference (true minus false) must be 0. A gap of named
+bit-neutral doublings (`(a*b)*2.0`, written `x + x` by the compiler) may stay. Any other gap
+is an unfused site: find it with the PTX `.loc` line map, write it as an explicit `fma`
+on the kernel, the host fn and `StageBlock::step_reference` together, and rerun.
+`SM` is the GPU architecture (default `sm_89`).
+
+**Wall time (`tests/stage_cuda_scale.rs`).** Release only (a debug build skips it).
+It prints CPU and CUDA ms per hour for Juniata, Hudson and, with
+`DDRS_CONUS_ADJ=<zarr>`, three CONUS sub-basins (about 1,000, 10,000 and 50,000
+reaches) and the whole network, at 1 and 4 substeps. Run it alone, on an idle machine
+(`nvidia-smi` shows no compute process, low `uptime` load):
+
+```bash
+DDRS_CONUS_ADJ=.ddrs/adjacency/<key>/merit_conus_adjacency.zarr \
+  cargo test --release --features cuda --test stage_cuda_scale -- --nocapture
+```
+
+`DDRS_SCALE_NET` (a label substring) and `DDRS_SCALE_SUBSTEPS` (1 or 4) pick one row,
+for example to run `nsys` on it. A filter that matches no row fails the test. Results
+and the crossover are in trap T13.
 
 ### Tier B — KAN head
 `src/nn/`, `Cargo.toml` rskan tag

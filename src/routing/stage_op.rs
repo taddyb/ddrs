@@ -19,6 +19,17 @@
 //! directly. `use_cuda: true` on a backend that is not CUDA falls back to the
 //! host path.
 //!
+//! # Fused multiply-adds
+//!
+//! NVRTC contracts `a*b + c` into one rounding. Every device kernel therefore
+//! writes its fused sites as an explicit `fma`, and the host fns of this file
+//! write the same sites with `f32::mul_add` (IEEE fused, the same bits). The
+//! reference `StageBlock::step_reference` fuses the same sites through the ops of
+//! `src/routing/stage_fma.rs`. With this, CPU and GPU agree bitwise on every
+//! block field whose chain has no `powf` or `ln`. CUDA's `powf` uses a hardware
+//! reciprocal approximation, so those fields differ by a few ulp. The per-kernel
+//! check is `scripts/fma_sass_check.py`.
+//!
 //! # Host tie rule per clamp
 //!
 //! This table is the binding tie rule for both arms. Ties pass for every clamp
@@ -56,8 +67,8 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
 use crate::routing::stage_cuda::{stage_hour_backward_dev, stage_timestep_cuda, HourSavedDev, StageOpConstsDev};
-use crate::sparse::cube_buf::{from_cube, into_cube};
 use crate::routing::stage_cuda::forward::HourForwardDev;
+use crate::sparse::cube_buf::{from_cube, into_cube};
 use crate::sparse::dispatch::effective_use_cuda;
 use crate::sparse::tree_lu::{
     tree_lu_factor, tree_lu_grad_a_host, tree_lu_solve_host, tree_lu_solve_transposed_host, TreeFactors,

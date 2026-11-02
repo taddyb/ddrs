@@ -1351,14 +1351,14 @@ impl SubstepDev {
     /// Copy a host `SubstepSaved` (start state, solve output, factors) to the device of `like`.
     /// Tests use it to feed the device backward the host's own saved state.
     #[doc(hidden)]
-    pub fn upload(h: &SubstepSaved, like: &Cube) -> Self {
+    pub fn upload(sv: &SubstepSaved, like: &Cube) -> Self {
         Self {
-            h: upload_f32(like, &h.h),
-            qc: upload_f32(like, &h.qc),
-            dh: upload_f32(like, &h.dh),
+            h: upload_f32(like, &sv.h),
+            qc: upload_f32(like, &sv.qc),
+            dh: upload_f32(like, &sv.dh),
             factors: TreeFactorsDev {
-                l_values: upload_f32(like, &h.factors.l_values),
-                u_values: upload_f32(like, &h.factors.u_values),
+                l_values: upload_f32(like, &sv.factors.l_values),
+                u_values: upload_f32(like, &sv.factors.u_values),
             },
         }
     }

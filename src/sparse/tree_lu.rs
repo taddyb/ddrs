@@ -20,14 +20,29 @@
 //! Factors: `l_values` is `L` in row layout with 1.0 on the diagonal. `u_values`
 //! has `U[k, d]` at slot `(d, k)` and `U[i, i]` at the diagonal slot.
 //!
-//! # Solves (reuse of the sweeps in `src/sparse/mod.rs`)
+//! # Solves (stage-only copies of the sweeps in `src/sparse/mod.rs`)
 //!
 //! | Step | Call |
 //! |---|---|
-//! | `L y = b` | `forward_sub_lower(pattern, l_values, b)` |
-//! | `U x = y` | `back_sub_upper_transposed(pattern, u_values, y)` |
-//! | `Uᵀ z = g` | `forward_sub_lower(pattern, u_values, g)` |
-//! | `Lᵀ y = z` | `back_sub_upper_transposed(pattern, l_values, z)` |
+//! | `L y = b` | `forward_sub_lower_recip(pattern, l_values, b)` |
+//! | `U x = y` | `back_sub_upper_transposed_recip(pattern, u_values, y)` |
+//! | `Uᵀ z = g` | `forward_sub_lower_recip(pattern, u_values, g)` |
+//! | `Lᵀ y = z` | `back_sub_upper_transposed_recip(pattern, l_values, z)` |
+//!
+//! The `_recip` fns are the shared sweeps with `/ diag` replaced by
+//! `* (1.0 / diag)`, which is the form cuSPARSE uses. So the host solves
+//! [`tree_lu_solve_host`] and [`tree_lu_solve_transposed_host`] are bitwise equal
+//! to the CUDA solves. The shared Muskingum-Cunge solves keep `/ diag`, so the
+//! DDR sandbox match does not change.
+//!
+//! # CPU or CUDA
+//!
+//! [`tree_lu_solve`] picks the arm once per op (`effective_use_cuda`). The CUDA
+//! arm lives in `src/sparse/tree_lu_cuda.rs`: a single-cube level-scheduled
+//! factor kernel (`tree_factor_dev`), the grad-A kernel, and the four solves,
+//! which call cuSPARSE as the MC path does. The factor fuses `diag -= l * up`
+//! as one multiply-add on both sides (`f32::mul_add` here, `fma` in the
+//! kernel), so the CPU and GPU factors are bitwise equal.
 //!
 //! Gradient: with `g = A⁻ᵀ·grad_x`, `grad_b = g`, and
 //! `grad_A[s] = -g[row(s)]·x[col(s)]` (first half),

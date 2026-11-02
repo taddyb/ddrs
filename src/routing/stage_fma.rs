@@ -24,7 +24,9 @@ use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
 use crate::sparse::{primitive_to_vec, CsrPattern};
 
-fn float<I: Backend>(t: Tensor<Autodiff<I>, 1>) -> <Autodiff<I> as burn::tensor::backend::BackendTypes>::FloatTensorPrimitive {
+fn float<I: Backend>(
+    t: Tensor<Autodiff<I>, 1>,
+) -> <Autodiff<I> as burn::tensor::backend::BackendTypes>::FloatTensorPrimitive {
     match t.into_primitive() {
         TensorPrimitive::Float(a) => a,
         TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
@@ -94,7 +96,11 @@ where
 }
 
 /// `a*s + c` with a constant `s`.
-pub(crate) fn fma_s<I: Backend + 'static>(a: Tensor<Autodiff<I>, 1>, s: f32, c: Tensor<Autodiff<I>, 1>) -> Tensor<Autodiff<I>, 1>
+pub(crate) fn fma_s<I: Backend + 'static>(
+    a: Tensor<Autodiff<I>, 1>,
+    s: f32,
+    c: Tensor<Autodiff<I>, 1>,
+) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
 {
