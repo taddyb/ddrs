@@ -240,7 +240,7 @@ pub struct StageParams {
     pub dt: f32,
     /// Gravity, 9.81.
     pub g: f32,
-    /// Passed to `tree_lu_solve` and `stage_timestep`; false in v1 (the validator rejects CUDA).
+    /// Passed to `tree_lu_solve` and `stage_timestep`. True runs the CUDA arms of the stage op and the tree solve.
     pub use_cuda: bool,
 }
 
