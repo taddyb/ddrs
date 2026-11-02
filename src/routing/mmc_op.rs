@@ -17,7 +17,8 @@ use burn::backend::autodiff::grads::Gradients;
 use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
 use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, TensorPrimitive};
 
-use crate::config::Config;
+use crate::config::{Config, GeometryForm};
+use crate::geometry::{compute_power_law_geometry, compute_power_law_geometry_field};
 use crate::routing::clamp_rule::{ceiling_active, floor_active};
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
 
@@ -320,6 +321,9 @@ pub(crate) struct TimestepState<B: Backend> {
     /// (`∂cap/∂K = −cap/K`) instead of into the Cunge chain. Already the
     /// combined `additive && positivity && !enforce_pos`; `false` ⇒ no op.
     pub reservoir_positivity: bool,
+    /// Which channel section the forward used. The backward handles only
+    /// `Trapezoid` for now.
+    pub geometry_form: GeometryForm,
 }
 
 #[derive(Debug)]
@@ -468,6 +472,10 @@ pub(crate) fn timestep_backward_core<I: Backend + 'static>(
 where
     I::FloatTensorPrimitive: 'static,
 {
+    assert!(
+        state.geometry_form == GeometryForm::Trapezoid,
+        "geometry_form: power_law has no backward yet"
+    );
     {
         let device = I::float_device(&grad_out);
 
@@ -1921,6 +1929,23 @@ pub(crate) mod forward_saved_idx {
 /// The saved-state array is indexed by [`forward_saved_idx`], whose order
 /// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
 #[allow(clippy::too_many_arguments)]
+/// The channel section a form computes, in the order the saved state wants.
+/// Power law leaves the trapezoid-only fields at zero.
+struct SectionOut<I: Backend> {
+    depth: Tensor<I, 1>,
+    top_width: Tensor<I, 1>,
+    side_slope: Tensor<I, 1>,
+    bottom_width: Tensor<I, 1>,
+    hyd_radius: Tensor<I, 1>,
+    velocity_un: Tensor<I, 1>,
+    velocity_cl: Tensor<I, 1>,
+    celerity: Tensor<I, 1>,
+    ratio: Tensor<I, 1>,
+    denominator: Tensor<I, 1>,
+    side_slope_raw: Tensor<I, 1>,
+    bw_raw: Tensor<I, 1>,
+}
+
 pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     cfg: &Config,
     pattern: &Arc<CsrPattern>,
@@ -1984,87 +2009,165 @@ where
 
     // S1
     let q_eps = qsp_in.clone() + 1e-6_f32;
-    // S2. With stage-dependent roughness the Manning inversion picks up a
-    // constant `d_ref^gamma` on the numerator; see S5 for where gamma really
-    // bites. At gamma == 0 (or d_ref == 1) the factor is exactly 1.0.
-    let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
-    let numerator = if gamma != 0.0 && d_ref != 1.0 {
-        numerator * d_ref.powf(gamma)
-    } else {
-        numerator
-    };
-    // S3
-    let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
-    // S4
-    let ratio = numerator.clone() / denominator.clone();
-    // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma); see `depth_exponent`.
-    let exponent = depth_exponent(q_eps.clone(), gamma, gamma_in.as_ref());
-    // S6
-    let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
-    // S7
-    let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
-    // S8 (pre-clamp side slope)
-    let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
-    // S9
-    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
-    // S10 (pre-clamp bw)
-    let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
-    // S11
-    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
-    // S12
-    let _area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
-    // S13
-    let wp = bottom_width.clone()
-        + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
-    // S14
-    let hyd_radius = _area.clone() / wp.clone();
-    // S15. v = (1/n(d))·R^(2/3)·√slope. With stage-dependent roughness
-    // 1/n(d) = (1/n_0)·(d/d_ref)^gamma, so the factor rides on the velocity as
-    // well as on the depth inversion. Applying it to only one of the two leaves
-    // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
-    // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
-    // caught on the first run.
-    let n_recip = match &gamma_in {
-        Some(g) => n_in.clone().recip() * (depth.clone() / d_ref).powf(g.clone()),
-        None if gamma != 0.0 => {
-            n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
-        }
-        None => n_in.clone().recip(),
-    };
-    let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
-        * slope_in.clone().sqrt();
-    // S16
-    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
-    // S17: celerity.
-    //   ddr_match=true  -> c = v·5/3, the wide-rectangular Kleitz-Seddon limit.
-    //                      Mirrors ddr/mmc.py:167. WRONG for the trapezoid built
-    //                      in S7-S13: kappa = b/y ~ 0.7-1.8 here, so the true
-    //                      ratio is ~1.30-1.36, not 1.667 (22-27% high).
-    //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
-    //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
-    //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
-    //   With stage-dependent roughness, Q = (d/d_ref)^gamma · Q_Manning(d), so
-    //   c = dQ/dA picks up one extra term. Using dA/dd = T (true for ANY cross
-    //   section, not just the power law):
-    //       c = v · [ beta_trapezoid + gamma · A/(T·d) ]
-    //   Sanity: for the pure power-law section A/(T·d) = 1/(q+1), recovering
-    //   beta = (5 + 3q + 3·gamma)/(3(q+1)), which is 5/3 at q = gamma = 0.
-    let celerity = if ddr_match {
-        velocity_cl.clone() * (5.0_f32 / 3.0_f32)
-    } else {
-        let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
-        let beta =
-            -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
-        let beta = match &gamma_in {
-            Some(g) => {
-                beta + _area.clone() * g.clone() / (top_width.clone() * depth.clone())
-            }
-            None if gamma != 0.0 => {
-                beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
-            }
-            None => beta,
+    // S2..S17: the channel section. The form picks the geometry. Everything
+    // after S17 reads the same named fields, whatever the form.
+    let SectionOut {
+        depth,
+        top_width,
+        side_slope,
+        bottom_width,
+        hyd_radius,
+        velocity_un,
+        velocity_cl,
+        celerity,
+        ratio,
+        denominator,
+        side_slope_raw,
+        bw_raw,
+    } = match cfg.params.geometry_form {
+        GeometryForm::Trapezoid => {
+        // S2. With stage-dependent roughness the Manning inversion picks up a
+        // constant `d_ref^gamma` on the numerator; see S5 for where gamma really
+        // bites. At gamma == 0 (or d_ref == 1) the factor is exactly 1.0.
+        let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
+        let numerator = if gamma != 0.0 && d_ref != 1.0 {
+            numerator * d_ref.powf(gamma)
+        } else {
+            numerator
         };
-        velocity_cl.clone() * beta
+        // S3
+        let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
+        // S4
+        let ratio = numerator.clone() / denominator.clone();
+        // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma); see `depth_exponent`.
+        let exponent = depth_exponent(q_eps.clone(), gamma, gamma_in.as_ref());
+        // S6
+        let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
+        // S7
+        let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
+        // S8 (pre-clamp side slope)
+        let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
+        // S9
+        let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
+        // S10 (pre-clamp bw)
+        let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
+        // S11
+        let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
+        // S12
+        let _area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
+        // S13
+        let wp = bottom_width.clone()
+            + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
+        // S14
+        let hyd_radius = _area.clone() / wp.clone();
+        // S15. v = (1/n(d))·R^(2/3)·√slope. With stage-dependent roughness
+        // 1/n(d) = (1/n_0)·(d/d_ref)^gamma, so the factor rides on the velocity as
+        // well as on the depth inversion. Applying it to only one of the two leaves
+        // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
+        // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
+        // caught on the first run.
+        let n_recip = match &gamma_in {
+            Some(g) => n_in.clone().recip() * (depth.clone() / d_ref).powf(g.clone()),
+            None if gamma != 0.0 => {
+                n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
+            }
+            None => n_in.clone().recip(),
+        };
+        let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
+            * slope_in.clone().sqrt();
+        // S16
+        let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
+        // S17: celerity.
+        //   ddr_match=true  -> c = v·5/3, the wide-rectangular Kleitz-Seddon limit.
+        //                      Mirrors ddr/mmc.py:167. WRONG for the trapezoid built
+        //                      in S7-S13: kappa = b/y ~ 0.7-1.8 here, so the true
+        //                      ratio is ~1.30-1.36, not 1.667 (22-27% high).
+        //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
+        //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
+        //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
+        //   With stage-dependent roughness, Q = (d/d_ref)^gamma · Q_Manning(d), so
+        //   c = dQ/dA picks up one extra term. Using dA/dd = T (true for ANY cross
+        //   section, not just the power law):
+        //       c = v · [ beta_trapezoid + gamma · A/(T·d) ]
+        //   Sanity: for the pure power-law section A/(T·d) = 1/(q+1), recovering
+        //   beta = (5 + 3q + 3·gamma)/(3(q+1)), which is 5/3 at q = gamma = 0.
+        let celerity = if ddr_match {
+            velocity_cl.clone() * (5.0_f32 / 3.0_f32)
+        } else {
+            let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
+            let beta =
+                -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
+            let beta = match &gamma_in {
+                Some(g) => {
+                    beta + _area.clone() * g.clone() / (top_width.clone() * depth.clone())
+                }
+                None if gamma != 0.0 => {
+                    beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
+                }
+                None => beta,
+            };
+            velocity_cl.clone() * beta
+        };
+
+            SectionOut {
+                depth,
+                top_width,
+                side_slope,
+                bottom_width,
+                hyd_radius,
+                velocity_un,
+                velocity_cl,
+                celerity,
+                ratio,
+                denominator,
+                side_slope_raw,
+                bw_raw,
+            }
+        }
+        GeometryForm::PowerLaw => {
+            assert!(!ddr_match, "geometry_form: power_law requires ddr_match: false");
+            let g = match &gamma_in {
+                Some(gt) => compute_power_law_geometry_field::<I>(
+                    n_in.clone(),
+                    psp_in.clone(),
+                    qsp_in.clone(),
+                    qt_in.clone(),
+                    slope_in.clone(),
+                    depth_lb,
+                    gt.clone(),
+                    d_ref,
+                ),
+                None => compute_power_law_geometry::<I>(
+                    n_in.clone(),
+                    psp_in.clone(),
+                    qsp_in.clone(),
+                    qt_in.clone(),
+                    slope_in.clone(),
+                    depth_lb,
+                    gamma,
+                    d_ref,
+                ),
+            };
+            // S16: same band as the trapezoid. Here it acts as a celerity band.
+            let velocity_cl = g.velocity.clone().clamp(velocity_lb, 15.0);
+            // S17 (power law): c = v_clamped * celerity_ratio.
+            let celerity = velocity_cl.clone() * g.celerity_ratio.clone();
+            let zeros = g.depth.zeros_like();
+            SectionOut {
+                depth: g.depth,
+                top_width: g.top_width,
+                side_slope: zeros.clone(),
+                bottom_width: zeros.clone(),
+                hyd_radius: g.hydraulic_radius,
+                velocity_un: g.velocity,
+                velocity_cl,
+                celerity,
+                ratio: g.ln_ratio,
+                denominator: zeros.clone(),
+                side_slope_raw: zeros.clone(),
+                bw_raw: zeros,
+            }
+        }
     };
 
     // S18..S23: Muskingum coefficients
@@ -2852,6 +2955,11 @@ where
 {
     use crate::config::SparseSolver;
     assert!(
+        cfg.params.geometry_form == GeometryForm::Trapezoid
+            || (reservoir.is_none() && release.is_none()),
+        "geometry_form: power_law does not support reservoirs or dam release"
+    );
+    assert!(
         reservoir.is_none() || release.is_none(),
         "the option C reservoir override and the dam release are exclusive"
     );
@@ -3023,6 +3131,7 @@ where
         reservoir_additive: reservoir.is_some_and(|r| r.additive),
         // Mirrors S19p's gate in `forward_chain_inner` exactly.
         reservoir_positivity: reservoir.is_some_and(|r| r.additive && r.positivity) && !enforce_pos,
+        geometry_form: cfg.params.geometry_form,
     };
     debug_assert!(
         !state.reservoir_additive || state.reservoir_t_prev.is_some(),
@@ -3250,6 +3359,10 @@ where
     I::Device: 'static,
 {
     use crate::config::SparseSolver;
+    assert!(
+        cfg.params.geometry_form == GeometryForm::Trapezoid,
+        "geometry_form: power_law does not support leakance"
+    );
 
     let dt = crate::routing::mmc::DT_SECONDS;
     let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
@@ -3417,6 +3530,7 @@ where
         reservoir_t_prev: None,
         reservoir_additive: false,
         reservoir_positivity: false,
+        geometry_form: cfg.params.geometry_form,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -3505,6 +3619,10 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    assert!(
+        cfg.params.geometry_form == GeometryForm::Trapezoid,
+        "geometry_form: power_law does not support CUDA graphs"
+    );
     use crate::config::SparseSolver;
 
     // SAFETY: route_timestep is the training thread's entry; no other thread
@@ -3763,6 +3881,7 @@ where
         reservoir_t_prev: None,
         reservoir_additive: false,
         reservoir_positivity: false,
+        geometry_form: GeometryForm::Trapezoid,
     };
 
     let result_prim = match TimestepOp
