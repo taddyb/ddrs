@@ -1918,17 +1918,6 @@ pub(crate) mod forward_saved_idx {
     pub const BW_RAW: usize = 22;
 }
 
-/// Inner-backend S1..S28 chain. Operates on `I::FloatTensorPrimitive`s — no
-/// autograd tape pushes. Returns `(q_next, [saved_state; NUM_SAVED_STATE])`.
-///
-/// Shared between [`timestep_forward`] (regular per-step path) and SP-10's
-/// `try_capture_forward` (CUDA-graph capture path) so that exactly the same
-/// kernel sequence runs in both cases — keeping V1 ABSOLUTE MATCH while also
-/// giving capture a deterministic chain to record.
-///
-/// The saved-state array is indexed by [`forward_saved_idx`], whose order
-/// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
-#[allow(clippy::too_many_arguments)]
 /// The channel section a form computes, in the order the saved state wants.
 /// Power law leaves the trapezoid-only fields at zero.
 struct SectionOut<I: Backend> {
@@ -1946,6 +1935,17 @@ struct SectionOut<I: Backend> {
     bw_raw: Tensor<I, 1>,
 }
 
+/// Inner-backend S1..S28 chain. Operates on `I::FloatTensorPrimitive`s — no
+/// autograd tape pushes. Returns `(q_next, [saved_state; NUM_SAVED_STATE])`.
+///
+/// Shared between [`timestep_forward`] (regular per-step path) and SP-10's
+/// `try_capture_forward` (CUDA-graph capture path) so that exactly the same
+/// kernel sequence runs in both cases — keeping V1 ABSOLUTE MATCH while also
+/// giving capture a deterministic chain to record.
+///
+/// The saved-state array is indexed by [`forward_saved_idx`], whose order
+/// mirrors `crate::cuda_graph::PersistentScratch::state_*` declaration order.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     cfg: &Config,
     pattern: &Arc<CsrPattern>,
