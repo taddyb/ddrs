@@ -89,7 +89,7 @@ fn tree_factor_kernel(
                 let up = a[nz + s];
                 l[s] = lv_;
                 u[s] = up;
-                // Rule F1: the same fused site as `tree_lu_factor` on the host.
+                // NVRTC contracts a*b+c into one rounding, so `tree_lu_factor` fuses the same site on the host.
                 d = fma(-lv_, up, d);
             }
             l[ds] = 1.0f32;

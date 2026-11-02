@@ -758,7 +758,7 @@ pub fn stage_readout_host(
     // 9
     let dt_s = asm.dt_s;
     // fe = inner * in_stage with inner fused; `fe` stays rounded for the `into` gather, and the net
-    // term takes `fe` as a fused product (rule F1, "let m = a*b; out = m; y = m + c").
+    // term subtracts the rounded `fe`. A product with several uses stays a plain multiply.
     let fe_inner: Vec<f32> = (0..n).map(|i| c.w_edge[i].mul_add(q_new[i], keep_of(c.w_edge[i]) * qc[i])).collect();
     let fe: Vec<f32> = (0..n).map(|i| fe_inner[i] * c.in_stage[i]).collect();
     let mut into = vec![0.0f32; n];
@@ -1508,7 +1508,7 @@ pub fn stage_hour_forward(
     for s in 0..subs {
         let asm = stage_assemble_host(c, hour, s, &h, &qc);
         let factors = tree_lu_factor(pattern, &asm.a_values);
-        // The reciprocal-form host solve that matches cuSPARSE bit for bit (fma-ruling.md, R1).
+        // The reciprocal-form host solve that matches cuSPARSE bit for bit.
         let dh = tree_lu_solve_host(pattern, &factors, &asm.r);
         let ro = stage_readout_host(c, hour, &h, &qc, &asm, &dh);
         for (m, v) in mass.iter_mut().zip(ro.mass) {

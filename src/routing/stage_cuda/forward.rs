@@ -1053,7 +1053,7 @@ pub fn stage_assemble_dev(c: &StageOpConstsDev, hour: &HourDev, s: usize, h: &Cu
     let dt_s = c.host.dt / subs as f32;
     let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
     let i_mid = i_mid_dev(c, hour, s);
-    let (hb0, hb1) = ((hour.b1 - hour.b0).mul_add(f0, hour.b0), (hour.b1 - hour.b0).mul_add(f1, hour.b0));
+    let (hb0, hb1) = (hour.b0 + (hour.b1 - hour.b0) * f0, hour.b0 + (hour.b1 - hour.b0) * f1);
     let depth = depth_dev(c, h, hb0);
     let edge = section_dev(c, &hour.p, &hour.q_eps, &depth.d_edge);
     let store = section_dev(c, &hour.p, &hour.q_eps, &depth.depth);

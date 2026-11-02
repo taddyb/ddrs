@@ -53,7 +53,7 @@ use super::tree_lu_cuda::{
     tree_factor_dev, tree_grad_a_dev, tree_solve_dev, tree_solve_transposed_dev, TreeDev,
     TreeFactorsDev,
 };
-use super::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
+use super::{primitive_to_vec, CsrPattern};
 
 /// Factors of a tree matrix. Both vectors have length `nnz` (`CsrPattern` layout).
 #[derive(Clone, Debug)]
@@ -189,7 +189,7 @@ pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
             let up = a_values[nnz + s];
             l_values[s] = l;
             u_values[s] = up;
-            // Rule F1 (fma-ruling): one fused multiply-add, the same site as `tree_factor_kernel`.
+            // NVRTC contracts a*b+c into one rounding, so the CPU fuses the same site as `tree_factor_kernel`.
             diag = (-l).mul_add(up, diag);
         }
         l_values[ds] = 1.0;
@@ -206,7 +206,7 @@ pub fn tree_lu_solve_host(pattern: &CsrPattern, f: &TreeFactors, b: &[f32]) -> V
 
 /// Stage-only copy of `forward_sub_lower` (`src/sparse/mod.rs`) with `/ diag` replaced by
 /// `* (1.0 / diag)`. This mirrors cuSPARSE's reciprocal form, so the host solve is bitwise
-/// equal to `tree_solve_dev` (fma-ruling.md, R1). The shared MC solve is unchanged.
+/// equal to `tree_solve_dev`. The shared MC solve is unchanged.
 fn forward_sub_lower_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
     debug_assert_eq!(a_values.len(), pattern.nnz());
     debug_assert_eq!(b.len(), pattern.n);
@@ -231,7 +231,7 @@ fn forward_sub_lower_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) ->
 }
 
 /// Stage-only copy of `back_sub_upper_transposed` (`src/sparse/mod.rs`) with `/ diag` replaced
-/// by `* (1.0 / diag)`. Mirrors cuSPARSE's reciprocal form (fma-ruling.md, R1).
+/// by `* (1.0 / diag)`. Mirrors cuSPARSE's reciprocal form: cuSPARSE multiplies by the reciprocal of the diagonal.
 fn back_sub_upper_transposed_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
     debug_assert_eq!(a_values.len(), pattern.nnz());
     debug_assert_eq!(b.len(), pattern.n);

@@ -808,7 +808,7 @@ fn gradcheck_state(
     println!("{label}: loss {l0}");
     let names = ["n", "q", "p", "h_t", "q_t"];
     // f32 noise on the loss sets the lower bound; curvature the upper. The absolute floor is
-    // max(1e-4, 4 * ulp(l0) / eps) (ruling R3b, 2026-11-01). The loss sums the outputs and each carries
+    // max(1e-4, 4 * ulp(l0) / eps) (2026-11-01). The loss sums the outputs and each carries
     // its own rounding, so the finite difference resolves the loss only to a few ulps: at the dam row the
     // measured loss quantum is 3.2e-6, which is 3.4 ulp(l0). The 5e-3 relative term is unchanged.
     const EPS: [f32; 5] = [1e-3, 1e-2, 0.2, 1e-2, 1e-2];

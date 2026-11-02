@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData, TensorPrimitive};
+use burn::tensor::{Bool, Int, Tensor, TensorData, TensorPrimitive};
 
 use crate::config::DownstreamBoundary;
 use crate::data::store::ChannelGeometryRows;
@@ -467,15 +467,6 @@ fn one_minus<I: Backend>(t: Tensor<Ad<I>, 1>) -> Tensor<Ad<I>, 1> {
     t.neg().add_scalar(1.0)
 }
 
-fn scatter_add<I: Backend>(
-    n: usize,
-    idx: &Tensor<Ad<I>, 1, Int>,
-    vals: Tensor<Ad<I>, 1>,
-) -> Tensor<Ad<I>, 1> {
-    let zeros = Tensor::<Ad<I>, 1>::zeros([n], &vals.device());
-    zeros.scatter(0, idx.clone(), vals, IndexingUpdateOp::Add)
-}
-
 impl<I: Backend + 'static> StageBlock<I>
 where
     I::FloatTensorPrimitive: 'static,
@@ -568,8 +559,8 @@ where
         q: &Tensor<Ad<I>, 1>,
         depth: Tensor<Ad<I>, 1>,
     ) -> Section<I> {
-        // The reference section is written out here, with the fused multiply-adds of rule F1
-        // (fma-ruling.md), line for line with `stage_op.rs::section_host`. `src/geometry.rs`
+        // The reference section is written out here, with the fused multiply-adds (NVRTC
+        // contracts a*b+c into one rounding, so the CPU fuses the same sites), line for line with `stage_op.rs::section_host`. `src/geometry.rs`
         // (shared with the hotstart) keeps its unfused form.
         let bw_lb = self.params.bottom_width_lb;
         let one = Tensor::<Ad<I>, 1>::ones_like(&depth);
@@ -972,7 +963,6 @@ where
         let sl = self.slots.as_ref().expect("slots built");
         let c = &self.c;
         let pr = self.params;
-        let nn = self.net.n;
         let (th, thc) = (pr.theta, pr.theta_control);
         let subs = pr.substeps.max(1) as usize;
         let dt_s = pr.dt / subs as f32;
@@ -996,7 +986,7 @@ where
         };
 
         // MC inflow at the hour's two ends; substeps interpolate linearly.
-        // Row sums fuse the product into the sum, as the fused op does (rule F1).
+        // Row sums fuse the product into the sum, as the fused op does (one rounding per a*b+c site).
         let spmv_mc = |x: Tensor<Ad<I>, 1>| spmv_fma::<I>(&sl.pattern, x, sl.adj_mc.clone());
         let i_t = spmv_mc(q_t.clone());
         let i_n = spmv_mc(q_next_mc.clone());

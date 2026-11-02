@@ -1,13 +1,20 @@
 //! CUDA arm of the fused stage op against its CPU arm.
 //!
 //! `StageBlock::step_fused` runs on NdArray (`use_cuda: false`) and on the
-//! Cuda backend (`use_cuda: true`) with the same inputs. Bars (plan D7):
-//! per hour and per field `max|dev - cpu| <= 1e-5 * max|cpu|` for the 3-hour
-//! families and the 24-hour MC-inflow case, `1e-4` for the 48-hour Juniata and
-//! Hudson runs; the five mass sums within `1e-5 * gross_flux_m3`; `steps`
-//! equal. The fields are `q_next`, `stage()` and the ten `last_coefficients()`
-//! fields. Each side feeds its own `q_next` forward. `run_pair_xb` returns the
-//! first failing field as an `Err` and never widens a bar.
+//! Cuda backend (`use_cuda: true`) with the same inputs. `run_pair_xb` compares, per hour and per
+//! field, `q_next`, `stage()` and the ten `last_coefficients()` fields, plus the five mass sums and
+//! `steps`. Each side feeds its own `q_next` forward. It returns the first failing field as an `Err`
+//! and never widens a bar. The gates:
+//!
+//! - `forward_substeps_match_host_from_synced_state` is strict. Every substep starts from the host
+//!   state. It uses a block bar of `1e-5 * max|host|`, per-entry cancellation bars for `r` and `q_new`,
+//!   and a mass bar. `reverse_substeps_match_host_from_gpu_state` does the same from the GPU state.
+//! - Juniata 48 h is strict at `1e-4 * max|cpu|`.
+//! - `mc_inflow` is strict at `1e-5 * max|cpu|`.
+//! - Hudson 48 h runs under the rounding-noise gate.
+//! - `chain_states`, `table_and_mixed` and `prescribed_boundary` run under a sanity bar of
+//!   `2e-3 * max|cpu|`. These families are stiff, so f32 rounding differences grow along the
+//!   trajectory. The user ruled this two-level gate on 2026-11-01.
 //!
 //! The 48-hour tests skip themselves in debug builds (the `cfg!(debug_assertions)`
 //! rule of `tests/stage_op_parity.rs`). Run them with
@@ -216,8 +223,8 @@ fn pick<T: Clone>(v: &[Vec<T>], k: usize) -> Vec<T> {
 
 // ------------------------------------------------------------ the pair run
 
-// Forward noise gate (ruling B3), mirroring the B2 gradient gate of
-// tests/stage_op_parity.rs. A miss of the strict bar on `q_next` or one of the
+// Forward noise gate (the user-ruled rounding-noise gate, 2026-11-01), mirroring the gradient noise
+// gate of tests/stage_op_parity.rs. A miss of the strict bar on `q_next` or one of the
 // ten `last_coefficients()` fields is accepted only when
 // err <= FWD_NOISE_FACTOR * (noise_cpu + noise_cuda) and
 // err <= FWD_NOISE_CAP_FRAC * max|cpu|; the accepted entries of a family are
@@ -225,8 +232,6 @@ fn pick<T: Clone>(v: &[Vec<T>], k: usize) -> Vec<T> {
 const FWD_NOISE_FACTOR: f32 = 4.0;
 const FWD_NOISE_CAP_FRAC: f32 = 5e-4;
 const FWD_NOISE_BUDGET_FRAC: f64 = 0.01;
-#[allow(dead_code)]
-const FWD_NOISE_BUDGET_FRAC_TABLE: f64 = 0.02;
 
 /// The 11 noise-eligible fields.
 const ELIGIBLE: [&str; 11] = [
@@ -309,7 +314,7 @@ struct Accepted {
     noise_dev: f32,
 }
 
-/// How a trajectory comparison is gated (rulings B3 and B4).
+/// How a trajectory comparison is gated (the noise gate and the sanity bar).
 #[derive(Clone, Copy, PartialEq)]
 enum Gate {
     /// Every entry within the strict bar. No acceptance.
@@ -317,11 +322,11 @@ enum Gate {
     /// Strict bar first; entries over it are printed; every field must stay within
     /// `STIFF_SANITY_FRAC * max|cpu|` and each mass term within `STIFF_SANITY_FRAC * gross`.
     Sanity,
-    /// The B3 noise gate (Hudson).
+    /// The rounding-noise gate (Hudson).
     Noise,
 }
 
-/// Sanity bar of the stiff families (ruling B4).
+/// Sanity bar of the stiff families (ruling of 2026-11-01).
 const STIFF_SANITY_FRAC: f32 = 2e-3;
 
 /// Counts of one family.
@@ -348,8 +353,8 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
-/// Run one case on both backends and apply the D7 forward bars with the B3
-/// noise gate. `bar` is the strict relative bar. Returns the first entry that
+/// Run one case on both backends and apply the forward bars with the noise
+/// gate. `bar` is the strict relative bar. Returns the first entry that
 /// fails the gate.
 fn run_pair_xb(case: &Case, theta: f32, substeps: u32, bar: f32, gate: Gate) -> Result<Worst, String> {
     let (dc, dg): (<Cpu as BackendTypes>::Device, <Gpu as BackendTypes>::Device) = (Default::default(), Default::default());
@@ -708,6 +713,22 @@ fn prescribed_boundary_cases() -> Vec<Case> {
         let c = Case::new("rising_series", adj, pattern, H0::Abs(h), vec![2.0, 3.0, 4.0]).prescribed(base, 0.5);
         cases.push(c);
     }
+    // Hour 0 has b0 = -0.03432996 and b1 = -0.23432997. At substep 3 of 4 (f0 = 0.75) the unfused
+    // interpolation gives -0.18432997 and the fused one -0.18432996, so the synced hb0 assert pins the
+    // unfused form on the device.
+    {
+        let (adj, pattern) = chain(&[1000.0; 3], &[1e-3; 3]);
+        let net = StageNetwork::build(&adj, &pattern, None, 0.0, &[]).unwrap();
+        let h: Vec<f32> = net.z_mid.iter().map(|z| z + 0.8).collect();
+        let (b0, b1) = (-0.03432996f32, -0.23432997f32);
+        let c = Case::new("boundary_unfused", adj, pattern, H0::Abs(h), vec![2.0, 3.0, 4.0]).prescribed(b0, b1 - b0);
+        let (k0, k1) = (c.series_base, c.series_base + c.series_rate);
+        assert_eq!((k0, k1), (b0, b1), "the series must hit the pinned boundary values");
+        let f0 = 3.0f32 / 4.0;
+        let (unfused, fused) = (k0 + (k1 - k0) * f0, (k1 - k0).mul_add(f0, k0));
+        assert_ne!(unfused, fused, "this input must tell the fused and unfused boundary stage apart");
+        cases.push(c);
+    }
     cases
 }
 
@@ -1015,10 +1036,11 @@ fn cuda_arm_is_the_phase_g_stub() {
 // with the host block. Strict everywhere: block bar 1e-5 x max|host|, 0/1
 // indicators exact, same zero set on the clamped outputs. No noise gate.
 
-/// Worst err/bar per field for one family; collects every miss.
-/// Cancellation fraction of the synced-state bar for `r` and `q_new` (ruling B4).
+/// Cancellation fraction of the synced-state bar for `r` and `q_new` (the bar scales with the size of
+/// the terms that cancel in the sum).
 const SYNC_CANCEL_FRAC: f32 = 1e-6;
 
+/// Worst err/bar per field for one family; collects every miss.
 struct Rec {
     worst: BTreeMap<String, f32>,
     /// Per field: (entries not bitwise equal, entries compared).
@@ -1034,7 +1056,7 @@ impl Rec {
     }
 
     /// The block bar `1e-5 * max|host|`; with `terms`, the per-entry cancellation
-    /// bar `max(1e-5 * max|host|, SYNC_CANCEL_FRAC * terms[i])` (ruling B4).
+    /// bar `max(1e-5 * max|host|, SYNC_CANCEL_FRAC * terms[i])` (ruling of 2026-11-01).
     fn close_t(&mut self, ctx: &str, key: &str, dev: &[f32], host: &[f32], terms: Option<&[f32]>) {
         assert_eq!(dev.len(), host.len(), "{ctx} {key}: length");
         let scale = host.iter().fold(0.0f32, |m, v| m.max(v.abs()));
@@ -1137,7 +1159,7 @@ impl Rec {
 
 /// Compare one substep. `asm`/`ro` are the reference blocks (computed by the host fns), `da`/`ddh`/`dr`
 /// the blocks under test. `dh_ref` is the reference solve; `dh_used` the solve output both readouts got.
-/// Same bars as ruling B4: block bar, cancellation bars for `r` and `q_new`, mass bars.
+/// Same bars as the forward direction: block bar, cancellation bars for `r` and `q_new`, mass bars.
 #[allow(clippy::too_many_arguments)]
 fn compare_substep(
     rec: &mut Rec,
@@ -1347,9 +1369,9 @@ fn forward_substeps_match_host_from_synced_state() {
 }
 
 
-// ------------------------------------------ round 5: reverse check and branch diagnostic
+// ------------------------------------------ reverse check from the GPU state
 //
-// Diagnostic only; no bar is changed here. `gpu_traj` runs the device hour (prologue, hour forward)
+// `gpu_traj` runs the device hour (prologue, hour forward)
 // from the case's initial state, which is what `step_fused` runs on CUDA, and keeps every substep's
 // start state and its own block outputs.
 
@@ -1364,8 +1386,6 @@ struct GpuSub {
 struct GpuHour {
     hour: HourHost,
     subs: Vec<GpuSub>,
-    /// `[h_end, q_next]` as `step_fused` outputs them.
-    out: Vec<f32>,
 }
 
 fn hour_b(case: &Case, k: usize) -> (f32, f32) {
@@ -1408,13 +1428,13 @@ fn gpu_traj(case: &Case, theta: f32, substeps: u32) -> (Arc<StageOpConsts>, Vec<
         let out = cube_to_host(&fwd.out);
         h = fwd.h_end.clone();
         qt = up(&out[n..]);
-        hours.push(GpuHour { hour: hour_to_host(&hd), subs, out });
+        hours.push(GpuHour { hour: hour_to_host(&hd), subs });
     }
     (c, hours)
 }
 
 /// Reverse check of one cell: along the GPU trajectory, run the host substep from the exact GPU
-/// values and compare with the GPU substep's own outputs, under the same B4 bars.
+/// values and compare with the GPU substep's own outputs, under the same bars.
 fn reverse_cell(case: &Case, theta: f32, substeps: u32, rec: &mut Rec) {
     let (c, hours) = gpu_traj(case, theta, substeps);
     for (k, gh) in hours.iter().enumerate() {
@@ -1424,10 +1444,7 @@ fn reverse_cell(case: &Case, theta: f32, substeps: u32, rec: &mut Rec) {
             // mirror of the forward direction: the host solve gets the GPU's own a_values and r
             let f = tree_lu_factor(&case.pattern, &g.asm.a_values);
             let dh_ref = tree_lu_solve_host(&case.pattern, &f, &g.asm.r);
-            // same inputs: the host solve on the GPU's own a_values and r, against the GPU dh
-            let f2 = tree_lu_factor(&case.pattern, &g.asm.a_values);
-            let dh_same = tree_lu_solve_host(&case.pattern, &f2, &g.asm.r);
-            rec.close(&ctx, "dh (host solve on the GPU a_values, r)", &g.dh, &dh_same);
+            rec.close(&ctx, "dh (host solve on the GPU a_values, r)", &g.dh, &dh_ref);
             // the GPU dh feeds the host readout
             let ro_h = stage_readout_host(&c, &gh.hour, &g.h, &g.qc, &asm_h, &g.dh);
             compare_substep(rec, &ctx, &c, &gh.hour, &g.qc, &asm_h, &ro_h, &dh_ref, &g.dh, &g.asm, &g.dh, &g.ro, None);
@@ -1435,83 +1452,15 @@ fn reverse_cell(case: &Case, theta: f32, substeps: u32, rec: &mut Rec) {
     }
 }
 
-/// Per reach: s_up, s_dn, act (2 without a table), a_up == 0, b_down == 0, r_prime == 0, sign(qc) (0 neg, 1 zero, 2 pos).
-type Pat = Vec<[u8; 7]>;
-const PAT_NAMES: [&str; 7] = ["s_up", "s_dn", "act", "a_up==0", "b_down==0", "r_prime==0", "sign(qc)"];
-
-fn pattern(asm: &Assembled, qc: &[f32]) -> Pat {
-    (0..qc.len())
-        .map(|i| {
-            [
-                (asm.depth.s_up[i] > 0.5) as u8,
-                (asm.depth.s_dn[i] > 0.5) as u8,
-                if asm.control.act.len() < qc.len() { 2 } else { (asm.control.act[i] > 0.5) as u8 },
-                (asm.newton.a_up[i] == 0.0) as u8,
-                (asm.newton.b_down[i] == 0.0) as u8,
-                (asm.control.r_prime[i] == 0.0) as u8,
-                if qc[i] < 0.0 { 0 } else if qc[i] == 0.0 { 1 } else { 2 },
-            ]
-        })
-        .collect()
-}
-
-/// Host-trajectory patterns, `[hour][substep]`.
-fn cpu_patterns(case: &Case, theta: f32, substeps: u32) -> Vec<Vec<Pat>> {
-    let dc: <Cpu as BackendTypes>::Device = Default::default();
-    let mut block = make_block::<Cpu>(case, theta, substeps, false, &dc);
-    let c = block.op_consts(&case.pattern);
-    let mut h = to_vec1(block.stage().unwrap());
-    let mut qt = case.q_t0.clone();
-    let mut out = vec![];
-    for k in 0..case.hours {
-        let (qp, mc) = (pick(&case.qp, k), pick(&case.mc, k));
-        let (b0, b1) = hour_b(case, k);
-        let hour = stage_prologue_host(&c, &case.n, &case.q, &case.p, &qt, &mc, &qp, b0, b1);
-        let fwd = stage_hour_forward(&c, &case.pattern, &hour, &h, &qt, true);
-        out.push(
-            fwd.subs
-                .iter()
-                .enumerate()
-                .map(|(s, sv)| pattern(&stage_assemble_host(&c, &hour, s, &sv.h, &sv.qc), &sv.qc))
-                .collect(),
-        );
-        h = fwd.h_end;
-        qt = fwd.q_out;
-    }
-    out
-}
-
-/// Hours at which any gated field, the stage or a mass term is over the sanity bar (2e-3 x max|cpu|, or x gross).
-fn sanity_miss_hours(cb: &[HourRec], gb: &[HourRec]) -> Vec<usize> {
-    let mut hours = vec![];
-    for k in 0..cb.len() {
-        let over = |d: &[f32], c: &[f32]| {
-            let scale = c.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            max_abs_diff(d, c) > STIFF_SANITY_FRAC * scale
-        };
-        let mut miss = over(&gb[k].stage, &cb[k].stage);
-        for fi in 0..ELIGIBLE.len() {
-            miss |= over(&gb[k].fields[fi], &cb[k].fields[fi]);
-        }
-        for j in 0..5 {
-            miss |= (gb[k].mass[j] - cb[k].mass[j]).abs() > STIFF_SANITY_FRAC * cb[k].mass[3].abs();
-        }
-        if miss {
-            hours.push(k);
-        }
-    }
-    hours
-}
-
 #[test]
-fn round5_reverse_and_branch_diagnostic() {
-    let mut misses_total = 0usize;
-    // 1. Reverse synced check, per family.
+fn reverse_substeps_match_host_from_gpu_state() {
+    let device = TestDevice::default();
+    let mut misses = 0usize;
     let families: Vec<(&str, Vec<Case>)> = vec![
         ("chain_states", chain_state_cases()),
         ("table_and_mixed", table_and_mixed_cases()),
         ("prescribed_boundary", prescribed_boundary_cases()),
-        ("mc_inflow", vec![mc_inflow_case(&TestDevice::default())]),
+        ("mc_inflow", vec![mc_inflow_case(&device)]),
     ];
     for (name, cases) in &families {
         let mut rec = Rec { worst: BTreeMap::new(), bits: BTreeMap::new(), misses: vec![] };
@@ -1523,310 +1472,14 @@ fn round5_reverse_and_branch_diagnostic() {
             }
         }
         print_rec(&format!("REVERSE {name}"), &rec);
-        misses_total += finish_rec(&format!("REVERSE {name}"), &rec);
+        misses += finish_rec(&format!("REVERSE {name}"), &rec);
     }
-    {
-        let df = chain_state_cases().into_iter().find(|c| c.label == "depth_floor").unwrap();
-        for substeps in [1u32, 4] {
-            let mut rec = Rec { worst: BTreeMap::new(), bits: BTreeMap::new(), misses: vec![] };
-            reverse_cell(&df, 0.6, substeps, &mut rec);
-            print_rec(&format!("REVERSE depth_floor th0.6 s{substeps}"), &rec);
-            finish_rec(&format!("REVERSE depth_floor th0.6 s{substeps}"), &rec);
-        }
-    }
-    println!("REVERSE total misses {misses_total}");
-
-    // 2. Branch patterns, per cell of the three stiff families.
-    let (dc, dg): (<Cpu as BackendTypes>::Device, <Gpu as BackendTypes>::Device) = (Default::default(), Default::default());
-    let (mut cells, mut flipped, mut missed, mut before_flip) = (0, 0, 0, 0);
-    let mut direct_mismatch = 0usize;
-    for (name, cases) in families.iter().take(3) {
-        for case in cases {
-            for theta in [0.55f32, 0.6, 1.0] {
-                for substeps in [1u32, 4] {
-                    cells += 1;
-                    let cp = cpu_patterns(case, theta, substeps);
-                    let (_, gh) = gpu_traj(case, theta, substeps);
-                    let cb = run_series::<Cpu>(case, theta, substeps, false, false, &dc);
-                    let gb = run_series::<Gpu>(case, theta, substeps, true, false, &dg);
-                    // the direct device run must equal step_fused
-                    for k in 0..case.hours {
-                        if gh[k].out[case.adj.n..] != gb[k].fields[0][..] {
-                            direct_mismatch += 1;
-                        }
-                    }
-                    let mut flip: Option<(usize, usize)> = None;
-                    let mut flip_txt = String::from("none");
-                    'outer: for k in 0..case.hours {
-                        for s in 0..cp[k].len() {
-                            let gp = pattern(&gh[k].subs[s].asm, &gh[k].subs[s].qc);
-                            if gp != cp[k][s] {
-                                let mut parts = vec![];
-                                for (i, (a, b)) in cp[k][s].iter().zip(&gp).enumerate() {
-                                    if a != b {
-                                        let f: Vec<String> = (0..7)
-                                            .filter(|&j| a[j] != b[j])
-                                            .map(|j| format!("{}: cpu {} gpu {}", PAT_NAMES[j], a[j], b[j]))
-                                            .collect();
-                                        parts.push(format!("reach {i} [{}]", f.join(", ")));
-                                    }
-                                }
-                                flip = Some((k, s));
-                                flip_txt = format!("hour {k} substep {s}: {}", parts.join("; "));
-                                break 'outer;
-                            }
-                        }
-                    }
-                    let miss = sanity_miss_hours(&cb, &gb);
-                    if flip.is_some() {
-                        flipped += 1;
-                    }
-                    if !miss.is_empty() {
-                        missed += 1;
-                    }
-                    let early = match (&flip, miss.first()) {
-                        (Some((fk, _)), Some(m)) => m < fk,
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
-                    if early {
-                        before_flip += 1;
-                    }
-                    println!(
-                        "BRANCH {name} {} theta {theta} substeps {substeps}: first flip {flip_txt}; sanity-miss hours {miss:?}{}",
-                        case.label,
-                        if early { "  <== MISS BEFORE FLIP" } else { "" }
-                    );
-                }
-            }
-        }
-    }
-    println!(
-        "BRANCH summary: cells {cells}, cells with a flip {flipped}, cells with a sanity miss {missed}, cells with a miss before the first flip (or without a flip) {before_flip}, direct-vs-step_fused q_next mismatches {direct_mismatch}"
-    );
-
-    // 3. Onset table: depth_floor theta 0.6, per hour worst err/max|cpu| per field.
-    let df = chain_state_cases().into_iter().find(|c| c.label == "depth_floor").unwrap();
-    for substeps in [1u32, 4] {
-        let cb = run_series::<Cpu>(&df, 0.6, substeps, false, false, &dc);
-        let gb = run_series::<Gpu>(&df, 0.6, substeps, true, false, &dg);
-        for k in 0..df.hours {
-            let rel = |d: &[f32], c: &[f32]| {
-                let scale = c.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-                if scale > 0.0 { max_abs_diff(d, c) / scale } else { max_abs_diff(d, c) }
-            };
-            let mut row = vec![format!("stage {:.2e}", rel(&gb[k].stage, &cb[k].stage))];
-            for (fi, name) in ELIGIBLE.iter().enumerate() {
-                row.push(format!("{name} {:.2e}", rel(&gb[k].fields[fi], &cb[k].fields[fi])));
-            }
-            let g = cb[k].mass[3].abs();
-            row.push(format!(
-                "mass(max over 5, /gross) {:.2e}",
-                (0..5).map(|j| (gb[k].mass[j] - cb[k].mass[j]).abs() / g).fold(0.0f32, f32::max)
-            ));
-            println!("ONSET depth_floor th0.6 s{substeps} hour {k}: {}", row.join(", "));
-        }
-    }
+    assert_eq!(misses, 0, "{misses} reverse-check misses (see SYNCMISS lines)");
 }
 
-
-// ----------------------------------------------- fma ruling F4.3: the cuSPARSE solve against two host solves
-//
-// (a) the shared host solve (`forward_sub_lower`, `back_sub_upper_transposed`: unfused) and (b) a fused
-// host solve written here (rule F1 on the two triangular loops: `sum = fma(a, x, sum)`). The device solve
-// runs on the host factors, so only the solve differs.
-
-// the loops of src/sparse/mod.rs::forward_sub_lower with rule F1 applied
-fn fused_forward_sub(p: &CsrPattern, l: &[f32], b: &[f32]) -> Vec<f32> {
-    let mut x = vec![0.0f32; p.n];
-    for i in 0..p.n {
-        let (mut sum, mut diag) = (0.0f32, 0.0f32);
-        for k in p.crow[i] as usize..p.crow[i + 1] as usize {
-            let j = p.col[k] as usize;
-            if j == i {
-                diag = l[k];
-            } else {
-                sum = l[k].mul_add(x[j], sum);
-            }
-        }
-        x[i] = (b[i] - sum) / diag;
-    }
-    x
-}
-
-// the loops of src/sparse/mod.rs::back_sub_upper_transposed with rule F1 applied
-fn fused_back_sub(p: &CsrPattern, u: &[f32], b: &[f32]) -> Vec<f32> {
-    let mut y = vec![0.0f32; p.n];
-    for i in (0..p.n).rev() {
-        let (mut sum, mut diag) = (0.0f32, 0.0f32);
-        for k in p.trans_crow[i] as usize..p.trans_crow[i + 1] as usize {
-            let j = p.trans_col[k] as usize;
-            let val = u[p.trans_to_orig[k] as usize];
-            if j == i {
-                diag = val;
-            } else {
-                sum = val.mul_add(y[j], sum);
-            }
-        }
-        y[i] = (b[i] - sum) / diag;
-    }
-    y
-}
-
-// variant (c): start from b and subtract with fused multiply-adds, `t = fma(-l, x, t)`, then divide
-fn sub_from_b_forward(p: &CsrPattern, l: &[f32], b: &[f32], fused: bool, recip: bool) -> Vec<f32> {
-    let mut x = vec![0.0f32; p.n];
-    for i in 0..p.n {
-        let (mut t, mut diag) = (b[i], 0.0f32);
-        for k in p.crow[i] as usize..p.crow[i + 1] as usize {
-            let j = p.col[k] as usize;
-            if j == i {
-                diag = l[k];
-            } else {
-                t = if fused { (-l[k]).mul_add(x[j], t) } else { t - l[k] * x[j] };
-            }
-        }
-        x[i] = if recip { t * (1.0 / diag) } else { t / diag };
-    }
-    x
-}
-
-fn sub_from_b_back(p: &CsrPattern, u: &[f32], b: &[f32], fused: bool, recip: bool) -> Vec<f32> {
-    let mut y = vec![0.0f32; p.n];
-    for i in (0..p.n).rev() {
-        let (mut t, mut diag) = (b[i], 0.0f32);
-        for k in p.trans_crow[i] as usize..p.trans_crow[i + 1] as usize {
-            let j = p.trans_col[k] as usize;
-            let val = u[p.trans_to_orig[k] as usize];
-            if j == i {
-                diag = val;
-            } else {
-                t = if fused { (-val).mul_add(y[j], t) } else { t - val * y[j] };
-            }
-        }
-        y[i] = if recip { t * (1.0 / diag) } else { t / diag };
-    }
-    y
-}
-
-/// Bitwise-equal counts: `[chain rows, confluence rows]` as (equal, total).
-#[derive(Default, Clone, Copy)]
-struct Cnt {
-    dev_vs_a: [usize; 2],
-    dev_vs_b: [usize; 2],
-    dev_vs_c: [usize; 2],
-    dev_vs_d: [usize; 2],
-    dev_vs_e: [usize; 2],
-    dev_vs_f: [usize; 2],
-    a_vs_b: [usize; 2],
-    total: [usize; 2],
-    factor_eq: usize,
-    factor_total: usize,
-}
-
-fn cusparse_cell(case: &Case, theta: f32, substeps: u32, cnt: &mut Cnt) {
-    let dc: <Cpu as BackendTypes>::Device = Default::default();
-    let mut block = make_block::<Cpu>(case, theta, substeps, false, &dc);
-    let c = block.op_consts(&case.pattern);
-    let mut h = to_vec1(block.stage().unwrap());
-    let like = cube_from_host(&[0.0], &Default::default());
-    let cd = Arc::new(StageOpConstsDev::upload(&c, &case.pattern, &like));
-    let up = |v: &[f32]| -> Cube { cube_from_host(v, &Default::default()) };
-    let p = &case.pattern;
-    let class: Vec<usize> = (0..p.n).map(|i| ((p.crow[i + 1] - p.crow[i]) as usize >= 3) as usize).collect();
-    let mut qt = case.q_t0.clone();
-    for k in 0..case.hours {
-        let (qp, mc) = (pick(&case.qp, k), pick(&case.mc, k));
-        let (b0, b1) = hour_b(case, k);
-        let hour = stage_prologue_host(&c, &case.n, &case.q, &case.p, &qt, &mc, &qp, b0, b1);
-        let fwd = stage_hour_forward(&c, p, &hour, &h, &qt, true);
-        for (s, sv) in fwd.subs.iter().enumerate() {
-            let asm = stage_assemble_host(&c, &hour, s, &sv.h, &sv.qc);
-            let f = tree_lu_factor(p, &asm.a_values);
-            let fdev = tree_factor_dev(&cd.tree, &up(&asm.a_values));
-            for (d, hh) in [(&fdev.l_values, &f.l_values), (&fdev.u_values, &f.u_values)] {
-                let dv = cube_to_host(d);
-                cnt.factor_total += dv.len();
-                cnt.factor_eq += dv.iter().zip(hh).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
-            }
-            let fd = TreeFactorsDev { l_values: up(&f.l_values), u_values: up(&f.u_values) };
-            let dev = cube_to_host(&tree_solve_dev(p, &fd, &up(&asm.r)));
-            let a = tree_lu_solve_host(p, &f, &asm.r);
-            let b = fused_back_sub(p, &f.u_values, &fused_forward_sub(p, &f.l_values, &asm.r));
-            let cc = sub_from_b_back(p, &f.u_values, &sub_from_b_forward(p, &f.l_values, &asm.r, true, false), true, false);
-            let dd = sub_from_b_back(p, &f.u_values, &sub_from_b_forward(p, &f.l_values, &asm.r, false, true), false, true);
-            let ee = sub_from_b_back(p, &f.u_values, &sub_from_b_forward(p, &f.l_values, &asm.r, true, true), true, true);
-            let ff = sub_from_b_back(p, &f.u_values, &sub_from_b_forward(p, &f.l_values, &asm.r, false, false), true, false);
-            for i in 0..p.n {
-                let cl = class[i];
-                cnt.total[cl] += 1;
-                cnt.dev_vs_a[cl] += (dev[i].to_bits() == a[i].to_bits()) as usize;
-                cnt.dev_vs_b[cl] += (dev[i].to_bits() == b[i].to_bits()) as usize;
-                cnt.dev_vs_c[cl] += (dev[i].to_bits() == cc[i].to_bits()) as usize;
-                cnt.dev_vs_d[cl] += (dev[i].to_bits() == dd[i].to_bits()) as usize;
-                cnt.dev_vs_e[cl] += (dev[i].to_bits() == ee[i].to_bits()) as usize;
-                cnt.dev_vs_f[cl] += (dev[i].to_bits() == ff[i].to_bits()) as usize;
-                cnt.a_vs_b[cl] += (a[i].to_bits() == b[i].to_bits()) as usize;
-            }
-        }
-        h = fwd.h_end;
-        qt = fwd.q_out;
-    }
-}
-
-fn print_cnt(name: &str, c: &Cnt) {
-    println!(
-        "CUSPARSE-VARIANTS {name}: chain d(unfused,recip) {}/{} e(fused,recip) {}/{} f(L unfused,U fused) {}/{}; confluence d {}/{} e {}/{} f {}/{}",
-        c.dev_vs_d[0], c.total[0], c.dev_vs_e[0], c.total[0], c.dev_vs_f[0], c.total[0],
-        c.dev_vs_d[1], c.total[1], c.dev_vs_e[1], c.total[1], c.dev_vs_f[1], c.total[1]
-    );
-    println!(
-        "CUSPARSE {name}: factor bitwise {}/{}; chain rows: dev==a {}/{}, dev==b(fused) {}/{}, dev==c(sub-from-b fma) {}/{}, a==b {}/{}; confluence rows: dev==a {}/{}, dev==b {}/{}, dev==c {}/{}, a==b {}/{}",
-        c.factor_eq, c.factor_total,
-        c.dev_vs_a[0], c.total[0], c.dev_vs_b[0], c.total[0], c.dev_vs_c[0], c.total[0], c.a_vs_b[0], c.total[0],
-        c.dev_vs_a[1], c.total[1], c.dev_vs_b[1], c.total[1], c.dev_vs_c[1], c.total[1], c.a_vs_b[1], c.total[1],
-    );
-}
-
-#[test]
-fn cusparse_solve_vs_host_solves() {
-    let device = TestDevice::default();
-    let fam: Vec<(&str, Vec<Case>)> = vec![
-        ("chain_states", chain_state_cases()),
-        ("table_and_mixed", table_and_mixed_cases()),
-        ("prescribed_boundary", prescribed_boundary_cases()),
-        ("mc_inflow", vec![mc_inflow_case(&device)]),
-    ];
-    for (name, cases) in &fam {
-        let mut cnt = Cnt::default();
-        for c in cases {
-            for theta in [0.55f32, 0.6, 1.0] {
-                for substeps in [1u32, 4] {
-                    cusparse_cell(c, theta, substeps, &mut cnt);
-                }
-            }
-        }
-        print_cnt(name, &cnt);
-    }
-    let mut cnt = Cnt::default();
-    let mut jc = juniata_case(&device);
-    jc.hours = 6;
-    for (th, sub) in [(1.0f32, 1u32), (0.6, 4)] {
-        cusparse_cell(&jc, th, sub, &mut cnt);
-    }
-    print_cnt("juniata_6h", &cnt);
-    if !cfg!(debug_assertions) {
-        let mut cnt = Cnt::default();
-        let mut hc = hudson_net_case(&device);
-        hc.hours = 6;
-        cusparse_cell(&hc, 0.6, 4, &mut cnt);
-        print_cnt("hudson_net_6h", &cnt);
-    }
-}
-
-
-// fma-ruling.md R1: the device solve (cuSPARSE) and `tree_lu_solve_host` must agree bitwise on the same
-// factors, so a cuSPARSE change shows up here. Juniata (chains and confluences) and chain_states.
+// The device solve (cuSPARSE) and `tree_lu_solve_host` must agree bitwise on the same factors, so a
+// cuSPARSE change shows up here. cuSPARSE multiplies by the reciprocal of the diagonal, so the host copy
+// does too. Juniata (chains and confluences) and chain_states.
 fn dh_bitwise_cell(case: &Case, theta: f32, substeps: u32, equal: &mut usize, total: &mut usize) {
     let dc: <Cpu as BackendTypes>::Device = Default::default();
     let mut block = make_block::<Cpu>(case, theta, substeps, false, &dc);

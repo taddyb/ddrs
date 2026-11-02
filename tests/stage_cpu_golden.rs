@@ -374,12 +374,12 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
 }
 
 /// (case label, theta, substeps, hash). First captured at the worktree's base commit before any Phase G
-/// change. Re-pinned 2026-11-01 (ruling F, fma-ruling.md): the CPU forward now fuses every `a*b + c` site
+/// change. Re-pinned 2026-11-01 (user ruling): the CPU forward now fuses every `a*b + c` site
 /// like the CUDA kernels do (`f32::mul_add`), so the forward bits and the gradients computed from them change.
 /// Old values: juniata 1/1 0x2ae92b67fad3d5e1, juniata 0.6/4 0x22e3e3b39497095d, table_rect 0.6/1
 /// 0x3eb5586bb6085ac2, flow_reversal 0.55/4 0x041ea849e871639d, dam_edge 1/1 0x030531fdfcc73026.
-/// Re-pinned again after the fma ruling's R1 (the forward solve uses the cuSPARSE reciprocal form, `tree_lu.rs`).
-/// Values before R1: juniata 1/1 0x299ce4709ea656c3, juniata 0.6/4 0xf59c6bf6f60e8ed7, table_rect 0.6/1
+/// Re-pinned again when the forward solve moved to the cuSPARSE reciprocal form (`tree_lu.rs`).
+/// Values before that change: juniata 1/1 0x299ce4709ea656c3, juniata 0.6/4 0xf59c6bf6f60e8ed7, table_rect 0.6/1
 /// 0x36234345f6cd664b, flow_reversal 0.55/4 0x33bd0272895f5336, dam_edge 1/1 0x088f4ef3393a5f3b.
 /// Tasks 6 and 7 fuse the CPU adjoint and will pin these again.
 const GOLDEN: &[(&str, f32, u32, u64)] = &[

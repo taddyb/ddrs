@@ -1,8 +1,8 @@
 //! Fused multiply-add as two small autodiff ops, for `StageBlock::step_reference`
-//! (ruling F, `fma-ruling.md` in the SDD workspace).
+//! (user ruling of 2026-11-01: the CPU copies the GPU's fused multiply-adds).
 //!
 //! Burn has no fma tensor op. The fused stage op and the CUDA kernels fuse every
-//! `a*b + c` site (rule F1); the reference has to round the same way to stay
+//! `a*b + c` site (NVRTC contracts it into one rounding); the reference has to round the same way to stay
 //! bitwise equal. `fma3` is `a*b + c` with one rounding per element, and
 //! `spmv_fma` is the row sum `out[row] = fma(x[col], w, out[row])` over the CSR
 //! slots in slot order. Both run the forward on host data with `f32::mul_add`
