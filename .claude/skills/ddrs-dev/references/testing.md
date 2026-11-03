@@ -50,6 +50,13 @@ cargo test --test geometry_power_law --test power_law_forward
 cargo test --test power_law_gradcheck --test adjoint_hydraulics_k
 ```
 
+Measurement on the Juniata and Hudson bundles (ignored, release, manual; records
+numbers, gates nothing; writes `output/geometry-form/`):
+
+```bash
+cargo test --release --test geometry_form_measure -- --ignored --nocapture
+```
+
 The tie rule: on the MC path a clamp bound is inactive at an exact tie, so the
 gradient passes. For a min of two live operands the tie goes to the first operand.
 `clamp_tie_rule` pins each site. A natural X = 0.5 rounding tie on the default path

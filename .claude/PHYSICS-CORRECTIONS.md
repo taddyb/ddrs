@@ -293,8 +293,9 @@ v = Q / A          c = v (5 + 3q + 3g) / (3 (q+1))      (= dQ/dA exactly)
 - Stage routing is allowed. The load prints a WARN: stage rows keep their own
   section, so `geometry_form` changes Muskingum-Cunge rows only.
 - The load prints an INFO line that points at this file.
-- The learned `n` shifts. Celerity rises 4 to 30 % at fixed `n`. Runs and values
-  of `n` are not comparable across forms.
+- The learned `n` shifts. At fixed trained parameters the median celerity rises 3.0 %
+  on Juniata and 3.6 % on Hudson (see Measured). Runs and values of `n` are not
+  comparable across forms.
 - Do not resume a checkpoint across forms, and do not evaluate one across forms.
   A trapezoid checkpoint loads under `power_law` with no warning, and its weights
   were trained against the other section.
@@ -331,7 +332,45 @@ runs. The pins are in `tests/clamp_tie_rule.rs`.
 
 ### Measured
 
-Measured numbers follow.
+Seed 42, CPU, 30 epochs, committed bundles. This is a record, not a gate. One run per
+cell, so differences of a few hundredths in NSE are within seed noise. The harness is
+`tests/geometry_form_measure.rs` (ignored, release, manual).
+
+Routed metrics (median over gauges on Juniata, per gauge on Hudson):
+
+| Bundle | Gauge | Trapezoid NSE / KGE | power_law NSE / KGE | Baseline NSE / KGE |
+|---|---|---|---|---|
+| Juniata | median (1 gauge) | 0.790 / 0.881 | 0.836 / 0.910 | 0.695 / 0.819 |
+| Hudson MC only | 01372058 Poughkeepsie | 0.145 / 0.604 | 0.208 / 0.621 | 0.144 / 0.561 |
+| Hudson MC only | 01358000 Green Island | 0.781 / 0.876 | 0.810 / 0.882 | 0.688 / 0.801 |
+| Hudson MC only | 01375000 Croton | 0.820 / 0.856 | 0.823 / 0.857 | 0.835 / 0.867 |
+| Hudson stage | 01372058 Poughkeepsie | 0.308 / 0.625 | 0.317 / 0.623 | 0.144 / 0.561 |
+| Hudson stage | 01358000 Green Island | 0.780 / 0.876 | 0.801 / 0.881 | 0.688 / 0.801 |
+| Hudson stage | 01375000 Croton | 0.819 / 0.856 | 0.821 / 0.856 | 0.835 / 0.867 |
+
+Celerity from `probe_courant` (`enforce_positivity: false` pass, rho 90, 2000 steps,
+every 10th step). The paired ratio is the power_law celerity over the trapezoid
+celerity, on the trapezoid run's trained checkpoint, joined on reach and step. This is
+the pure form effect at fixed trained parameters. The trained-vs-trained ratio
+compares the median celerity of each form's own trained run.
+
+| Bundle | Paired ratio median | Paired ratio 5 to 95 % | Trained-vs-trained ratio |
+|---|---|---|---|
+| Juniata (213 reaches) | 1.030 | 1.024 to 1.102 | 1.027 |
+| Hudson MC only (756 reaches) | 1.036 | 1.026 to 1.183 | 1.054 |
+
+Median learned parameters. Juniata (from the plot output): n 0.1258 trapezoid and
+0.1275 power_law, p 12.47 and 12.26, q 0.483 and 0.481. Hudson runs write no
+parameter file; the last training log line gives median n: MC only 0.1258 and 0.1262,
+stage 0.1268 and 0.1306.
+
+Hudson stage run: the `stage routing: 41 of 756 reaches in the stage block` line
+confirms 41 stage rows. Under power_law the section changes the 715 Muskingum-Cunge
+rows only (756 minus 41). Stage rows keep the table section. Poughkeepsie sits on a
+stage row, so it changes only through its Muskingum-Cunge inflows.
+
+`probe_courant --celerity-csv <path>` writes `reach,step,celerity_m_s` for the
+`enforce_positivity: false` pass.
 
 ## CUDA backend coverage
 
