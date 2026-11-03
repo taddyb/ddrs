@@ -216,8 +216,9 @@ how many MC clamp states switch between the plus and minus runs. Fields:
 finite, positive, strictly decreasing) and `at_optimum` (default false; also
 sweep at the Newton optimum). Absent means off and nothing changes. The sweep
 reads the clamp ledger (`src/routing/clamp_ledger.rs`), so it covers the plain
-`route_timestep` path only; a leakance or CUDA-graph arm gives an empty ledger
-and the run stops with an error. Each arm writes two CSVs:
+`route_timestep` path only; a CUDA-graph arm gives an empty ledger and the run
+stops with an error. A leakance arm (`params.use_leakance`) is refused at arm
+setup, before any evaluation, with an error that names `landscape.fd_sweep`. Each arm writes two CSVs:
 `fd_sweep.csv` (one row per point, `h` and active axis; a frozen axis has no
 row; columns `h_aa`, `h_col_*`, `reach_steps`, `switch_total`, one
 `switch_<site>` per clamp site, `switch_range`, `switch_frac`) and

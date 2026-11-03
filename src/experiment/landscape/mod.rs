@@ -378,6 +378,20 @@ impl LandscapeSpec {
         }
     }
 
+    /// Refuse `fd_sweep` for an arm with `params.use_leakance`. The sweep reads
+    /// the clamp ledger, and the leakance path records none. Checked at arm
+    /// setup, before any evaluation, so one bad arm cannot panic mid-run.
+    pub fn validate_fd_sweep_arm(&self, arm_name: &str, use_leakance: bool) -> Result<(), BoxError> {
+        if self.fd_sweep.is_some() && use_leakance {
+            return Err(format!(
+                "arm `{arm_name}`: landscape.fd_sweep is not supported when params.use_leakance is true \
+                 (the leakance path records no clamp ledger); remove landscape.fd_sweep or use a non-leakance arm"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// `zero_audit` reads the per-reach gradients, so it needs `reach_grad`.
     pub fn validate_zero_audit(&self) -> Result<(), BoxError> {
         if self.zero_audit && !self.reach_grad {
@@ -509,6 +523,7 @@ where
     let t_arm = Instant::now();
     println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
     let ctx = InfluenceContext::<I>::open_allowing_leakance(arm, device, opts.force_cpu, &opts.period)?;
+    spec.validate_fd_sweep_arm(&arm.name, ctx.cfg.params.use_leakance)?;
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
     let n_windows = spec.n_windows.clamp(1, 4);
@@ -1339,6 +1354,17 @@ mod tests {
         assert_eq!(sw.steps, vec![0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625]);
         assert!(!sw.at_optimum);
         spec.validate_fd_sweep().unwrap();
+    }
+
+    #[test]
+    fn fd_sweep_is_refused_for_a_leakance_arm() {
+        let on: LandscapeSpec = serde_yaml::from_str("gauges: {}\nfd_sweep: {}\n").unwrap();
+        let err = on.validate_fd_sweep_arm("leaky", true).unwrap_err().to_string();
+        assert!(err.contains("params.use_leakance") && err.contains("landscape.fd_sweep"), "{err}");
+        assert!(err.contains("leaky"), "{err}");
+        on.validate_fd_sweep_arm("plain", false).unwrap();
+        let off: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        off.validate_fd_sweep_arm("leaky", true).unwrap();
     }
 
     #[test]
