@@ -2,6 +2,24 @@
 //! Same harness as `tests/sp8_gradcheck.rs`: analytical gradient against
 //! central finite differences, per tracked parent, on the 4-reach chain with
 //! `L = 10_000` m so the Cunge X is interior (B19's terms run).
+//!
+//! FD step: one rule for every slot, declared in `step_of`.
+//! `h = max(h0, h_rt)`, with `h0 = 1e-3 * max(1, |x|)` and
+//! `h_rt = 4 * eps_f32 * sum|q_next| / (REL_TOL * |g|)`, capped at
+//! `0.1 * max(1, |x|)`. The loss is an f32 sum, so the FD carries a roundoff
+//! error of about `eps_f32 * sum|q_next| / h`. Where `|g|` is small next to
+//! `sum|q_next|`, a fixed step puts the FD at that floor and it cannot resolve
+//! `REL_TOL`. `h_rt` is the step at which the floor is `REL_TOL / 4` of `|g|`.
+//! A slot where the cap binds is printed as `(capped)` and relies on
+//! `ABS_TOL`. `check` prints `h` and `roundoff_est` per slot.
+//!
+//! `enforce_positivity` base point: every positivity gradcheck first asserts
+//! that no clamp selection (depth floor, velocity band, K floor, Cunge X band,
+//! positivity X cap) changes between `x - h` and `x + h`. With
+//! `Q_t = [100, 120, 140, 160]` the X cap on reach 1 binds exactly at the base
+//! point, so the stencil straddled a kink (n gradient 140 vs FD 326). The
+//! positivity tests therefore use `Q_t = [100, 150, 160, 170]`, the nearest
+//! variant found that is kink-free for all four parents.
 
 use std::sync::Arc;
 
@@ -18,6 +36,8 @@ type AB = Autodiff<I>;
 const N: usize = 4;
 const LEN: f32 = 10_000.0;
 const EPS: f32 = 1e-3;
+/// Largest FD step, as a fraction of `max(1, |x|)`.
+const STEP_CAP: f32 = 0.1;
 const REL_TOL: f32 = 5e-3;
 const ABS_TOL: f32 = 1e-4;
 const GAMMA: f32 = 0.35;
@@ -100,7 +120,11 @@ fn base_inputs(mode: Mode) -> Inputs {
         n: vec![0.035; N],
         qsp: vec![0.4; N],
         psp: vec![20.0; N],
-        qt: vec![100.0, 120.0, 140.0, 160.0],
+        qt: match mode {
+            // Positivity base point: see the module doc.
+            Mode::Positivity => vec![100.0, 150.0, 160.0, 170.0],
+            _ => vec![100.0, 120.0, 140.0, 160.0],
+        },
         qpt: vec![10.0, 12.0, 14.0, 16.0],
         gamma: matches!(mode, Mode::LearnedGamma).then(|| vec![LEARNED_GAMMA; N]),
     }
@@ -194,7 +218,7 @@ fn analytical(
         .collect()
 }
 
-fn loss_value(cfg: &Config, inp: &Inputs) -> f32 {
+fn q_next_of(cfg: &Config, inp: &Inputs) -> Vec<f32> {
     let adj = chain();
     let dev = device();
     let pattern = Arc::new(CsrPattern::from_sparse(&adj));
@@ -216,14 +240,34 @@ fn loss_value(cfg: &Config, inp: &Inputs) -> f32 {
         None,
         inp.gamma.as_ref().map(|g| t(g)),
     );
-    q_next.sum().into_data().to_vec::<f32>().unwrap()[0]
+    q_next.into_data().to_vec::<f32>().unwrap()
 }
 
-fn fd(cfg: &Config, inp: &Inputs, parent: Parent, rel_step: f32) -> Vec<f32> {
+fn loss_value(cfg: &Config, inp: &Inputs) -> f32 {
+    q_next_of(cfg, inp).iter().sum()
+}
+
+/// FD step for one slot, one rule for every slot (see the module doc):
+/// `h = max(h0, h_rt)`, capped at `CAP * max(1, |x|)`.
+/// Returns `(h, capped)`.
+fn step_of(x: f32, g: f32, q_abs_sum: f32) -> (f32, bool) {
+    let scale = x.abs().max(1.0);
+    let h0 = EPS * scale;
+    let h_rt = 4.0 * f32::EPSILON * q_abs_sum / (REL_TOL * g.abs().max(1e-12));
+    let cap = STEP_CAP * scale;
+    let h = h0.max(h_rt);
+    if h > cap {
+        (cap, true)
+    } else {
+        (h, false)
+    }
+}
+
+fn fd(cfg: &Config, inp: &Inputs, parent: Parent, steps: &[f32]) -> Vec<f32> {
     let base = field(inp, parent).clone();
     (0..N)
         .map(|i| {
-            let eps = (rel_step * base[i].abs()).max(rel_step);
+            let eps = steps[i];
             let mut plus = inp.clone();
             field_mut(&mut plus, parent)[i] = base[i] + eps;
             let mut minus = inp.clone();
@@ -233,28 +277,107 @@ fn fd(cfg: &Config, inp: &Inputs, parent: Parent, rel_step: f32) -> Vec<f32> {
         .collect()
 }
 
+
+/// Clamp selections per reach, read from the saved forward state (k1 hook):
+/// depth floor, velocity band, K floor, Cunge X band and the positivity X cap.
+/// Each entry is a small code; two stencil ends with equal codes are on the
+/// same smooth branch. Mirrors S6, S16, S18', S19 and S19' in `mmc_op.rs`.
+fn selections(cfg: &Config, inp: &Inputs) -> Vec<[u8; 5]> {
+    let adj = chain();
+    let dev = device();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let t = |d: &[f32]| -> Tensor<I, 1> { Tensor::from_floats(d, &dev) };
+    let k = __spike_forward_chain_k1_outputs::<I>(
+        cfg,
+        &pattern,
+        t(&inp.n),
+        t(&inp.qsp),
+        t(&inp.psp),
+        t(&inp.qt),
+        t(&inp.qpt),
+        t(&adj.length_m),
+        t(&adj.slope),
+        t(&[0.3; N]),
+    );
+    let dt = ddrs::routing::mmc::DT_SECONDS;
+    let delta = ddrs::routing::mmc_op::POSITIVITY_DELTA;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let enforce = cfg.params.enforce_positivity;
+    (0..N)
+        .map(|i| {
+            let (depth, top, v_un, v_cl, c, k_m) = (k[0][i], k[1][i], k[5][i], k[6][i], k[7][i], k[8][i]);
+            let depth_floor = (depth <= depth_lb) as u8;
+            let v_band = if v_cl > v_un { 1 } else if v_cl < v_un { 2 } else { 0 };
+            let k_raw = LEN / c;
+            let k_floor = (enforce && k_m > k_raw) as u8;
+            let w = inp.qt[i] / (top * 1e-3 * c * LEN + 1e-12);
+            let x_raw = (-w + 1.0) * 0.5;
+            let x_band = if x_raw < 0.0 { 1 } else if x_raw > 0.5 { 2 } else { 0 };
+            let x_cap = if enforce {
+                let x_c = x_raw.clamp(0.0, 0.5);
+                let cr = k_m.recip() * dt;
+                let hi_a = cr * (0.5 * (1.0 - delta));
+                let hi_b = (-cr * 0.5 + 1.0) * (1.0 - delta);
+                if hi_a < x_c && hi_a <= hi_b { 1 } else if hi_b < x_c { 2 } else { 0 }
+            } else {
+                0
+            };
+            [depth_floor, v_band, k_floor, x_band, x_cap]
+        })
+        .collect()
+}
+
+/// Panics when any clamp selection differs between `x - h` and `x + h` of the
+/// perturbed slot. A differing selection puts a kink inside the FD stencil.
+fn assert_kink_free(cfg: &Config, inp: &Inputs, parent: Parent, steps: &[f32]) {
+    let base = field(inp, parent).clone();
+    for i in 0..N {
+        let h = steps[i];
+        let mut plus = inp.clone();
+        field_mut(&mut plus, parent)[i] = base[i] + h;
+        let mut minus = inp.clone();
+        field_mut(&mut minus, parent)[i] = base[i] - h;
+        let mut mid = inp.clone();
+        field_mut(&mut mid, parent)[i] = base[i];
+        let (sp, sm, s0) = (selections(cfg, &plus), selections(cfg, &minus), selections(cfg, &mid));
+        assert!(
+            sp == sm && sp == s0,
+            "{parent:?}[{i}]: a clamp selection changes inside the FD stencil (minus {sm:?}, base {s0:?}, plus {sp:?})"
+        );
+    }
+}
+
 fn slot_ok(a: f32, f: f32) -> bool {
     let abs = (a - f).abs();
     let rel = abs / a.abs().max(f.abs()).max(1e-12);
     rel < REL_TOL || abs < ABS_TOL
 }
 
-/// One FD step (`EPS`), as in `tests/sp8_gradcheck.rs`. A slot passes when the
-/// analytical and FD values agree within `REL_TOL` or `ABS_TOL`.
+/// A slot passes when the analytical and FD values agree within `REL_TOL` or
+/// `ABS_TOL`. The FD step comes from `step_of`.
 fn check(mode: Mode, parent: Parent) {
     let cfg = mock_cfg(mode);
     let inp = base_inputs(mode);
     let a = analytical(&cfg, &inp, &[parent], |q| q.sum()).remove(0);
-    let f = fd(&cfg, &inp, parent, EPS);
+    let q_abs_sum: f32 = q_next_of(&cfg, &inp).iter().map(|q| q.abs()).sum();
+    let picked: Vec<(f32, bool)> = (0..N)
+        .map(|i| step_of(field(&inp, parent)[i], a[i], q_abs_sum))
+        .collect();
+    let steps: Vec<f32> = picked.iter().map(|p| p.0).collect();
+    assert_kink_free(&cfg, &inp, parent, &steps);
+    let f = fd(&cfg, &inp, parent, &steps);
     let rel = |x: f32, y: f32| (x - y).abs() / x.abs().max(y.abs()).max(1e-12);
     let mut worst = 0.0f32;
     let mut ok = true;
     for i in 0..N {
         println!(
-            "  {parent:?}[{i}] analytical={:.6e} fd={:.6e} rel={:.3e}",
+            "  {parent:?}[{i}] h={:.3e}{} analytical={:.6e} fd={:.6e} rel={:.3e} roundoff_est={:.3e}",
+            steps[i],
+            if picked[i].1 { " (capped)" } else { "" },
             a[i],
             f[i],
-            rel(a[i], f[i])
+            rel(a[i], f[i]),
+            f32::EPSILON * q_abs_sum / steps[i] / a[i].abs().max(1e-12)
         );
         worst = worst.max(rel(a[i], f[i]));
         ok &= slot_ok(a[i], f[i]);
