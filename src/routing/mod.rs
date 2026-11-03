@@ -6,6 +6,7 @@ pub mod mmc;
 pub mod utils;
 pub mod mmc_op;
 pub mod power_law;
+pub mod reference_step;
 pub mod release;
 pub mod stage;
 pub mod stage_op;

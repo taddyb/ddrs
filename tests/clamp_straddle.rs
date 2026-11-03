@@ -23,6 +23,15 @@
 //! an exact tie if one exists. When no exact tie exists the test prints
 //! `no exact tie reachable at <site>` and skips only that place.
 //!
+//! 4. At every place, the fused gradient of all five parents matches the
+//!    gradient of `routing::reference_step::reference_timestep` (plain Burn
+//!    autodiff): the same zero set, and nonzero entries at rel < 1e-3 or
+//!    abs < 1e-6. This covers the three far places where the FD cannot
+//!    resolve the gradient, and the ties.
+//!
+//! An FD is skipped, with a printed reason, where the round-off step `h_rt` is
+//! more than 10 % of the parameter.
+//!
 //! The leakance head has no ledger sites. Four tests at the end check its two
 //! tie cases (head floor, bed cap) against the head with that clamp removed.
 //!
@@ -40,6 +49,7 @@ use burn::tensor::Tensor;
 use ddrs::config::{Config, GeometryForm};
 use ddrs::routing::clamp_ledger::{ClampLedger, ClampProbe, ClampSite, ProbeSite};
 use ddrs::routing::mmc::DT_SECONDS;
+use ddrs::routing::reference_step::reference_timestep;
 use ddrs::routing::mmc_op::{
     __spike_forward_chain_k1_outputs, __spike_forward_chain_k23_outputs, timestep_forward_diag,
     timestep_forward_leakance, POSITIVITY_DELTA,
@@ -460,6 +470,54 @@ fn differing_sites(a: &Out, b: &Out, reach: usize) -> Vec<&'static str> {
         .collect()
 }
 
+/// Fused gradient against the autodiff reference for all five parents, with
+/// the loss `q_next.sum()`. Pushes one message per mismatch.
+fn autodiff_check(tag: &str, cfg: &Config, f: &Inputs, fails: &mut Vec<String>) {
+    let adj = chain(f);
+    let dev = device();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &dev);
+    let one = |fused: bool| -> Vec<Vec<f32>> {
+        let leaf = |d: &[f32]| -> Tensor<AB, 1> { Tensor::<AB, 1>::from_floats(d, &dev).require_grad() };
+        let c = |d: &[f32]| -> Tensor<AB, 1> { Tensor::<AB, 1>::from_floats(d, &dev) };
+        let (n, qsp, psp, qt, qpt) = (leaf(&f.n), leaf(&f.qsp), leaf(&f.psp), leaf(&f.qt), leaf(&f.qpt));
+        let (length, slope, xs) = (c(&f.length), c(&f.slope), c(&[0.3; N]));
+        let q = if fused {
+            timestep_forward_diag::<I>(
+                cfg, &pattern, &assembler, n.clone(), qsp.clone(), psp.clone(), qt.clone(),
+                qpt.clone(), length, slope, xs, None, None, None,
+            )
+        } else {
+            reference_timestep::<I>(
+                cfg, &pattern, &assembler, n.clone(), qsp.clone(), psp.clone(), qt.clone(),
+                qpt.clone(), length, slope, xs, None,
+            )
+        };
+        let g = q.sum().backward();
+        [&n, &qsp, &psp, &qt, &qpt].iter().map(|t| host(t.grad(&g).expect("tracked parent"))).collect()
+    };
+    let (gf, gr) = (one(true), one(false));
+    let names = ["n", "q_spatial", "p_spatial", "q_t", "q_prime_t"];
+    for (p, (a, b)) in gf.iter().zip(&gr).enumerate() {
+        if !(a.iter().chain(b).all(|x| x.is_finite())) {
+            fails.push(format!("{tag}: autodiff check, non-finite gradient for {}: fused {a:?} reference {b:?}", names[p]));
+            continue;
+        }
+        for i in 0..N {
+            let (x, y) = (a[i], b[i]);
+            if (x == 0.0) != (y == 0.0) {
+                fails.push(format!("{tag}: autodiff zero-set mismatch {}[{i}]: fused {x:e}, reference {y:e}", names[p]));
+            } else if x != 0.0 {
+                let abs = (x - y).abs();
+                let rel = abs / x.abs().max(y.abs());
+                if !(rel < 1e-3 || abs < 1e-6) {
+                    fails.push(format!("{tag}: autodiff value mismatch {}[{i}]: fused {x:e}, reference {y:e}, rel {rel:e}", names[p]));
+                }
+            }
+        }
+    }
+}
+
 fn check_point(spec: &Spec, p: &Point, fails: &mut Vec<String>) {
     let tag = format!("{} {:?} {:?}", spec.site.name(), spec.form, p.pos);
     let out = run(&p.cfg, &p.inp, true);
@@ -486,6 +544,13 @@ fn check_point(spec: &Spec, p: &Point, fails: &mut Vec<String>) {
         fails.push(format!(
             "{tag}: ledger active={act}, want {want} (raw {:.9e}, bound {:.9e})",
             p.raw, p.bound
+        ));
+    }
+    autodiff_check(&tag, &p.cfg, &p.inp, fails);
+    if act != any_active {
+        fails.push(format!(
+            "{tag}: site {} ledger active={act}, but a site sharing probe site {ps:?} is active (any_active={any_active}); the pass-through check would run as a zero check",
+            spec.site.name()
         ));
     }
     if any_active {
