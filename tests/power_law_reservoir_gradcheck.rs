@@ -7,15 +7,34 @@
 //! row's celerity gradient is cut before `power_law.rs::section_backward`.
 //! On the replace row the dam's `n`, `q_spatial` and `p_spatial` get exactly 0.
 //!
-//! Base points are the source files'. Each gradcheck first asserts that the
-//! power-law routed discharge series is finite and that the dam reach has a
-//! nonzero analytical gradient, so none of the checks is vacuous.
+//! Base points are the source files'. Each check asserts the analytical
+//! gradient is nonzero (except the exact-zero dam row), so none is vacuous.
+//!
+//! FD step: the rule of `tests/power_law_gradcheck.rs::step_of`.
+//! `h = max(h0, h_rt)`, with `h0 = 1e-3 * max(1, |x|)` and
+//! `h_rt = 4 * eps_f32 * S / (REL_TOL * |g|)`, capped at
+//! `STEP_CAP * max(1, |x|)` with `STEP_CAP = 0.1`. Here the loss is a weighted
+//! sum over all steps and reaches, not one `q_next`, so the round-off scale
+//! `S` is the sum over steps and reaches of `|w * q|` from the base-point
+//! forward. A slot whose cap binds is printed as `(capped)` and fails the
+//! check. A slot with an exactly zero analytical gradient (the replace-row dam)
+//! uses `h0`, since there is no gradient to resolve.
+//!
+//! Kink-free check: before each FD, the clamp selections (depth floor,
+//! velocity band, Cunge X band) of every reach on every step of the window must
+//! be equal at `x - h`, `x` and `x + h`. Each step is read by running the
+//! section on that step's `Q_t` from the stencil point's own routed series.
+//! A stencil that crosses a switch is refused, not passed.
 
 use burn::backend::{Autodiff, NdArray};
 use burn::tensor::Tensor;
 
 use ddrs::config::{Config, DamRow, GeometryForm};
 use ddrs::routing::mmc::DamRelease;
+use ddrs::routing::mmc_op::__spike_forward_chain_k1_outputs;
+use ddrs::routing::utils::denormalize;
+use ddrs::sparse::CsrPattern;
+use std::sync::Arc;
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use ddrs::sparse::SparseAdjacency;
 
@@ -25,8 +44,9 @@ type Device = <I as burn::tensor::backend::BackendTypes>::Device;
 
 const REL_TOL: f64 = 5e-3;
 const ABS_TOL: f64 = 1e-4;
-/// FD step on the normalized `[0, 1]` parents (see `tests/reservoir_override.rs::EPS`).
-const EPS: f32 = 1e-2;
+const EPS: f32 = 1e-3;
+/// Largest FD step, as a fraction of `max(1, |x|)`.
+const STEP_CAP: f32 = 0.1;
 
 fn power_law_cfg() -> Config {
     let mut cfg = Config::default();
@@ -192,22 +212,111 @@ enum Parent {
     QSpatial,
 }
 
-fn fd_grad(cfg: &Config, arm: Arm, steps: usize, qp: &[f32], parent: Parent, reach: usize) -> f64 {
-    let base = Params::uniform(5);
-    let x0 = match parent {
-        Parent::N => base.n[reach],
-        Parent::QSpatial => base.q_spatial[reach],
-    };
-    let eps = (EPS * x0.abs()).max(EPS);
-    let eval = |x: f32| {
-        let mut p = base.clone();
-        match parent {
-            Parent::N => p.n[reach] = x,
-            Parent::QSpatial => p.q_spatial[reach] = x,
+fn params_with(parent: Parent, reach: usize, x: f32) -> Params {
+    let mut p = Params::uniform(5);
+    match parent {
+        Parent::N => p.n[reach] = x,
+        Parent::QSpatial => p.q_spatial[reach] = x,
+    }
+    p
+}
+
+fn base_value(parent: Parent, reach: usize) -> f32 {
+    let b = Params::uniform(5);
+    match parent {
+        Parent::N => b.n[reach],
+        Parent::QSpatial => b.q_spatial[reach],
+    }
+}
+
+/// FD step for one slot (see the module doc). Returns `(h, capped)`.
+fn step_of(x: f32, g: f32, s: f32) -> (f32, bool) {
+    let scale = x.abs().max(1.0);
+    let h0 = EPS * scale;
+    if g == 0.0 {
+        return (h0, false);
+    }
+    let h_rt = 4.0 * f32::EPSILON * s / (REL_TOL as f32 * g.abs());
+    let cap = STEP_CAP * scale;
+    let h = h0.max(h_rt);
+    if h > cap { (cap, true) } else { (h, false) }
+}
+
+fn routed_host(cfg: &Config, arm: Arm, qp: &[f32], p: &Params) -> Vec<f32> {
+    let r = route(cfg, sandbox5(), qp, p, arm, false);
+    r.q.into_data().to_vec().unwrap()
+}
+
+/// Clamp selections `[depth floor, velocity band, X band]` for every step and
+/// reach, from the stencil point's own routed series (`q` is `[5, steps + 1]`).
+fn selections(cfg: &Config, p: &Params, q: &[f32], qp: &[f32], steps: usize) -> Vec<[u8; 3]> {
+    let adj = sandbox5();
+    let dev = Device::default();
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let t = |d: &[f32]| -> Tensor<I, 1> { Tensor::from_floats(d, &dev) };
+    let ranges = &cfg.params.parameter_ranges;
+    let logs = &cfg.params.log_space_parameters;
+    let log_of = |k: &str| logs.iter().any(|s| s == k);
+    let n = denormalize(t(&p.n), ranges.n, log_of("n"));
+    let qsp = denormalize(t(&p.q_spatial), ranges.q_spatial, log_of("q_spatial"));
+    let psp = denormalize(t(&p.p_spatial), ranges.p_spatial, log_of("p_spatial"));
+    let cols = steps + 1;
+    let depth_lb = cfg.params.attribute_minimums.depth;
+    let mut out = Vec::new();
+    for step in 0..steps {
+        let qt: Vec<f32> = (0..5).map(|r| q[r * cols + step]).collect();
+        let qpt = &qp[step * 5..step * 5 + 5];
+        let k = __spike_forward_chain_k1_outputs::<I>(
+            cfg,
+            &pattern,
+            n.clone(),
+            qsp.clone(),
+            psp.clone(),
+            t(&qt),
+            t(qpt),
+            t(&adj.length_m),
+            t(&adj.slope),
+            t(&[0.3; 5]),
+        );
+        for r in 0..5 {
+            let (depth, top, v_un, v_cl, c) = (k[0][r], k[1][r], k[5][r], k[6][r], k[7][r]);
+            let depth_floor = (depth <= depth_lb) as u8;
+            let v_band = if v_cl > v_un { 1 } else if v_cl < v_un { 2 } else { 0 };
+            let w = qt[r] / (top * adj.slope[r] * c * adj.length_m[r] + 1e-12);
+            let x_raw = (-w + 1.0) * 0.5;
+            let x_band = if x_raw < 0.0 { 1 } else if x_raw > 0.5 { 2 } else { 0 };
+            out.push([depth_floor, v_band, x_band]);
         }
-        let r = route(cfg, sandbox5(), qp, &p, arm, false);
+    }
+    out
+}
+
+/// Panics when any clamp selection differs between `x - h`, `x` and `x + h`.
+fn assert_kink_free(cfg: &Config, arm: Arm, steps: usize, qp: &[f32], parent: Parent, reach: usize, h: f32) {
+    let x0 = base_value(parent, reach);
+    let sel = |x: f32| {
+        let p = params_with(parent, reach, x);
+        let q = routed_host(cfg, arm, qp, &p);
+        selections(cfg, &p, &q, qp, steps)
+    };
+    let (sm, s0, sp) = (sel(x0 - h), sel(x0), sel(x0 + h));
+    for (i, ((a, b), c)) in sm.iter().zip(&s0).zip(&sp).enumerate() {
+        assert!(
+            a == b && b == c,
+            "{parent:?}@{reach}: a clamp selection changes inside the FD stencil at step {} reach {} (minus {a:?}, base {b:?}, plus {c:?})",
+            i / 5,
+            i % 5
+        );
+    }
+}
+
+fn fd_grad(cfg: &Config, arm: Arm, steps: usize, qp: &[f32], parent: Parent, reach: usize, eps: f32) -> f64 {
+    let x0 = base_value(parent, reach);
+    let eval = |x: f32| {
+        let r = route(cfg, sandbox5(), qp, &params_with(parent, reach, x), arm, false);
         loss_f64(&r.q, 5, steps)
     };
+    // Divide by the step actually taken in f32, not by `2·eps`.
     let (hi, lo) = (x0 + eps, x0 - eps);
     (eval(hi) - eval(lo)) / (hi as f64 - lo as f64)
 }
@@ -219,17 +328,27 @@ fn gradcheck(label: &str, arm: Arm, steps: usize, t_scale: f32, dam_is_zero: boo
     let cfg = power_law_cfg();
     let qp = sandbox_q_prime(steps, t_scale);
     let (gn, gq, _) = analytical_grads(&cfg, arm, steps, &qp);
+    // Round-off scale of the loss: sum of |w * q| at the base point.
+    let q0 = routed_host(&cfg, arm, &qp, &Params::uniform(5));
+    let scale: f32 = q0.iter().zip(weights(5, steps)).map(|(&a, w)| (a * w).abs()).sum();
+    println!("{label}: round-off scale S = sum|w q| = {scale:.6e}");
     let (mut worst_rel, mut worst_abs) = (0.0f64, 0.0f64);
     let mut failures = Vec::new();
     for (parent, analytical) in [(Parent::N, &gn), (Parent::QSpatial, &gq)] {
         for (name, reach) in [("upstream", UPSTREAM), ("downstream", DOWNSTREAM), ("dam", DAM)] {
             let a = analytical[reach] as f64;
-            let f = fd_grad(&cfg, arm, steps, &qp, parent, reach);
+            let (h, capped) = step_of(base_value(parent, reach), a as f32, scale);
+            assert_kink_free(&cfg, arm, steps, &qp, parent, reach, h);
+            let f = fd_grad(&cfg, arm, steps, &qp, parent, reach, h);
             let abs = (a - f).abs();
             let rel = abs / a.abs().max(f.abs()).max(1e-12);
             println!(
-                "{label} {parent:?} @ reach {reach} ({name}): analytical={a:.6e} fd={f:.6e} abs={abs:.3e} rel={rel:.3e}"
+                "{label} {parent:?} @ reach {reach} ({name}): h={h:.3e}{} analytical={a:.6e} fd={f:.6e} abs={abs:.3e} rel={rel:.3e}",
+                if capped { " (capped)" } else { "" }
             );
+            if capped {
+                failures.push(format!("{label} {parent:?} @ reach {reach}: the step cap binds"));
+            }
             if reach == DAM && dam_is_zero {
                 assert_eq!(a, 0.0, "{label} {parent:?}: dam row gradient must be exactly 0");
                 if f.abs() >= ABS_TOL {
