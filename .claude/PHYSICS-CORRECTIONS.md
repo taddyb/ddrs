@@ -333,7 +333,7 @@ runs. The pins are in `tests/clamp_tie_rule.rs`.
 ### Measured
 
 Seed 42, CPU, 30 epochs, committed bundles. This is a record, not a gate. One run per
-cell, so differences of a few hundredths in NSE are within seed noise. The harness is
+cell. No seed repeat was run, so these differences are not shown to exceed seed noise. The harness is
 `tests/geometry_form_measure.rs` (ignored, release, manual).
 
 Routed metrics (median over gauges on Juniata, per gauge on Hudson):
@@ -360,9 +360,10 @@ compares the median celerity of each form's own trained run.
 | Hudson MC only (756 reaches) | 1.036 | 1.026 to 1.183 | 1.054 |
 
 Median learned parameters. Juniata (from the plot output): n 0.1258 trapezoid and
-0.1275 power_law, p 12.47 and 12.26, q 0.483 and 0.481. Hudson runs write no
-parameter file; the last training log line gives median n: MC only 0.1258 and 0.1262,
-stage 0.1268 and 0.1306.
+0.1275 power_law, p 12.47 and 12.26, q 0.483 and 0.481. These are medians over the
+full network, read from the plot file. Hudson runs write no parameter file; the last training log line gives median n: MC only 0.1258 and 0.1262,
+stage 0.1268 and 0.1306. The Hudson value is the last training-batch median from
+`run.log`, so it is not the same statistic as the Juniata network median.
 
 Hudson stage run: the `stage routing: 41 of 756 reaches in the stage block` line
 confirms 41 stage rows. Under power_law the section changes the 715 Muskingum-Cunge

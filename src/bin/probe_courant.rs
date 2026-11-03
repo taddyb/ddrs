@@ -441,7 +441,7 @@ where
     if let Some(p) = cli.celerity_csv.as_ref() {
         let off = &summaries[0].rep;
         let n = off.n_reaches;
-        let lengths: Vec<f32> = inp_length.clone();
+        let lengths = &inp_length;
         let dt = ddrs::routing::mmc::DT_SECONDS;
         let mut out = String::from("reach,step,celerity_m_s\n");
         for (j, &cr_raw) in off.cr_raw.iter().enumerate() {

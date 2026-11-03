@@ -51,7 +51,7 @@ cargo test --test power_law_gradcheck --test adjoint_hydraulics_k
 ```
 
 Measurement on the Juniata and Hudson bundles (ignored, release, manual; records
-numbers, gates nothing; writes `output/geometry-form/`):
+numbers, gates nothing; writes under `output/`):
 
 ```bash
 cargo test --release --test geometry_form_measure -- --ignored --nocapture

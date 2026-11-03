@@ -7,7 +7,8 @@
 //!
 //! All runs share ONE workspace, `output/geometry-form/.ddrs` (gitignored), so
 //! later probes can read the checkpoints. The run ids go to
-//! `output/geometry-form/RUN_IDS.txt`.
+//! `output/geometry-form/RUN_IDS.txt`. That file is appended to, so remove it
+//! before a rerun.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
