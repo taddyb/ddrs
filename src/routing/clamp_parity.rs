@@ -321,8 +321,9 @@ fn sample_step<I: Backend + 'static>(
         *rep.active.entry(s).or_insert(0) += ledger.count(s);
     }
 
-    // Reason check. `x_sol` is the trajectory's pre-clamp solve, which equals
-    // the fused one (the forward assert above).
+    // Reason check. `x_sol` is the trajectory's pre-clamp solve. It equals the
+    // fused one because both run the same chain on the same inputs (the assert
+    // above compares the clamped `q_next`, not `x_sol`).
     let q_t_v = vec1(q_t.clone());
     {
         let x_sol = vec1(Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(
@@ -348,6 +349,7 @@ fn sample_step<I: Backend + 'static>(
             &x_sol,
             &upstream,
             &cfg.params.attribute_minimums,
+            !cfg.params.use_leakance && !cfg.params.use_reservoirs,
         );
         for v in &mut r.violations {
             v.2 = format!("step {step}: {}", v.2);

@@ -54,6 +54,9 @@ const SLACK: f64 = 1e-5;
 #[derive(Clone, Debug, Default)]
 pub struct ReasonReport {
     pub checked: BTreeMap<ClampSite, u64>,
+    /// True when the `DischargeFloor` rule was not applied (count only)
+    /// because the config has leakance or reservoir rows.
+    pub discharge_rule_skipped: bool,
     /// `(site, reach, message)`. The message holds the raw inputs, the bound
     /// and the margin.
     pub violations: Vec<(ClampSite, usize, String)>,
@@ -66,7 +69,19 @@ impl ReasonReport {
             *self.checked.entry(s).or_insert(0) += c;
         }
         self.violations.extend(other.violations);
+        self.discharge_rule_skipped |= other.discharge_rule_skipped;
     }
+}
+
+/// The closed forms assume `d_ref = 1`. Return an error naming
+/// `params.stage_roughness.d_ref` when `gamma != 0` and `d_ref != 1`.
+pub fn check_preconditions(gamma: f32, d_ref: f32) -> Result<(), String> {
+    if gamma != 0.0 && d_ref != 1.0 {
+        return Err(format!(
+            "the clamp-reason closed forms assume d_ref = 1, but params.stage_roughness.d_ref is {d_ref} with gamma {gamma}"
+        ));
+    }
+    Ok(())
 }
 
 fn is_active(step: &StepLedger, site: ClampSite, i: usize) -> bool {
@@ -95,7 +110,9 @@ fn area(p: f64, q: f64, d: f64) -> f64 {
 ///
 /// `gamma` is `cfg.params.stage_roughness_params().0`. `upstream[i]` lists the
 /// direct upstream reaches of `i`. `q_t` is the discharge the step started from
-/// and `x_sol` is the pre-clamp solve of the same step.
+/// and `x_sol` is the pre-clamp solve of the same step. Call
+/// [`check_preconditions`] first. `discharge_rule_exact` is false when the
+/// config has leakance or reservoir rows: `DischargeFloor` is then count only.
 #[allow(clippy::too_many_arguments)]
 pub fn clamp_reasons(
     form: GeometryForm,
@@ -109,8 +126,10 @@ pub fn clamp_reasons(
     x_sol: &[f32],
     upstream: &[Vec<usize>],
     mins: &AttributeMinimums,
+    discharge_rule_exact: bool,
 ) -> ReasonReport {
     let mut rep = ReasonReport::default();
+    rep.discharge_rule_skipped = !discharge_rule_exact;
     let gamma = gamma as f64;
     let d_lb = mins.depth as f64;
     let v_lb = mins.velocity as f64;
@@ -155,6 +174,9 @@ pub fn clamp_reasons(
                             ),
                         ));
                     }
+                }
+                ClampSite::DischargeFloor if !discharge_rule_exact => {
+                    *rep.checked.entry(site).or_insert(0) += 1;
                 }
                 ClampSite::DischargeFloor if x_sol[i] < 0.0 => {
                     *rep.checked.entry(site).or_insert(0) += 1;
@@ -211,7 +233,7 @@ mod tests {
 
     fn one(form: GeometryForm, site: ClampSite, q_t: f32) -> ReasonReport {
         let step = led(1, &[(site, &[0])]);
-        clamp_reasons(form, 0.0, &step, &[q_t], &[N], &[P], &[Q], &[S], &[1.0], &[vec![]], &mins())
+        clamp_reasons(form, 0.0, &step, &[q_t], &[N], &[P], &[Q], &[S], &[1.0], &[vec![]], &mins(), true)
     }
 
     fn floor_of(form: GeometryForm) -> f32 {
@@ -267,7 +289,7 @@ mod tests {
         let bound = (0.5 * area(P as f64, Q as f64, d_v)) as f32;
         let run = |q_t: f32| {
             let step = led(1, &[(ClampSite::VelocityLow, &[0])]);
-            clamp_reasons(GeometryForm::PowerLaw, 0.0, &step, &[q_t], &[N], &[P], &[Q], &[S], &[1.0], &[vec![]], &m)
+            clamp_reasons(GeometryForm::PowerLaw, 0.0, &step, &[q_t], &[N], &[P], &[Q], &[S], &[1.0], &[vec![]], &m, true)
         };
         assert!(run(0.5 * bound).violations.is_empty());
         let bad = run(2.0 * bound);
@@ -304,12 +326,16 @@ mod tests {
     }
 
     fn floor_run(n: usize, x_sol: &[f32], window: &[usize]) -> ReasonReport {
+        floor_run_with(n, x_sol, window, true)
+    }
+
+    fn floor_run_with(n: usize, x_sol: &[f32], window: &[usize], exact: bool) -> ReasonReport {
         let all: Vec<usize> = (0..n).collect();
         let step = led(n, &[(ClampSite::DischargeFloor, &all), (ClampSite::OutsideCrWindow, window)]);
         let ones = vec![1.0_f32; n];
         clamp_reasons(
             GeometryForm::PowerLaw, 0.0, &step, &ones, &vec![N; n], &vec![P; n], &vec![Q; n],
-            &vec![S; n], x_sol, &chain_upstream(n), &mins(),
+            &vec![S; n], x_sol, &chain_upstream(n), &mins(), exact,
         )
     }
 
@@ -335,5 +361,21 @@ mod tests {
         let rep = floor_run(2, &[1.0, 5e-5], &[]);
         assert!(rep.violations.is_empty());
         assert!(!rep.checked.contains_key(&ClampSite::DischargeFloor));
+    }
+
+    #[test]
+    fn discharge_floor_is_count_only_with_leakance_or_reservoirs() {
+        let rep = floor_run_with(2, &[1.0, -1.0], &[], false);
+        assert!(rep.violations.is_empty());
+        assert!(rep.discharge_rule_skipped);
+        assert_eq!(rep.checked[&ClampSite::DischargeFloor], 2);
+    }
+
+    #[test]
+    fn d_ref_other_than_one_is_refused() {
+        let e = check_preconditions(0.18, 2.0).unwrap_err();
+        assert!(e.contains("params.stage_roughness.d_ref"), "{e}");
+        assert!(check_preconditions(0.18, 1.0).is_ok());
+        assert!(check_preconditions(0.0, 2.0).is_ok());
     }
 }

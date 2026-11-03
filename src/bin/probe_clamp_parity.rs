@@ -108,6 +108,10 @@ fn main() -> R<()> {
     if cfg.params.use_leakance {
         return Err("this probe does not support params.use_leakance: true (the autodiff reference has no leakance)".into());
     }
+    if cli.reasons {
+        let (gamma, d_ref) = cfg.params.stage_roughness_params();
+        ddrs::routing::clamp_reasons::check_preconditions(gamma, d_ref)?;
+    }
     if let (Some(exp), Some(ckpt)) = (cfg.experiment.as_mut(), cli.checkpoint.clone()) {
         exp.checkpoint = Some(ckpt);
     }
@@ -245,6 +249,9 @@ fn main() -> R<()> {
         println!("checked entries per site (rule applied, or count only for sites without a rule):");
         for s in ClampSite::ALL {
             println!("  {:<20} {}", s.name(), rep.reasons.checked.get(&s).copied().unwrap_or(0));
+        }
+        if rep.reasons.discharge_rule_skipped {
+            println!("discharge_floor rule skipped (count only): leakance or reservoir rows present");
         }
         println!("reason violations: {reason_violations}");
         for (site, reach, msg) in &rep.reasons.violations {
