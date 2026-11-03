@@ -248,22 +248,41 @@ pub fn active_steps(ledger: &ClampLedger, site: ClampSite, i: usize) -> usize {
     ledger.steps.iter().filter(|s| on(s, site, i)).count()
 }
 
+/// `|dL|` of a +- perturbation: the larger of `|lp - l0|` and `|lm - l0|`.
+/// NaN when any of the three losses is not finite, so a broken loss can never
+/// look flat.
+pub fn perturbed_dl(l0: f32, lp: f32, lm: f32) -> f32 {
+    if !(l0.is_finite() && lp.is_finite() && lm.is_finite()) {
+        return f32::NAN;
+    }
+    (lp - l0).abs().max((lm - l0).abs())
+}
+
+/// Flat means a finite `|dL|` below `FLAT_REL * |L|`. A NaN is not flat.
+pub fn is_flat(d: f32, l0: f32) -> bool {
+    d.is_finite() && l0.is_finite() && d < FLAT_REL * l0.abs()
+}
+
 /// True when the arm can be audited: a plain Muskingum-Cunge path (no
-/// leakance, no reservoirs, no stage routing) and axes that are all `n`, `p`
-/// or `q`. The clamp ledger covers that path only.
+/// leakance, no reservoirs). The clamp ledger covers that path only. An axis
+/// that is not `n`, `p` or `q` (gamma) is skipped by `audit_gauge` and gets a
+/// `not_audited` row; the other axes are still audited.
 pub fn auditable<I: Backend + 'static>(obj: &Objective<I>) -> bool
 where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
     let p = &obj.ctx.cfg.params;
-    !p.use_leakance && !p.use_reservoirs && obj.axes.iter().all(|a| Axis::from_param(a).is_some())
+    !p.use_leakance && !p.use_reservoirs
 }
 
 /// Audit one gauge at one point and append its rows to `zero_audit.csv`.
 /// Returns the gate violations: `unexplained` entries whose perturbation is
-/// not flat. Prints one line per such entry with the number of steps each
-/// clamp site is active on that reach.
+/// not flat (a non-finite loss counts as not flat). Prints one `UNEXPLAINED`
+/// line for every unexplained entry, flat or not (the line says which), with
+/// the number of steps each clamp site is active on that reach. Before the
+/// slots, asserts once per call that the per-reach loss with no perturbation
+/// equals `eval` bitwise.
 #[allow(clippy::too_many_arguments)]
 pub fn audit_gauge<I: Backend + 'static>(
     obj: &Objective<I>,
@@ -298,19 +317,22 @@ where
     let mut rows = Vec::new();
     let mut counts_all = Vec::new();
     let mut violations = 0usize;
-    let mut checked_zero_perturbation = false;
+    let again = obj.reach_loss(alpha, None);
+    assert_eq!(again.to_bits(), l0.to_bits(), "reach_loss with no perturbation must equal eval bitwise");
+    println!("  [{arm}] {staid} zero_audit ({point}): reach_loss with no perturbation equals eval bitwise ({l0:e})");
+    let mut skipped_axes = Vec::new();
     for slot in 0..3 {
-        let axis = Axis::from_param(&obj.axes[slot]).expect("auditable arm");
+        let Some(axis) = Axis::from_param(&obj.axes[slot]) else {
+            skipped_axes.push(super::axis_label(&obj.axes[slot]).to_string());
+            continue;
+        };
         let counts = audit_axis(&input, slot, axis, &rg.slots[slot]);
         let mut flat = 0usize;
         for &i in &counts.unexplained_reaches {
-            if !checked_zero_perturbation {
-                let again = obj.reach_loss(alpha, None);
-                assert_eq!(again.to_bits(), l0.to_bits(), "reach_loss with no perturbation must equal eval bitwise");
-                checked_zero_perturbation = true;
-            }
-            let d = [PERTURB, -PERTURB].iter().map(|dx| (obj.reach_loss(alpha, Some((slot, i, *dx))) - l0).abs()).fold(0.0f32, f32::max);
-            let is_flat = d < FLAT_REL * l0.abs();
+            let lp = obj.reach_loss(alpha, Some((slot, i, PERTURB)));
+            let lm = obj.reach_loss(alpha, Some((slot, i, -PERTURB)));
+            let d = perturbed_dl(l0, lp, lm);
+            let is_flat = is_flat(d, l0);
             if is_flat {
                 flat += 1;
             } else {
@@ -331,6 +353,10 @@ where
         rows.push(ZeroAuditRow { point, axis: super::axis_label(&obj.axes[*slot]), counts, unexplained_flat: *flat });
     }
     append_zero_audit(arm_dir, arm, staid, &rows)?;
+    for a in &skipped_axes {
+        super::output::append_zero_audit_skipped(arm_dir, arm, staid, a)?;
+        println!("  [{arm}] {staid} zero_audit ({point}, {a}): not_audited");
+    }
     for r in &rows {
         println!(
             "  [{arm}] {staid} zero_audit ({point}, {}): n_zero {} no_path {} range_clamp {} masked_row {} gauge_floor {} clamp_cut {} unexplained {} (flat {})",
@@ -459,6 +485,64 @@ mod tests {
         let fx = Fx::new(ledger(3, &[(ClampSite::VelocityLow, 1), (ClampSite::XCap, 1), (ClampSite::KFloor, 1)]));
         assert_eq!(fx.run(GeometryForm::PowerLaw, Axis::Q, &G).clamp_cut, 1);
         assert_eq!(fx.run(GeometryForm::Trapezoid, Axis::P, &G).clamp_cut, 1);
+    }
+
+    #[test]
+    fn nan_or_infinite_loss_is_never_flat() {
+        assert!(is_flat(perturbed_dl(1.0, 1.0, 1.0), 1.0));
+        assert!(!is_flat(perturbed_dl(1.0, 1.1, 1.0), 1.0));
+        assert!(perturbed_dl(1.0, f32::NAN, 1.0).is_nan());
+        assert!(perturbed_dl(1.0, 1.0, f32::INFINITY).is_nan());
+        assert!(perturbed_dl(f32::NAN, 1.0, 1.0).is_nan());
+        assert!(!is_flat(perturbed_dl(1.0, f32::NAN, 1.0), 1.0));
+        assert!(!is_flat(f32::NAN, 1.0));
+        assert!(!is_flat(0.0, f32::NAN));
+    }
+
+    /// Every form x axis cell over all 32 combinations of depth, velocity,
+    /// X band, XCap and KFloor, with both velocity sites and both X band
+    /// sites. The expected value is written out from the table in the module
+    /// doc, not taken from `cut_holds`.
+    #[test]
+    fn cut_table_covers_every_cell() {
+        for bits in 0..32u32 {
+            let (depth, vel, xband, xcap, kf) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0, bits & 16 != 0);
+            for vsite in [ClampSite::VelocityLow, ClampSite::VelocityHigh] {
+                for xsite in [ClampSite::XBandLow, ClampSite::XBandHigh] {
+                    let mut set = Vec::new();
+                    if depth {
+                        set.push((ClampSite::DepthFloor, 1));
+                    }
+                    if vel {
+                        set.push((vsite, 1));
+                    }
+                    if xband {
+                        set.push((xsite, 1));
+                    }
+                    if xcap {
+                        set.push((ClampSite::XCap, 1));
+                    }
+                    if kf {
+                        set.push((ClampSite::KFloor, 1));
+                    }
+                    let step = &ledger(1, &set).steps[0];
+                    let x = xband || xcap;
+                    let cases = [
+                        (GeometryForm::PowerLaw, Axis::N, depth || (vel && x)),
+                        (GeometryForm::PowerLaw, Axis::P, vel && x),
+                        (GeometryForm::PowerLaw, Axis::Q, vel && kf && x),
+                        (GeometryForm::Trapezoid, Axis::N, (depth && vel) || (vel && kf && x)),
+                        (GeometryForm::Trapezoid, Axis::P, vel && kf && x),
+                        (GeometryForm::Trapezoid, Axis::Q, vel && kf && x),
+                    ];
+                    for (form, axis, want) in cases {
+                        assert_eq!(cut_holds(form, axis, step, 1), want, "{form:?} {axis:?} bits {bits:05b} {vsite:?} {xsite:?}");
+                        // The other reaches have nothing active.
+                        assert!(!cut_holds(form, axis, step, 0));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

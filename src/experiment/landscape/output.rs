@@ -372,8 +372,10 @@ pub struct ZeroAuditRow<'a> {
 /// Append the zero-gradient audit of one gauge to `zero_audit.csv` in
 /// `arm_dir`. Each row counts the entries of one axis whose `reach_grad` is
 /// exactly 0.0 by cause. The gate is `unexplained - unexplained_flat == 0`.
-/// An arm or axis that is not audited (leakance, the gamma axis) writes one
-/// row with `point` `not_audited` and no counts.
+/// Something not audited writes a row with `point` `not_audited` and no
+/// counts (`append_zero_audit_skipped`): a leakance or reservoir arm writes one
+/// row for the whole arm (empty `axis`), and an arm with a gamma axis still
+/// audits its n, p and q axes and writes one such row for the gamma axis.
 pub fn append_zero_audit(arm_dir: &Path, arm: &str, staid: &str, rows: &[ZeroAuditRow]) -> Result<(), BoxError> {
     let path = arm_dir.join("zero_audit.csv");
     let new = !path.exists();
@@ -392,15 +394,15 @@ pub fn append_zero_audit(arm_dir: &Path, arm: &str, staid: &str, rows: &[ZeroAud
     Ok(())
 }
 
-/// The single `not_audited` row of `zero_audit.csv`.
-pub fn append_zero_audit_skipped(arm_dir: &Path, arm: &str, staid: &str) -> Result<(), BoxError> {
+/// A `not_audited` row of `zero_audit.csv`. `axis` is empty for a whole arm.
+pub fn append_zero_audit_skipped(arm_dir: &Path, arm: &str, staid: &str, axis: &str) -> Result<(), BoxError> {
     let path = arm_dir.join("zero_audit.csv");
     let new = !path.exists();
     let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
     if new {
         writeln!(w, "{ZERO_AUDIT_HEADER}")?;
     }
-    writeln!(w, "{arm},{staid},not_audited,,,,,,,,,,")?;
+    writeln!(w, "{arm},{staid},not_audited,{axis},,,,,,,,,")?;
     Ok(())
 }
 
@@ -416,7 +418,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let c = AxisCounts { n_reach: 10, n_zero: 7, no_path: 1, range_clamp: 2, masked_row: 0, gauge_floor: 0, clamp_cut: 3, unexplained: 1, unexplained_reaches: vec![4] };
         append_zero_audit(&dir, "a", "01", &[ZeroAuditRow { point: "trained", axis: "n", counts: &c, unexplained_flat: 1 }]).unwrap();
-        append_zero_audit_skipped(&dir, "b", "01").unwrap();
+        append_zero_audit_skipped(&dir, "b", "01", "").unwrap();
+        append_zero_audit_skipped(&dir, "b", "01", "gamma").unwrap();
         let t = std::fs::read_to_string(dir.join("zero_audit.csv")).unwrap();
         let mut it = t.lines();
         assert_eq!(
@@ -425,6 +428,7 @@ mod tests {
         );
         assert_eq!(it.next().unwrap(), "a,01,trained,n,10,7,1,2,0,0,3,1,1");
         assert_eq!(it.next().unwrap(), "b,01,not_audited,,,,,,,,,,");
+        assert_eq!(it.next().unwrap(), "b,01,not_audited,gamma,,,,,,,,,");
         assert!(it.next().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -221,7 +221,8 @@ and the run stops with an error. Each arm writes two CSVs:
 `fd_sweep.csv` (one row per point, `h` and active axis; a frozen axis has no
 row; columns `h_aa`, `h_col_*`, `reach_steps`, `switch_total`, one
 `switch_<site>` per clamp site, `switch_range`, `switch_frac`) and
-`fd_sweep_eig.csv` (eigenvalues per `h` and `max_rel_change_vs_prev_h`).
+`fd_sweep_eig.csv` (eigenvalues per `h` and `max_rel_change_vs_prev_h`; a frozen
+axis's eigenvalue is written as NaN).
 `switch_frac` is the share of (step, reach) entries where any clamp site
 differs. `switch_range` counts parameter-range clamp changes and stays apart.
 When `fd_step` is one of the steps, the log prints
@@ -238,10 +239,14 @@ every step, from the table in the module doc), else `unexplained`. Each
 `unexplained` entry is perturbed by +-0.05 on its own leaf; it counts as
 `unexplained_flat` when `|dL| < 1e-6 |L|`. Per arm it writes `zero_audit.csv`
 (`arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat`).
-The gate is `unexplained - unexplained_flat == 0`; the log prints `GATE FAIL`
-and one `UNEXPLAINED` line per bad entry. The `optimum` point is audited only
+A non-finite perturbed loss is never flat. The gate is
+`unexplained - unexplained_flat == 0`; the log prints one `UNEXPLAINED` line for
+every unexplained entry (flat or not; the line says which) and `GATE FAIL` when
+any is not flat. Once per audited point it asserts that the per-reach loss with
+no perturbation equals `eval` bitwise. The `optimum` point is audited only
 when the Newton optimum differs from the trained point. A leakance, reservoir
-or gamma-axis arm writes one `not_audited` row. It needs the clamp ledger, so
+arm writes one `not_audited` row for the whole arm; a gamma axis gets a
+`not_audited` row of its own while n, p and q are still audited. It needs the clamp ledger, so
 it covers the plain `route_timestep` path only. Code:
 `src/experiment/landscape/zero_audit.rs`.
 

@@ -843,8 +843,8 @@ where
                 }
                 println!("  [{}] {} zero_audit gate: unexplained and not flat = {bad}{}", arm.name, g.staid, if bad == 0 { "" } else { "  GATE FAIL" });
             } else {
-                output::append_zero_audit_skipped(arm_dir, &arm.name, &g.staid)?;
-                println!("  [{}] {} zero_audit: not_audited (leakance, reservoirs or a non-n/p/q axis)", arm.name, g.staid);
+                output::append_zero_audit_skipped(arm_dir, &arm.name, &g.staid, "")?;
+                println!("  [{}] {} zero_audit: not_audited (leakance or reservoirs)", arm.name, g.staid);
             }
         }
         (Some(rg0.slots), Some(rgs.slots), dist)
