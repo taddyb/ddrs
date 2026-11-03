@@ -56,7 +56,12 @@ cargo test --lib clamp_parity            # the same comparison on a routed 5-rea
 
 `probe_clamp_parity` runs the same comparison on a real routed trajectory (CPU only,
 refuses stage-routing configs): `cargo run --release --bin probe_clamp_parity -- --config <run>/config.yaml --checkpoint <run>/checkpoints/<last> --gauges <G> --rho 90 --steps 2000 --sample-every 20 --workspace <ws>`.
-It prints active counts per clamp site and mismatch counts per parent, and exits 1 on any zero-set mismatch.
+It also refuses `ddr_match: true`, `use_reservoirs: true`, `use_leakance: true` and a learned `gamma`.
+It prints active counts per clamp site, mismatch counts per parent, and a breakdown by reach steadiness.
+It exits 1 on any zero-set mismatch. On the four example-bundle runs it exits 1 today:
+`n`, `q_spatial` and `p_spatial` get an exact 0 on one side and round-off on the other at reaches
+where the step is steady. Compare the band breakdown with the one in `.claude/PHYSICS-CORRECTIONS.md`
+before reading exit 1 as a regression.
 
 Measurement on the Juniata and Hudson bundles (ignored, release, manual; records
 numbers, gates nothing; writes under `output/`):

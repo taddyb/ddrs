@@ -63,8 +63,9 @@ struct Cli {
     #[arg(long, default_value_t = 20)]
     sample_every: usize,
 
-    /// Workspace root. Kept for the same command line as `probe_courant`;
-    /// unused when the config names explicit adjacency stores.
+    /// Accepted and never read. Kept so the command line matches
+    /// `probe_courant`. The probe has no managed adjacency build, so the
+    /// config must name explicit adjacency stores.
     #[arg(long, default_value = ".ddrs")]
     workspace: PathBuf,
 }
@@ -88,6 +89,19 @@ fn main() -> R<()> {
     }
     if cfg.stage_routing_on() {
         return Err("this probe does not support params.stage_routing (it probes the Muskingum-Cunge gradient)".into());
+    }
+    // `ProbeInputs` carries no gamma and the reference has no leakance, so
+    // these configs would be probed as a different model than the trained one.
+    if cfg
+        .kan_head
+        .as_ref()
+        .map(|k| k.learnable_parameters.iter().any(|p| p == "gamma"))
+        .unwrap_or(false)
+    {
+        return Err("this probe does not support `gamma` in kan_head.learnable_parameters (ProbeInputs carries no gamma)".into());
+    }
+    if cfg.params.use_leakance {
+        return Err("this probe does not support params.use_leakance: true (the autodiff reference has no leakance)".into());
     }
     if let (Some(exp), Some(ckpt)) = (cfg.experiment.as_mut(), cli.checkpoint.clone()) {
         exp.checkpoint = Some(ckpt);

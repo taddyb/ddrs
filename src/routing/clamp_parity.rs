@@ -15,7 +15,6 @@
 //! by more than rel 1e-3 and abs 1e-6 are reported as value outliers only.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use burn::backend::Autodiff;
 use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
@@ -115,6 +114,12 @@ impl ClampParityReport {
     pub fn total_mismatches(&self) -> u64 {
         self.mismatches.values().sum()
     }
+}
+
+/// The gate: the gradient pair `(a, b)` differs in its zero set, or either
+/// side is not finite.
+pub fn zero_set_mismatch(a: f32, b: f32) -> bool {
+    !(a.is_finite() && b.is_finite()) || (a == 0.0) != (b == 0.0)
 }
 
 fn vec1<I: Backend>(t: Tensor<I, 1>) -> Vec<f32> {
@@ -334,8 +339,7 @@ fn sample_step<I: Backend + 'static>(
             .collect()
     };
     let is_mismatch = |pi: usize, i: usize| {
-        let (a, b) = (grads_f[pi][i], grads_r[pi][i]);
-        !(a.is_finite() && b.is_finite()) || (a == 0.0) != (b == 0.0)
+        zero_set_mismatch(grads_f[pi][i], grads_r[pi][i])
     };
     // Full dump of reaches with any mismatch in the >1e-4 band.
     for i in 0..n {
@@ -385,10 +389,9 @@ fn sample_step<I: Backend + 'static>(
         *rep.compared.get_mut(*name).unwrap() += n as u64;
         for i in 0..n {
             let (a, b) = (gf[i], gr[i]);
-            let finite = a.is_finite() && b.is_finite();
             let cell = &mut rep.cells.get_mut(*name).unwrap()[cell_index(band[i], clamped[i])];
             cell.compared += 1;
-            if !finite || (a == 0.0) != (b == 0.0) {
+            if zero_set_mismatch(a, b) {
                 cell.mismatches += 1;
                 if clamped[i] {
                     let key = (
@@ -434,6 +437,7 @@ fn sample_step<I: Backend + 'static>(
 mod tests {
     use super::*;
     use crate::sparse::{CsrPattern, SparseAdjacency};
+    use std::sync::Arc;
     use burn::backend::NdArray;
 
     type I = NdArray<f32>;
@@ -484,7 +488,23 @@ mod tests {
         assert_eq!(rep.n_sampled_steps, 6);
         for p in PARENTS {
             assert_eq!(rep.compared[p], 30, "compared {p}");
+            assert!(rep.compared[p] > 0, "compared {p}");
             assert_eq!(rep.mismatches[p], 0, "mismatches {p}: {:?}", rep.first_mismatches);
         }
+    }
+
+    /// Negative control: the gate counts a pair that differs in its zero set,
+    /// and a non-finite value, as one mismatch each.
+    #[test]
+    fn gate_counts_zero_set_difference() {
+        assert!(zero_set_mismatch(1e-8, 0.0));
+        assert!(zero_set_mismatch(0.0, -3.0));
+        assert!(zero_set_mismatch(f32::NAN, 1.0));
+        assert!(!zero_set_mismatch(0.0, 0.0));
+        assert!(!zero_set_mismatch(1.0, 2.0));
+        let a = [0.0_f32, 1.0, 0.0, 2.0];
+        let b = [0.0_f32, 1.0, 1e-9, 2.0];
+        let n = a.iter().zip(&b).filter(|(x, y)| zero_set_mismatch(**x, **y)).count();
+        assert_eq!(n, 1);
     }
 }

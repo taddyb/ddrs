@@ -336,7 +336,7 @@ A natural X = 0.5 rounding tie on the default path now passes the gradient.
 Forward values stay bitwise. A training trajectory can move slightly from older
 runs. The pins are in `tests/clamp_tie_rule.rs`.
 
-### Zero pattern on real operating points
+#### Zero pattern on real operating points
 
 `probe_clamp_parity` routes a trained window and compares the fused gradient with
 Burn autodiff at every 20th hourly step. The loss is `sum(q_next * w)` with
@@ -350,14 +350,35 @@ The runs are local, under the geometry-form workspace. Checkpoint: the last one,
 `--gauges 1` (01567000, 213 reaches). Hudson MC-only uses `--gauges 4`
 (756 reaches).
 
-**Result: the zero sets do not match for the parameter parents.** `q_t` and
+**Result: the zero sets do not match for the parameter parents. Every mismatch is
+f32 round-off at an entry whose true gradient is 0 or near 0.** `q_t` and
 `q_prime_t` match in all four arms (0 mismatches in 75600 or 21300 entries). `n`,
-`q_spatial` and `p_spatial` show the same mismatch count per arm. In the first 20
-mismatches of each arm, the nonzero side has a gradient of 1e-6 or smaller and the
-other side is exactly 0. The ledger rows of those 20 show no clamp
-site active, only `outside_cr_window`, which is not a clamp. This is a finding,
-not yet explained. A round-off cause (a sum of terms that cancels exactly on one
-side and not on the other) fits the sizes but was not tested.
+`q_spatial` and `p_spatial` reach `q_next` only through K and X, so they share one
+mismatch count per arm. Muskingum has c1 + c2 + c3 = 1 and c3 + c4 = 1 for any K
+and X. So `q_next = c1*dI + c3*dQ + I_t + q'`, with `dI = I_next - I_t`,
+`I = N q` and `dQ = q_t - I_t - q'`. The local derivative with respect to K or X is
+`dc1*dI + dc3*dQ`. It is near 0 at a steady reach, and where the two terms cancel.
+There the fused sum and the autodiff sum round differently, so one side can be
+exactly 0 and the other a small number.
+
+Steadiness of the reach at the step (`s = max(|q_next - q_t|, |I_next - I_t|) /
+max(|q_t|, |I_t|, 1e-6)`, from the trajectory values). Mismatches at bitwise or
+`s <= 1e-6` steadiness, out of all mismatches: Juniata trapezoid 1479 of 1479,
+Juniata power_law 1518 of 1518, Hudson trapezoid 7200 of 7203, Hudson power_law
+7458 of 7458. The three others are one entry, Hudson trapezoid step 1240, reach 556
+(`s` = 2.4e-4, X clamped to 0 by `x_band_low`). There `dI - 2*dQ` is 5.8e-5 against
+`dI` = -3.9e-2, and the f32 round-off scale of the four-term sum is 2.8e-5. So its
+true gradient is also at round-off.
+
+225 mismatch entries sit on reaches with a clamp site active (3 Juniata power_law,
+156 Hudson trapezoid, 66 Hudson power_law). They are `x_band_low` or `depth_floor`
+at steady reaches. No mismatch comes from a clamp mask. The nonzero side of a
+mismatch is small but not always tiny: the largest is 6.6e-4 for `n` (Hudson
+trapezoid), 8.9e-5 for `q_spatial` and 2.6e-6 for `p_spatial` (Hudson power_law).
+
+The probe's strict gate (exit 1 on any zero-set mismatch) still exits 1 on all four
+runs. Whether to gate only entries whose true gradient is resolvable in f32 is an
+open decision.
 
 | Arm | Run id | Mismatches per parent (n, q_spatial, p_spatial) | Entries per parent | Value outliers (n, q_spatial, p_spatial) | `max_q_rel_diff` |
 |---|---|---|---|---|---|
@@ -367,6 +388,13 @@ side and not on the other) fits the sizes but was not tested.
 | Hudson MC power_law | `2026-11-03T04-25-11Z-train-and-test` | 2486, 2486, 2486 | 75600 | 2948, 263, 28 | 0e0 |
 
 Mismatches for `q_t` and `q_prime_t`: 0 in every arm, with 0 value outliers.
+
+Value outliers are nonzero entries on both sides that differ by more than rel 1e-3
+and abs 1e-6. Reported, not gated. Most sit at steady reaches (`s <= 1e-4`: 161 of
+216, 156 of 217, 2777 of 3296 and 2915 of 3239 in table order). The largest
+|fused - ref| per arm (n, q_spatial, p_spatial): Juniata trapezoid 9.9e-4, 5.2e-5,
+1.1e-6; Juniata power_law 9.4e-4, 9.8e-6, 0; Hudson trapezoid 6.2e-3, 8.3e-4, 4.3e-5;
+Hudson power_law 3.1e-3, 5.6e-4, 2.9e-5.
 
 Active (step, reach) entries per clamp site, summed over the 100 sampled steps:
 
@@ -384,7 +412,6 @@ Active (step, reach) entries per clamp site, summed over the 100 sampled steps:
 | x_cap | 0 | 0 | 0 | 0 |
 | discharge_floor | 0 | 2 | 4 | 2 |
 | outside_cr_window | 20530 | 20597 | 69190 | 69765 |
-
 
 ### Measured
 
