@@ -336,6 +336,56 @@ A natural X = 0.5 rounding tie on the default path now passes the gradient.
 Forward values stay bitwise. A training trajectory can move slightly from older
 runs. The pins are in `tests/clamp_tie_rule.rs`.
 
+### Zero pattern on real operating points
+
+`probe_clamp_parity` routes a trained window and compares the fused gradient with
+Burn autodiff at every 20th hourly step. The loss is `sum(q_next * w)` with
+`w_i = 1 + (i % 7)`. Five parents are tracked: `n`, `q_spatial`, `p_spatial`,
+`q_t`, `q_prime_t`. The fused forward equals the trajectory forward bitwise at
+every sampled step (the probe asserts it). The reference forward matches the
+fused forward with `max_q_rel_diff` 0 in all four arms.
+
+The runs are local, under the geometry-form workspace. Checkpoint: the last one,
+`epoch_30_mb_0`. Window: 90 days from day 0, 100 sampled steps. Juniata uses
+`--gauges 1` (01567000, 213 reaches). Hudson MC-only uses `--gauges 4`
+(756 reaches).
+
+**Result: the zero sets do not match for the parameter parents.** `q_t` and
+`q_prime_t` match in all four arms (0 mismatches in 75600 or 21300 entries). `n`,
+`q_spatial` and `p_spatial` show the same mismatch count per arm. In the first 20
+mismatches of each arm, the nonzero side has a gradient of 1e-6 or smaller and the
+other side is exactly 0. The ledger rows of those 20 show no clamp
+site active, only `outside_cr_window`, which is not a clamp. This is a finding,
+not yet explained. A round-off cause (a sum of terms that cancels exactly on one
+side and not on the other) fits the sizes but was not tested.
+
+| Arm | Run id | Mismatches per parent (n, q_spatial, p_spatial) | Entries per parent | Value outliers (n, q_spatial, p_spatial) | `max_q_rel_diff` |
+|---|---|---|---|---|---|
+| Juniata trapezoid | `2026-11-03T04-29-42Z-train-and-test` | 493, 493, 493 | 21300 | 184, 31, 1 | 0e0 |
+| Juniata power_law | `2026-11-03T04-30-00Z-train-and-test` | 506, 506, 506 | 21300 | 192, 25, 0 | 0e0 |
+| Hudson MC trapezoid | `2026-11-03T04-24-45Z-train-and-test` | 2401, 2401, 2401 | 75600 | 2754, 325, 217 | 0e0 |
+| Hudson MC power_law | `2026-11-03T04-25-11Z-train-and-test` | 2486, 2486, 2486 | 75600 | 2948, 263, 28 | 0e0 |
+
+Mismatches for `q_t` and `q_prime_t`: 0 in every arm, with 0 value outliers.
+
+Active (step, reach) entries per clamp site, summed over the 100 sampled steps:
+
+| Site | Juniata trapezoid | Juniata power_law | Hudson MC trapezoid | Hudson MC power_law |
+|---|---|---|---|---|
+| depth_floor | 0 | 1 | 31 | 2 |
+| side_slope_low | 0 | 0 | 0 | 0 |
+| side_slope_high | 0 | 0 | 0 | 0 |
+| bottom_width_floor | 0 | 0 | 0 | 0 |
+| velocity_low | 0 | 1 | 2 | 1 |
+| velocity_high | 0 | 0 | 0 | 0 |
+| k_floor | 0 | 0 | 0 | 0 |
+| x_band_low | 533 | 457 | 3743 | 2915 |
+| x_band_high | 0 | 0 | 0 | 0 |
+| x_cap | 0 | 0 | 0 | 0 |
+| discharge_floor | 0 | 2 | 4 | 2 |
+| outside_cr_window | 20530 | 20597 | 69190 | 69765 |
+
+
 ### Measured
 
 Seed 42, CPU, 30 epochs, committed bundles. This is a record, not a gate. One run per
