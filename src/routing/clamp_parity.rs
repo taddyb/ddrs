@@ -21,6 +21,7 @@ use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
 
 use crate::config::Config;
 use crate::routing::clamp_ledger::{ClampLedger, ClampSite};
+use crate::routing::clamp_reasons::{clamp_reasons, ReasonReport};
 use crate::routing::courant_probe::ProbeInputs;
 use crate::routing::mmc_op::{forward_chain_inner, forward_saved_idx, timestep_forward_diag};
 use crate::routing::reference_step::reference_timestep;
@@ -60,6 +61,9 @@ pub struct ClampParityReport {
     pub clamp_groups: BTreeMap<(String, String), u64>,
     /// Full dumps of reaches with a zero-set mismatch in the `>1e-4` band.
     pub unsteady_details: Vec<String>,
+    /// Reason check of the active clamps, summed over sampled steps. Separate
+    /// from the zero-set gate. Violation messages start with the step.
+    pub reasons: ReasonReport,
 }
 
 /// Steadiness bands of a reach at one step, from the trajectory values.
@@ -317,8 +321,41 @@ fn sample_step<I: Backend + 'static>(
         *rep.active.entry(s).or_insert(0) += ledger.count(s);
     }
 
-    // Steadiness band and clamp attribution of each reach at this step.
+    // Reason check. `x_sol` is the trajectory's pre-clamp solve, which equals
+    // the fused one (the forward assert above).
     let q_t_v = vec1(q_t.clone());
+    {
+        let x_sol = vec1(Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(
+            saved[forward_saved_idx::X_SOL].clone(),
+        )));
+        let upstream: Vec<Vec<usize>> = (0..n)
+            .map(|r| {
+                (inp.pattern.crow[r] as usize..inp.pattern.crow[r + 1] as usize)
+                    .filter(|&k| inp.pattern.adj_values[k] != 0.0)
+                    .map(|k| inp.pattern.col[k] as usize)
+                    .collect()
+            })
+            .collect();
+        let mut r = clamp_reasons(
+            cfg.params.geometry_form,
+            cfg.params.stage_roughness_params().0,
+            &ledger.steps[0],
+            &q_t_v,
+            &vec1(inp.n.clone()),
+            &vec1(inp.p_spatial.clone()),
+            &vec1(inp.q_spatial.clone()),
+            &vec1(inp.slope.clone()),
+            &x_sol,
+            &upstream,
+            &cfg.params.attribute_minimums,
+        );
+        for v in &mut r.violations {
+            v.2 = format!("step {step}: {}", v.2);
+        }
+        rep.reasons.merge(r);
+    }
+
+    // Steadiness band and clamp attribution of each reach at this step.
     let (i_t_v, i_next_v) = (inflow(&inp.pattern, &q_t_v), inflow(&inp.pattern, &traj_next));
     let band: Vec<usize> =
         (0..n).map(|i| band_of(q_t_v[i], traj_next[i], i_t_v[i], i_next_v[i])).collect();

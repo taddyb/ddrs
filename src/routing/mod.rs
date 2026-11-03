@@ -1,6 +1,7 @@
 pub mod clamp_rule;
 pub mod clamp_ledger;
 pub mod clamp_parity;
+pub mod clamp_reasons;
 pub mod courant_probe;
 pub mod leakance;
 pub mod mmc;

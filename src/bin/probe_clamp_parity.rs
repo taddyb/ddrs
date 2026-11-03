@@ -63,6 +63,11 @@ struct Cli {
     #[arg(long, default_value_t = 20)]
     sample_every: usize,
 
+    /// Print the clamp-reason report in its own block. A reason violation
+    /// makes the exit code 1, like a zero-set mismatch does.
+    #[arg(long)]
+    reasons: bool,
+
     /// Accepted and never read. Kept so the command line matches
     /// `probe_courant`. The probe has no managed adjacency build, so the
     /// config must name explicit adjacency stores.
@@ -233,7 +238,26 @@ fn main() -> R<()> {
     }
     let total = rep.total_mismatches();
     println!("total zero-set mismatches: {total}");
-    if total > 0 {
+    let mut reason_violations = 0usize;
+    if cli.reasons {
+        reason_violations = rep.reasons.violations.len();
+        println!("---- clamp reasons (separate from the zero-set gate) ----");
+        println!("checked entries per site (rule applied, or count only for sites without a rule):");
+        for s in ClampSite::ALL {
+            println!("  {:<20} {}", s.name(), rep.reasons.checked.get(&s).copied().unwrap_or(0));
+        }
+        println!("reason violations: {reason_violations}");
+        for (site, reach, msg) in &rep.reasons.violations {
+            println!("  {} reach {reach}: {msg}", site.name());
+        }
+    }
+    if total > 0 || reason_violations > 0 {
+        if total > 0 {
+            eprintln!("exit 1: zero-set mismatches ({total})");
+        }
+        if reason_violations > 0 {
+            eprintln!("exit 1: reason violations ({reason_violations})");
+        }
         std::process::exit(1);
     }
     Ok(())
