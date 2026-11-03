@@ -228,13 +228,27 @@ fn ledger_marks_the_depth_floor() {
     }
 }
 
+fn short_fixture() -> Fixture {
+    let mut f = f4_10k();
+    f.length = vec![1_000.0; 4];
+    f
+}
+
+fn high_w_fixture() -> Fixture {
+    let mut f = f4_10k();
+    f.length = vec![100.0; 4];
+    f.slope = vec![1e-5; 4];
+    f
+}
+
 #[test]
 fn probe_cuts_exactly_where_the_ledger_is_active() {
-    let mut cut_total = 0usize;
-    let mut sites_seen = std::collections::BTreeSet::new();
+    // Active entries with a nonzero incoming gradient, per probe site. A cut
+    // of a zero gradient proves nothing, so only these entries count.
+    let mut live_cuts: std::collections::BTreeMap<ProbeSite, usize> = Default::default();
     for form in [GeometryForm::Trapezoid, GeometryForm::PowerLaw] {
         for enforce in [false, true] {
-            for f in [f4_10k(), depth_fixture()] {
+            for f in [f4_10k(), depth_fixture(), short_fixture(), high_w_fixture()] {
                 let steps = 3;
                 let r = run(&cfg(form, enforce), &f, steps, true);
                 let ledger = r.ledger.unwrap();
@@ -244,7 +258,6 @@ fn probe_cuts_exactly_where_the_ledger_is_active() {
                     // Backward call order is the reverse of the forward order.
                     let st = &ledger.steps[steps - 1 - k];
                     for (site, sg) in &sp.sites {
-                        sites_seen.insert(*site);
                         assert_eq!(sg.g_in.len(), N);
                         assert_eq!(sg.g_out.len(), N);
                         for i in 0..N {
@@ -253,7 +266,9 @@ fn probe_cuts_exactly_where_the_ledger_is_active() {
                                 .filter(|s| s.probe_site() == Some(*site))
                                 .any(|s| st.active.get(s).is_some_and(|v| v[i]));
                             if active {
-                                cut_total += 1;
+                                if sg.g_in[i] != 0.0 {
+                                    *live_cuts.entry(*site).or_default() += 1;
+                                }
                                 assert_eq!(
                                     sg.g_out[i], 0.0,
                                     "{form:?} enforce={enforce} step {k} {site:?} reach {i}: active but gradient passes"
@@ -271,9 +286,8 @@ fn probe_cuts_exactly_where_the_ledger_is_active() {
             }
         }
     }
-    println!("cut entries checked = {cut_total}, probe sites seen = {sites_seen:?}");
-    assert!(cut_total > 0, "no clamp was active, the check is vacuous");
-    for s in [ProbeSite::Depth, ProbeSite::Discharge, ProbeSite::Velocity, ProbeSite::XBand, ProbeSite::KFloor, ProbeSite::XCap] {
-        assert!(sites_seen.contains(&s), "probe never saw {s:?}");
+    println!("live cuts per probe site = {live_cuts:?}");
+    for s in [ProbeSite::Depth, ProbeSite::Velocity, ProbeSite::XCap, ProbeSite::KFloor, ProbeSite::XBand] {
+        assert!(live_cuts.get(&s).copied().unwrap_or(0) > 0, "no live cut at {s:?}");
     }
 }

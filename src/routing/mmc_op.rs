@@ -2234,7 +2234,7 @@ where
 
             SectionOut {
                 depth,
-                depth_raw: Some(depth_raw),
+                depth_raw: ledger.is_some().then_some(depth_raw),
                 top_width,
                 side_slope,
                 bottom_width,
@@ -3550,6 +3550,8 @@ where
 /// zeta, routed depth, and area_z (inner backend, no tape), recomputed from the
 /// SAME saved primitives the backward reads — so the reported value is exactly
 /// what was subtracted from `b_rhs`. `None` (the training path) adds zero kernels.
+///
+/// Leakance runs are eval diagnostics here and record no clamp ledger.
 #[allow(clippy::too_many_arguments)]
 pub fn timestep_forward_leakance<I: Backend + 'static>(
     cfg: &Config,
@@ -3655,7 +3657,6 @@ where
         gamma_p.clone().map(wrap),
         // Reservoir rows are rejected with leakance (`route_timestep`).
         None,
-        // Leakance runs are eval diagnostics here and record no ledger.
         None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");

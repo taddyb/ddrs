@@ -1819,7 +1819,8 @@ impl<I: Backend> MuskingumCunge<I> {
     }
 
     /// Take the recorded ledger and stop recording. `None` if it was never
-    /// enabled.
+    /// enabled. Zero steps means the plain `route_timestep` path did not run
+    /// (the leakance and CUDA-graph paths record nothing).
     pub fn take_clamp_ledger(&mut self) -> Option<crate::routing::clamp_ledger::ClampLedger> {
         self.clamp_ledger.take()
     }

@@ -12,7 +12,9 @@
 use std::collections::BTreeMap;
 
 /// One clamp on the forward path. `OutsideCrWindow` is not a clamp: it marks
-/// reaches where a Muskingum coefficient `c1` or `c3` is negative.
+/// reaches where a Muskingum coefficient `c1` or `c3` is negative. It reads
+/// `c1` and `c3` after the dam-row overrides, so on dam rows it reports the
+/// reservoir coefficients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ClampSite {
     DepthFloor,
