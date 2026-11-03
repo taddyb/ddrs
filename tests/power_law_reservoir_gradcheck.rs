@@ -26,6 +26,8 @@
 //! section on that step's `Q_t` from the stencil point's own routed series.
 //! A stencil that crosses a switch is refused, not passed.
 
+use std::sync::Arc;
+
 use burn::backend::{Autodiff, NdArray};
 use burn::tensor::Tensor;
 
@@ -34,7 +36,6 @@ use ddrs::routing::mmc::DamRelease;
 use ddrs::routing::mmc_op::__spike_forward_chain_k1_outputs;
 use ddrs::routing::utils::denormalize;
 use ddrs::sparse::CsrPattern;
-use std::sync::Arc;
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use ddrs::sparse::SparseAdjacency;
 

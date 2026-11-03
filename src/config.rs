@@ -1015,7 +1015,8 @@ pub struct Params {
     /// `ddr_match: false` and `use_cuda_graphs: false`, and positive
     /// `attribute_minimums.slope`, `parameter_ranges.p_spatial` lower bound
     /// and `defaults.p_spatial` (`validate_geometry_form`). Leakance and
-    /// reservoirs run on it. It does not change stage rows. Learned n and runs are not comparable across forms.
+    /// reservoirs run on it. It does not change stage rows. Learned n and runs
+    /// are not comparable across forms.
     pub geometry_form: GeometryForm,
     /// Enforce the Muskingum non-negativity window `2X <= Cr <= 2(1-X)`
     /// (`Cr = dt/K`) on every reach-timestep, so the S27 solve can never

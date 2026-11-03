@@ -250,7 +250,7 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |
 | `enforce_positivity` | S18′ K floor, S19′ X cap | gk_musk mask + new cr→k path; XGrads masked by mask_cunge | no (default off; requires `ddr_match: false`) | `positivity_clamp` |
 | `params.subdivision` | build-time graph only (larger N, `q'/m`, KAN gather, hot-start divisor) | **none** — no gradient path | no (default off) | `subdivide`, `subdivision_integration`, `adjacency_parity` |
-| `geometry_form` | S2..S17 arm | early-return power-law tail | no, default trapezoid | `power_law_gradcheck`, `geometry_form_golden` |
+| `geometry_form` | S2..S17 arm | early-return power-law tail | no, default trapezoid | `power_law_gradcheck`, `power_law_leakance_gradcheck`, `power_law_reservoir_gradcheck`, `geometry_form_golden` |
 
 ## geometry_form: one consistent section (power_law)
 
@@ -293,7 +293,9 @@ v = Q / A          c = v (5 + 3q + 3g) / (3 (q+1))      (= dQ/dA exactly)
   zeta reads the shared power-law depth, and its depth, `q_eps` and `p`
   gradients join `power_law.rs::section_backward`. The section takes `ln p` and
   `ln s`, so load also needs `attribute_minimums.slope`, the lower bound of
-  `parameter_ranges.p_spatial` and `defaults.p_spatial` above zero.
+  `parameter_ranges.p_spatial` and `defaults.p_spatial` above zero. On both forms the leakance width is
+  `(p d)^q_eps` (the DDR reference form, `src/routing/leakance.rs::zeta_forward`),
+  not the section's top width `p d^q`. It reads the section's depth.
 - Stage routing is allowed. The load prints a WARN: stage rows keep their own
   section, so `geometry_form` changes Muskingum-Cunge rows only.
 - The load prints an INFO line that points at this file.

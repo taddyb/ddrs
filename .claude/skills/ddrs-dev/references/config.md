@@ -320,7 +320,7 @@ when subdivision is enabled), plus one at dataset open.
 | `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
 | `validate_enforce_positivity` | `enforce_positivity: true` + `ddr_match: true` | `"requires \`ddr_match: false\`"` |
 | `validate_geometry_form` | `geometry_form: power_law` + `ddr_match: true` or `use_cuda_graphs: true` | `"params.geometry_form: power_law requires"` + the offending key |
-| `validate_geometry_form` | `geometry_form: power_law` + `attribute_minimums.slope <= 0`, a `parameter_ranges.p_spatial` lower bound `<= 0`, or `defaults.p_spatial <= 0` | `"params.geometry_form: power_law needs"` + the offending key |
+| | `geometry_form: power_law` + `attribute_minimums.slope <= 0`, a `parameter_ranges.p_spatial` lower bound `<= 0`, or `defaults.p_spatial <= 0` | `"params.geometry_form: power_law needs"` + the offending key |
 | | `geometry_form: power_law` (log lines at load, not errors) | INFO `"params.geometry_form: power_law"` always; WARN `"stage rows keep their own section"` when `stage_routing.enabled` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |
 | `validate_grad_accum` | `grad_accum_steps: 0` | `"grad_accum_steps: 0"` |

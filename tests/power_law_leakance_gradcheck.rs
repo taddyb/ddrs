@@ -262,6 +262,10 @@ fn step_of(parent: Parent, x: f32, g: f32, q_abs_sum: f32) -> (f32, bool) {
     }
     let scale = x.abs().max(1.0);
     let h0 = EPS * scale;
+    // An exactly zero analytical gradient has nothing to resolve: use h0.
+    if g == 0.0 {
+        return (h0, false);
+    }
     let h_rt = 4.0 * f32::EPSILON * q_abs_sum / (REL_TOL * g.abs().max(1e-12));
     let cap = STEP_CAP * scale;
     let h = h0.max(h_rt);
@@ -419,15 +423,18 @@ fn gradcheck_leakance_factor() {
 }
 
 /// zeta is zero when d_gw is far above the depth: the three leakance
-/// gradients are exactly zero and the routing gradients still match FD.
+/// gradients are exactly zero, analytically and by finite difference.
 #[test]
 fn gaining_chain_leakance_gradients_are_zero() {
     let cfg = mock_cfg();
     let inp = base_inputs(dgw_gaining());
     for p in [Parent::KD, Parent::DGW, Parent::LeakFactor] {
         let a = analytical(&cfg, &inp, p);
-        for (i, v) in a.iter().enumerate() {
-            assert!(v.abs() < 1e-9, "gaining: {p:?}[{i}] must be 0, got {v:.3e}");
+        let steps: Vec<f32> = (0..N).map(|i| step_of(p, field(&inp, p)[i], a[i], 0.0).0).collect();
+        let f = fd(&cfg, &inp, p, &steps);
+        for i in 0..N {
+            assert!(a[i].abs() < 1e-9, "gaining: {p:?}[{i}] must be 0, got {:.3e}", a[i]);
+            assert!(f[i].abs() < 1e-5, "gaining: {p:?}[{i}] FD must be 0, got {:.3e}", f[i]);
         }
     }
 }
@@ -484,5 +491,42 @@ fn all_ones_mask_equals_no_mask() {
         let none = run(&cfg, &inp, &[p], None, true).1.remove(0);
         let ones = run(&cfg, &inp, &[p], Some(vec![1.0; N]), true).1.remove(0);
         assert_eq!(none, ones, "{p:?}: all-ones mask differs from no mask");
+    }
+}
+
+/// The depth floor is ACTIVE on a losing reach. Reach 0 has a tiny Q_t, a
+/// small n and a large p, so its raw depth is well below
+/// `attribute_minimums.depth`. The depth is then constant: dL/dn through the
+/// depth is cut, including zeta's depth term, so dL/dn on reach 0 is exactly
+/// 0. dL/dp and dL/dq_spatial are not cut (the width term and the section's
+/// `p d^q` read them directly) and are checked against FD. This pins the
+/// order in which zeta's depth gradient joins: before the depth-floor mask.
+#[test]
+fn floored_losing_reach_cuts_the_depth_gradient() {
+    let cfg = mock_cfg();
+    let mut inp = base_inputs(vec![D_GW; N]);
+    inp.qt[0] = 1e-3;
+    inp.n[0] = 0.01;
+    inp.psp[0] = 150.0;
+
+    // Raw depth of reach 0 from the forward's own formula.
+    let q_eps = inp.qsp[0] + 1e-6;
+    let ratio = inp.qt[0] * inp.n[0] * (q_eps + 1.0) / (inp.psp[0] * 1e-3_f32.sqrt() + 1e-8);
+    let raw_depth = ratio.powf(3.0 / (3.0 * q_eps + 5.0));
+    let floor = cfg.params.attribute_minimums.depth;
+    println!("floored reach 0: raw depth {raw_depth:.4e} m, floor {floor:.4e} m");
+    assert!(raw_depth < 0.5 * floor, "raw depth {raw_depth} is not clearly below the floor {floor}");
+
+    let sel = selections(&cfg, &inp);
+    assert_eq!(sel[0][0], 1, "depth floor must be active on reach 0: {:?}", sel[0]);
+    assert_eq!(sel[0][3], 1, "reach 0 must be losing: {:?}", sel[0]);
+
+    let gn = analytical(&cfg, &inp, Parent::N);
+    assert_eq!(gn[0], 0.0, "dL/dn on the floored reach must be exactly 0, got {}", gn[0]);
+    let gp = analytical(&cfg, &inp, Parent::PSpatial);
+    assert!(gp[0] != 0.0 && gp[0].is_finite(), "dL/dp on the floored reach is {}", gp[0]);
+
+    for p in [Parent::N, Parent::PSpatial, Parent::QSpatial] {
+        check("floored", &inp, p);
     }
 }
