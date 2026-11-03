@@ -2,14 +2,14 @@
 //! hand-written backward of the fused op.
 //!
 //! `reference_timestep` computes S1..S28 with ordinary autodiff tensor ops,
-//! using the same op order as `mmc_op::forward_chain_inner`. The zero-pattern
+//! using the same op order as `src/routing/mmc_op.rs::forward_chain_inner`. The zero-pattern
 //! test (`tests/clamp_zero_parity.rs`) and the straddle tests compare its
 //! gradient with the fused one.
 //!
 //! The reference does not call the fused forward, any `TimestepOp`, or
-//! `sparse::spmv_primitive`. It may call pure forward helpers that are plain
-//! Burn ops: `mmc_op::depth_exponent`, the power-law geometry functions and
-//! `mmc_op::POSITIVITY_DELTA`. Burn's `clamp` and `clamp_min` pass the
+//! `src/sparse/mod.rs::spmv_primitive`. It may call pure forward helpers that are plain
+//! Burn ops: `src/routing/mmc_op.rs::depth_exponent`, the power-law geometry functions and
+//! `src/routing/mmc_op.rs::POSITIVITY_DELTA`. Burn's `clamp` and `clamp_min` pass the
 //! gradient at an exact tie, and `min_pair` sends a tie to the first operand.
 //! That is the tie rule the fused backward follows.
 //!
@@ -30,7 +30,7 @@ use crate::sparse::{self, AValuesAssembler, CsrPattern};
 ///
 /// Panics on `ddr_match`. `x_storage_at` is unused: with `ddr_match` off the
 /// Cunge X replaces it. It stays in the signature to mirror
-/// `mmc_op::timestep_forward`. `gamma_at: Some` overrides the scalar stage
+/// `src/routing/mmc_op.rs::timestep_forward`. `gamma_at: Some` overrides the scalar stage
 /// roughness exponent, as in the fused forward.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]

@@ -1,6 +1,6 @@
 //! Zero-pattern parity: the hand-written backward of the fused MC timestep
 //! against plain Burn autodiff of the same timestep
-//! (`routing::reference_step::reference_timestep`).
+//! (`src/routing/reference_step.rs::reference_timestep`).
 //!
 //! Fixture: a 6-reach chain with per-reach inputs chosen so that the clamp
 //! sites are active on some reach. The loss is `sum(q_next * [1..6])`. Every
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use burn::backend::{Autodiff, NdArray};
 use burn::tensor::Tensor;
 
-use ddrs::config::{Config, GeometryForm};
+use ddrs::config::{Config, GeometryForm, StageRoughnessSection};
 use ddrs::routing::clamp_ledger::{ClampLedger, ClampSite};
 use ddrs::routing::mmc_op::timestep_forward_diag;
 use ddrs::routing::reference_step::reference_timestep;
@@ -71,6 +71,13 @@ fn z6() -> Z6 {
 }
 
 fn cfg(form: GeometryForm, enforce_positivity: bool) -> Config {
+    cfg_sr(form, enforce_positivity, false)
+}
+
+/// `stage_roughness`: add a stage-roughness block with `d_ref` 2.0 (not 1), so
+/// the `d_ref^gamma` factor on S2 runs. The learned gamma overrides the scalar
+/// gamma elsewhere.
+fn cfg_sr(form: GeometryForm, enforce_positivity: bool, stage_roughness: bool) -> Config {
     let mut cfg = Config::default();
     cfg.params.ddr_match = false;
     cfg.params.parameter_ranges.n = [0.01, 0.1];
@@ -85,6 +92,10 @@ fn cfg(form: GeometryForm, enforce_positivity: bool) -> Config {
     cfg.params.log_space_parameters = vec![];
     cfg.params.geometry_form = form;
     cfg.params.enforce_positivity = enforce_positivity;
+    if stage_roughness {
+        cfg.params.stage_roughness =
+            Some(StageRoughnessSection { gamma: 0.2, d_ref: 2.0 });
+    }
     cfg
 }
 
@@ -248,11 +259,12 @@ fn run_case(
     case: &str,
     form: GeometryForm,
     pos: bool,
+    sr: bool,
     gamma: Option<f32>,
     targets: &[ClampSite],
     bad: &mut Vec<String>,
 ) {
-    let c = cfg(form, pos);
+    let c = cfg_sr(form, pos, sr);
     let z = z6();
     let fused = grads(&c, &z, gamma, true);
     let led = fused.ledger.as_ref().unwrap();
@@ -277,11 +289,12 @@ fn run_case(
 #[test]
 fn fused_gradient_matches_autodiff_zero_pattern() {
     let mut bad = Vec::new();
-    run_case("trapezoid", GeometryForm::Trapezoid, false, None, &TRAP_SITES, &mut bad);
-    run_case("trapezoid+positivity", GeometryForm::Trapezoid, true, None, &TRAP_SITES, &mut bad);
-    run_case("power_law", GeometryForm::PowerLaw, false, None, &POWER_SITES, &mut bad);
-    run_case("power_law+positivity", GeometryForm::PowerLaw, true, None, &POWER_SITES, &mut bad);
-    run_case("power_law+gamma0.2", GeometryForm::PowerLaw, false, Some(0.2), &POWER_SITES, &mut bad);
+    run_case("trapezoid", GeometryForm::Trapezoid, false, false, None, &TRAP_SITES, &mut bad);
+    run_case("trapezoid+positivity", GeometryForm::Trapezoid, true, false, None, &TRAP_SITES, &mut bad);
+    run_case("power_law", GeometryForm::PowerLaw, false, false, None, &POWER_SITES, &mut bad);
+    run_case("power_law+positivity", GeometryForm::PowerLaw, true, false, None, &POWER_SITES, &mut bad);
+    run_case("power_law+gamma0.2", GeometryForm::PowerLaw, false, false, Some(0.2), &POWER_SITES, &mut bad);
+    run_case("trapezoid+gamma0.2+d_ref2", GeometryForm::Trapezoid, false, true, Some(0.2), &TRAP_SITES, &mut bad);
     for b in &bad {
         println!("MISMATCH: {b}");
     }

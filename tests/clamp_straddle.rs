@@ -3,10 +3,10 @@
 //!
 //! For each (site, form) the raw value sits at five places against the bound:
 //! far below, just below, an exact tie, just above and far above. At each place
-//! the tests check three things on the straddling reach.
+//! the tests check four things on the straddling reach.
 //!
 //! 1. The clamp ledger is active exactly where the raw value is strictly
-//!    outside the bound. A tie is inactive (`routing::clamp_rule`).
+//!    outside the bound. A tie is inactive (`src/routing/clamp_rule.rs`).
 //! 2. The clamp probe cuts the gradient to exactly 0.0 where the site is
 //!    active. Where it is inactive, the gradient passes bit for bit and is not
 //!    zero.
@@ -24,7 +24,7 @@
 //! `no exact tie reachable at <site>` and skips only that place.
 //!
 //! 4. At every place, the fused gradient of all five parents matches the
-//!    gradient of `routing::reference_step::reference_timestep` (plain Burn
+//!    gradient of `src/routing/reference_step.rs::reference_timestep` (plain Burn
 //!    autodiff): the same zero set, and nonzero entries at rel < 1e-3 or
 //!    abs < 1e-6. This covers the three far places where the FD cannot
 //!    resolve the gradient, and the ties.
