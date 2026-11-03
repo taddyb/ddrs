@@ -203,6 +203,14 @@ fn main() -> R<()> {
             }
         }
     }
+    println!("clamp-attributed mismatches by active site set (outside_cr_window included) and band:");
+    for ((sites, band), c) in &rep.clamp_groups {
+        println!("  {c:>6}  {band:<8} {sites}");
+    }
+    println!("reaches with a mismatch in the >1e-4 band ({}):", rep.unsteady_details.len());
+    for d in &rep.unsteady_details {
+        println!("  {d}");
+    }
     if !rep.first_mismatches.is_empty() {
         println!("first mismatches:");
         for m in &rep.first_mismatches {

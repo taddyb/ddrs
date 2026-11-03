@@ -23,7 +23,7 @@ use burn::tensor::{backend::Backend, Tensor, TensorPrimitive};
 use crate::config::Config;
 use crate::routing::clamp_ledger::{ClampLedger, ClampSite};
 use crate::routing::courant_probe::ProbeInputs;
-use crate::routing::mmc_op::{forward_chain_inner, timestep_forward_diag};
+use crate::routing::mmc_op::{forward_chain_inner, forward_saved_idx, timestep_forward_diag};
 use crate::routing::reference_step::reference_timestep;
 use crate::sparse::AValuesAssembler;
 
@@ -56,6 +56,11 @@ pub struct ClampParityReport {
     pub max_q_rel_diff: f32,
     /// Per parent, 8 cells indexed by [`cell_index`]. Diagnostic only.
     pub cells: BTreeMap<String, [CellStats; 8]>,
+    /// Zero-set mismatches on clamp-active reaches, counted per parent entry,
+    /// keyed by (active clamp sites joined by `+`, steadiness band name).
+    pub clamp_groups: BTreeMap<(String, String), u64>,
+    /// Full dumps of reaches with a zero-set mismatch in the `>1e-4` band.
+    pub unsteady_details: Vec<String>,
 }
 
 /// Steadiness bands of a reach at one step, from the trajectory values.
@@ -171,7 +176,7 @@ where
         let q_prime_t: Tensor<I, 1> = q_prime.clone().slice([(t - 1)..t, 0..n]).reshape([n]);
         let mut x_eff_out = None;
         let mut leak_out = None;
-        let (q_next, _saved) = forward_chain_inner::<I>(
+        let (q_next, saved) = forward_chain_inner::<I>(
             cfg,
             &inp.pattern,
             inp.n.clone(),
@@ -196,6 +201,7 @@ where
         if t % sample_every == 0 {
             sample_step::<I>(
                 cfg, inp, &assembler, &q_t, &q_prime_t, &q_next_t, &weights, t, &mut rep,
+                &saved, x_eff_out.clone(),
             );
             rep.n_sampled_steps += 1;
         }
@@ -215,6 +221,8 @@ fn sample_step<I: Backend + 'static>(
     weights: &[f32],
     step: usize,
     rep: &mut ClampParityReport,
+    saved: &[I::FloatTensorPrimitive],
+    x_eff: Option<I::FloatTensorPrimitive>,
 ) where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
@@ -318,6 +326,60 @@ fn sample_step<I: Backend + 'static>(
         })
         .collect();
 
+    let sites_of = |i: usize| -> Vec<&'static str> {
+        ClampSite::ALL
+            .iter()
+            .filter(|s| ledger.steps[0].active.get(s).map(|v| v[i]).unwrap_or(false))
+            .map(|s| s.name())
+            .collect()
+    };
+    let is_mismatch = |pi: usize, i: usize| {
+        let (a, b) = (grads_f[pi][i], grads_r[pi][i]);
+        !(a.is_finite() && b.is_finite()) || (a == 0.0) != (b == 0.0)
+    };
+    // Full dump of reaches with any mismatch in the >1e-4 band.
+    for i in 0..n {
+        if band[i] == 3 && (0..PARENTS.len()).any(|pi| is_mismatch(pi, i)) {
+            let get = |idx: usize| vec1(Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(saved[idx].clone())));
+            let (c1, c2, c3, c4, k) = (
+                get(forward_saved_idx::C1),
+                get(forward_saved_idx::C2),
+                get(forward_saved_idx::C3),
+                get(forward_saved_idx::C4),
+                get(forward_saved_idx::K_MUSKINGUM),
+            );
+            let x = x_eff
+                .clone()
+                .map(|p| vec1(Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(p))));
+            // Solve adjoint lambda = A^-T w, A = I - diag(c1) N, by a reverse sweep.
+            let mut lam: Vec<f32> = weights.to_vec();
+            for r in (0..n).rev() {
+                for kk in inp.pattern.crow[r] as usize..inp.pattern.crow[r + 1] as usize {
+                    let c = inp.pattern.col[kk] as usize;
+                    lam[c] += c1[r] * inp.pattern.adj_values[kk] * lam[r];
+                }
+            }
+            let qpv = vec1(q_prime_t.clone());
+            let (dq_i, di) = (q_t_v[i] - i_t_v[i] - qpv[i], i_next_v[i] - i_t_v[i]);
+            let s = (traj_next[i] - q_t_v[i]).abs().max(di.abs()) / q_t_v[i].abs().max(i_t_v[i].abs()).max(1e-6);
+            let vals: Vec<String> = PARENTS
+                .iter()
+                .enumerate()
+                .map(|(pi, nm)| format!("{nm}: fused {:e} ref {:e}{}", grads_f[pi][i], grads_r[pi][i], if is_mismatch(pi, i) { " MISMATCH" } else { "" }))
+                .collect();
+            rep.unsteady_details.push(format!(
+                "step {step} reach {i} band {} active [{}]\n    {}\n    s {s:e} dI {di:e} dQ {dq_i:e} q_t {:e} I_t {:e} I_next {:e} q_prime_t {:e} q_next {:e}\n    c1 {:e} c2 {:e} c3 {:e} c4 {:e} K {:e} X {}  (saved state of the fused forward)\n    w {} lambda=(A^-T w)[reach] {:e}  (reverse sweep over the pattern with c1)",
+                BANDS[band[i]],
+                sites_of(i).join(" "),
+                vals.join("\n    "),
+                q_t_v[i], i_t_v[i], i_next_v[i], qpv[i], traj_next[i],
+                c1[i], c2[i], c3[i], c4[i], k[i],
+                x.as_ref().map(|v| format!("{:e}", v[i])).unwrap_or_else(|| "n/a".into()),
+                weights[i], lam[i],
+            ));
+        }
+    }
+
     for (pi, name) in PARENTS.iter().enumerate() {
         let (gf, gr) = (&grads_f[pi], &grads_r[pi]);
         *rep.compared.get_mut(*name).unwrap() += n as u64;
@@ -328,6 +390,18 @@ fn sample_step<I: Backend + 'static>(
             cell.compared += 1;
             if !finite || (a == 0.0) != (b == 0.0) {
                 cell.mismatches += 1;
+                if clamped[i] {
+                    let key = (
+                        ClampSite::ALL
+                            .iter()
+                            .filter(|s| ledger.steps[0].active.get(s).map(|v| v[i]).unwrap_or(false))
+                            .map(|s| s.name())
+                            .collect::<Vec<_>>()
+                            .join("+"),
+                        BANDS[band[i]].to_string(),
+                    );
+                    *rep.clamp_groups.entry(key).or_insert(0) += 1;
+                }
                 let g = if a == 0.0 { b.abs() } else { a.abs() };
                 if g.is_nan() || g > cell.max_mismatch_abs_g {
                     cell.max_mismatch_abs_g = g;
