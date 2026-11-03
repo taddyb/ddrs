@@ -534,6 +534,7 @@ where
         slope_t,
         xst_t,
         false,
+        None, // skip_rows: count every row
         None, // gamma: no stage roughness in this fixture
     );
 
@@ -1192,8 +1193,10 @@ fn load_params_yaml(name: &str, params: &str) -> ddrs::data::error::Result<Confi
 
 #[test]
 fn enforce_positivity_can_never_reach_the_cuda_graph_path() {
-    // Case 1: ddr_match left at its default (true). The enforce_positivity
-    // validator rejects before cuda_graphs is even relevant.
+    // Case 1: ddr_match left at its default. Either validator may reject
+    // first, and which one depends on ddr_match (see
+    // .claude/PHYSICS-CORRECTIONS.md). Accept both messages, but the config
+    // must be rejected.
     let err = load_params_yaml(
         "ddrs_ep_graphs_default_ddr_match.yaml",
         "  enforce_positivity: true\n  use_cuda_graphs: true\n",
@@ -1202,8 +1205,9 @@ fn enforce_positivity_can_never_reach_the_cuda_graph_path() {
     let msg = format!("{err}");
     println!("case 1 rejection: {msg}");
     assert!(
-        msg.contains("enforce_positivity") && msg.contains("ddr_match"),
-        "expected the enforce_positivity/ddr_match conflict, got: {msg}"
+        (msg.contains("enforce_positivity") && msg.contains("ddr_match"))
+            || (msg.contains("use_cuda_graphs") && msg.contains("ddr_match")),
+        "expected an enforce_positivity or use_cuda_graphs conflict with ddr_match, got: {msg}"
     );
 
     // Case 2: ddr_match: false, which is the ONLY way enforce_positivity can
@@ -1470,5 +1474,240 @@ fn cusparse_ga_matches_cpu_on_a_confluence() {
         println!(
             "WORST confluence cross-backend rel (enforce_positivity={enforce_positivity}) = {worst:.3e}"
         );
+    }
+}
+
+// ===========================================================================
+// Part F: the power-law section (`geometry_form: power_law`).
+//
+// F4-10k: a 4-reach chain of 10 km reaches, where the Cunge X is interior, so
+// B19's terms run. FD runs on CUDA for n and q_t (the gradients that sit well
+// above the f32 FD noise floor). The CPU-vs-CUDA analytic parity covers all
+// six parents (n, q_spatial, p_spatial, q_t, q_prime_t, gamma).
+// ===========================================================================
+
+fn power_law_cfg() -> Config {
+    let mut cfg = Config::default();
+    cfg.params.ddr_match = false;
+    cfg.params.parameter_ranges.n = [0.01, 0.1];
+    cfg.params.parameter_ranges.q_spatial = [0.1, 0.9];
+    cfg.params.parameter_ranges.p_spatial = [1.0, 200.0];
+    cfg.params.attribute_minimums.velocity = 0.1;
+    cfg.params.attribute_minimums.depth = 0.01;
+    cfg.params.attribute_minimums.discharge = 0.001;
+    cfg.params.attribute_minimums.bottom_width = 0.1;
+    cfg.params.attribute_minimums.slope = 0.001;
+    cfg.params.defaults.insert("p_spatial".to_string(), 1.0);
+    cfg.params.log_space_parameters = vec![];
+    cfg.params.geometry_form = ddrs::config::GeometryForm::PowerLaw;
+    cfg
+}
+
+fn f4_10k() -> Fixture {
+    Fixture {
+        length: vec![10_000.0; 4],
+        slope: vec![1e-3; 4],
+        n: vec![0.035; 4],
+        qsp: vec![0.4; 4],
+        psp: vec![20.0; 4],
+        qt: vec![100.0, 120.0, 140.0, 160.0],
+        qpt: vec![10.0, 12.0, 14.0, 16.0],
+    }
+}
+
+/// `1 / max(q_next, 1)` from a CPU forward, shared by both backends.
+fn power_law_weights() -> Vec<f32> {
+    let f = f4_10k();
+    let adj = chain(&f);
+    let dev = device::<Cpu>();
+    let pat = Arc::new(CsrPattern::from_sparse(&adj));
+    let asm = AValuesAssembler::<Cpu>::new(&pat, &dev);
+    let ones = vec![1.0f32; 4];
+    let (loss, _) = run_forward_loss::<Cpu>(
+        &power_law_cfg(), &pat, &asm, &dev, &f.n, &f.qsp, &f.psp, &f.qt, &f.qpt, &f.length,
+        &f.slope, &ones, None,
+    );
+    let q_next = loss.into_data().convert::<f32>().into_vec::<f32>().unwrap();
+    q_next.iter().map(|&q| 1.0 / q.max(1.0)).collect()
+}
+
+fn power_law_analytic<I: Backend + 'static>(parent: Parent) -> Vec<f32>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let f = f4_10k();
+    let adj = chain(&f);
+    let dev = device::<I>();
+    let pat = Arc::new(CsrPattern::from_sparse(&adj));
+    let asm = AValuesAssembler::<I>::new(&pat, &dev);
+    let (loss, parents) = run_forward_loss::<I>(
+        &power_law_cfg(), &pat, &asm, &dev, &f.n, &f.qsp, &f.psp, &f.qt, &f.qpt, &f.length,
+        &f.slope, &power_law_weights(), Some(parent),
+    );
+    let grads = loss.sum().backward();
+    let g = match parent {
+        Parent::N => parents.n.grad(&grads),
+        Parent::QSpatial => parents.qsp.grad(&grads),
+        Parent::PSpatial => parents.psp.grad(&grads),
+        Parent::QT => parents.qt.grad(&grads),
+    };
+    g.expect("grad").into_data().convert::<f32>().into_vec::<f32>().unwrap()
+}
+
+/// The six parents of the fused op, for the full analytic parity check.
+#[derive(Copy, Clone, Debug)]
+enum PlParent {
+    N,
+    QSpatial,
+    PSpatial,
+    QT,
+    QPrimeT,
+    Gamma,
+}
+
+const PL_ALL: [PlParent; 6] = [
+    PlParent::N,
+    PlParent::QSpatial,
+    PlParent::PSpatial,
+    PlParent::QT,
+    PlParent::QPrimeT,
+    PlParent::Gamma,
+];
+
+/// Analytic gradient of one of the six parents, with a learned per-reach gamma
+/// of 0.2 so the gamma parent exists.
+fn power_law_analytic_six<I: Backend + 'static>(parent: PlParent) -> Vec<f32>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let f = f4_10k();
+    let adj = chain(&f);
+    let dev = device::<I>();
+    let pat = Arc::new(CsrPattern::from_sparse(&adj));
+    let asm = AValuesAssembler::<I>::new(&pat, &dev);
+    let mk = |data: &[f32], me: PlParent| -> Tensor<Autodiff<I>, 1> {
+        let t: Tensor<Autodiff<I>, 1> = Tensor::from_floats(data, &dev);
+        if std::mem::discriminant(&parent) == std::mem::discriminant(&me) {
+            t.require_grad()
+        } else {
+            t
+        }
+    };
+    let n = mk(&f.n, PlParent::N);
+    let qsp = mk(&f.qsp, PlParent::QSpatial);
+    let psp = mk(&f.psp, PlParent::PSpatial);
+    let qt = mk(&f.qt, PlParent::QT);
+    let qpt = mk(&f.qpt, PlParent::QPrimeT);
+    let gamma = mk(&[0.2f32; 4], PlParent::Gamma);
+    let plain = |data: &[f32]| -> Tensor<Autodiff<I>, 1> { Tensor::from_floats(data, &dev) };
+    let q_next = timestep_forward::<I>(
+        &power_law_cfg(),
+        &pat,
+        &asm,
+        n.clone(),
+        qsp.clone(),
+        psp.clone(),
+        qt.clone(),
+        qpt.clone(),
+        plain(&f.length),
+        plain(&f.slope),
+        plain(&[0.3f32; 4]),
+        false,
+        None, // skip_rows: count every row
+        Some(gamma.clone()),
+    );
+    let loss = q_next * plain(&power_law_weights());
+    let grads = loss.sum().backward();
+    let g = match parent {
+        PlParent::N => n.grad(&grads),
+        PlParent::QSpatial => qsp.grad(&grads),
+        PlParent::PSpatial => psp.grad(&grads),
+        PlParent::QT => qt.grad(&grads),
+        PlParent::QPrimeT => qpt.grad(&grads),
+        PlParent::Gamma => gamma.grad(&grads),
+    };
+    g.expect("grad").into_data().convert::<f32>().into_vec::<f32>().unwrap()
+}
+
+/// `(fd_grad, fd_noise_floor)`, same step and noise rule as `fd_grad_cfg`.
+fn power_law_fd<I: Backend + 'static>(parent: Parent) -> (Vec<f32>, Vec<f32>)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let f = f4_10k();
+    let adj = chain(&f);
+    let dev = device::<I>();
+    let pat = Arc::new(CsrPattern::from_sparse(&adj));
+    let asm = AValuesAssembler::<I>::new(&pat, &dev);
+    let cfg = power_law_cfg();
+    let weights = power_law_weights();
+    let eval_loss = |n: &[f32], qsp: &[f32], psp: &[f32], qt: &[f32]| -> f32 {
+        let (loss, _) = run_forward_loss::<I>(
+            &cfg, &pat, &asm, &dev, n, qsp, psp, qt, &f.qpt, &f.length, &f.slope, &weights, None,
+        );
+        loss.sum().into_data().convert::<f32>().into_vec::<f32>().unwrap()[0]
+    };
+    let loss_mag = eval_loss(&f.n, &f.qsp, &f.psp, &f.qt).abs().max(1.0);
+    let mut grad = vec![0.0f32; 4];
+    let mut noise = vec![0.0f32; 4];
+    for i in 0..4 {
+        let (mut pn, mut pq, mut pp, mut pt) =
+            (f.n.clone(), f.qsp.clone(), f.psp.clone(), f.qt.clone());
+        let (mut mn, mut mq, mut mp, mut mt) =
+            (f.n.clone(), f.qsp.clone(), f.psp.clone(), f.qt.clone());
+        let (plus, minus, base) = match parent {
+            Parent::N => (&mut pn, &mut mn, &f.n),
+            Parent::QSpatial => (&mut pq, &mut mq, &f.qsp),
+            Parent::PSpatial => (&mut pp, &mut mp, &f.psp),
+            Parent::QT => (&mut pt, &mut mt, &f.qt),
+        };
+        let eps = REL_STEP * base[i].abs();
+        plus[i] = base[i] + eps;
+        minus[i] = base[i] - eps;
+        grad[i] = (eval_loss(&pn, &pq, &pp, &pt) - eval_loss(&mn, &mq, &mp, &mt)) / (2.0 * eps);
+        noise[i] = NOISE_ULPS * loss_mag * f32::EPSILON / (2.0 * eps);
+    }
+    (grad, noise)
+}
+
+/// FD gradcheck of the power-law backward on backend `I`. Needs at least two
+/// reaches above the FD noise floor, so the check has power.
+fn power_law_fd_check<I: Backend + 'static>(label: &str, parent: Parent)
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    let (fd, noise) = power_law_fd::<I>(parent);
+    let analytic = power_law_analytic::<I>(parent);
+    let name = format!("{label} power_law FD gradcheck: {}", parent.name());
+    let (worst_rel, worst_abs, resolved, pass) =
+        gradcheck_verdict(&name, &analytic, &fd, &noise, true);
+    assert!(resolved >= 2, "{name}: only {resolved} reaches above the FD noise floor");
+    assert!(pass, "{name}: failed (worst rel={worst_rel:.3e}, abs={worst_abs:.3e})");
+}
+
+#[test]
+fn power_law_gradcheck_on_cuda() {
+    power_law_fd_check::<Gpu>("CUDA", Parent::N);
+    power_law_fd_check::<Gpu>("CUDA", Parent::QT);
+}
+
+/// The same FD check on the CPU backend. It runs without a GPU and shows the
+/// fixture has power before the CUDA run.
+#[test]
+fn power_law_gradcheck_fixture_has_power_on_cpu() {
+    power_law_fd_check::<Cpu>("CPU", Parent::N);
+    power_law_fd_check::<Cpu>("CPU", Parent::QT);
+}
+
+#[test]
+fn power_law_analytic_gradients_match_across_backends() {
+    for p in PL_ALL {
+        let cpu = power_law_analytic_six::<Cpu>(p);
+        let gpu = power_law_analytic_six::<Gpu>(p);
+        compare_backends(&format!("power_law d(loss)/d({p:?})"), &cpu, &gpu);
     }
 }

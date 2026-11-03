@@ -472,10 +472,6 @@ pub(crate) fn timestep_backward_core<I: Backend + 'static>(
 where
     I::FloatTensorPrimitive: 'static,
 {
-    assert!(
-        state.geometry_form == GeometryForm::Trapezoid,
-        "geometry_form: power_law has no backward yet"
-    );
     {
         let device = I::float_device(&grad_out);
 
@@ -975,18 +971,6 @@ where
         };
 
         // ===========================================================
-        // Geometry recomputed from the saved primitives. Hoisted above B18
-        // because the `ddr_match: false` celerity (B17) needs A, T, P and
-        // sqrt(1+z²) too; B14/B13 below reuse the exact same tensors.
-        //   wp   = bw + 2·d·sqrt(1+ss²)   (S13)
-        //   area = R · wp                 (S14 inverted; area itself unsaved)
-        // ===========================================================
-        let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
-        let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
-        let wp = bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
-        let area = hyd_radius.clone() * wp.clone();
-
-        // ===========================================================
         // B18'. K floor (`enforce_positivity` only, S18'):
         //   k_musk = max(k_raw, k_floor)  →  ∂k_musk/∂k_raw = 1 where
         //   k_raw >= k_floor (a tie passes), else 0 (the reach is sub-grid and K is pinned to
@@ -1016,6 +1000,47 @@ where
             Some(xg) => gcelerity + xg.g_celerity.clone(),
             None => gcelerity,
         };
+
+        if state.geometry_form == GeometryForm::PowerLaw {
+            assert!(
+                zeta_geom.is_none(),
+                "geometry_form: power_law does not support leakance yet"
+            );
+            let s = crate::routing::power_law::section_backward(
+                state,
+                gcelerity,
+                x_grads.as_ref().map(|xg| xg.g_top_width.clone()),
+            );
+            let gq_t = gq_t_from_s24.map(|from_s24| {
+                let g = gq_t_from_s25 + from_s24 + s.gq_t;
+                match x_grads.as_ref() {
+                    Some(xg) => g + xg.g_q_t.clone(),
+                    None => g,
+                }
+            });
+            return ParentGrads {
+                n: mask.n.then_some(s.gn),
+                q_spatial: mask.q_spatial.then_some(s.gq_eps),
+                p_spatial: mask.p_spatial.then_some(s.gp),
+                q_t: gq_t,
+                q_prime_t: gq_prime_t,
+                gamma: if mask.gamma { s.ggamma } else { None },
+                t_release: g_t_release,
+                t_release_prev: g_t_release_prev,
+            };
+        }
+
+        // ===========================================================
+        // Geometry recomputed from the saved primitives. Placed below the
+        // power-law early return, since only the trapezoid path (B17 on) reads
+        // it. B14/B13 below reuse the exact same tensors.
+        //   wp   = bw + 2·d·sqrt(1+ss²)   (S13)
+        //   area = R · wp                 (S14 inverted; area itself unsaved)
+        // ===========================================================
+        let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
+        let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
+        let wp = bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
+        let area = hyd_radius.clone() * wp.clone();
 
         // ===========================================================
         // B17. celerity = velocity_cl · beta
