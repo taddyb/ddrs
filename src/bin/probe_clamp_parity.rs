@@ -24,7 +24,7 @@ use ddrs::config::{Config, ConfigMode, SparseSolver};
 use ddrs::data::dataset::MeritGagesDataset;
 use ddrs::data::dates::RhoWindow;
 use ddrs::routing::clamp_ledger::ClampSite;
-use ddrs::routing::clamp_parity::{run_clamp_parity, PARENTS};
+use ddrs::routing::clamp_parity::{run_clamp_parity, BANDS, PARENTS};
 use ddrs::routing::denormalize;
 use ddrs::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use ddrs::training::bootstrap_head_and_state;
@@ -184,6 +184,24 @@ fn main() -> R<()> {
     println!("active (step, reach) entries per clamp site:");
     for s in ClampSite::ALL {
         println!("  {:<20} {}", s.name(), rep.active.get(&s).copied().unwrap_or(0));
+    }
+    println!("breakdown by steadiness band (clamp = a clamp site is active on the reach):");
+    for p in PARENTS {
+        println!("  parent {p}");
+        println!(
+            "    {:<8} {:<5} {:>9} {:>9} {:>9} {:>14} {:>14}",
+            "band", "clamp", "compared", "mismatch", "outlier", "max|g| mism", "max|diff| outl"
+        );
+        for (b, name) in BANDS.iter().enumerate() {
+            for clamp in [false, true] {
+                let c = rep.cells[p][ddrs::routing::clamp_parity::cell_index(b, clamp)];
+                println!(
+                    "    {:<8} {:<5} {:>9} {:>9} {:>9} {:>14e} {:>14e}",
+                    name, clamp, c.compared, c.mismatches, c.outliers,
+                    c.max_mismatch_abs_g, c.max_outlier_abs_diff
+                );
+            }
+        }
     }
     if !rep.first_mismatches.is_empty() {
         println!("first mismatches:");

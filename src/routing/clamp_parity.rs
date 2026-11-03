@@ -54,6 +54,56 @@ pub struct ClampParityReport {
     pub first_mismatches: Vec<String>,
     /// Largest `|q_ref - q_fused| / max(|q_fused|, 1e-6)` over sampled steps.
     pub max_q_rel_diff: f32,
+    /// Per parent, 8 cells indexed by [`cell_index`]. Diagnostic only.
+    pub cells: BTreeMap<String, [CellStats; 8]>,
+}
+
+/// Steadiness bands of a reach at one step, from the trajectory values.
+pub const BANDS: [&str; 4] = ["bitwise", "<=1e-6", "<=1e-4", ">1e-4"];
+
+/// Counts for one (steadiness band, clamp attribution) cell of one parent.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CellStats {
+    /// All compared entries in the cell (the base rate).
+    pub compared: u64,
+    pub mismatches: u64,
+    pub outliers: u64,
+    /// Largest |g| on the nonzero side of a zero-set mismatch.
+    pub max_mismatch_abs_g: f32,
+    /// Largest |fused - reference| over value outliers.
+    pub max_outlier_abs_diff: f32,
+}
+
+/// Index into [`ClampParityReport::cells`]: `band * 2 + clamped as usize`.
+pub fn cell_index(band: usize, clamped: bool) -> usize {
+    band * 2 + clamped as usize
+}
+
+/// Steadiness `s = max(|q_next - q_t|, |I_next - I_t|) / max(|q_t|, |I_t|, 1e-6)`
+/// to a band index in [`BANDS`]. `bitwise` needs both pairs equal bit for bit.
+fn band_of(q_t: f32, q_next: f32, i_t: f32, i_next: f32) -> usize {
+    if q_next.to_bits() == q_t.to_bits() && i_next.to_bits() == i_t.to_bits() {
+        return 0;
+    }
+    let s = (q_next - q_t).abs().max((i_next - i_t).abs()) / q_t.abs().max(i_t.abs()).max(1e-6);
+    if s <= 1e-6 {
+        1
+    } else if s <= 1e-4 {
+        2
+    } else {
+        3
+    }
+}
+
+/// `I = N q`: sum of the upstream discharges of each reach.
+fn inflow(pattern: &crate::sparse::CsrPattern, q: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0_f32; pattern.n];
+    for r in 0..pattern.n {
+        for k in pattern.crow[r] as usize..pattern.crow[r + 1] as usize {
+            out[r] += pattern.adj_values[k] * q[pattern.col[k] as usize];
+        }
+    }
+    out
 }
 
 impl ClampParityReport {
@@ -114,6 +164,7 @@ where
         rep.mismatches.insert(p.to_string(), 0);
         rep.compared.insert(p.to_string(), 0);
         rep.value_outliers.insert(p.to_string(), 0);
+        rep.cells.insert(p.to_string(), [CellStats::default(); 8]);
     }
 
     for t in 1..=steps {
@@ -253,13 +304,34 @@ fn sample_step<I: Backend + 'static>(
         *rep.active.entry(s).or_insert(0) += ledger.count(s);
     }
 
+    // Steadiness band and clamp attribution of each reach at this step.
+    let q_t_v = vec1(q_t.clone());
+    let (i_t_v, i_next_v) = (inflow(&inp.pattern, &q_t_v), inflow(&inp.pattern, &traj_next));
+    let band: Vec<usize> =
+        (0..n).map(|i| band_of(q_t_v[i], traj_next[i], i_t_v[i], i_next_v[i])).collect();
+    let clamped: Vec<bool> = (0..n)
+        .map(|i| {
+            ClampSite::ALL
+                .iter()
+                .filter(|s| **s != ClampSite::OutsideCrWindow)
+                .any(|s| ledger.steps[0].active.get(s).map(|v| v[i]).unwrap_or(false))
+        })
+        .collect();
+
     for (pi, name) in PARENTS.iter().enumerate() {
         let (gf, gr) = (&grads_f[pi], &grads_r[pi]);
         *rep.compared.get_mut(*name).unwrap() += n as u64;
         for i in 0..n {
             let (a, b) = (gf[i], gr[i]);
             let finite = a.is_finite() && b.is_finite();
+            let cell = &mut rep.cells.get_mut(*name).unwrap()[cell_index(band[i], clamped[i])];
+            cell.compared += 1;
             if !finite || (a == 0.0) != (b == 0.0) {
+                cell.mismatches += 1;
+                let g = if a == 0.0 { b.abs() } else { a.abs() };
+                if g.is_nan() || g > cell.max_mismatch_abs_g {
+                    cell.max_mismatch_abs_g = g;
+                }
                 *rep.mismatches.get_mut(*name).unwrap() += 1;
                 if rep.first_mismatches.len() < MAX_FIRST_MISMATCHES {
                     rep.first_mismatches.push(format!(
@@ -273,6 +345,10 @@ fn sample_step<I: Backend + 'static>(
                 let abs = (a - b).abs();
                 let rel = abs / a.abs().max(b.abs());
                 if !(rel < REL_TOL || abs < ABS_TOL) {
+                    cell.outliers += 1;
+                    if abs > cell.max_outlier_abs_diff {
+                        cell.max_outlier_abs_diff = abs;
+                    }
                     *rep.value_outliers.get_mut(*name).unwrap() += 1;
                 }
             }
