@@ -429,6 +429,10 @@ where
     /// regardless of `self.objective` -- see `kge`), the max clamped
     /// fraction over windows, and each window's daily gauge series (m3/s;
     /// consumed by `daily_series`, dropped by `eval`).
+    ///
+    /// With `ledger` set, the engine records its clamp state at every routed
+    /// step and the steps of all windows are appended to it in window order.
+    /// With `None`, nothing is recorded.
     fn forward_loss(&self, leaves: &[Tensor<AD<I>, 1>; 3], mut ledger: Option<&mut ClampLedger>) -> (Tensor<AD<I>, 1>, Vec<f32>, Vec<f32>, f32, Vec<Vec<f32>>) {
         let device = &self.ctx.device;
         let n = self.n_reach();
@@ -653,6 +657,36 @@ where
             l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()).unwrap_or_else(|| vec![0.0; n])
         };
         ReachGrad { slots: [extract(&leaves[0]), extract(&leaves[1]), extract(&leaves[2])] }
+    }
+
+    /// Routed steps of each window, in window order: the number of steps the
+    /// forward routes, which is the ledger length `eval_with_ledger` must
+    /// return (`MuskingumCunge::forward` routes `T - 1` steps from `T` hours).
+    pub fn routed_steps_per_window(&self) -> Vec<usize> {
+        self.windows.iter().map(|w| w.q_prime.dims()[0] - 1).collect()
+    }
+
+    /// The loss at `α` with per-reach leaves, and with one leaf moved by
+    /// `delta` when `perturb = Some((slot, reach, delta))`. Same forward path
+    /// as `reach_grad`. With `None` the leaves hold `α` exactly, so the loss
+    /// equals `eval(α).loss` bit for bit. Runs a backward pass only to release
+    /// the tape (see `eval`).
+    pub fn reach_loss(&self, alpha: [f32; 3], perturb: Option<(usize, usize, f32)>) -> f32 {
+        let device = &self.ctx.device;
+        let n = self.n_reach();
+        let leaves: [Tensor<AD<I>, 1>; 3] = std::array::from_fn(|k| {
+            let mut v = vec![alpha[k]; n];
+            if let Some((slot, reach, delta)) = perturb {
+                if slot == k {
+                    v[reach] += delta;
+                }
+            }
+            Tensor::<AD<I>, 1>::from_floats(v.as_slice(), device).require_grad()
+        });
+        let (total, _nses, _kges, _clamped_max, _dailies) = self.forward_loss(&leaves, None);
+        let loss: f32 = total.clone().inner().into_data().to_vec::<f32>().unwrap()[0];
+        let _ = total.backward();
+        loss
     }
 
     /// Central-difference Hessian of `L_g` at `α` (symmetrized), step `h`.

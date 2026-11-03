@@ -4,6 +4,7 @@
 pub mod fd_sweep;
 pub mod objective;
 pub mod output;
+pub mod zero_audit;
 
 use std::path::Path;
 use std::time::Instant;
@@ -161,8 +162,17 @@ pub struct LandscapeSpec {
     /// Sweep the Hessian FD step and count clamp switches per step. Writes
     /// `fd_sweep.csv` and `fd_sweep_eig.csv` per arm. Absent by default, and
     /// then nothing changes. See `fd_sweep::FdSweepSpec`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fd_sweep: Option<fd_sweep::FdSweepSpec>,
+    /// Audit every per-reach gradient that is exactly 0 and give it a cause.
+    /// Needs `reach_grad: true`. Writes `zero_audit.csv` per arm. Off by
+    /// default, and then nothing changes. See `zero_audit`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub zero_audit: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 fn d_window_days() -> usize { 365 }
 fn d_water_year() -> i32 { 2000 }
@@ -360,7 +370,7 @@ impl LandscapeSpec {
         Ok(())
     }
 
-    /// Reject a `period` that isn't one of `VALID_PERIODS`.
+    /// Reject an `fd_sweep` block with bad steps. Absent is fine.
     pub fn validate_fd_sweep(&self) -> Result<(), BoxError> {
         match &self.fd_sweep {
             Some(sw) => sw.validate(),
@@ -368,6 +378,15 @@ impl LandscapeSpec {
         }
     }
 
+    /// `zero_audit` reads the per-reach gradients, so it needs `reach_grad`.
+    pub fn validate_zero_audit(&self) -> Result<(), BoxError> {
+        if self.zero_audit && !self.reach_grad {
+            return Err("landscape.zero_audit needs landscape.reach_grad: true".into());
+        }
+        Ok(())
+    }
+
+    /// Reject a `period` that isn't one of `VALID_PERIODS`.
     pub fn validate_period(&self) -> Result<(), BoxError> {
         if !VALID_PERIODS.contains(&self.period.as_str()) {
             return Err(format!(
@@ -416,6 +435,7 @@ where
     spec.validate_deriv_weight()?;
     spec.validate_period()?;
     spec.validate_fd_sweep()?;
+    spec.validate_zero_audit()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -815,6 +835,18 @@ where
             }
         }
         let dist = dist_to_gauge(&obj.windows[0].tensors.adjacency, obj.windows[0].gauge_row);
+        if spec.zero_audit {
+            if zero_audit::auditable(&obj) {
+                let mut bad = zero_audit::audit_gauge(&obj, &arm.name, &g.staid, arm_dir, "trained", [0.0; 3], &rg0, &dist)?;
+                if alpha_star != [0.0; 3] {
+                    bad += zero_audit::audit_gauge(&obj, &arm.name, &g.staid, arm_dir, "optimum", alpha_star, &rgs, &dist)?;
+                }
+                println!("  [{}] {} zero_audit gate: unexplained and not flat = {bad}{}", arm.name, g.staid, if bad == 0 { "" } else { "  GATE FAIL" });
+            } else {
+                output::append_zero_audit_skipped(arm_dir, &arm.name, &g.staid)?;
+                println!("  [{}] {} zero_audit: not_audited (leakance, reservoirs or a non-n/p/q axis)", arm.name, g.staid);
+            }
+        }
         (Some(rg0.slots), Some(rgs.slots), dist)
     } else {
         (None, None, Vec::new())
@@ -1275,6 +1307,23 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("testing"));
         assert!(err.to_string().contains("training"));
+    }
+
+    #[test]
+    fn absent_keys_are_not_serialized() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        let text = serde_json::to_string(&spec).unwrap();
+        assert!(!text.contains("fd_sweep") && !text.contains("zero_audit"), "{text}");
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nzero_audit: true\n").unwrap();
+        assert!(serde_json::to_string(&spec).unwrap().contains("zero_audit"));
+    }
+
+    #[test]
+    fn zero_audit_needs_reach_grad() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nzero_audit: true\n").unwrap();
+        assert!(spec.validate_zero_audit().unwrap_err().to_string().contains("reach_grad"));
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nzero_audit: true\nreach_grad: true\n").unwrap();
+        spec.validate_zero_audit().unwrap();
     }
 
     #[test]

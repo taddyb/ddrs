@@ -228,6 +228,23 @@ When `fd_step` is one of the steps, the log prints
 `fd_sweep check: max |H_sweep(fd_step) - hess0| = 0` (same evaluations). Code:
 `src/experiment/landscape/fd_sweep.rs`.
 
+**`landscape.zero_audit` (zero-gradient audit).** Add `zero_audit: true` next to
+`reach_grad: true` to give every per-reach gradient that is exactly 0.0 one
+cause. Classes, in order: `no_path` (reach not upstream of the gauge),
+`range_clamp` (parameter outside its range in every window), `masked_row` (dam
+or stage row; 0 in the paper studies), `gauge_floor` (`DischargeFloor` active at
+the gauge row at every step), `clamp_cut` (a clamp set that cuts the path at
+every step, from the table in the module doc), else `unexplained`. Each
+`unexplained` entry is perturbed by +-0.05 on its own leaf; it counts as
+`unexplained_flat` when `|dL| < 1e-6 |L|`. Per arm it writes `zero_audit.csv`
+(`arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat`).
+The gate is `unexplained - unexplained_flat == 0`; the log prints `GATE FAIL`
+and one `UNEXPLAINED` line per bad entry. The `optimum` point is audited only
+when the Newton optimum differs from the trained point. A leakance, reservoir
+or gamma-axis arm writes one `not_audited` row. It needs the clamp ledger, so
+it covers the plain `route_timestep` path only. Code:
+`src/experiment/landscape/zero_audit.rs`.
+
 ## Juniata single-catchment sample (`examples/juniata/`)
 
 The fastest full end-to-end exercise of the CLI, and the mirror of DDR's

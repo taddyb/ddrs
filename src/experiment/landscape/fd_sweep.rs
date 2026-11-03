@@ -177,6 +177,20 @@ mod tests {
     }
 
     #[test]
+    fn two_sites_switching_on_one_reach_step_count_once() {
+        let two = |a: bool, b: bool| {
+            let mut active = std::collections::BTreeMap::new();
+            active.insert(ClampSite::DepthFloor, vec![a, false]);
+            active.insert(ClampSite::XCap, vec![b, false]);
+            ClampLedger { steps: vec![StepLedger { n: 2, active }] }
+        };
+        let (a, b) = (two(false, false), two(true, true));
+        assert_eq!(a.switches(&b, ClampSite::DepthFloor), 1);
+        assert_eq!(a.switches(&b, ClampSite::XCap), 1);
+        assert_eq!(switched_entries(&a, &b), 1);
+    }
+
+    #[test]
     fn one_changed_entry_is_one_switch() {
         let a = ledger(&[true, false, true]);
         let b = ledger(&[true, true, true]);

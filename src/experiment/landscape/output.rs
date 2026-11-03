@@ -305,7 +305,8 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
 /// (step, reach) entries where at least one of the 11 sites differs between
 /// the plus and minus runs. `switch_range` counts parameter-range clamp
 /// changes and is kept apart. `fd_sweep_eig.csv` has one row per step;
-/// `max_rel_change_vs_prev_h` is empty on the first step.
+/// `max_rel_change_vs_prev_h` is empty on the first step. A frozen axis has
+/// no eigenvalue: its `eig_k` is written as NaN.
 pub fn append_fd_sweep(
     arm_dir: &Path,
     arm: &str,
@@ -355,9 +356,78 @@ pub fn append_fd_sweep(
     Ok(())
 }
 
+/// Header of `zero_audit.csv`.
+pub const ZERO_AUDIT_HEADER: &str =
+    "arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat";
+
+/// One row of `zero_audit.csv`: the zero counts of one axis at one point.
+pub struct ZeroAuditRow<'a> {
+    pub point: &'a str,
+    pub axis: &'a str,
+    pub counts: &'a super::zero_audit::AxisCounts,
+    /// Unexplained entries whose single-leaf perturbation leaves the loss flat.
+    pub unexplained_flat: usize,
+}
+
+/// Append the zero-gradient audit of one gauge to `zero_audit.csv` in
+/// `arm_dir`. Each row counts the entries of one axis whose `reach_grad` is
+/// exactly 0.0 by cause. The gate is `unexplained - unexplained_flat == 0`.
+/// An arm or axis that is not audited (leakance, the gamma axis) writes one
+/// row with `point` `not_audited` and no counts.
+pub fn append_zero_audit(arm_dir: &Path, arm: &str, staid: &str, rows: &[ZeroAuditRow]) -> Result<(), BoxError> {
+    let path = arm_dir.join("zero_audit.csv");
+    let new = !path.exists();
+    let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new {
+        writeln!(w, "{ZERO_AUDIT_HEADER}")?;
+    }
+    for r in rows {
+        let c = r.counts;
+        writeln!(
+            w,
+            "{arm},{staid},{},{},{},{},{},{},{},{},{},{},{}",
+            r.point, r.axis, c.n_reach, c.n_zero, c.no_path, c.range_clamp, c.masked_row, c.gauge_floor, c.clamp_cut, c.unexplained, r.unexplained_flat
+        )?;
+    }
+    Ok(())
+}
+
+/// The single `not_audited` row of `zero_audit.csv`.
+pub fn append_zero_audit_skipped(arm_dir: &Path, arm: &str, staid: &str) -> Result<(), BoxError> {
+    let path = arm_dir.join("zero_audit.csv");
+    let new = !path.exists();
+    let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new {
+        writeln!(w, "{ZERO_AUDIT_HEADER}")?;
+    }
+    writeln!(w, "{arm},{staid},not_audited,,,,,,,,,,")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_zero_audit_writes_exact_header_and_rows() {
+        use crate::experiment::landscape::zero_audit::AxisCounts;
+        let dir = std::env::temp_dir().join(format!("zero_audit_out_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = AxisCounts { n_reach: 10, n_zero: 7, no_path: 1, range_clamp: 2, masked_row: 0, gauge_floor: 0, clamp_cut: 3, unexplained: 1, unexplained_reaches: vec![4] };
+        append_zero_audit(&dir, "a", "01", &[ZeroAuditRow { point: "trained", axis: "n", counts: &c, unexplained_flat: 1 }]).unwrap();
+        append_zero_audit_skipped(&dir, "b", "01").unwrap();
+        let t = std::fs::read_to_string(dir.join("zero_audit.csv")).unwrap();
+        let mut it = t.lines();
+        assert_eq!(
+            it.next().unwrap(),
+            "arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat"
+        );
+        assert_eq!(it.next().unwrap(), "a,01,trained,n,10,7,1,2,0,0,3,1,1");
+        assert_eq!(it.next().unwrap(), "b,01,not_audited,,,,,,,,,,");
+        assert!(it.next().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn minimal_result(slices: Vec<Slice>) -> LandscapeResult {
         LandscapeResult {
