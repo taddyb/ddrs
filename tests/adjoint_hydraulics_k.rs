@@ -91,15 +91,9 @@ fn helper_k_hours(cfg: &Config, gamma_field: Option<&Tensor<I, 1>>) -> Vec<f32> 
 
 #[test]
 fn reach_k_hours_matches_the_solver_k() {
-    // Trapezoid: bitwise, or the recorded exception below.
+    // Trapezoid: bitwise.
     let cfg = mock_cfg(GeometryForm::Trapezoid, 0.0);
-    let (h, s) = (helper_k_hours(&cfg, None), solver_k_hours(&cfg));
-    for (a, b) in h.iter().zip(&s) {
-        assert!(((a - b) / b).abs() < 1e-6, "trapezoid {a} vs {b}");
-    }
-    if bits(&h) != bits(&s) {
-        eprintln!("trapezoid K is not bitwise; within rel 1e-6");
-    }
+    assert_eq!(bits(&helper_k_hours(&cfg, None)), bits(&solver_k_hours(&cfg)));
 
     // Power law, no stage roughness.
     let cfg = mock_cfg(GeometryForm::PowerLaw, 0.0);
