@@ -1,6 +1,7 @@
 //! Per-gauge loss landscape in channel-parameter (log-multiplier) space.
 //! Spec: research/specs/2026-09-07-adjoint-landscape-design.md
 
+pub mod fd_sweep;
 pub mod objective;
 pub mod output;
 
@@ -157,6 +158,11 @@ pub struct LandscapeSpec {
     /// `LandscapeOptions::period`.
     #[serde(default = "d_period")]
     pub period: String,
+    /// Sweep the Hessian FD step and count clamp switches per step. Writes
+    /// `fd_sweep.csv` and `fd_sweep_eig.csv` per arm. Absent by default, and
+    /// then nothing changes. See `fd_sweep::FdSweepSpec`.
+    #[serde(default)]
+    pub fd_sweep: Option<fd_sweep::FdSweepSpec>,
 }
 fn d_window_days() -> usize { 365 }
 fn d_water_year() -> i32 { 2000 }
@@ -355,6 +361,13 @@ impl LandscapeSpec {
     }
 
     /// Reject a `period` that isn't one of `VALID_PERIODS`.
+    pub fn validate_fd_sweep(&self) -> Result<(), BoxError> {
+        match &self.fd_sweep {
+            Some(sw) => sw.validate(),
+            None => Ok(()),
+        }
+    }
+
     pub fn validate_period(&self) -> Result<(), BoxError> {
         if !VALID_PERIODS.contains(&self.period.as_str()) {
             return Err(format!(
@@ -402,6 +415,7 @@ where
     spec.validate_objective()?;
     spec.validate_deriv_weight()?;
     spec.validate_period()?;
+    spec.validate_fd_sweep()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -579,6 +593,15 @@ where
     let e0 = obj.eval([0.0; 3], true);
     let grad0 = e0.grad.unwrap();
     let hess0 = obj.hessian([0.0; 3], h);
+    if let Some(sw) = &spec.fd_sweep {
+        let (rows, eigs) = fd_sweep::fd_step_sweep(&obj, [0.0; 3], &sw.steps);
+        output::append_fd_sweep(arm_dir, &arm.name, &g.staid, "trained", &rows, &eigs)?;
+        if sw.steps.contains(&h) {
+            let hs = fd_sweep::hessian_from_rows(&rows, h);
+            let d = (0..3).flat_map(|i| (0..3).map(move |j| (i, j))).map(|(i, j)| (hs[i][j] - hess0[i][j]).abs()).fold(0.0f32, f32::max);
+            println!("  [{}] {} fd_sweep check: max |H_sweep(fd_step) - hess0| = {:e}", arm.name, g.staid, d);
+        }
+    }
     println!("  [{}] {} trained point: L0 {:.5} NSE {:.3} grad {:?} clamped {:.3}", arm.name, g.staid, e0.loss, e0.nse_mean, grad0, e0.clamped_frac);
 
     // 2. damped Newton to the per-gauge optimum
@@ -643,6 +666,10 @@ where
         }
     }
     let alpha_star = alpha;
+    if let Some(sw) = spec.fd_sweep.as_ref().filter(|sw| sw.at_optimum) {
+        let (rows, eigs) = fd_sweep::fd_step_sweep(&obj, alpha_star, &sw.steps);
+        output::append_fd_sweep(arm_dir, &arm.name, &g.staid, "optimum", &rows, &eigs)?;
+    }
     let e_star = cur;
     let hess_star = hess;
     let (eigval_star, eigvec_star) = eig_active(hess_star, active);
@@ -1248,5 +1275,35 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("testing"));
         assert!(err.to_string().contains("training"));
+    }
+
+    #[test]
+    fn fd_sweep_absent_by_default() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert!(spec.fd_sweep.is_none());
+    }
+
+    #[test]
+    fn fd_sweep_empty_block_takes_the_defaults() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nfd_sweep: {}\n").unwrap();
+        let sw = spec.fd_sweep.as_ref().unwrap();
+        assert_eq!(sw.steps, vec![0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625]);
+        assert!(!sw.at_optimum);
+        spec.validate_fd_sweep().unwrap();
+    }
+
+    #[test]
+    fn fd_sweep_validation_rejects_bad_steps() {
+        let bad = |steps: &str, needle: &str| {
+            let spec: LandscapeSpec = serde_yaml::from_str(&format!("gauges: {{}}\nfd_sweep: {{ steps: {steps} }}\n")).unwrap();
+            let err = spec.validate_fd_sweep().unwrap_err().to_string();
+            assert!(err.contains(needle), "{err}");
+        };
+        bad("[]", "empty");
+        bad("[0.1, 0.0]", "positive");
+        bad("[0.1, -0.2]", "positive");
+        bad("[0.1, .nan]", "finite");
+        bad("[0.1, 0.2]", "decreasing");
+        bad("[0.1, 0.1]", "decreasing");
     }
 }

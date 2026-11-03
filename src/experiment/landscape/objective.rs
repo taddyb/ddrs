@@ -18,6 +18,7 @@ use crate::data::dataset::RoutingTensors;
 use crate::data::ids::Staid;
 use crate::experiment::adjoint::influence::InfluenceContext;
 use crate::experiment::BoxError;
+use crate::routing::clamp_ledger::ClampLedger;
 use crate::routing::utils::denormalize;
 use crate::routing::{MuskingumCunge, RoutingInputs, SpatialParameters};
 use crate::training::forward::{gather_params_to_subreaches, scatter_add_by_group};
@@ -375,6 +376,31 @@ where
         }
     }
 
+    /// Per axis, which entries sit strictly outside the parameter range at
+    /// `alpha`, windows first and reaches within each window. The value is the
+    /// one `forward_loss` clamps: `x0 * exp(alpha)`, or `x0 + alpha * s` for an
+    /// additive axis. A tie with a bound is inactive (Burn's clamp tie rule).
+    /// An axis the objective does not clamp does not exist: every axis is
+    /// clamped to its range.
+    pub fn range_active(&self, alpha: [f32; 3]) -> [Vec<bool>; 3] {
+        let device = &self.ctx.device;
+        let n = self.n_reach();
+        let ones = Tensor::<I, 1>::ones([n], device);
+        let mut out: [Vec<bool>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for w in &self.windows {
+            for k in 0..3 {
+                let phys = match self.additive[k] {
+                    Some(s) => w.x0[k].clone() + Tensor::<I, 1>::from_floats([alpha[k]].as_slice(), device).mul_scalar(s) * ones.clone(),
+                    None => w.x0[k].clone() * (Tensor::<I, 1>::from_floats([alpha[k]].as_slice(), device).exp() * ones.clone()),
+                };
+                let [lo, hi] = self.ranges[k];
+                let v: Vec<f32> = phys.into_data().to_vec::<f32>().unwrap();
+                out[k].extend(v.iter().map(|x| *x < lo || *x > hi));
+            }
+        }
+        out
+    }
+
     /// Normalized (engine-space) field from a physical field with autograd.
     fn normalize_ad(x_phys: Tensor<AD<I>, 1>, range: [f32; 2], log_space: bool) -> Tensor<AD<I>, 1> {
         let [lo, hi] = range;
@@ -403,7 +429,7 @@ where
     /// regardless of `self.objective` -- see `kge`), the max clamped
     /// fraction over windows, and each window's daily gauge series (m3/s;
     /// consumed by `daily_series`, dropped by `eval`).
-    fn forward_loss(&self, leaves: &[Tensor<AD<I>, 1>; 3]) -> (Tensor<AD<I>, 1>, Vec<f32>, Vec<f32>, f32, Vec<Vec<f32>>) {
+    fn forward_loss(&self, leaves: &[Tensor<AD<I>, 1>; 3], mut ledger: Option<&mut ClampLedger>) -> (Tensor<AD<I>, 1>, Vec<f32>, Vec<f32>, f32, Vec<Vec<f32>>) {
         let device = &self.ctx.device;
         let n = self.n_reach();
         let ones = Tensor::<AD<I>, 1>::ones([n], device);
@@ -439,6 +465,9 @@ where
             }
             let get = |name: &str| norm.iter().find(|(nm, _)| nm == name).map(|(_, t)| t.clone());
             let mut engine = MuskingumCunge::<I>::new(self.ctx.cfg.clone(), device.clone());
+            if ledger.is_some() {
+                engine.enable_clamp_ledger();
+            }
             engine.setup_inputs(
                 RoutingInputs { adjacency: w.tensors.adjacency.clone(), x_storage: Tensor::from_inner(w.x_storage.clone()) },
                 Tensor::<AD<I>, 2>::from_inner(w.q_prime.clone()),
@@ -456,6 +485,11 @@ where
                 None,
             );
             let runoff = engine.forward();
+            if let Some(l) = ledger.as_deref_mut() {
+                if let Some(taken) = engine.take_clamp_ledger() {
+                    l.steps.extend(taken.steps);
+                }
+            }
             let gauge = scatter_add_by_group(runoff, w.tensors.flat_indices.clone(), w.tensors.group_ids.clone(), w.tensors.num_gauges);
             let daily = self.ctx.daily(gauge); // (1, D)
             let d = daily.dims()[1];
@@ -533,13 +567,28 @@ where
     /// `examples/leak_probe.rs` for the isolated repro (`ad-track-nobackward`
     /// leaks, `ad-track-backward` does not).
     pub fn eval(&self, alpha: [f32; 3], with_grad: bool) -> Eval {
+        self.eval_inner(alpha, with_grad, None)
+    }
+
+    /// `eval` plus the clamp ledger of the routed forward pass, all windows
+    /// in order. The ledger covers the plain `route_timestep` path only.
+    /// Panics when it comes back empty: a path that records nothing (leakance,
+    /// CUDA graphs) must fail loudly, not report zero switches.
+    pub fn eval_with_ledger(&self, alpha: [f32; 3], with_grad: bool) -> (Eval, ClampLedger) {
+        let mut ledger = ClampLedger::default();
+        let e = self.eval_inner(alpha, with_grad, Some(&mut ledger));
+        assert!(!ledger.steps.is_empty(), "clamp ledger is empty: this routing path records no clamp state");
+        (e, ledger)
+    }
+
+    fn eval_inner(&self, alpha: [f32; 3], with_grad: bool, ledger: Option<&mut ClampLedger>) -> Eval {
         let device = &self.ctx.device;
         // α leaves (shape [1]) — one set shared across windows. Always
         // require_grad so the tape-releasing backward below has leaves to
         // walk back to.
         let leaves: [Tensor<AD<I>, 1>; 3] =
             std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device).require_grad());
-        let (total, nses, kges, clamped_max, _dailies) = self.forward_loss(&leaves);
+        let (total, nses, kges, clamped_max, _dailies) = self.forward_loss(&leaves, ledger);
         let loss: f32 = total.clone().inner().into_data().to_vec::<f32>().unwrap()[0];
         let grads = total.backward();
         let grad = if with_grad {
@@ -582,7 +631,7 @@ where
         let device = &self.ctx.device;
         let leaves: [Tensor<AD<I>, 1>; 3] =
             std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats([alpha[k]].as_slice(), device).require_grad());
-        let (total, _nses, _kges, _clamped_max, dailies) = self.forward_loss(&leaves);
+        let (total, _nses, _kges, _clamped_max, dailies) = self.forward_loss(&leaves, None);
         let _ = total.backward();
         dailies.into_iter().next().expect("at least one window")
     }
@@ -598,7 +647,7 @@ where
         let n = self.n_reach();
         let leaves: [Tensor<AD<I>, 1>; 3] =
             std::array::from_fn(|k| Tensor::<AD<I>, 1>::from_floats(vec![alpha[k]; n].as_slice(), device).require_grad());
-        let (total, _nses, _kges, _clamped_max, _dailies) = self.forward_loss(&leaves);
+        let (total, _nses, _kges, _clamped_max, _dailies) = self.forward_loss(&leaves, None);
         let grads = total.backward();
         let extract = |l: &Tensor<AD<I>, 1>| -> Vec<f32> {
             l.grad(&grads).map(|t| t.into_data().to_vec::<f32>().unwrap()).unwrap_or_else(|| vec![0.0; n])

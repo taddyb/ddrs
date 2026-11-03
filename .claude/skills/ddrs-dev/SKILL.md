@@ -209,6 +209,25 @@ variables named by label; `census.py` reads the labels. The adjoint study and th
 hydraulic-K check carry the learned gamma too, and both handle a fixed `q_spatial`
 (`params.defaults.q_spatial`, the n_0 + gamma head).
 
+**`landscape.fd_sweep` (FD step sweep).** Add `fd_sweep: {}` to the `landscape`
+block to repeat the Hessian central difference at several steps `h` and count
+how many MC clamp states switch between the plus and minus runs. Fields:
+`steps` (default `[0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625]`; non-empty,
+finite, positive, strictly decreasing) and `at_optimum` (default false; also
+sweep at the Newton optimum). Absent means off and nothing changes. The sweep
+reads the clamp ledger (`src/routing/clamp_ledger.rs`), so it covers the plain
+`route_timestep` path only; a leakance or CUDA-graph arm gives an empty ledger
+and the run stops with an error. Each arm writes two CSVs:
+`fd_sweep.csv` (one row per point, `h` and active axis; a frozen axis has no
+row; columns `h_aa`, `h_col_*`, `reach_steps`, `switch_total`, one
+`switch_<site>` per clamp site, `switch_range`, `switch_frac`) and
+`fd_sweep_eig.csv` (eigenvalues per `h` and `max_rel_change_vs_prev_h`).
+`switch_frac` is the share of (step, reach) entries where any clamp site
+differs. `switch_range` counts parameter-range clamp changes and stays apart.
+When `fd_step` is one of the steps, the log prints
+`fd_sweep check: max |H_sweep(fd_step) - hess0| = 0` (same evaluations). Code:
+`src/experiment/landscape/fd_sweep.rs`.
+
 ## Juniata single-catchment sample (`examples/juniata/`)
 
 The fastest full end-to-end exercise of the CLI, and the mirror of DDR's
