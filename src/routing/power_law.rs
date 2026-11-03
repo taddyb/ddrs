@@ -25,7 +25,8 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorPrimitive};
 
 use crate::routing::clamp_rule::{ceiling_active, floor_active};
-use crate::routing::mmc_op::{TimestepState, ZetaGeomGrads};
+use crate::routing::clamp_ledger::{ProbeSite, StepProbe};
+use crate::routing::mmc_op::{probe_keep, probe_record, TimestepState, ZetaGeomGrads};
 
 /// Gradients of the section inputs. `gq_t` is the part of `dL/dQ_t` that flows
 /// through the section (velocity and depth). `ggamma` is `Some` only when
@@ -41,12 +42,16 @@ pub(crate) struct SectionGrads<I: Backend> {
 /// Backward of the power-law section. `gcelerity` is `dL/dc` with B18 and the
 /// B19 `dX/dc` term already folded in. `g_top_width_from_x` is B19's `dX/dT`.
 /// `zeta_geom` is the leakance term's depth, `q_eps` and `p` gradients.
-pub(crate) fn section_backward<I: Backend>(
+pub(crate) fn section_backward<I: Backend + 'static>(
     state: &TimestepState<I>,
     gcelerity: Tensor<I, 1>,
     g_top_width_from_x: Option<Tensor<I, 1>>,
     zeta_geom: Option<&ZetaGeomGrads<I>>,
-) -> SectionGrads<I> {
+    probe: &mut Option<StepProbe>,
+) -> SectionGrads<I>
+where
+    I::FloatTensorPrimitive: 'static,
+{
     let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
         Tensor::from_primitive(TensorPrimitive::Float(p))
     };
@@ -85,10 +90,12 @@ pub(crate) fn section_backward<I: Backend>(
     let gg_from_beta = gamma_t.as_ref().map(|_| gbeta.clone() / qp1.clone());
 
     // B16: velocity band, read from the pre-clamp velocity.
+    let gv_in = probe_keep(probe, &gv_cl);
     let gv_un = gv_cl.mask_fill(
         floor_active(v_un.clone(), velocity_lb).bool_or(ceiling_active(v_un.clone(), 15.0)),
         0.0,
     );
+    probe_record::<I>(probe, ProbeSite::Velocity, gv_in, &gv_un);
 
     // B15p: v = Q / A
     let gq_t_from_v = gv_un.clone() / area.clone();
@@ -116,6 +123,13 @@ pub(crate) fn section_backward<I: Backend>(
         Some(zg) => gd_total + zg.g_depth.clone(),
         None => gd_total,
     };
+    // The depth probe: the total before the floor mask and the same total
+    // masked (`cut` below applies the mask to each product).
+    let gd_in = probe_keep(probe, &gd_total);
+    if let Some(g_in) = gd_in {
+        let masked = gd_total.clone().mask_fill(floor.clone(), 0.0);
+        probe_record::<I>(probe, ProbeSite::Depth, Some(g_in), &masked);
+    }
     let g_lnd = gd_total * d;
     let g_lnr = g_lnd.clone() * e.clone();
     let g_e = g_lnd * ln_r;

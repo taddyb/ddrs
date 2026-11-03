@@ -172,6 +172,7 @@ where
             /* skip_rows */ None,
             /* gamma_in */ None,
             /* reservoir */ None,
+            /* ledger */ None,
         );
 
         if t % sample_every == 0 {

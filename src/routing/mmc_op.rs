@@ -7,7 +7,7 @@
 //!
 //! Parents in fixed order: [n, q_spatial, p_spatial, q_t, q_prime_t].
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use burn::backend::Autodiff;
@@ -19,6 +19,7 @@ use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, Tensor
 
 use crate::config::{Config, GeometryForm};
 use crate::geometry::{compute_power_law_geometry, compute_power_law_geometry_field};
+use crate::routing::clamp_ledger::{ClampLedger, ClampProbe, ClampSite, ProbeSite, SiteGrad, StepLedger, StepProbe};
 use crate::routing::clamp_rule::{ceiling_active, floor_active};
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
 
@@ -325,6 +326,9 @@ pub(crate) struct TimestepState<B: Backend> {
     /// the trapezoid runs the B-labels in this file, and the power law runs
     /// `power_law.rs::section_backward`.
     pub geometry_form: GeometryForm,
+    /// Optional sink for the clamp probe. `None` ⇒ the backward records
+    /// nothing and makes no host copy.
+    pub probe: Option<Arc<Mutex<ClampProbe>>>,
 }
 
 #[derive(Debug)]
@@ -489,6 +493,8 @@ where
         };
 
         let gy = wrap(grad_out);
+        // Clamp probe: one `StepProbe` per backward call, pushed on return.
+        let mut sprobe: Option<StepProbe> = state.probe.as_ref().map(|_| StepProbe::default());
 
         let n_t = wrap(state.n.clone());
         // `state.q_spatial` is not read: every q path goes through the saved
@@ -552,7 +558,9 @@ where
         // ===========================================================
         // clamp_min(x, lb): the gradient is cut where x < lb. A tie (x == lb)
         // passes (`clamp_rule`).
+        let gy_in = probe_keep(&sprobe, &gy);
         let gx_sol = gy.mask_fill(floor_active(x_sol.clone(), discharge_lb), 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::Discharge, gy_in, &gx_sol);
 
         // ===========================================================
         // B27. (gA_values, gb_rhs) = csr_solve_backward(...)
@@ -879,7 +887,9 @@ where
 
                 let g_hi_a = gx.clone().mask_fill(mask_a.bool_not(), 0.0);
                 let g_hi_b = gx.clone().mask_fill(mask_b.bool_not(), 0.0);
+                let gx_in = probe_keep(&sprobe, &gx);
                 let gx_cunge = gx.mask_fill(mask_cunge.bool_not(), 0.0);
+                probe_record::<I>(&mut sprobe, ProbeSite::XCap, gx_in, &gx_cunge);
 
                 // ∂hi_a/∂cr = +0.5(1−δ),  ∂hi_b/∂cr = −0.5(1−δ)
                 let half_1md = 0.5 * (1.0 - POSITIVITY_DELTA);
@@ -894,7 +904,9 @@ where
             // tie at 0 or 0.5 passes. The mask reads the pre-clamp `x_raw`
             // under both `enforce_pos` values.
             let cut_x = floor_active(x_raw.clone(), 0.0).bool_or(ceiling_active(x_raw, 0.5));
+            let gx_in = probe_keep(&sprobe, &gx);
             let gx = gx.mask_fill(cut_x, 0.0);
+            probe_record::<I>(&mut sprobe, ProbeSite::XBand, gx_in, &gx);
             Some(XGrads {
                 // ∂X/∂Q = −0.5·W/Q, but W = Q/(B·S·c·L) so Q cancels exactly.
                 // Written in the cancelled form on purpose: `q_t` is only
@@ -983,7 +995,10 @@ where
         let gk_raw = if enforce_pos {
             let k_raw = length.clone() / celerity.clone();
             let k_floor = dt * (1.0 + POSITIVITY_DELTA) / 2.0;
-            gk_muskingum.mask_fill(floor_active(k_raw, k_floor), 0.0)
+            let gk_in = probe_keep(&sprobe, &gk_muskingum);
+            let gk_out = gk_muskingum.mask_fill(floor_active(k_raw, k_floor), 0.0);
+            probe_record::<I>(&mut sprobe, ProbeSite::KFloor, gk_in, &gk_out);
+            gk_out
         } else {
             gk_muskingum
         };
@@ -1008,6 +1023,7 @@ where
                 gcelerity,
                 x_grads.as_ref().map(|xg| xg.g_top_width.clone()),
                 zeta_geom.as_ref(),
+                &mut sprobe,
             );
             let gq_t = gq_t_from_s24.map(|from_s24| {
                 let g = gq_t_from_s25 + from_s24 + s.gq_t;
@@ -1016,6 +1032,7 @@ where
                     None => g,
                 }
             });
+            push_step_probe(state, sprobe);
             return ParentGrads {
                 n: mask.n.then_some(s.gn),
                 q_spatial: mask.q_spatial.then_some(s.gq_eps),
@@ -1117,7 +1134,9 @@ where
         // ===========================================================
         let cut_v = floor_active(velocity_un.clone(), velocity_lb)
             .bool_or(ceiling_active(velocity_un.clone(), 15.0));
+        let gv_in = probe_keep(&sprobe, &gvelocity_cl);
         let gvelocity_un = gvelocity_cl.mask_fill(cut_v, 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::Velocity, gv_in, &gvelocity_un);
 
         // ===========================================================
         // B15. velocity_un = (1/n) · R^(2/3) · √slope
@@ -1202,7 +1221,9 @@ where
         //   gradient passes where bw_raw >= lb (a tie passes).
         // ===========================================================
         let gbw_total = gbw_from_s13 + gbw_from_s12;
+        let gbw_in = probe_keep(&sprobe, &gbw_total);
         let gbw_raw = gbw_total.mask_fill(floor_active(bw_raw.clone(), bottom_width_lb), 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::BottomWidth, gbw_in, &gbw_raw);
 
         // ===========================================================
         // B10. bw_raw = tw - 2·ss·d
@@ -1225,7 +1246,9 @@ where
         };
         let cut_ss = floor_active(side_slope_raw.clone(), 0.5)
             .bool_or(ceiling_active(side_slope_raw.clone(), 50.0));
+        let gss_in = probe_keep(&sprobe, &gss_combined);
         let gss_from_clamp = gss_combined.mask_fill(cut_ss, 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::SideSlope, gss_in, &gss_from_clamp);
 
         // ===========================================================
         // B8. side_slope_raw = tw · q_eps / (2·d)
@@ -1300,7 +1323,9 @@ where
         let depth_pre_clamp = ratio
             .clone()
             .powf(depth_exponent(q_eps.clone(), state.gamma, gamma_t_b6.as_ref()));
+        let gd_in = probe_keep(&sprobe, &gd_total);
         let gd_pre_clamp = gd_total.mask_fill(floor_active(depth_pre_clamp, depth_lb), 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::Depth, gd_in, &gd_pre_clamp);
 
         // d = ratio^exponent  (NOTE: depth saved is post-clamp; where the mask
         // passes the gradient the clamp is inactive, so the saved depth equals
@@ -1414,6 +1439,7 @@ where
         };
         let ggamma = if mask.gamma { ggamma } else { None };
 
+        push_step_probe(state, sprobe);
         ParentGrads {
             n: gn,
             q_spatial: gq_spatial,
@@ -1946,10 +1972,74 @@ pub(crate) mod forward_saved_idx {
     pub const BW_RAW: usize = 22;
 }
 
+/// Record one ledger entry. `mask` runs only when a ledger is present, so the
+/// no-sink path builds no tensor and makes no host copy.
+fn ledger_record<I: Backend + 'static>(
+    step: &mut Option<StepLedger>,
+    site: ClampSite,
+    mask: impl FnOnce() -> Tensor<I, 1, Bool>,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if let Some(st) = step.as_mut() {
+        let prim = match mask().float().into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        };
+        let v: Vec<bool> = primitive_to_vec::<I>(prim).into_iter().map(|x| x != 0.0).collect();
+        st.active.insert(site, v);
+    }
+}
+
+/// Push one backward call's probe record onto the shared sink.
+pub(crate) fn push_step_probe<B: Backend>(state: &TimestepState<B>, sp: Option<StepProbe>) {
+    if let (Some(step), Some(sink)) = (sp, state.probe.as_ref()) {
+        sink.lock().expect("clamp probe lock").steps.push(step);
+    }
+}
+
+/// Copy a tensor to the host for the probe.
+fn probe_host<I: Backend + 'static>(t: &Tensor<I, 1>) -> Vec<f32>
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    let prim = match t.clone().into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        _ => unreachable!(),
+    };
+    primitive_to_vec::<I>(prim)
+}
+
+/// Keep a gradient for the probe: a cheap clone when probing, else `None`.
+pub(crate) fn probe_keep<I: Backend>(sp: &Option<StepProbe>, g: &Tensor<I, 1>) -> Option<Tensor<I, 1>> {
+    sp.as_ref().map(|_| g.clone())
+}
+
+/// Record the gradient before (`g_in`, from [`probe_keep`]) and after the
+/// mask (`g_out`) at one site. No-op when not probing.
+pub(crate) fn probe_record<I: Backend + 'static>(
+    sp: &mut Option<StepProbe>,
+    site: ProbeSite,
+    g_in: Option<Tensor<I, 1>>,
+    g_out: &Tensor<I, 1>,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if let (Some(step), Some(g_in)) = (sp.as_mut(), g_in) {
+        step.sites.insert(
+            site,
+            SiteGrad { g_in: probe_host::<I>(&g_in), g_out: probe_host::<I>(g_out) },
+        );
+    }
+}
+
 /// The channel section a form computes, in the order the saved state wants.
 /// Power law leaves the trapezoid-only fields at zero.
 struct SectionOut<I: Backend> {
     depth: Tensor<I, 1>,
+    /// The depth before the floor `clamp_min`. Only the clamp ledger reads
+    /// it. The power law builds it only when a ledger is present.
+    depth_raw: Option<Tensor<I, 1>>,
     top_width: Tensor<I, 1>,
     side_slope: Tensor<I, 1>,
     bottom_width: Tensor<I, 1>,
@@ -1999,6 +2089,9 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     gamma_in: Option<Tensor<I, 1>>,
     // Linear-reservoir override (S19''). `None` ⇒ no op, byte-identical.
     reservoir: Option<&ReservoirTensors<I>>,
+    // Clamp ledger sink. `Some` records one `StepLedger` for this call and
+    // reads masks to the host; `None` adds no kernel and no host copy.
+    mut ledger: Option<&mut ClampLedger>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -2041,6 +2134,7 @@ where
     // after S17 reads the same named fields, whatever the form.
     let SectionOut {
         depth,
+        depth_raw,
         top_width,
         side_slope,
         bottom_width,
@@ -2070,7 +2164,8 @@ where
         // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma); see `depth_exponent`.
         let exponent = depth_exponent(q_eps.clone(), gamma, gamma_in.as_ref());
         // S6
-        let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
+        let depth_raw = ratio.clone().powf(exponent.clone());
+        let depth = depth_raw.clone().clamp_min(depth_lb);
         // S7
         let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
         // S8 (pre-clamp side slope)
@@ -2139,6 +2234,7 @@ where
 
             SectionOut {
                 depth,
+                depth_raw: Some(depth_raw),
                 top_width,
                 side_slope,
                 bottom_width,
@@ -2181,8 +2277,14 @@ where
             // S17 (power law): c = v_clamped * celerity_ratio.
             let celerity = velocity_cl.clone() * g.celerity_ratio.clone();
             let zeros = g.depth.zeros_like();
+            // The reference function's own ops for the pre-clamp depth. Built
+            // only for the ledger, so the no-sink path runs no extra kernel.
+            let depth_raw = ledger
+                .is_some()
+                .then(|| (g.ln_ratio.clone() * g.exponent.clone()).exp());
             SectionOut {
                 depth: g.depth,
+                depth_raw,
                 top_width: g.top_width,
                 side_slope: zeros.clone(),
                 bottom_width: zeros.clone(),
@@ -2198,6 +2300,29 @@ where
         }
     };
 
+    // Clamp ledger: the section clamps, on the same pre-clamp tensors the
+    // backward masks (`clamp_rule`: a tie is inactive).
+    let mut step_led: Option<StepLedger> = ledger.as_ref().map(|_| StepLedger {
+        n: qt_in.dims()[0],
+        active: Default::default(),
+    });
+    if step_led.is_some() {
+        let dr = depth_raw.clone().expect("the ledger asked for the pre-clamp depth");
+        ledger_record::<I>(&mut step_led, ClampSite::DepthFloor, || floor_active(dr, depth_lb));
+        if cfg.params.geometry_form == GeometryForm::Trapezoid {
+            let ss = side_slope_raw.clone();
+            ledger_record::<I>(&mut step_led, ClampSite::SideSlopeLow, || floor_active(ss.clone(), 0.5));
+            ledger_record::<I>(&mut step_led, ClampSite::SideSlopeHigh, || ceiling_active(ss, 50.0));
+            let bw = bw_raw.clone();
+            ledger_record::<I>(&mut step_led, ClampSite::BottomWidthFloor, || {
+                floor_active(bw, bottom_width_lb)
+            });
+        }
+        let v = velocity_un.clone();
+        ledger_record::<I>(&mut step_led, ClampSite::VelocityLow, || floor_active(v.clone(), velocity_lb));
+        ledger_record::<I>(&mut step_led, ClampSite::VelocityHigh, || ceiling_active(v, 15.0));
+    }
+
     // S18..S23: Muskingum coefficients
     //
     // S18': K floor (`enforce_positivity` only). A reach with K < dt/2 is
@@ -2209,7 +2334,9 @@ where
     // `hi_b > 0`, so no `clamp_min` is needed on the three-way min).
     let k_raw = length_in.clone() / celerity.clone();
     let k_muskingum = if enforce_pos {
-        k_raw.clamp_min(dt * (1.0 + POSITIVITY_DELTA) / 2.0)
+        let k_floor = dt * (1.0 + POSITIVITY_DELTA) / 2.0;
+        ledger_record::<I>(&mut step_led, ClampSite::KFloor, || floor_active(k_raw.clone(), k_floor));
+        k_raw.clamp_min(k_floor)
     } else {
         k_raw
     };
@@ -2236,7 +2363,10 @@ where
         let w = qt_in.clone()
             / (top_width.clone() * slope_in.clone() * celerity.clone() * length_in.clone()
                 + 1e-12);
-        let x_cunge = ((-w + 1.0) * 0.5).clamp(0.0, 0.5);
+        let x_raw = (-w + 1.0) * 0.5;
+        ledger_record::<I>(&mut step_led, ClampSite::XBandLow, || floor_active(x_raw.clone(), 0.0));
+        ledger_record::<I>(&mut step_led, ClampSite::XBandHigh, || ceiling_active(x_raw.clone(), 0.5));
+        let x_cunge = x_raw.clamp(0.0, 0.5);
         if enforce_pos {
             // S19': stability cap. Muskingum's non-negative-coefficient window
             // is 2X <= Cr <= 2(1-X); solving both sides for X gives
@@ -2255,6 +2385,15 @@ where
             let cr = k_muskingum.clone().recip() * dt;
             let hi_a = cr.clone() * (0.5 * (1.0 - POSITIVITY_DELTA));
             let hi_b = (-cr * 0.5 + 1.0) * (1.0 - POSITIVITY_DELTA);
+            // The Cunge branch wins when it is at most both caps (the `<=`
+            // cascade of B19'). The cap is active where it does not.
+            ledger_record::<I>(&mut step_led, ClampSite::XCap, || {
+                x_cunge
+                    .clone()
+                    .lower_equal(hi_a.clone())
+                    .bool_and(x_cunge.clone().lower_equal(hi_b.clone()))
+                    .bool_not()
+            });
             x_cunge.min_pair(hi_a).min_pair(hi_b)
         } else {
             x_cunge
@@ -2350,6 +2489,11 @@ where
         Some((res, t_prev)) => c3.mask_where(res.mask.clone(), (t_prev.clone() * 2.0 - dt) / denom.clone()),
         None => c3,
     };
+
+    // Coefficients outside the non-negative window (not a clamp).
+    ledger_record::<I>(&mut step_led, ClampSite::OutsideCrWindow, || {
+        c1.clone().lower_elem(0.0).bool_or(c3.clone().lower_elem(0.0))
+    });
 
     // S24: i_t = N · q_t (inner-backend SpMV)
     let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
@@ -2509,8 +2653,14 @@ where
     }
 
     // S28: q_next = max(x_sol, discharge_lb)
+    ledger_record::<I>(&mut step_led, ClampSite::DischargeFloor, || {
+        floor_active(x_sol.clone(), discharge_lb)
+    });
     let q_next = x_sol.clone().clamp_min(discharge_lb);
     let q_next_prim = unwrap(q_next);
+    if let (Some(sink), Some(step)) = (ledger.as_mut(), step_led.take()) {
+        sink.steps.push(step);
+    }
 
     // Saved-state array — order MUST match `forward_saved_idx`.
     let saved: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = [
@@ -2945,6 +3095,48 @@ where
         None,
         None,
         None,
+        None,
+        None,
+    )
+}
+
+/// [`timestep_forward`] with the clamp sinks, for tests and probes. With both
+/// sinks `None` it is `timestep_forward`. `gamma_at` is the learned per-reach
+/// stage-roughness exponent, as in `timestep_forward`.
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_diag<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
+    ledger: Option<&mut ClampLedger>,
+    probe: Option<Arc<Mutex<ClampProbe>>>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    timestep_forward_with_reservoirs::<I>(
+        cfg, pattern, assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        false,
+        None,
+        gamma_at,
+        None,
+        None,
+        None,
+        ledger,
+        probe,
     )
 }
 
@@ -2976,6 +3168,10 @@ pub(crate) fn timestep_forward_with_reservoirs<I: Backend + 'static>(
     // Receives this step's pre-clamp solve and routed inflow when `Some`
     // (the engine's dam-row clamp accounting). Reads only; no numerics change.
     dam_diag: Option<&mut Option<DamStepDiag<I>>>,
+    // Clamp ledger sink: one `StepLedger` per call when `Some`.
+    ledger: Option<&mut ClampLedger>,
+    // Clamp probe sink: one `StepProbe` per backward call when `Some`.
+    probe: Option<Arc<Mutex<ClampProbe>>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -3073,6 +3269,7 @@ where
         skip_rows,
         gamma_chain.clone(),
         reservoir,
+        ledger,
     );
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
@@ -3155,6 +3352,7 @@ where
         // Mirrors S19p's gate in `forward_chain_inner` exactly.
         reservoir_positivity: reservoir.is_some_and(|r| r.additive && r.positivity) && !enforce_pos,
         geometry_form: cfg.params.geometry_form,
+        probe,
     };
     debug_assert!(
         !state.reservoir_additive || state.reservoir_t_prev.is_some(),
@@ -3330,6 +3528,8 @@ where
         None,
         Some(release),
         None,
+        None,
+        None,
     )
 }
 
@@ -3455,6 +3655,8 @@ where
         gamma_p.clone().map(wrap),
         // Reservoir rows are rejected with leakance (`route_timestep`).
         None,
+        // Leakance runs are eval diagnostics here and record no ledger.
+        None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
@@ -3549,6 +3751,7 @@ where
         reservoir_additive: false,
         reservoir_positivity: false,
         geometry_form: cfg.params.geometry_form,
+        probe: None,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -3900,6 +4103,7 @@ where
         reservoir_additive: false,
         reservoir_positivity: false,
         geometry_form: GeometryForm::Trapezoid,
+        probe: None,
     };
 
     let result_prim = match TimestepOp
@@ -3947,7 +4151,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None, None, None,
+        &mut None, &mut None, false, None, None, None, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -4010,7 +4214,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None, None, None,
+        &mut None, &mut None, false, None, None, None, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

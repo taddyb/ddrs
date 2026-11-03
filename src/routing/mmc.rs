@@ -763,6 +763,11 @@ pub struct MuskingumCunge<I: Backend> {
     /// (no autograd tape) and grow by one elementwise add per timestep.
     collect_zeta: bool,
 
+    /// Clamp ledger. `None` by default; `enable_clamp_ledger` arms it, and
+    /// each plain `route_timestep` call then appends one step. The leakance
+    /// and CUDA-graph paths record nothing.
+    clamp_ledger: Option<crate::routing::clamp_ledger::ClampLedger>,
+
     /// Per-timestep negative-discharge tracking. Off by default;
     /// `enable_negative_discharge_tracking` turns it on. When off, the host
     /// sync in `forward_chain_inner` is skipped entirely — zero added cost.
@@ -841,6 +846,7 @@ impl<I: Backend> MuskingumCunge<I> {
             divide_hotstart_by_pieces: true,
             discharge_t: None,
             collect_zeta: false,
+            clamp_ledger: None,
             track_negative_discharge: false,
             zeta_abs_sum: None,
             zeta_net_sum: None,
@@ -1591,6 +1597,8 @@ impl<I: Backend> MuskingumCunge<I> {
                     }
                 }),
                 self.dam_account.is_some().then_some(&mut self.last_dam_diag),
+                self.clamp_ledger.as_mut(),
+                None,
             );
             match (self.stage.as_mut(), stage_args) {
                 (Some(block), Some((n_man, p, q, q_t_raw, q_prime))) => {
@@ -1801,6 +1809,19 @@ impl<I: Backend> MuskingumCunge<I> {
     /// stays `None`. Eval-time use — the training path never enables this.
     pub fn enable_zeta_accumulation(&mut self) {
         self.collect_zeta = true;
+    }
+
+    /// Start recording the clamp ledger: one `StepLedger` per `route_timestep`
+    /// call on the plain path. Reads each step's clamp masks to the host, so
+    /// leave it off in production. Replaces any ledger already held.
+    pub fn enable_clamp_ledger(&mut self) {
+        self.clamp_ledger = Some(crate::routing::clamp_ledger::ClampLedger::default());
+    }
+
+    /// Take the recorded ledger and stop recording. `None` if it was never
+    /// enabled.
+    pub fn take_clamp_ledger(&mut self) -> Option<crate::routing::clamp_ledger::ClampLedger> {
+        self.clamp_ledger.take()
     }
 
     /// Turn on per-timestep negative-discharge tracking. When off (the
