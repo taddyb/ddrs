@@ -506,10 +506,19 @@ $$
 which equals 1 only at $q = 0$ and $q = 1$, and is 1.114 at $q = 0.65$ (the
 value the current arm prescribes). This is the same $(2-q)(q+1)/2$ factor
 recorded in `tests/stage_roughness.rs` as the "up to 11%" gap between the true
-$\mathrm{d}A/\mathrm{d}d$ and the $T$ the celerity convention uses. It is
-inherited from DDR and out of scope of any fix in this tree, but it means the
-depth reported by the model is the depth of a power-law channel, not of the
-trapezoid whose conveyance is then computed.
+$\mathrm{d}A/\mathrm{d}d$ and the $T$ the celerity convention uses. The
+trapezoid default keeps it. It means the depth reported by the model is the
+depth of a power-law channel, not of the trapezoid whose conveyance is then
+computed. `params.geometry_form: power_law` removes it: one section, with
+$R = d/(q+1)$, and the closed form
+
+$$
+d = \left[\frac{Q\,n\,(q+1)^{5/3}\,d_{\mathrm{ref}}^{\gamma}}{p\sqrt{s}}\right]^{3/(5+3q+3\gamma)},
+\qquad v = Q/A,
+\qquad c = v\,\frac{5+3q+3\gamma}{3(q+1)}
+$$
+
+which gives $Q = vA$ and $c = \mathrm{d}Q/\mathrm{d}A$ exactly.
 
 ### 4.4 Every clamp, and what it does to the gradient
 
@@ -522,8 +531,8 @@ reach-timestep through that path.
 | C1 | slope floor | $s \ge 10^{-3}$ | `attribute_minimums.slope`, applied once in `mmc.rs::setup_inputs` | n/a | $s$ is not a parameter; no gradient path |
 | C2 | lateral inflow floor | $q' \ge 10^{-4}$ | `attribute_minimums.discharge`, once per window in `mmc.rs::forward` | n/a | $q'$ is data (a parent only in the adjoint study) |
 | C3 | depth floor | $d \ge 10^{-2}$ m | `attribute_minimums.depth` | B6 | zero into $\mathcal{R}$, $e$, hence into $n$, $q$, $p$, $Q_t$ through the depth chain |
-| C4 | side-slope band | $z \in [0.5, 50]$ | **literal**, not configurable | B9 | zero into $T$, $q_\varepsilon$, $d$ through $z$ |
-| C5 | bottom-width floor | $b \ge 10^{-2}$ m | `attribute_minimums.bottom_width` | B11 | zero into $T$, $z$, $d$ through $b$ |
+| C4 (trapezoid only) | side-slope band | $z \in [0.5, 50]$ | **literal**, not configurable | B9 | zero into $T$, $q_\varepsilon$, $d$ through $z$ |
+| C5 (trapezoid only) | bottom-width floor | $b \ge 10^{-2}$ m | `attribute_minimums.bottom_width` | B11 | zero into $T$, $z$, $d$ through $b$ |
 | C6 | velocity band | $v \in [0.01, 15]$ m/s | lower from `attribute_minimums.velocity`, **upper literal 15** | B16 | zero into all of $R$, $n$, $d$ through the velocity |
 | C7 | Muskingum $K$ floor | $K \ge \Delta t (1+\delta)/2$ | `enforce_positivity` only, $\delta = 10^{-2}$ literal | B18' | zero into celerity, hence into all geometry |
 | C8 | Cunge $X$ band | $X \in [0, 0.5]$ | literal | B19 | zero into $Q_t$, $T$, $c$ through $X$ |
@@ -534,6 +543,14 @@ reach-timestep through that path.
 | C13 | KGE per-gauge cap | weighted component sum $\le 10$ | `loss.kge_clamp` | autograd | zero for that gauge's KGE term |
 
 C10 is the consequential one for mass: see §6.5.
+
+C4 and C5 are trapezoid only. The `power_law` section has no side slope and no
+bottom width.
+
+**Tie rule.** On the Muskingum-Cunge path a clamp bound is inactive at an exact
+tie, so the gradient passes. For a min of two live operands the tie goes to the
+first operand. The depth floor (C3) and the Cunge $X$ band (C8) read the
+pre-clamp value. The table in `.claude/PHYSICS-CORRECTIONS.md` lists every site.
 
 ---
 
@@ -649,7 +666,9 @@ $$
 
 to relative tolerance $10^{-4}$, *under the convention the solver uses*.
 
-**(b) The convention itself is approximate, by up to 2.3%.** The solver
+**(b) The convention itself is approximate, by up to 2.3%.** (On
+`geometry_form: power_law` it is exact: $\mathrm{d}A/\mathrm{d}d = T$, so $\beta$
+has no approximation.) The solver
 computes $c = (\mathrm{d}Q/\mathrm{d}d)/T$, i.e. it assumes
 $\mathrm{d}A/\mathrm{d}d = T$ and $\mathrm{d}P_w/\mathrm{d}d = 2\sqrt{1+z^2}$,
 i.e. a trapezoid of **fixed shape** being filled. This geometry reshapes as it
@@ -1248,7 +1267,7 @@ the single shared function
 
 | label | differentiates | key expression |
 |---|---|---|
-| **B28** | S28 output clamp (C10) | $\bar{x}_{\mathrm{sol}} = \bar{y}\cdot\mathbb{1}[x_{\mathrm{sol}} > 10^{-4}]$ |
+| **B28** | S28 output clamp (C10) | $\bar{x}_{\mathrm{sol}} = \bar{y}\cdot\mathbb{1}[x_{\mathrm{sol}} \ge 10^{-4}]$ |
 | **B27** | the triangular solve | equations 60-61; calls `dispatch::backward_solve_primitive`, then the per-nnz $-\bar{b}[r]x[c]$ |
 | *zeta hook* | equations 73-79 | called with $\bar{b}$ the moment B27 produces it; returns the three geometry grads |
 | **B26** | S26 assembly | equation 63, $\bar{c}_1$ from $\bar{A}_{\text{values}}$ |
@@ -1257,20 +1276,24 @@ the single shared function
 | **B23-B20** | $c_1..c_4$ and the shared denominator | $\overline{\mathrm{denom}}\big|_{c_i} = -\bar{c}_i\,\mathrm{num}_i/\mathrm{denom}^2$; $\overline{\mathrm{num}_i} = \bar{c}_i/\mathrm{denom}$; accumulated into $\overline{2KX}$ and $\overline{2K(1-X)}$ |
 | **B19** | the Cunge $X$ (`ddr_match: false` only) | $\bar{X} = 2K(\overline{2KX} - \overline{2K(1-X)})$, then $\partial X/\partial Q_t = -\tfrac{1}{2}/(TscL)$, $\partial X/\partial T = +\tfrac{1}{2}D_{\mathrm{cell}}/T$, $\partial X/\partial c = +\tfrac{1}{2}D_{\mathrm{cell}}/c$, masked by C8 |
 | **B19'** | the S19' three-way `min` (`enforce_positivity`) | partitions $\bar{X}$ across branches Cunge > hi$_a$ > hi$_b$ by a `<=` cascade; opens the NEW path $X \to Cr \to K$, accumulated as $\bar{K}\big|_{X\text{-cap}} = -\bar{Cr}\,\Delta t/K^2$ |
-| **B18'** | the S18' $K$ floor (C7) | $\bar{K}_{\mathrm{raw}} = \bar{K}\cdot\mathbb{1}[L/c > \Delta t(1+\delta)/2]$ |
+| **B18'** | the S18' $K$ floor (C7) | $\bar{K}_{\mathrm{raw}} = \bar{K}\cdot\mathbb{1}[L/c \ge \Delta t(1+\delta)/2]$ |
 | **B18** | $K = L/c$ | $\bar{c} = -\bar{K}_{\mathrm{raw}}L/c^2$, plus B19's $\partial X/\partial c$ term |
 | **B17** | the celerity | `ddr_match`: $\bar{v} = \bar{c}\cdot 5/3$. Else with $G = \tfrac43 A\sqrt{1+z^2}/(TP_w)$ and $H = \gamma A/(Td)$: $\bar{v} = \bar{c}\beta$, $\bar\beta = \bar{c}v$, $\partial\beta/\partial A = -G/A + H/A$, $\partial\beta/\partial T = +G/T - H/T$, $\partial\beta/\partial P_w = +G/P_w$, $\partial\beta/\partial z = -Gz/(1+z^2)$, $\partial\beta/\partial d = -H/d$, $\partial c/\partial\gamma = vA/(Td)$ |
-| **B16** | S16 velocity clamp (C6) | mask $v_{\mathrm{lb}} < v_{\mathrm{un}} < 15$ |
+| **B17p** | the celerity, `power_law` | $c = v_{\mathrm{cl}}\beta$ with $\beta = (5+3q+3\gamma)/(3(q+1))$; $\partial\beta/\partial q = -(2+3\gamma)/(3(q+1)^2)$, $\partial\beta/\partial\gamma = 1/(q+1)$ |
+| **B16** | S16 velocity clamp (C6) | mask $v_{\mathrm{lb}} \le v_{\mathrm{un}} \le 15$ |
 | **B15** | Manning velocity | $\partial v/\partial n = -v/n$; $\partial v/\partial R = \tfrac23 v/R$; and with stage roughness $\partial v/\partial d\big|_{\text{explicit}} = \gamma v/d$, $\partial v/\partial\gamma = v\ln(d/d_{\mathrm{ref}})$ |
+| **B15p** | velocity, `power_law` | $v = Q/A$; $\partial v/\partial A = -v/A$, $\partial v/\partial Q = 1/A$ |
 | **B14** | $R = A/P_w$ | $\partial R/\partial A = 1/P_w$; $\partial R/\partial P_w = -R/P_w$ |
 | **B13** | wetted perimeter | $\partial P_w/\partial b = 1$; $\partial P_w/\partial d = 2\sqrt{1+z^2}$; $\partial P_w/\partial z = 2dz/\sqrt{1+z^2}$ |
 | **B12** | area | $\partial A/\partial T = \partial A/\partial b = d/2$; $\partial A/\partial d = (T+b)/2$ |
-| **B11** | bottom-width floor (C5) | mask $b_{\mathrm{raw}} > b_{\mathrm{lb}}$ |
+| **B12p** | area, `power_law` | $A = Td/(q+1)$; $\partial A/\partial T = d/(q+1)$, $\partial A/\partial d = T/(q+1)$, $\partial A/\partial q = -A/(q+1)$ |
+| **B11** | bottom-width floor (C5) | mask $b_{\mathrm{raw}} \ge b_{\mathrm{lb}}$ |
 | **B10** | $b_{\mathrm{raw}} = T - 2zd$ | $\partial/\partial T = 1$; $\partial/\partial z = -2d$; $\partial/\partial d = -2z$ |
-| **B9** | side-slope clamp (C4) | mask $0.5 < z_{\mathrm{raw}} < 50$ |
+| **B9** | side-slope clamp (C4) | mask $0.5 \le z_{\mathrm{raw}} \le 50$ |
 | **B8** | $z_{\mathrm{raw}} = Tq_\varepsilon/(2d)$ | $\partial/\partial T = q_\varepsilon/(2d)$; $\partial/\partial q_\varepsilon = T/(2d)$; $\partial/\partial d = -Tq_\varepsilon/(2d^2)$ |
 | **B7** | $T = p\,d^{q_\varepsilon}$ | $\partial T/\partial p = T/p$; $\partial T/\partial d = Tq_\varepsilon/d$; $\partial T/\partial q_\varepsilon = T\ln d$ |
-| **B6** | depth floor (C3) and $d = \mathcal{R}^e$ | mask $d > d_{\mathrm{lb}}$; $\partial d/\partial\mathcal{R} = e\,d/\mathcal{R}$; $\partial d/\partial e = d\ln\mathcal{R}$ |
+| **B6** | depth floor (C3) and $d = \mathcal{R}^e$ | mask $\mathcal{R}^e \ge d_{\mathrm{lb}}$ (pre-clamp); $\partial d/\partial\mathcal{R} = e\,d/\mathcal{R}$; $\partial d/\partial e = d\ln\mathcal{R}$ |
+| **B6p** | depth and its floor, `power_law` | $d = \max(e^{e\ln\mathcal{R}}, d_{\mathrm{lb}})$ in log space; mask reads the pre-clamp depth, tie passes; $\partial\ln d/\partial\ln\mathcal{R} = e$ |
 | **B5** | the exponent | $\partial e/\partial q_\varepsilon = \partial e/\partial\gamma = -9/(5+3q_\varepsilon+3\gamma)^2$ |
 | **B4** | $\mathcal{R} = \mathcal{N}/\mathcal{D}$ | $\partial\mathcal{R}/\partial\mathcal{N} = 1/\mathcal{D}$; $\partial\mathcal{R}/\partial\mathcal{D} = -\mathcal{R}/\mathcal{D}$ |
 | **B3** | $\mathcal{D} = p\sqrt{s} + 10^{-8}$ | $\partial\mathcal{D}/\partial p = \sqrt{s}$ (slope is constant) |
@@ -1815,6 +1838,8 @@ $Q_{t+1} = \max(x_{\mathrm{sol}}, 10^{-4})$ in
 only symptom". See §6.5 for the accurate statement and the measured rates.
 
 ### 12.6 `src/geometry.rs` says "invert Manning's equation for a trapezoidal section"
+
+Resolved for `geometry_form: power_law`; the trapezoid default is unchanged.
 
 The closed form it then computes (equations 16-20) is the inversion of the
 **power-law** section with $R \approx d$, not of the trapezoid that equations

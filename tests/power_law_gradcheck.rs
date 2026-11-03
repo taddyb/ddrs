@@ -16,9 +16,9 @@
 //! `enforce_positivity` base point: every positivity gradcheck first asserts
 //! that no clamp selection (depth floor, velocity band, K floor, Cunge X band,
 //! positivity X cap) changes between `x - h` and `x + h`. With
-//! `Q_t = [100, 120, 140, 160]` the X cap on reach 1 binds exactly at the base
-//! point, so the stencil straddled a kink (n gradient 140 vs FD 326). The
-//! positivity tests therefore use `Q_t = [100, 150, 160, 170]`, the nearest
+//! `Q_t = [100, 120, 140, 160]` the X cap on reach 1 sits within one FD step
+//! of the Cunge X, so the n stencil crossed the switch (n gradient 140 vs FD
+//! 326). The positivity tests therefore use `Q_t = [100, 150, 160, 170]`, the nearest
 //! variant found that is kink-free for all four parents.
 
 use std::sync::Arc;
@@ -277,7 +277,6 @@ fn fd(cfg: &Config, inp: &Inputs, parent: Parent, steps: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-
 /// Clamp selections per reach, read from the saved forward state (k1 hook):
 /// depth floor, velocity band, K floor, Cunge X band and the positivity X cap.
 /// Each entry is a small code; two stencil ends with equal codes are on the
@@ -305,7 +304,8 @@ fn selections(cfg: &Config, inp: &Inputs) -> Vec<[u8; 5]> {
     let enforce = cfg.params.enforce_positivity;
     (0..N)
         .map(|i| {
-            let (depth, top, v_un, v_cl, c, k_m) = (k[0][i], k[1][i], k[5][i], k[6][i], k[7][i], k[8][i]);
+            let (depth, top, v_un, v_cl, c, k_m) =
+                (k[0][i], k[1][i], k[5][i], k[6][i], k[7][i], k[8][i]);
             let depth_floor = (depth <= depth_lb) as u8;
             let v_band = if v_cl > v_un { 1 } else if v_cl < v_un { 2 } else { 0 };
             let k_raw = LEN / c;

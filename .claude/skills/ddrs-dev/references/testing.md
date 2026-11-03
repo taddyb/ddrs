@@ -38,6 +38,24 @@ short of ABSOLUTE MATCH (after writing its CSV/PNG diagnostics), so scripted
 callers no longer need to read stdout. The example remains the diagnostic
 form (per-reach table, PNG, `DDRS_FORCE_GRAPHS` GPU path).
 
+Section form (`params.geometry_form`) and the MC clamp tie rule. Run these after a
+change to `src/geometry.rs`, `src/routing/mmc_op.rs`, `src/routing/power_law.rs`,
+`src/routing/clamp_rule.rs` or the `geometry_form` guards:
+
+```bash
+cargo test --test geometry_form_golden   # trapezoid MC op and geometry fns, pinned bitwise
+cargo test --test clamp_tie_rule         # a clamp bound is inactive at an exact tie
+cargo test --test geometry_form_config   # load-time guards, INFO and WARN lines
+cargo test --test geometry_power_law --test power_law_forward
+cargo test --test power_law_gradcheck --test adjoint_hydraulics_k
+```
+
+The tie rule: on the MC path a clamp bound is inactive at an exact tie, so the
+gradient passes. For a min of two live operands the tie goes to the first operand.
+`clamp_tie_rule` pins each site. A natural X = 0.5 rounding tie on the default path
+now passes the gradient, so a training trajectory can move slightly from older
+runs. Forward values stay bitwise.
+
 ### Acceptance — end-to-end metric floors (Juniata)
 
 Stage routing has its own acceptance test, release-only (about 36 s on CPU):
@@ -262,6 +280,7 @@ line citation outright rather than trusting it to stay pinned.
 | DDR parity (invariant 1) | `ddr_sandbox_match` (in-process, plain `cargo test`) + `compare_ddr_sandbox` example (diagnostics, exits 1 on mismatch) |
 | End-to-end acceptance | `juniata_acceptance`, `gridded_acceptance` (release-only; metric floors + beats-baseline on the committed bundles) |
 | Gridded (DDM30) ingestion | `gridded_bundle` (sub-reach store → subdivided layout, gauge at the cell's last piece, cache hit, dataset opens), `cargo test --lib adjacency::gridded` (synthetic-store validation), `hourly_streamflow::time_major_store_reads_identically_to_divide_major`, `cargo test --lib zarr::tests::upstream_comids_names_each_subdivided_parent_once` |
+| Section form (`geometry_form`) | `geometry_form_golden` (trapezoid unchanged, bitwise), `geometry_form_config` (guards), `geometry_power_law` (reference fns), `power_law_forward`, `power_law_gradcheck` (plus one CUDA case in `cuda_backward_parity`), `adjoint_hydraulics_k` (`reach_k_hours`), `clamp_tie_rule` (tie rule, both forms) |
 | Sparse / autograd | `sparse_gradcheck`, `sp8_gradcheck` |
 | KAN head | the 4 `kan_head_*` fixture tests (need `--features fixtures`) |
 | Leakance | `leakance_reference_match` (cross-implementation, vs DDR `_compute_zeta` @ `c2bd0f9`), `leakance_gradcheck`, `leakance_off_parity`, `zeta_accum` (incl. multi-timestep volume accounting), `leakance_gate` (tau = 1 bit-exact identity through all three readers, gate gradcheck, saturation) |

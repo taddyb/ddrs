@@ -321,8 +321,9 @@ pub(crate) struct TimestepState<B: Backend> {
     /// (`∂cap/∂K = −cap/K`) instead of into the Cunge chain. Already the
     /// combined `additive && positivity && !enforce_pos`; `false` ⇒ no op.
     pub reservoir_positivity: bool,
-    /// Which channel section the forward used. The backward handles only
-    /// `Trapezoid` for now.
+    /// Which channel section the forward used. The backward branches on it:
+    /// the trapezoid runs the B-labels in this file, and the power law runs
+    /// `power_law.rs::section_backward`.
     pub geometry_form: GeometryForm,
 }
 
@@ -1289,7 +1290,12 @@ where
         // tie passes. The saved `depth` is post-clamp, so a `>=` test on it
         // would pass every clamped entry. The mask reads the PRE-clamp depth,
         // rebuilt with the forward's own ops (`depth_exponent`, the saved
-        // `ratio`), so it matches the forward bit for bit.
+        // `ratio`). It is bit for bit the depth of the Burn-op forward. The
+        // CUDA graph kernel computes its raw depth as `exp(e * ln(ratio))`
+        // (`cuda_graph/geometry_kernel.rs::forward_k1_kernel`), so within a
+        // few ulp of `depth_lb` the graph path's floor decision can differ
+        // from this mask. This concerns the trapezoid graph path only: the
+        // power law with CUDA graphs is rejected at load.
         let gamma_t_b6 = state
             .gamma_t
             .clone()

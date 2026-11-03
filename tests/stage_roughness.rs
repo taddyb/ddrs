@@ -145,7 +145,8 @@ fn exponents_match_theory_and_gamma_moves_velocity() {
 /// it treats the side slope `z` as fixed while depth varies, but this geometry
 /// has `z = T·q/(2d) = (p·q/2)·d^(q−1)`, which moves with depth unless `q = 1`.
 /// So `v·beta` does NOT equal the true `dQ/dA` even at `gamma = 0`, and that is
-/// pre-existing, inherited from DDR, and out of scope here — see
+/// pre-existing and inherited from DDR. It is kept on the trapezoid default;
+/// `geometry_form: power_law` removes it. See
 /// `documents_the_preexisting_beta_approximation` below, which measures it.
 ///
 /// What IS exact, and what this gate checks, is the stage-roughness increment.
@@ -162,8 +163,8 @@ fn exponents_match_theory_and_gamma_moves_velocity() {
 /// `z = (p·q/2)·d^(q−1)` both move with depth, so the true `dA/dd` is
 /// `T·(2−q)(q+1)/2`, up to 11 % away from `T` in the middle of the `q` range.
 /// Correcting that would change the routing physics and DDR parity, so it is
-/// out of scope; it is measured in
-/// `documents_the_preexisting_beta_approximation`.
+/// kept on the trapezoid default; `geometry_form: power_law` removes it. It is
+/// measured in `documents_the_preexisting_beta_approximation`.
 ///
 /// The geometry at a given depth does not depend on `gamma` at all — `gamma`
 /// only changes which discharge maps to that depth, and the velocity there — so

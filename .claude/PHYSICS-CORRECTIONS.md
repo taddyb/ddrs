@@ -250,6 +250,88 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |
 | `enforce_positivity` | S18′ K floor, S19′ X cap | gk_musk mask + new cr→k path; XGrads masked by mask_cunge | no (default off; requires `ddr_match: false`) | `positivity_clamp` |
 | `params.subdivision` | build-time graph only (larger N, `q'/m`, KAN gather, hot-start divisor) | **none** — no gradient path | no (default off) | `subdivide`, `subdivision_integration`, `adjacency_parity` |
+| `geometry_form` | S2..S17 arm | early-return power-law tail | no, default trapezoid | `power_law_gradcheck`, `geometry_form_golden` |
+
+## geometry_form: one consistent section (power_law)
+
+`params.geometry_form` picks the channel section for Muskingum-Cunge rows.
+`trapezoid` is the default and an absent key means it. Forward values and parent
+gradients of the default are bitwise unchanged, except at exact clamp ties (see
+the tie rule below).
+
+### The defect on the trapezoid
+
+The trapezoid path gets its depth from a power-law inversion with `R = d`. It then
+builds a tangent trapezoid on that depth. The two sections differ, so `Q != vA`.
+Over the parameter box the ratio `vA/Q` has median 0.83 and a 5 to 95 % range of
+0.14 to 1.17. At p 21, q 0.65 it is 0.84 to 0.86.
+
+The side-slope clamp makes it worse at small q. At q about 0.084 the clamp binds
+above about 1.9 m depth. It flips the sign of `d ln c / dq`: +0.19 on the
+trapezoid, against -0.80 for a consistent section, at Q 100 m3/s.
+
+### The power-law section
+
+```
+T = p d^q          A = T d/(q+1)          R = d/(q+1)
+d = [ Q n (q+1)^(5/3) d_ref^g / (p sqrt(s)) ]^( 3/(5 + 3q + 3g) )
+v = Q / A          c = v (5 + 3q + 3g) / (3 (q+1))      (= dQ/dA exactly)
+```
+
+- The depth runs in log space. The depth floor `attribute_minimums.depth` stays.
+- `dA/dd = T` holds exactly, so the celerity `beta` has no approximation.
+- Cunge X uses `T`. The path has no side slope, no bottom width, and no clamps C4
+  and C5.
+- The velocity clamp stays as `clamp(Q/A, v_lb, 15)`. It acts as a celerity band.
+  `Q = vA` holds wherever the clamp is inactive. At the depth floor `v = Q/A` is
+  kept (continuity, not Manning).
+
+### Where it applies
+
+- Supported: `ddr_match: false` only. `use_cuda_graphs`, `use_leakance` and
+  `use_reservoirs` are rejected at load (`config.rs::validate_geometry_form`).
+- Stage routing is allowed. The load prints a WARN: stage rows keep their own
+  section, so `geometry_form` changes Muskingum-Cunge rows only.
+- The load prints an INFO line that points at this file.
+- The learned `n` shifts. Celerity rises 4 to 30 % at fixed `n`. Runs and values
+  of `n` are not comparable across forms.
+- Do not resume a checkpoint across forms, and do not evaluate one across forms.
+  A trapezoid checkpoint loads under `power_law` with no warning, and its weights
+  were trained against the other section.
+
+Code: forward in `src/routing/mmc_op.rs` (the `geometry_form` arm of the forward
+chain), backward in `src/routing/power_law.rs::section_backward`, reference
+functions in `src/geometry.rs`.
+
+### Tie rule on the MC path
+
+A clamp bound is inactive at an exact tie, so the gradient passes. For a min of
+two live operands the tie goes to the first operand (Burn `min_pair`). This
+matches Burn autodiff and DDR's `torch.clamp`. The helpers are in
+`src/routing/clamp_rule.rs`. Two sites read the saved clamped value before. A `>=`
+mask on a clamped value would pass every clamped entry, so they now read the
+pre-clamp value, rebuilt with the forward's own ops.
+
+| Site | Mask | Tensor read | Before | After |
+|---|---|---|---|---|
+| B28 solve output floor | `x_sol` vs discharge floor | `x_sol` | `x > lb` | `x >= lb` |
+| B18' K floor | `k_raw` vs K floor | `k_raw` | `k > floor` | `k >= floor` |
+| B16 velocity band | `v_un` in `[v_lb, 15]` | `v_un` | strict `<` and `>` | `<=` and `>=` |
+| B11 bottom-width floor | `bw_raw` vs floor | `bw_raw` | `bw > lb` | `bw >= lb` |
+| B9 side-slope band | `z_raw` in `[0.5, 50]` | `z_raw` | strict | closed |
+| B6 depth floor | `ratio^e` vs `depth_lb` | pre-clamp depth | saved post-clamp depth `> lb` | pre-clamp `>= lb` |
+| B19 Cunge X band | `x_raw` in `[0, 0.5]` | pre-clamp `x_raw` | saved clamped X, strict | pre-clamp, closed |
+| S19p dam-row X cap | cap vs channel X | recomputed cap and `X_r` | tie counted as the cap | cap wins only if `cap < X_r` |
+| Leakance losing-only gate | `depth` vs `d_gw` | `depth` | `depth > d_gw` | `depth >= d_gw` |
+| Leakance bed cap | `m_raw` vs cap | `m_raw` | `m_raw < cap` | `m_raw <= cap` |
+
+A natural X = 0.5 rounding tie on the default path now passes the gradient.
+Forward values stay bitwise. A training trajectory can move slightly from older
+runs. The pins are in `tests/clamp_tie_rule.rs`.
+
+### Measured
+
+Measured numbers follow.
 
 ## CUDA backend coverage
 

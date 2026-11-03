@@ -127,7 +127,8 @@ pub(crate) fn section_backward<I: Backend>(
                 None => s,
             })
         }
-        _ => None,
+        (None, None) => None,
+        _ => unreachable!("gamma_t is Some for both terms or for neither"),
     };
 
     SectionGrads {

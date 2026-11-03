@@ -20,8 +20,13 @@ pub struct TrapezoidalGeometry<B: Backend> {
     pub velocity: Tensor<B, 1>,
 }
 
-/// Invert Manning's equation for a trapezoidal section, then derive the rest
-/// of the geometry from the Leopold & Maddock power law.
+/// Invert Manning's equation on the power-law section with `R = d`, then
+/// build a tangent trapezoid on that depth (spec sections 4.3 and 12.6).
+/// The two sections differ, so `Q != vA` on the result. The trapezoid
+/// default keeps this; `params.geometry_form: power_law` uses one consistent
+/// section instead.
+///
+/// The rest of the geometry comes from the Leopold & Maddock power law.
 ///
 /// Matches the reference Python implementation including the `q + 1e-6` epsilon,
 /// the `(3 / (5 + 3q))` exponent on depth, and the `[0.5, 50]` side-slope clamp.
