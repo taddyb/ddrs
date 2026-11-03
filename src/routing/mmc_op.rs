@@ -1003,14 +1003,11 @@ where
         };
 
         if state.geometry_form == GeometryForm::PowerLaw {
-            assert!(
-                zeta_geom.is_none(),
-                "geometry_form: power_law does not support leakance yet"
-            );
             let s = crate::routing::power_law::section_backward(
                 state,
                 gcelerity,
                 x_grads.as_ref().map(|xg| xg.g_top_width.clone()),
+                zeta_geom.as_ref(),
             );
             let gq_t = gq_t_from_s24.map(|from_s24| {
                 let g = gq_t_from_s25 + from_s24 + s.gq_t;
@@ -2986,11 +2983,6 @@ where
 {
     use crate::config::SparseSolver;
     assert!(
-        cfg.params.geometry_form == GeometryForm::Trapezoid
-            || (reservoir.is_none() && release.is_none()),
-        "geometry_form: power_law does not support reservoirs or dam release"
-    );
-    assert!(
         reservoir.is_none() || release.is_none(),
         "the option C reservoir override and the dam release are exclusive"
     );
@@ -3390,11 +3382,6 @@ where
     I::Device: 'static,
 {
     use crate::config::SparseSolver;
-    assert!(
-        cfg.params.geometry_form == GeometryForm::Trapezoid,
-        "geometry_form: power_law does not support leakance"
-    );
-
     let dt = crate::routing::mmc::DT_SECONDS;
     let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
     let depth_lb = cfg.params.attribute_minimums.depth;

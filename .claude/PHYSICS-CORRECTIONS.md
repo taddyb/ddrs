@@ -288,8 +288,12 @@ v = Q / A          c = v (5 + 3q + 3g) / (3 (q+1))      (= dQ/dA exactly)
 
 ### Where it applies
 
-- Supported: `ddr_match: false` only. `use_cuda_graphs`, `use_leakance` and
-  `use_reservoirs` are rejected at load (`config.rs::validate_geometry_form`).
+- Supported: `ddr_match: false` only. `use_cuda_graphs` is rejected at load
+  (`config.rs::validate_geometry_form`). Leakance and reservoirs run on it:
+  zeta reads the shared power-law depth, and its depth, `q_eps` and `p`
+  gradients join `power_law.rs::section_backward`. The section takes `ln p` and
+  `ln s`, so load also needs `attribute_minimums.slope`, the lower bound of
+  `parameter_ranges.p_spatial` and `defaults.p_spatial` above zero.
 - Stage routing is allowed. The load prints a WARN: stage rows keep their own
   section, so `geometry_form` changes Muskingum-Cunge rows only.
 - The load prints an INFO line that points at this file.

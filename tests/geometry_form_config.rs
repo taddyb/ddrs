@@ -53,17 +53,54 @@ fn power_law_rejects_cuda_graphs() {
 }
 
 #[test]
-fn power_law_rejects_leakance() {
-    expect_err("leakance", "  geometry_form: power_law\n  use_leakance: true\n", "use_leakance");
+fn power_law_loads_with_leakance() {
+    let cfg = load("leakance", "  geometry_form: power_law\n  use_leakance: true\n").expect("loads");
+    assert!(cfg.params.use_leakance);
 }
 
 #[test]
-fn power_law_rejects_reservoirs() {
-    expect_err(
-        "reservoirs",
-        "  geometry_form: power_law\n  use_reservoirs: true\n",
-        "use_reservoirs",
+fn power_law_loads_with_reservoirs() {
+    // `use_reservoirs` needs a dam table in `data_sources.reservoirs`.
+    let yaml = format!(
+        "mode: training\ngeodataset: merit\nseed: 42\nnp_seed: 42\ndata_sources:\n  attributes: [a.nc]\n  streamflow: s\n  observations: o\n  gages: g.csv\n  geospatial_fabric: f.shp\n  reservoirs: /tmp/ddrs_dams.csv\nparams:\n  geometry_form: power_law\n  use_reservoirs: true\n{RANGES}"
     );
+    let path = std::env::temp_dir().join("ddrs_geometry_form_reservoirs.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    let cfg = Config::from_yaml_file(&path).expect("loads");
+    assert!(cfg.params.use_reservoirs);
+}
+
+#[test]
+fn power_law_rejects_zero_slope_minimum() {
+    expect_err(
+        "slope_min",
+        "  geometry_form: power_law\n  attribute_minimums:\n    slope: 0.0\n",
+        "attribute_minimums.slope",
+    );
+}
+
+#[test]
+fn power_law_rejects_nonpositive_p_spatial_lower_bound() {
+    let yaml = "mode: training\ngeodataset: merit\nseed: 42\nnp_seed: 42\nparams:\n  geometry_form: power_law\n  parameter_ranges:\n    n: [0.015, 0.25]\n    q_spatial: [0.0, 1.0]\n    p_spatial: [0.0, 200.0]\n";
+    let path = std::env::temp_dir().join("ddrs_geometry_form_p_lower.yaml");
+    std::fs::write(&path, yaml).unwrap();
+    let msg = Config::from_yaml_file(&path).map(|_| ()).expect_err("must be rejected").to_string();
+    assert!(msg.contains("geometry_form"), "message lacks geometry_form: {msg}");
+    assert!(msg.contains("parameter_ranges.p_spatial"), "message lacks the key: {msg}");
+}
+
+#[test]
+fn power_law_rejects_nonpositive_p_spatial_default() {
+    expect_err(
+        "p_default",
+        "  geometry_form: power_law\n  defaults:\n    p_spatial: 0.0\n",
+        "defaults.p_spatial",
+    );
+}
+
+#[test]
+fn trapezoid_still_loads_with_zero_slope_minimum() {
+    load("trap_slope_min", "  attribute_minimums:\n    slope: 0.0\n").expect("trapezoid is unchanged");
 }
 
 #[test]

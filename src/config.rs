@@ -1012,9 +1012,10 @@ pub struct Params {
     pub ddr_match: bool,
     /// Channel section for Muskingum-Cunge rows: `trapezoid` (default, an
     /// absent key means this) or `power_law`. `power_law` needs
-    /// `ddr_match: false`, `use_cuda_graphs: false`, `use_leakance: false`
-    /// and `use_reservoirs: false` (`validate_geometry_form`). It does not
-    /// change stage rows. Learned n and runs are not comparable across forms.
+    /// `ddr_match: false` and `use_cuda_graphs: false`, and positive
+    /// `attribute_minimums.slope`, `parameter_ranges.p_spatial` lower bound
+    /// and `defaults.p_spatial` (`validate_geometry_form`). Leakance and
+    /// reservoirs run on it. It does not change stage rows. Learned n and runs are not comparable across forms.
     pub geometry_form: GeometryForm,
     /// Enforce the Muskingum non-negativity window `2X <= Cr <= 2(1-X)`
     /// (`Cr = dt/K`) on every reach-timestep, so the S27 solve can never
@@ -2419,8 +2420,9 @@ fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
 }
 
 /// `params.geometry_form: power_law` is a fused-op section. It has no legacy
-/// physics, no captured CUDA graph, no leakance term and no reservoir
-/// override, so each of those is refused at load.
+/// physics and no captured CUDA graph, so each of those is refused at load.
+/// Leakance and reservoirs run on it. Its log arguments (slope, p) must be
+/// positive.
 fn validate_geometry_form(cfg: &Config) -> std::result::Result<(), String> {
     let p = &cfg.params;
     if p.geometry_form != GeometryForm::PowerLaw {
@@ -2437,11 +2439,28 @@ fn validate_geometry_form(cfg: &Config) -> std::result::Result<(), String> {
     if p.use_cuda_graphs {
         return refuse("use_cuda_graphs", "the captured kernel hardcodes the trapezoid.");
     }
-    if p.use_leakance {
-        return refuse("use_leakance", "the leakance op has no power-law path.");
+    // The section takes `ln p` and `ln s` with no epsilon guard.
+    let positive = |key: &str, what: &str| {
+        Err(format!(
+            "params.geometry_form: power_law needs `{key}` > 0: {what}"
+        ))
+    };
+    if p.attribute_minimums.slope <= 0.0 {
+        return positive("attribute_minimums.slope", "the section takes ln of the slope.");
     }
-    if p.use_reservoirs {
-        return refuse("use_reservoirs", "the reservoir override has no power-law path.");
+    if p.parameter_ranges.p_spatial[0] <= 0.0 {
+        return positive(
+            "parameter_ranges.p_spatial",
+            "the lower bound must be positive; the section takes ln of p.",
+        );
+    }
+    if let Some(&v) = p.defaults.get("p_spatial") {
+        if v <= 0.0 {
+            return positive(
+                "defaults.p_spatial",
+                "the fixed p is used when p is not learned; the section takes ln of p.",
+            );
+        }
     }
     Ok(())
 }

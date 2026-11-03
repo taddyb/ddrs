@@ -13,8 +13,7 @@ use burn::tensor::Tensor;
 use ddrs::config::{Config, DownstreamBoundary, GeometryForm, StageRoughnessSection};
 use ddrs::geometry::compute_power_law_geometry;
 use ddrs::routing::mmc_op::{
-    __spike_forward_chain_k1_outputs, timestep_forward, timestep_forward_leakance,
-    timestep_forward_release, timestep_forward_via_graph,
+    __spike_forward_chain_k1_outputs, timestep_forward, timestep_forward_via_graph,
 };
 use ddrs::routing::stage::{StageInputs, StageParams};
 use ddrs::routing::{MuskingumCunge, SpatialParameters};
@@ -276,61 +275,6 @@ fn stage_subset_changes_mc_rows_only_by_form() {
 
 fn at(v: &[f32]) -> Tensor<AB, 1> {
     Tensor::<AB, 1>::from_floats(v, &device())
-}
-
-#[test]
-#[should_panic(expected = "geometry_form")]
-fn leakance_entry_rejects_power_law() {
-    let cfg = mock_cfg(GeometryForm::PowerLaw);
-    let adj = chain(10_000.0);
-    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
-    let assembler = AValuesAssembler::<I>::new(&pattern, &device());
-    let _ = timestep_forward_leakance::<I>(
-        &cfg,
-        &pattern,
-        &assembler,
-        at(&[0.035; N]),
-        at(&[0.4; N]),
-        at(&[20.0; N]),
-        at(&QT),
-        at(&QPT),
-        at(&adj.length_m),
-        at(&adj.slope),
-        at(&[0.3; N]),
-        at(&[5e-7; N]),
-        at(&[0.0; N]),
-        at(&[0.5; N]),
-        None,
-        None,
-        false,
-        None,
-        None,
-    );
-}
-
-#[test]
-#[should_panic(expected = "geometry_form")]
-fn release_entry_rejects_power_law() {
-    let cfg = mock_cfg(GeometryForm::PowerLaw);
-    let adj = chain(10_000.0);
-    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
-    let assembler = AValuesAssembler::<I>::new(&pattern, &device());
-    let _ = timestep_forward_release::<I>(
-        &cfg,
-        &pattern,
-        &assembler,
-        at(&[0.035; N]),
-        at(&[0.4; N]),
-        at(&[20.0; N]),
-        at(&QT),
-        at(&QPT),
-        at(&adj.length_m),
-        at(&adj.slope),
-        at(&[0.3; N]),
-        vec![1],
-        at(&[3600.0; N]),
-        at(&[3600.0; N]),
-    );
 }
 
 #[test]

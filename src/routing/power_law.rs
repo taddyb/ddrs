@@ -15,12 +15,17 @@
 //!
 //! The Cunge X term (B19) is folded in by the caller: its `dX/dc` term joins
 //! `gcelerity` before this function, and its `dX/dT` term joins `gT` here.
+//!
+//! Leakance: zeta reads the post-clamp depth, `q_eps` and `p`. Its depth
+//! gradient joins the depth total after every other depth term and BEFORE the
+//! depth-floor mask, so the mask cuts it as it cuts the others. Its `q_eps`
+//! and `p` gradients join `gq_eps` and `gp` after their other terms.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorPrimitive};
 
 use crate::routing::clamp_rule::{ceiling_active, floor_active};
-use crate::routing::mmc_op::TimestepState;
+use crate::routing::mmc_op::{TimestepState, ZetaGeomGrads};
 
 /// Gradients of the section inputs. `gq_t` is the part of `dL/dQ_t` that flows
 /// through the section (velocity and depth). `ggamma` is `Some` only when
@@ -35,10 +40,12 @@ pub(crate) struct SectionGrads<I: Backend> {
 
 /// Backward of the power-law section. `gcelerity` is `dL/dc` with B18 and the
 /// B19 `dX/dc` term already folded in. `g_top_width_from_x` is B19's `dX/dT`.
+/// `zeta_geom` is the leakance term's depth, `q_eps` and `p` gradients.
 pub(crate) fn section_backward<I: Backend>(
     state: &TimestepState<I>,
     gcelerity: Tensor<I, 1>,
     g_top_width_from_x: Option<Tensor<I, 1>>,
+    zeta_geom: Option<&ZetaGeomGrads<I>>,
 ) -> SectionGrads<I> {
     let wrap = |p: I::FloatTensorPrimitive| -> Tensor<I, 1> {
         Tensor::from_primitive(TensorPrimitive::Float(p))
@@ -103,7 +110,13 @@ pub(crate) fn section_backward<I: Backend>(
 
     // B6p: d = max(exp(e ln_r), d_lb). The mask reads the PRE-clamp depth.
     let floor = floor_active((ln_r.clone() * e.clone()).exp(), depth_lb);
-    let g_lnd = (gd_from_area + gd_from_t) * d;
+    let gd_total = gd_from_area + gd_from_t;
+    // Zeta's depth gradient joins here, before the floor mask below.
+    let gd_total = match zeta_geom {
+        Some(zg) => gd_total + zg.g_depth.clone(),
+        None => gd_total,
+    };
+    let g_lnd = gd_total * d;
     let g_lnr = g_lnd.clone() * e.clone();
     let g_e = g_lnd * ln_r;
     // Cut AFTER each product: Q_t = 0 gives ln_r = -inf and 0/0.
@@ -131,10 +144,21 @@ pub(crate) fn section_backward<I: Backend>(
         _ => unreachable!("gamma_t is Some for both terms or for neither"),
     };
 
+    let gp = gp_from_t + gp_from_d;
+    let gp = match zeta_geom {
+        Some(zg) => gp + zg.g_p_spatial.clone(),
+        None => gp,
+    };
+    let gq_eps = gq_from_beta + gq_from_area + gq_from_t + gq_from_lnr + gq_from_e;
+    let gq_eps = match zeta_geom {
+        Some(zg) => gq_eps + zg.g_q_eps.clone(),
+        None => gq_eps,
+    };
+
     SectionGrads {
         gn: gn_from_d,
-        gp: gp_from_t + gp_from_d,
-        gq_eps: gq_from_beta + gq_from_area + gq_from_t + gq_from_lnr + gq_from_e,
+        gp,
+        gq_eps,
         gq_t: gq_t_from_v + gq_t_from_d,
         ggamma,
     }
