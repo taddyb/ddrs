@@ -21,7 +21,8 @@ pub struct TrapezoidalGeometry<B: Backend> {
 }
 
 /// Invert Manning's equation on the power-law section with `R = d`, then
-/// build a tangent trapezoid on that depth (spec sections 4.3 and 12.6).
+/// build a tangent trapezoid on that depth (sections 4.3 and 12.6 of
+/// `research/specs/2026-09-17-model-equations-reference.md`).
 /// The two sections differ, so `Q != vA` on the result. The trapezoid
 /// default keeps this; `params.geometry_form: power_law` uses one consistent
 /// section instead.

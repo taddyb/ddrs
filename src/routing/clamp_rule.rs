@@ -5,20 +5,25 @@
 //! matches Burn autodiff (`clamp_min` masks with a strict comparison, so a tie
 //! passes) and DDR's `torch.clamp`.
 //!
-//! The backward in `mmc_op.rs::timestep_backward_core` and
-//! `leakance.rs::zeta_backward` apply the rule at these sites:
+//! The backward in `src/routing/mmc_op.rs::timestep_backward_core` and
+//! `src/routing/leakance.rs::zeta_backward` apply the rule at these sites:
 //!
 //! - discharge floor on the solved flow (B28);
 //! - K floor (B18'), velocity band (B16), bottom width floor (B11), side
 //!   slope band (B9) and depth floor (B6);
 //! - Cunge X band (B19), read from the PRE-clamp X;
+//! - Cunge X cascade `min(x_cunge, hi_a, hi_b)` (B19'): the order matches
+//!   `min_pair`, so the first operand (Cunge, then `hi_a`) wins a tie;
+//! - leakance mass bound (unchanged): the backward reads the saved binding
+//!   factors from the forward, so it applies no tie test of its own;
 //! - dam-row X cap (B19p): the cap wins only when strictly smaller than the
 //!   channel X, so a tie goes to the channel X;
 //! - leakance losing-only gate and bed cap: a tie is losing and connected.
 //!
-//! Two sites read the saved CLAMPED value today (depth and X). A `>=` mask on
-//! a clamped value would pass the gradient through every clamped entry, so
-//! those masks read the pre-clamp value, recomputed with the forward's ops.
+//! Two sites keep a saved CLAMPED value (depth and X). A `>=` mask on a
+//! clamped value would pass the gradient through every clamped entry, so the
+//! depth and X masks read the pre-clamp value, recomputed with the forward's
+//! ops. No mask reads a clamped value.
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, Tensor};

@@ -263,12 +263,19 @@ the tie rule below).
 
 The trapezoid path gets its depth from a power-law inversion with `R = d`. It then
 builds a tangent trapezoid on that depth. The two sections differ, so `Q != vA`.
-Over the parameter box the ratio `vA/Q` has median 0.83 and a 5 to 95 % range of
-0.14 to 1.17. At p 21, q 0.65 it is 0.84 to 0.86.
+Over a grid on the `config/merit_training.yaml` parameter box the ratio `vA/Q`
+has median 0.768 and a 5 to 95 % range of 0.080 to 1.174. At p 21, q 0.65 it is
+0.84 to 0.86. The grid is `n` 0.015 to 0.25 (6 log steps), `p` 1 to 200 (7 log
+steps), `q` 0.05 to 0.95 (7 steps), `Q` 0.5 to 5000 m3/s (7 log steps) and slope
+1e-3 to 3e-2 (4 log steps), 8232 points. Source: the ignored test
+`tests/geometry_power_law.rs::trapezoid_va_over_q_spread`. An earlier draft of this
+text said median 0.83 and range 0.14 to 1.17 for an unrecorded grid; the 95 % end
+agrees, the other two differ with the grid.
 
 The side-slope clamp makes it worse at small q. At q about 0.084 the clamp binds
 above about 1.9 m depth. It flips the sign of `d ln c / dq`: +0.19 on the
-trapezoid, against -0.80 for a consistent section, at Q 100 m3/s.
+trapezoid, against -0.80 for a consistent section, at Q 100 m3/s. These two
+values are planner estimates. No test in the repo reproduces them.
 
 ### The power-law section
 
@@ -293,9 +300,11 @@ v = Q / A          c = v (5 + 3q + 3g) / (3 (q+1))      (= dQ/dA exactly)
   zeta reads the shared power-law depth, and its depth, `q_eps` and `p`
   gradients join `power_law.rs::section_backward`. The section takes `ln p` and
   `ln s`, so load also needs `attribute_minimums.slope`, the lower bound of
-  `parameter_ranges.p_spatial` and `defaults.p_spatial` above zero. On both forms the leakance width is
-  `(p d)^q_eps` (the DDR reference form, `src/routing/leakance.rs::zeta_forward`),
-  not the section's top width `p d^q`. It reads the section's depth.
+  `parameter_ranges.p_spatial` and `defaults.p_spatial` above zero.
+  On both forms the leakance width is `(p d)^q_eps` (the DDR reference form,
+  `src/routing/leakance.rs::zeta_forward`), not the section's top width
+  `p d^q`. It reads the section's depth. Open: matching the width to `p d^q`
+  would break `leakance_reference_match`; this is the user's decision.
 - Stage routing is allowed. The load prints a WARN: stage rows keep their own
   section, so `geometry_form` changes Muskingum-Cunge rows only.
 - The load prints an INFO line that points at this file.
@@ -455,6 +464,31 @@ stage row, so it changes only through its Muskingum-Cunge inflows.
 
 `probe_courant --celerity-csv <path>` writes `reach,step,celerity_m_s` for the
 `enforce_positivity: false` pass.
+
+### Landscape Hessian on the power law
+
+The `fd_sweep` tool (`landscape.fd_sweep`) repeats the landscape Hessian at
+FD steps `h` from 0.4 down to 0.00625. Seed 42, CPU, one gauge per bundle, one
+window of 365 days, `grid: 0`, `newton_iters: 0`. The trapezoid curvature
+settles as `h` shrinks on Juniata. The power-law curvature does not.
+
+- Juniata 01567000, power_law: `h_aa` does not settle below `h = 0.025`. The
+  p axis goes 0.0187 to 0.0038 and the q axis 0.0431 to 0.0307 over `h = 0.1`
+  to `0.00625`. The smallest eigenvalue changes sign.
+- Hudson 01372058, power_law: the n axis `h_aa` at the default `fd_step = 0.05`
+  is 0.4827. It is 0.139 at `h = 0.1` and 0.126 at `h = 0.025`. So `hess0`
+  sits on an outlier for this arm.
+- Clamp switching is under 5 % of reach-steps, mostly `x_band_low`. It does not
+  explain the drift. The cause is untested.
+- Run `fd_sweep` before you trust `hess0` on a power-law arm.
+
+The runs are local (gitignored workspace `output/geometry-form/.ddrs`):
+`fd-sweep-juniata/2026-11-03T10-41-17Z` and `fd-sweep-hudson/2026-11-03T10-42-38Z`.
+The arms are the trapezoid and power_law runs of 2026-11-03 (Juniata
+`04-29-42Z` and `04-30-00Z`, Hudson `04-24-45Z` and `04-25-11Z`).
+
+Zero audit (`zero_audit`, same four arms): `n_zero` is 0 on every axis and arm.
+The audit held without classifying anything.
 
 ## CUDA backend coverage
 

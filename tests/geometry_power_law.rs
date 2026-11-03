@@ -293,3 +293,58 @@ fn trapezoid_is_not_self_consistent() {
         assert!(ratio > 0.80 && ratio < 0.90, "ratio {ratio}");
     }
 }
+
+/// Prints the `vA/Q` spread of the trapezoid path over a grid on the box of
+/// `config/merit_training.yaml` (`n` 0.015 to 0.25 and `p` 1 to 200, both
+/// log-spaced; `q` 0.05 to 0.95; `Q` 0.5 to 5000 m3/s, log-spaced; slope
+/// 1e-3 to 3e-2, log-spaced). It is the source of the figures in
+/// `.claude/PHYSICS-CORRECTIONS.md`. Run:
+/// `cargo test --test geometry_power_law trapezoid_va_over_q_spread -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn trapezoid_va_over_q_spread() {
+    fn logspace(lo: f64, hi: f64, k: usize) -> Vec<f64> {
+        (0..k).map(|i| (lo.ln() + (hi.ln() - lo.ln()) * i as f64 / (k - 1) as f64).exp()).collect()
+    }
+    let ns = logspace(0.015, 0.25, 6);
+    let ps = logspace(1.0, 200.0, 7);
+    let qs: Vec<f64> = (0..7).map(|i| 0.05 + 0.15 * i as f64).collect();
+    let flows = logspace(0.5, 5000.0, 7);
+    let ss = logspace(1e-3, 3e-2, 4);
+    let (mut n_v, mut p_v, mut q_v, mut f_v, mut s_v) = (vec![], vec![], vec![], vec![], vec![]);
+    for &n in &ns {
+        for &p in &ps {
+            for &q in &qs {
+                for &f in &flows {
+                    for &s in &ss {
+                        n_v.push(n as f32);
+                        p_v.push(p as f32);
+                        q_v.push(q as f32);
+                        f_v.push(f as f32);
+                        s_v.push(s as f32);
+                    }
+                }
+            }
+        }
+    }
+    let g = compute_trapezoidal_geometry::<B>(
+        t1(n_v),
+        t1(p_v),
+        t1(q_v),
+        t1(f_v.clone()),
+        t1(s_v),
+        DEPTH_LB,
+        0.1,
+    );
+    let (v, a) = (vals(&g.velocity), vals(&g.cross_sectional_area));
+    let mut ratio: Vec<f64> = (0..v.len()).map(|i| v[i] * a[i] / f_v[i] as f64).collect();
+    ratio.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    let pct = |p: f64| ratio[((ratio.len() - 1) as f64 * p).round() as usize];
+    println!(
+        "trapezoid vA/Q over {} grid points: median {:.3}, 5% {:.3}, 95% {:.3}",
+        ratio.len(),
+        pct(0.5),
+        pct(0.05),
+        pct(0.95)
+    );
+}

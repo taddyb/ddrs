@@ -238,8 +238,10 @@ pub(crate) struct TimestepState<B: Backend> {
     pub x_storage: B::FloatTensorPrimitive,
     /// The Muskingum X the forward ACTUALLY used at S19. Equals `x_storage`
     /// when `ddr_match`; the Cunge-derived `clamp(0.5(1 − Q/(B·S·c·L)), 0, 0.5)`
-    /// otherwise. The backward reads it both to evaluate the c1..c4 chain and
-    /// to build the `[0, 0.5]` clamp mask (B19).
+    /// otherwise. The backward reads it to evaluate the c1..c4 chain. It does
+    /// NOT build the `[0, 0.5]` clamp mask (B19) from it: this value is
+    /// already clamped, so a tie rule applied to it would pass every
+    /// saturated entry. B19 reads the recomputed pre-clamp `x_raw`.
     ///
     /// Deliberately NOT part of the `forward_saved_idx` array: that array is
     /// index-locked to `cuda_graph::PersistentScratch`'s `state_*` fields, and
@@ -770,8 +772,10 @@ where
         //     mask_a     = !mask_cunge && (hi_a <= hi_b)
         //     mask_b     = !mask_cunge && !mask_a
         //
-        // Ties are a measure-zero subgradient choice; the ordering just has to
-        // be deterministic and total, which the `<=` cascade guarantees.
+        // Ties follow the tie rule (`src/routing/clamp_rule.rs`): the order
+        // must match `min_pair`, where the first operand wins a tie. The `<=`
+        // cascade above encodes that (Cunge first, then `hi_a`, then `hi_b`),
+        // so the fused gradient equals the autodiff reference at ties too.
         //
         // Consequences:
         //   * the existing `∂X/∂Q`, `∂X/∂B`, `∂X/∂c` terms are the Cunge

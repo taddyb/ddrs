@@ -1184,13 +1184,14 @@ the model cannot represent baseflow gain at all.
 $\zeta$, the incoming gradient is negated:
 
 $$
-\bar{\zeta} \;=\; -\bar{b} \cdot \mathbb{1}_{\text{mask}} \cdot \mathbb{1}\!\left[d > d_{gw}\right]
+\bar{\zeta} \;=\; -\bar{b} \cdot \mathbb{1}_{\text{mask}} \cdot \mathbb{1}\!\left[d \ge d_{gw}\right]
 \tag{73}
 $$
 
-where the $\mathbb{1}[d > d_{gw}]$ gate is applied only when
-`losing_only = true`, with the subgradient at the kink $d = d_{gw}$ defined as
-**0** (measure-zero, finite-difference safe). Gating $\bar{\zeta}$ once zeroes
+where the $\mathbb{1}[d \ge d_{gw}]$ gate is applied only when
+`losing_only = true`. The tie rule applies at the kink $d = d_{gw}$: a tie is
+losing, so the gate is 1 and the gradient passes. The bed cap counts a tie as
+connected (the cap does not bind). Gating $\bar{\zeta}$ once zeroes
 all six outputs at a stroke.
 
 With $m \equiv d - d_{gw}$ (recomputed **unclamped** in the backward, which is
