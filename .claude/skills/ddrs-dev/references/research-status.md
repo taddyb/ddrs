@@ -252,6 +252,23 @@ op `StageTimestepOp` (src/routing/stage_op.rs). A rho 90 mini-batch is 2.05x Mus
 check is the baseline and the analytic stage tests, not parity. One gauge, one seed: do not read the 0.0025 NSE
 difference as a gain. Gate: `tests/juniata_stage_acceptance.rs`.
 
+**Stage on CUDA (2026-11-02).** The fused op, its tree factors and tree solves run on
+CUDA, forward and backward (`sparse_solver: cuda`, `src/routing/stage_cuda/`). CUDA
+graphs stay rejected with the stage block. Parity with the CPU path is gated at two
+levels (`testing.md` "Stage on CUDA"): strict where the inputs are identical, a
+noise gate on trajectories. Engine check on 6 days (120 hours), 2026-11-02: Juniata
+worst forward err/bar 4.7e-2 and Hudson 8.0e-3, no accepted gradient misses
+(0 of 639 and 0 of 2145 entries), exact zeros on the 41 Hudson table rows on both
+backends, and no host copies in the CUDA forward and backward. One synthetic test is
+parked: `gradient_parity_depth_floor_stiff_cell` fails the gradient noise gate on one
+stiff cell (15 of 51 entries) and is `#[ignore]` until the user decides how to gate
+stiff gradient trajectories. Speed: the CUDA stage op beats the CPU only above about
+10,000 reaches (13x faster at full CONUS, 1 substep), and end to end CUDA is 77x to
+353x slower than CPU on the four examples (trap T13 has the table). The CPU path
+now fuses the same multiply-adds as the GPU and is about 1.3x slower in a default
+build (trap T22: the build choice is open). CPU and GPU agree bitwise on every block
+field without `powf` or `ln` (trap T20).
+
 ## Structural constants (stable)
 
 CONUS 346,321 reaches / 338,814 edges · eval network 64,892 reaches for the

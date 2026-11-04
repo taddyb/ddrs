@@ -481,7 +481,8 @@ pub fn apply_stage_block<I: Backend>(
         bottom_width_lb: cfg.params.attribute_minimums.bottom_width,
         dt: crate::routing::mmc::DT_SECONDS,
         g: 9.81,
-        // The validator rejects `sparse_solver: cuda` with the block, so this is false today.
+        // `sparse_solver: cuda` runs the CUDA arms of the stage op and the tree solve. On a CPU
+        // backend the dispatch falls back to the host path with a one-shot warning.
         use_cuda: cfg.params.sparse_solver == crate::config::SparseSolver::Cuda,
     };
     let inputs = crate::routing::stage::StageInputs {

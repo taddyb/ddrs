@@ -10,12 +10,17 @@ use std::sync::Arc;
 
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Bool, IndexingUpdateOp, Int, Tensor, TensorData};
+use burn::tensor::{Bool, Int, Tensor, TensorData, TensorPrimitive};
 
 use crate::config::DownstreamBoundary;
 use crate::data::store::ChannelGeometryRows;
-use crate::geometry::{compute_trapezoidal_geometry, trapezoid_depth_derivatives, trapezoid_from_depth};
-use crate::routing::stage_op::{stage_timestep, Assembled, StageOpConsts};
+use crate::geometry::compute_trapezoidal_geometry;
+use crate::routing::stage_cuda::forward::AssembledDev;
+use crate::routing::stage_cuda::StageOpConstsDev;
+use crate::routing::stage_fma::{fma3, fma_s, spmv_fma};
+use crate::routing::stage_op::{stage_timestep, Assembled, HourOut, StageOpConsts};
+use crate::sparse::cube_buf::{cube_to_host, from_cube, into_cube, Cube};
+use crate::sparse::dispatch::effective_use_cuda;
 use crate::sparse::tree_lu::{assert_tree, tree_lu_solve};
 use crate::sparse::{CsrPattern, SparseAdjacency};
 
@@ -235,7 +240,8 @@ pub struct StageParams {
     pub dt: f32,
     /// Gravity, 9.81.
     pub g: f32,
-    /// Passed to `tree_lu_solve`; false in v1 (the validator rejects CUDA).
+    /// Passed to `tree_lu_solve` and `stage_timestep`. True runs the CUDA arms on a `Cuda<f32, i32>` backend.
+    /// On any other backend the host path runs, with a one-shot warning.
     pub use_cuda: bool,
 }
 
@@ -318,6 +324,38 @@ pub struct StageCoefficients<I: Backend> {
     pub d_s: Tensor<I, 1>,
     pub dt_phi: Tensor<I, 1>,
     pub r_prime: Tensor<I, 1>,
+}
+
+/// The ten `StageCoefficients` fields of the last substep as device buffers
+/// (the CUDA fused path; no host copy).
+struct LastCoeffsDev {
+    alpha: Cube,
+    beta: Cube,
+    kappa: Cube,
+    a_up: Cube,
+    b_down: Cube,
+    area_edge: Cube,
+    radius_edge: Cube,
+    d_s: Cube,
+    dt_phi: Cube,
+    r_prime: Cube,
+}
+
+impl LastCoeffsDev {
+    fn of(a: &AssembledDev) -> Self {
+        Self {
+            alpha: a.newton.alpha.clone(),
+            beta: a.newton.beta.clone(),
+            kappa: a.newton.kappa.clone(),
+            a_up: a.newton.a_up.clone(),
+            b_down: a.newton.b_down.clone(),
+            area_edge: a.edge.out_area.clone(),
+            radius_edge: a.edge.out_radius.clone(),
+            d_s: a.d_s.clone(),
+            dt_phi: a.newton.dt_phi.clone(),
+            r_prime: a.control.r_prime.clone(),
+        }
+    }
 }
 
 /// Row-level constants (length `n`) on the device.
@@ -409,8 +447,12 @@ pub struct StageBlock<I: Backend> {
     last_coeffs: Option<StageCoefficients<I>>,
     /// Last substep of the fused path (host); `last_coeffs` is `None` then.
     last_host: Option<Assembled>,
+    /// Last substep of the fused path on CUDA (device); `last_host` is `None` then.
+    last_dev: Option<LastCoeffsDev>,
     /// Host copy of the constants for the fused op; cleared when the table or the slots change.
     op_consts: Option<Arc<StageOpConsts>>,
+    /// Device copy of `op_consts`; cleared with it.
+    op_consts_dev: Option<Arc<StageOpConstsDev>>,
     reference_step: bool,
     record: bool,
     coeff_record: Vec<(Vec<f32>, Vec<f32>)>,
@@ -424,15 +466,6 @@ fn f32_tensor<I: Backend>(v: &[f32], device: &I::Device) -> Tensor<Ad<I>, 1> {
 
 fn one_minus<I: Backend>(t: Tensor<Ad<I>, 1>) -> Tensor<Ad<I>, 1> {
     t.neg().add_scalar(1.0)
-}
-
-fn scatter_add<I: Backend>(
-    n: usize,
-    idx: &Tensor<Ad<I>, 1, Int>,
-    vals: Tensor<Ad<I>, 1>,
-) -> Tensor<Ad<I>, 1> {
-    let zeros = Tensor::<Ad<I>, 1>::zeros([n], &vals.device());
-    zeros.scatter(0, idx.clone(), vals, IndexingUpdateOp::Add)
 }
 
 impl<I: Backend + 'static> StageBlock<I>
@@ -508,7 +541,9 @@ where
             steps: 0,
             last_coeffs: None,
             last_host: None,
+            last_dev: None,
             op_consts: None,
+            op_consts_dev: None,
             reference_step: false,
             record: false,
             coeff_record: Vec::new(),
@@ -525,31 +560,51 @@ where
         q: &Tensor<Ad<I>, 1>,
         depth: Tensor<Ad<I>, 1>,
     ) -> Section<I> {
+        // The reference section is written out here, with the fused multiply-adds (NVRTC
+        // contracts a*b+c into one rounding, so the CPU fuses the same sites), line for
+        // line with `stage_op.rs::section_host`. `src/geometry.rs` (shared with the
+        // hotstart) keeps its unfused form.
         let bw_lb = self.params.bottom_width_lb;
-        let g = trapezoid_from_depth(p.clone(), q.clone(), depth.clone(), bw_lb);
-        let (a_d, p_d) = trapezoid_depth_derivatives(q.clone(), depth.clone(), &g, bw_lb);
+        let one = Tensor::<Ad<I>, 1>::ones_like(&depth);
+        let q_eps = q.clone() + 1e-6;
+        // 2a
+        let tw = p.clone() * depth.clone().powf(q_eps.clone());
+        let ssr = tw.clone() * q_eps.clone() / (depth.clone() * 2.0);
+        let ss = ssr.clone().clamp(0.5, 50.0);
+        // 2b
+        let bwr = tw.clone() - ss.clone() * depth.clone() * 2.0;
+        let bw = bwr.clone().clamp_min(bw_lb);
+        // 2c
+        let area = (tw.clone() + bw.clone()) * depth.clone() / 2.0;
+        let root = fma3::<I>(ss.clone(), ss.clone(), one.clone()).sqrt();
+        let perim = bw.clone() + depth.clone() * root.clone() * 2.0;
+        let radius = area.clone() / perim.clone();
+        // 2d
+        let tw_d = q_eps * tw.clone() / depth.clone();
+        let ss_active = ssr.clone().greater_elem(0.5).int() * ssr.clone().lower_elem(50.0).int();
+        let ss_active = ss_active.float();
+        let ss_d = (ssr / depth.clone())
+            * fma3::<I>(tw_d.clone() / tw.clone(), depth.clone(), one.clone().neg())
+            * ss_active;
+        // 2e
+        let bw_active = bwr.greater_elem(bw_lb).float();
+        let bw_d = (tw_d.clone() - ss.clone() * 2.0 - depth.clone() * ss_d.clone() * 2.0) * bw_active;
+        // 2f
+        let a_d = (tw.clone() + bw.clone()) / 2.0 + depth.clone() * (tw_d + bw_d.clone()) / 2.0;
+        let p_d = bw_d + root.clone() * 2.0 + depth.clone() * ss * ss_d * 2.0 / root;
         let Some(t) = &self.table else {
-            return Section {
-                top_width: g.top_width,
-                area: g.area,
-                wetted_perimeter: g.wetted_perimeter,
-                hydraulic_radius: g.hydraulic_radius,
-                a_d,
-                p_d,
-            };
+            return Section { top_width: tw, area, wetted_perimeter: perim, hydraulic_radius: radius, a_d, p_d };
         };
         let keep = one_minus::<I>(t.mask.clone());
         let area_r = t.tw.clone() * depth.clone();
         let perim_r = t.tw.clone() + depth * 2.0;
         let radius_r = area_r.clone() / perim_r.clone();
-        let mix = |head: Tensor<Ad<I>, 1>, tab: Tensor<Ad<I>, 1>| {
-            head * keep.clone() + tab * t.mask.clone()
-        };
+        let mix = |head: Tensor<Ad<I>, 1>, tab: Tensor<Ad<I>, 1>| fma3::<I>(head, keep.clone(), tab * t.mask.clone());
         Section {
-            top_width: mix(g.top_width, t.tw.clone()),
-            area: mix(g.area, area_r),
-            wetted_perimeter: mix(g.wetted_perimeter, perim_r),
-            hydraulic_radius: mix(g.hydraulic_radius, radius_r),
+            top_width: mix(tw, t.tw.clone()),
+            area: mix(area, area_r),
+            wetted_perimeter: mix(perim, perim_r),
+            hydraulic_radius: mix(radius, radius_r),
             a_d: mix(a_d, t.tw.clone()),
             p_d: mix(p_d, Tensor::<Ad<I>, 1>::ones_like(&t.tw) * 2.0),
         }
@@ -605,6 +660,7 @@ where
             }
         }
         self.op_consts = None;
+        self.op_consts_dev = None;
         let device = self.c.z_mid.device();
         self.net.z_mid = bed;
         self.c.z_mid = f32_tensor::<I>(&self.net.z_mid, &device);
@@ -757,6 +813,23 @@ where
                 r_prime: t(&a.control.r_prime),
             });
         }
+        if let Some(d) = &self.last_dev {
+            let t = |c: &Cube| {
+                Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(from_cube::<I>(c.clone())))
+            };
+            return Some(StageCoefficients {
+                alpha: t(&d.alpha),
+                beta: t(&d.beta),
+                kappa: t(&d.kappa),
+                a_up: t(&d.a_up),
+                b_down: t(&d.b_down),
+                area_edge: t(&d.area_edge),
+                radius_edge: t(&d.radius_edge),
+                d_s: t(&d.d_s),
+                dt_phi: t(&d.dt_phi),
+                r_prime: t(&d.r_prime),
+            });
+        }
         self.last_coeffs.as_ref().map(|c| StageCoefficients {
             alpha: c.alpha.clone(),
             beta: c.beta.clone(),
@@ -797,6 +870,7 @@ where
             }
         }
         self.op_consts = None;
+        self.op_consts_dev = None;
         let nnz = pattern.nnz();
         assert_eq!(pattern.n, self.net.n, "pattern and stage network differ in size");
         assert_eq!(self.net.adj_stage_to_stage.len(), nnz, "pattern and stage masks differ in nnz");
@@ -891,7 +965,6 @@ where
         let sl = self.slots.as_ref().expect("slots built");
         let c = &self.c;
         let pr = self.params;
-        let nn = self.net.n;
         let (th, thc) = (pr.theta, pr.theta_control);
         let subs = pr.substeps.max(1) as usize;
         let dt_s = pr.dt / subs as f32;
@@ -915,9 +988,8 @@ where
         };
 
         // MC inflow at the hour's two ends; substeps interpolate linearly.
-        let spmv_mc = |x: Tensor<Ad<I>, 1>| {
-            scatter_add::<I>(nn, &sl.row_idx, x.gather(0, sl.col_idx.clone()) * sl.adj_mc.clone())
-        };
+        // Row sums fuse the product into the sum, as the fused op does (one rounding per a*b+c site).
+        let spmv_mc = |x: Tensor<Ad<I>, 1>| spmv_fma::<I>(&sl.pattern, x, sl.adj_mc.clone());
         let i_t = spmv_mc(q_t.clone());
         let i_n = spmv_mc(q_next_mc.clone());
         let i_delta = i_n - i_t.clone();
@@ -926,7 +998,7 @@ where
         // Fixed n on table rows (zero gradient to the head's n there).
         let n_man = match &self.table {
             None => n_man,
-            Some(t) => n_man * one_minus::<I>(t.mask.clone()) + t.n.clone() * t.mask.clone(),
+            Some(t) => fma3::<I>(n_man, one_minus::<I>(t.mask.clone()), t.n.clone() * t.mask.clone()),
         };
         let n2 = n_man.clone() * n_man.clone();
         let qp_stage = q_prime_t * c.in_stage.clone();
@@ -937,7 +1009,7 @@ where
 
         for s in 0..subs {
             let (f0, f1) = (s as f32 / subs as f32, (s + 1) as f32 / subs as f32);
-            let i_mid = (i_t.clone() * 2.0 + i_delta.clone() * (f0 + f1)) * 0.5;
+            let i_mid = fma_s::<I>(i_delta.clone(), f0 + f1, i_t.clone() * 2.0) * 0.5;
             let (hbc0, hbc1) = (b0 + (b1 - b0) * f0, b0 + (b1 - b0) * f1);
 
             // 1. depths and the edge's down-stage
@@ -968,16 +1040,21 @@ where
             let den = dt_phi.clone() * 2.0 + 1.0;
             let alpha = (dt_phi.clone() + 1.0) / den.clone() * c.friction.clone();
             let beta = ge.area.clone() * (pr.g * dt_s) / (c.edge_length.clone() * den.clone()) * c.friction.clone();
-            let phi_d = a_d.clone() / ge.area.clone()
-                + (a_d.clone() / ge.area.clone() - p_d / ge.wetted_perimeter.clone()) * (4.0 / 3.0);
+            let phi_d = fma_s::<I>(
+                a_d.clone() / ge.area.clone() - p_d / ge.wetted_perimeter.clone(),
+                (4.0f64 / 3.0) as f32,
+                a_d.clone() / ge.area.clone(),
+            );
             let dh_edge = h.clone() - h_down;
-            let kappa = (dt_phi.clone() * qc.clone() * phi_d
-                + a_d * dh_edge.clone() * (pr.g * dt_s) / c.edge_length.clone())
-                / den
+            let kappa = fma3::<I>(
+                dt_phi.clone() * qc.clone(),
+                phi_d,
+                a_d * dh_edge.clone() * (pr.g * dt_s) / c.edge_length.clone(),
+            ) / den
                 * c.friction.clone();
-            let q_star = alpha.clone() * qc.clone() + beta.clone() * dh_edge;
-            let a_up = (beta.clone() * th + kappa.clone() * s_up).clamp_min(0.0) * c.friction.clone();
-            let b_down = (beta.clone() * th - kappa.clone() * s_dn).clamp_min(0.0) * c.friction.clone();
+            let q_star = fma3::<I>(alpha.clone(), qc.clone(), beta.clone() * dh_edge);
+            let a_up = fma_s::<I>(beta.clone(), th, kappa.clone() * s_up).clamp_min(0.0) * c.friction.clone();
+            let b_down = fma_s::<I>(beta.clone(), th, (kappa.clone() * s_dn).neg()).clamp_min(0.0) * c.friction.clone();
 
             // 4. control edges: dams (power-law storage over T) and the normal-depth outlet
             let e1 = q_eps.clone() + 1.0;
@@ -990,43 +1067,48 @@ where
                 let active = excess.clone().detach().greater_elem(0.0).float();
                 let r_tab = t.tw.clone() * c.length.clone() * excess.clamp_min(0.0) / c.dam_t.clone();
                 let rp_tab = rp_dam.clone() * active;
-                r_dam = r_dam * one_minus::<I>(t.mask.clone()) + r_tab * t.mask.clone();
-                rp_dam = rp_dam * one_minus::<I>(t.mask.clone()) + rp_tab * t.mask.clone();
+                r_dam = fma3::<I>(r_dam, one_minus::<I>(t.mask.clone()), r_tab * t.mask.clone());
+                rp_dam = fma3::<I>(rp_dam, one_minus::<I>(t.mask.clone()), rp_tab * t.mask.clone());
             }
             let kk = gs.area.clone() * gs.hydraulic_radius.clone().powf_scalar(2.0 / 3.0) / n_man.clone();
             let s0_sqrt = c.s0.clone().sqrt();
             let r_nd = kk.clone() * s0_sqrt.clone();
-            let dk_dd = kk * (a_ds / gs.area.clone() * (5.0 / 3.0) - p_ds / gs.wetted_perimeter.clone() * (2.0 / 3.0));
+            let w_kk = fma_s::<I>(
+                a_ds / gs.area.clone(),
+                (5.0f64 / 3.0) as f32,
+                (p_ds / gs.wetted_perimeter.clone() * (2.0 / 3.0)).neg(),
+            );
+            let dk_dd = kk * w_kk;
             let rp_nd = dk_dd * s0_sqrt;
-            let r_t = c.dam.clone() * r_dam + c.nd.clone() * r_nd;
-            let r_prime = (c.dam.clone() * rp_dam + c.nd.clone() * rp_nd).clamp_min(0.0);
+            let r_t = fma3::<I>(c.dam.clone(), r_dam, c.nd.clone() * r_nd);
+            let r_prime = fma3::<I>(c.dam.clone(), rp_dam, c.nd.clone() * rp_nd).clamp_min(0.0);
 
             // 5. matrix values [2·nnz]; the unknown is the increment dh
             let a_edge = a_up.clone().gather(0, sl.col_idx.clone()) * sl.adj_friction.clone();
             let b_edge = b_down.clone().gather(0, sl.col_idx.clone()) * sl.adj_friction.clone();
-            let lower_f = a_edge.neg() * th;
             let upper_f = b_edge.clone().neg() * th;
-            let off_dam = r_prime.clone().gather(0, sl.col_idx.clone()) * sl.dam_slot.clone() * (-thc);
-            let sum_in_b = scatter_add::<I>(nn, &sl.row_idx, b_edge);
-            let diag_stage = d_s.clone() + (a_up.clone() + sum_in_b) * th;
-            let diag = diag_stage * c.in_stage.clone()
-                + c.w_ctrl.clone() * r_prime.clone()
+            let off_a = r_prime.clone().gather(0, sl.col_idx.clone()) * sl.dam_slot.clone();
+            // sum_in_b fuses b_down[col] * adj_friction into the row sum; `b_edge` stays rounded for `upper_f`.
+            let sum_in_b = spmv_fma::<I>(&sl.pattern, b_down.clone(), sl.adj_friction.clone());
+            let diag_stage = fma_s::<I>(a_up.clone() + sum_in_b, th, d_s.clone());
+            let diag = fma3::<I>(diag_stage, c.in_stage.clone(), c.w_ctrl.clone() * r_prime.clone())
                 + one_minus::<I>(c.in_stage.clone());
-            let lower = lower_f + off_dam + diag.gather(0, sl.row_idx.clone()) * sl.diag_slot.clone();
+            let off_dam = off_a * (-thc);
+            let lower = fma3::<I>(
+                diag.gather(0, sl.row_idx.clone()),
+                sl.diag_slot.clone(),
+                fma_s::<I>(a_edge.neg(), th, off_dam),
+            );
             let a_values = Tensor::cat(vec![lower, upper_f], 0);
 
             // 6. right-hand side r: fluxes only, each edge's old flux once with its own weight
-            let flux_old = c.friction.clone() * ((q_star.clone() * th) + qc.clone() * (1.0 - th));
-            let ctrl_old = c.w_ctrl.clone() * r_t.clone() + (c.ctrl.clone() - c.w_ctrl.clone()) * qc.clone();
-            let e_old = flux_old + ctrl_old;
-            let in_e = scatter_add::<I>(
-                nn,
-                &sl.row_idx,
-                e_old.clone().gather(0, sl.col_idx.clone()) * sl.adj_stage.clone(),
-            );
+            let inner_old = fma_s::<I>(q_star.clone(), th, qc.clone() * (1.0 - th));
+            let ctrl_old = fma3::<I>(c.w_ctrl.clone(), r_t.clone(), (c.ctrl.clone() - c.w_ctrl.clone()) * qc.clone());
+            let e_old = fma3::<I>(c.friction.clone(), inner_old, ctrl_old);
+            let in_e = spmv_fma::<I>(&sl.pattern, e_old.clone(), sl.adj_stage.clone());
             let mut r = qp_stage.clone() + i_mid.clone() + in_e - e_old;
             if prescribed {
-                r = r + c.outlet.clone() * b_down.clone() * (th * (hbc1 - hbc0));
+                r = fma_s::<I>(c.outlet.clone() * b_down.clone(), th * (hbc1 - hbc0), r);
             }
 
             // 7. solve for dh, then floor the stage; the created volume is counted
@@ -1040,20 +1122,20 @@ where
             if prescribed {
                 dh_down = dh_down * one_minus::<I>(c.outlet.clone()) + c.outlet.clone() * (hbc1 - hbc0);
             }
-            let q_fr = q_star + a_up.clone() * dh.clone() - b_down.clone() * dh_down;
-            let q_ctrl = (r_t + r_prime.clone() * dh) * c.ctrl.clone();
-            let q_new = q_fr + q_ctrl;
+            let q_fr = fma3::<I>(
+                b_down.clone().neg(),
+                dh_down,
+                fma3::<I>(a_up.clone(), dh.clone(), q_star),
+            );
+            let q_ctrl_sum = fma3::<I>(r_prime.clone(), dh, r_t);
+            let q_new = fma3::<I>(q_ctrl_sum, c.ctrl.clone(), q_fr);
 
             // 9. mass balance on the inner backend
             {
                 let w = c.w_edge.clone();
-                let f_edge = (w.clone() * q_new.clone().detach() + one_minus::<I>(w) * qc.clone().detach())
-                    * c.in_stage.clone();
-                let into = scatter_add::<I>(
-                    nn,
-                    &sl.row_idx,
-                    f_edge.clone().gather(0, sl.col_idx.clone()) * sl.adj_stage.clone(),
-                );
+                let f_inner = fma3::<I>(w.clone(), q_new.clone().detach(), one_minus::<I>(w) * qc.clone().detach());
+                let f_edge = f_inner.clone() * c.in_stage.clone();
+                let into = spmv_fma::<I>(&sl.pattern, f_edge.clone(), sl.adj_stage.clone());
                 let i_mid_d = i_mid.clone().detach();
                 let qp_d = qp_stage.clone().detach();
                 let net_flux = ((into.clone() + i_mid_d.clone() + qp_d.clone() - f_edge.clone()).sum() * dt_s).inner();
@@ -1067,7 +1149,7 @@ where
                 .sum()
                     * dt_s)
                     .inner();
-                let gross = (((f_edge.abs() * (c.in_stage.clone() + c.has_down.clone() * c.in_stage.clone()))
+                let gross = (((f_edge.abs() * fma3::<I>(c.has_down.clone(), c.in_stage.clone(), c.in_stage.clone()))
                     .sum()
                     + i_mid_d.clone().abs().sum()
                     + qp_d.abs().sum())
@@ -1106,6 +1188,7 @@ where
             }
         }
         self.last_host = None;
+        self.last_dev = None;
         self.last_coeffs = coeffs;
         if self.record {
             self.stage_record.push(h.clone().inner().into_data().to_vec().expect("f32"));
@@ -1180,6 +1263,24 @@ where
         out
     }
 
+    /// Device copy of `op_consts`, cached and cleared with it. Panics unless
+    /// the block's backend is `Cuda<f32, i32>`.
+    #[doc(hidden)]
+    pub fn op_consts_dev(&mut self, pattern: &Arc<CsrPattern>) -> Arc<StageOpConstsDev> {
+        let host = self.op_consts(pattern);
+        if let Some(d) = &self.op_consts_dev {
+            return d.clone();
+        }
+        let prim = match self.c.z_mid.clone().inner().into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+        };
+        let like = into_cube::<I>(prim);
+        let dev = Arc::new(StageOpConstsDev::upload(&host, pattern, &like));
+        self.op_consts_dev = Some(dev.clone());
+        dev
+    }
+
     /// One routing hour through the fused op: one autodiff node
     /// with a hand-written backward. Same arguments and result as
     /// `step_reference`.
@@ -1218,20 +1319,56 @@ where
             (0.0, 0.0)
         };
         let consts = self.op_consts(pattern);
-        let nn = self.net.n;
+        // The device constants are built only on the CUDA arm.
+        let consts_dev = if effective_use_cuda::<I>(pr.use_cuda) { Some(self.op_consts_dev(pattern)) } else { None };
         let (out, fwd) = stage_timestep::<I>(
-            &consts, pattern, n_man, q, p, h_t, q_t, q_next_mc, q_prime_t, b0, b1, pr.use_cuda,
+            &consts,
+            consts_dev.as_ref(),
+            pattern,
+            n_man,
+            q,
+            p,
+            h_t,
+            q_t,
+            q_next_mc,
+            q_prime_t,
+            b0,
+            b1,
+            pr.use_cuda,
         );
+        self.finish_fused_hour(out, fwd, &device)
+    }
+
+    /// The hour epilogue of `step_fused`, shared by both arms: the mass
+    /// accumulator, `steps`, the record path, the last coefficients, `h_t` and
+    /// `step_index`. The device arm reads nothing back unless `record` is on.
+    fn finish_fused_hour(&mut self, out: Tensor<Ad<I>, 1>, fwd: HourOut, device: &I::Device) -> Tensor<Ad<I>, 1> {
+        let nn = self.net.n;
         let h_end = out.clone().slice([0..nn]);
         let q_out = out.slice([nn..2 * nn]);
-        // Epilogue.
-        self.acc = self.acc.clone() + Tensor::<I, 1>::from_floats(fwd.mass, &device);
-        self.steps += 1;
-        if self.record {
-            self.coeff_record.push((fwd.last.newton.dt_phi.clone(), fwd.last.newton.alpha.clone()));
-            self.stage_record.push(fwd.h_end.clone());
+        match fwd {
+            HourOut::Host(fwd) => {
+                self.acc = self.acc.clone() + Tensor::<I, 1>::from_floats(fwd.mass, device);
+                if self.record {
+                    self.coeff_record.push((fwd.last.newton.dt_phi.clone(), fwd.last.newton.alpha.clone()));
+                    self.stage_record.push(fwd.h_end.clone());
+                }
+                self.last_host = Some(fwd.last);
+                self.last_dev = None;
+            }
+            HourOut::Dev(fwd) => {
+                let mass = Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(from_cube::<I>(fwd.mass.clone())));
+                self.acc = self.acc.clone() + mass;
+                if self.record {
+                    self.coeff_record
+                        .push((cube_to_host(&fwd.last.newton.dt_phi), cube_to_host(&fwd.last.newton.alpha)));
+                    self.stage_record.push(cube_to_host(&fwd.h_end));
+                }
+                self.last_dev = Some(LastCoeffsDev::of(&fwd.last));
+                self.last_host = None;
+            }
         }
-        self.last_host = Some(fwd.last);
+        self.steps += 1;
         self.last_coeffs = None;
         self.h_t = Some(h_end);
         self.step_index += 1;

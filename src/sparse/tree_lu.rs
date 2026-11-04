@@ -20,14 +20,29 @@
 //! Factors: `l_values` is `L` in row layout with 1.0 on the diagonal. `u_values`
 //! has `U[k, d]` at slot `(d, k)` and `U[i, i]` at the diagonal slot.
 //!
-//! # Solves (reuse of the sweeps in `src/sparse/mod.rs`)
+//! # Solves (stage-only copies of the sweeps in `src/sparse/mod.rs`)
 //!
 //! | Step | Call |
 //! |---|---|
-//! | `L y = b` | `forward_sub_lower(pattern, l_values, b)` |
-//! | `U x = y` | `back_sub_upper_transposed(pattern, u_values, y)` |
-//! | `Uᵀ z = g` | `forward_sub_lower(pattern, u_values, g)` |
-//! | `Lᵀ y = z` | `back_sub_upper_transposed(pattern, l_values, z)` |
+//! | `L y = b` | `forward_sub_lower_recip(pattern, l_values, b)` |
+//! | `U x = y` | `back_sub_upper_transposed_recip(pattern, u_values, y)` |
+//! | `Uᵀ z = g` | `forward_sub_lower_recip(pattern, u_values, g)` |
+//! | `Lᵀ y = z` | `back_sub_upper_transposed_recip(pattern, l_values, z)` |
+//!
+//! The `_recip` fns are the shared sweeps with `/ diag` replaced by
+//! `* (1.0 / diag)`, which is the form cuSPARSE uses. So the host solves
+//! [`tree_lu_solve_host`] and [`tree_lu_solve_transposed_host`] are bitwise equal
+//! to the CUDA solves. The shared Muskingum-Cunge solves keep `/ diag`, so the
+//! DDR sandbox match does not change.
+//!
+//! # CPU or CUDA
+//!
+//! [`tree_lu_solve`] picks the arm once per op (`effective_use_cuda`). The CUDA
+//! arm lives in `src/sparse/tree_lu_cuda.rs`: a single-cube level-scheduled
+//! factor kernel (`tree_factor_dev`), the grad-A kernel, and the four solves,
+//! which call cuSPARSE as the MC path does. The factor fuses `diag -= l * up`
+//! as one multiply-add on both sides (`f32::mul_add` here, `fma` in the
+//! kernel), so the CPU and GPU factors are bitwise equal.
 //!
 //! Gradient: with `g = A⁻ᵀ·grad_x`, `grad_b = g`, and
 //! `grad_A[s] = -g[row(s)]·x[col(s)]` (first half),
@@ -47,7 +62,13 @@ use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData, TensorPrimitive};
 
-use super::{back_sub_upper_transposed, forward_sub_lower, primitive_to_vec, CsrPattern};
+use super::cube_buf::{from_cube, into_cube, Cube};
+use super::dispatch::effective_use_cuda;
+use super::tree_lu_cuda::{
+    tree_factor_dev, tree_grad_a_dev, tree_solve_dev, tree_solve_transposed_dev, TreeDev,
+    TreeFactorsDev,
+};
+use super::{primitive_to_vec, CsrPattern};
 
 /// Factors of a tree matrix. Both vectors have length `nnz` (`CsrPattern` layout).
 #[derive(Clone, Debug)]
@@ -92,6 +113,81 @@ pub fn assert_tree(pattern: &CsrPattern) -> Result<(), String> {
     Ok(())
 }
 
+/// The tree structure of a pattern for level-scheduled kernels. Built once per pattern.
+#[derive(Clone, Debug)]
+pub struct TreeLevels {
+    pub n: usize,
+    pub nnz: usize,
+    pub n_levels: usize,
+    pub crow: Vec<i32>,
+    pub col: Vec<i32>,
+    pub row: Vec<i32>,
+    /// `diag_slot(pattern, col[s])` for every slot `s`.
+    pub col_diag: Vec<i32>,
+    /// The downstream reach, -1 at an outlet.
+    pub down: Vec<i32>,
+    /// The slot of `(down[i], i)`, -1 at an outlet.
+    pub down_slot: Vec<i32>,
+    /// Level boundaries, length `n_levels + 1`.
+    pub lvl_ptr: Vec<i32>,
+    /// Reaches by level. Ascending reach index inside a level.
+    pub lvl_idx: Vec<i32>,
+}
+
+/// `level[i]` = 0 with no upstream reach, else 1 + the largest upstream level.
+/// Runs `assert_tree` first. Reaches go in index order because `row > col`.
+pub fn tree_levels(pattern: &CsrPattern) -> Result<TreeLevels, String> {
+    assert_tree(pattern)?;
+    let (n, nnz) = (pattern.n, pattern.nnz());
+    let mut down = vec![-1i32; n];
+    let mut down_slot = vec![-1i32; n];
+    let mut col_diag = vec![0i32; nnz];
+    for s in 0..nnz {
+        let c = pattern.col[s] as usize;
+        col_diag[s] = diag_slot(pattern, c) as i32;
+        let r = pattern.row_for_nnz[s];
+        if r as usize != c {
+            down[c] = r;
+            down_slot[c] = s as i32;
+        }
+    }
+    let mut level = vec![0usize; n];
+    for i in 0..n {
+        if down[i] >= 0 {
+            let d = down[i] as usize;
+            level[d] = level[d].max(level[i] + 1);
+        }
+    }
+    let n_levels = level.iter().copied().max().map_or(0, |m| m + 1);
+    let mut lvl_ptr = vec![0i32; n_levels + 1];
+    for &l in &level {
+        lvl_ptr[l + 1] += 1;
+    }
+    for l in 0..n_levels {
+        lvl_ptr[l + 1] += lvl_ptr[l];
+    }
+    let mut fill = lvl_ptr.clone();
+    let mut lvl_idx = vec![0i32; n];
+    for i in 0..n {
+        let l = level[i];
+        lvl_idx[fill[l] as usize] = i as i32;
+        fill[l] += 1;
+    }
+    Ok(TreeLevels {
+        n,
+        nnz,
+        n_levels,
+        crow: pattern.crow.clone(),
+        col: pattern.col.clone(),
+        row: pattern.row_for_nnz.clone(),
+        col_diag,
+        down,
+        down_slot,
+        lvl_ptr,
+        lvl_idx,
+    })
+}
+
 /// Zero-fill LU. `a_values.len() == 2 * nnz` (layout in the module doc).
 pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
     let nnz = pattern.nnz();
@@ -108,7 +204,8 @@ pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
             let up = a_values[nnz + s];
             l_values[s] = l;
             u_values[s] = up;
-            diag -= l * up;
+            // NVRTC contracts a*b+c into one rounding, so the CPU fuses the same site as `tree_factor_kernel`.
+            diag = (-l).mul_add(up, diag);
         }
         l_values[ds] = 1.0;
         u_values[ds] = diag;
@@ -118,8 +215,60 @@ pub fn tree_lu_factor(pattern: &CsrPattern, a_values: &[f32]) -> TreeFactors {
 
 /// Solve `A x = b`.
 pub fn tree_lu_solve_host(pattern: &CsrPattern, f: &TreeFactors, b: &[f32]) -> Vec<f32> {
-    let y = forward_sub_lower(pattern, &f.l_values, b);
-    back_sub_upper_transposed(pattern, &f.u_values, &y)
+    let y = forward_sub_lower_recip(pattern, &f.l_values, b);
+    back_sub_upper_transposed_recip(pattern, &f.u_values, &y)
+}
+
+/// Stage-only copy of `forward_sub_lower` (`src/sparse/mod.rs`) with `/ diag` replaced by
+/// `* (1.0 / diag)`. This mirrors cuSPARSE's reciprocal form, so the host solve is bitwise
+/// equal to `tree_solve_dev`. The shared MC solve is unchanged.
+fn forward_sub_lower_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(a_values.len(), pattern.nnz());
+    debug_assert_eq!(b.len(), pattern.n);
+    let n = pattern.n;
+    let mut x = vec![0.0f32; n];
+    for i in 0..n {
+        let start = pattern.crow[i] as usize;
+        let end = pattern.crow[i + 1] as usize;
+        let mut sum = 0.0f32;
+        let mut diag = 0.0f32;
+        for k in start..end {
+            let j = pattern.col[k] as usize;
+            if j == i {
+                diag = a_values[k];
+            } else {
+                sum += a_values[k] * x[j];
+            }
+        }
+        x[i] = (b[i] - sum) * (1.0 / diag);
+    }
+    x
+}
+
+/// Stage-only copy of `back_sub_upper_transposed` (`src/sparse/mod.rs`) with `/ diag` replaced
+/// by `* (1.0 / diag)`. Mirrors cuSPARSE's reciprocal form: cuSPARSE multiplies by the reciprocal of the diagonal.
+fn back_sub_upper_transposed_recip(pattern: &CsrPattern, a_values: &[f32], b: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(a_values.len(), pattern.nnz());
+    debug_assert_eq!(b.len(), pattern.n);
+    let n = pattern.n;
+    let mut y = vec![0.0f32; n];
+    for i in (0..n).rev() {
+        let start = pattern.trans_crow[i] as usize;
+        let end = pattern.trans_crow[i + 1] as usize;
+        let mut sum = 0.0f32;
+        let mut diag = 0.0f32;
+        for k in start..end {
+            let j = pattern.trans_col[k] as usize;
+            let val = a_values[pattern.trans_to_orig[k] as usize];
+            if j == i {
+                diag = val;
+            } else {
+                sum += val * y[j];
+            }
+        }
+        y[i] = (b[i] - sum) * (1.0 / diag);
+    }
+    y
 }
 
 /// Solve `Aᵀ y = g`.
@@ -128,8 +277,8 @@ pub fn tree_lu_solve_transposed_host(
     f: &TreeFactors,
     g: &[f32],
 ) -> Vec<f32> {
-    let z = forward_sub_lower(pattern, &f.u_values, g);
-    back_sub_upper_transposed(pattern, &f.l_values, &z)
+    let z = forward_sub_lower_recip(pattern, &f.u_values, g);
+    back_sub_upper_transposed_recip(pattern, &f.l_values, &z)
 }
 
 /// Gradient of the loss w.r.t. `A` (length `2 * nnz`), given `g = A⁻ᵀ·grad_x`
@@ -149,101 +298,24 @@ pub fn tree_lu_grad_a_host(pattern: &CsrPattern, grad_b: &[f32], x: &[f32]) -> V
 }
 
 // =================================================================================
-// Dispatch layer. One function per host step; the CUDA arms are filled in Phase G.
-// Modelled on `src/sparse/dispatch.rs::backward_solve_primitive`.
-// =================================================================================
-
-pub(crate) const CUDA_TODO: &str = "stage_routing CUDA path: Phase G";
-
-/// Factor `A` (length `2 * nnz`).
-pub(crate) fn dispatch_factor(
-    pattern: &CsrPattern,
-    a_values: &[f32],
-    use_cuda: bool,
-) -> TreeFactors {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    tree_lu_factor(pattern, a_values)
-}
-
-/// Solve `L y = b`.
-pub(crate) fn dispatch_l_solve(
-    pattern: &CsrPattern,
-    l_values: &[f32],
-    b: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    forward_sub_lower(pattern, l_values, b)
-}
-
-/// Solve `U x = y`.
-pub(crate) fn dispatch_u_solve(
-    pattern: &CsrPattern,
-    u_values: &[f32],
-    y: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    back_sub_upper_transposed(pattern, u_values, y)
-}
-
-/// Solve `Uᵀ z = g`.
-pub(crate) fn dispatch_ut_solve(
-    pattern: &CsrPattern,
-    u_values: &[f32],
-    g: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    forward_sub_lower(pattern, u_values, g)
-}
-
-/// Solve `Lᵀ g = z`.
-pub(crate) fn dispatch_lt_solve(
-    pattern: &CsrPattern,
-    l_values: &[f32],
-    z: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    back_sub_upper_transposed(pattern, l_values, z)
-}
-
-/// Gradient w.r.t. `A` (length `2 * nnz`) from `g` and `x`.
-pub(crate) fn dispatch_grad_a(
-    pattern: &CsrPattern,
-    g: &[f32],
-    x: &[f32],
-    use_cuda: bool,
-) -> Vec<f32> {
-    if use_cuda {
-        unimplemented!("{}", CUDA_TODO)
-    }
-    tree_lu_grad_a_host(pattern, g, x)
-}
-
-// =================================================================================
 // Autodiff op
 // =================================================================================
 
-/// Saved state for the backward pass. Everything is behind an `Arc`, so cloning
-/// onto the tape is a refcount bump.
+/// What the backward needs from the forward. The CPU/CUDA choice is made once
+/// per op, in [`tree_lu_solve`]; the variant records which arm ran. The host
+/// data are behind an `Arc` and the device data are buffer handles, so cloning
+/// onto the tape copies no array.
+#[derive(Clone, Debug)]
+enum TreeSaved {
+    Host { factors: Arc<TreeFactors>, x: Arc<Vec<f32>> },
+    Dev { f: TreeFactorsDev, x: Cube, tree: Arc<TreeDev> },
+}
+
+/// Saved state for the backward pass.
 #[derive(Clone, Debug)]
 struct TreeSolveState {
-    factors: Arc<TreeFactors>,
-    x: Arc<Vec<f32>>,
+    saved: TreeSaved,
     pattern: Arc<CsrPattern>,
-    use_cuda: bool,
 }
 
 #[derive(Debug)]
@@ -261,30 +333,45 @@ where
         grads: &mut Gradients,
         _checkpointer: &mut Checkpointer,
     ) {
-        let TreeSolveState { factors, x, pattern, use_cuda } = ops.state;
+        let TreeSolveState { saved, pattern } = ops.state;
         let [parent_a, parent_b] = ops.parents;
         let grad_out = grads.consume::<B>(&ops.node);
-        let device = B::float_device(&grad_out);
-        let grad_x = primitive_to_vec::<B>(grad_out);
+        match saved {
+            TreeSaved::Host { factors, x } => {
+                let device = B::float_device(&grad_out);
+                let grad_x = primitive_to_vec::<B>(grad_out);
 
-        // g = A^{-T} grad_x: Uᵀ z = grad_x, then Lᵀ g = z.
-        let z = dispatch_ut_solve(&pattern, &factors.u_values, &grad_x, use_cuda);
-        let g = dispatch_lt_solve(&pattern, &factors.l_values, &z, use_cuda);
+                // g = A^{-T} grad_x: Uᵀ z = grad_x, then Lᵀ g = z.
+                let z = forward_sub_lower_recip(&pattern, &factors.u_values, &grad_x);
+                let g = back_sub_upper_transposed_recip(&pattern, &factors.l_values, &z);
 
-        if let Some(p_a) = parent_a {
-            let ga = dispatch_grad_a(&pattern, &g, &x, use_cuda);
-            let len = ga.len();
-            grads.register::<B>(
-                p_a.id,
-                B::float_from_data(TensorData::new(ga, [len]), &device),
-            );
-        }
-        if let Some(p_b) = parent_b {
-            let len = g.len();
-            grads.register::<B>(
-                p_b.id,
-                B::float_from_data(TensorData::new(g, [len]), &device),
-            );
+                if let Some(p_a) = parent_a {
+                    let ga = tree_lu_grad_a_host(&pattern, &g, &x);
+                    let len = ga.len();
+                    grads.register::<B>(
+                        p_a.id,
+                        B::float_from_data(TensorData::new(ga, [len]), &device),
+                    );
+                }
+                if let Some(p_b) = parent_b {
+                    let len = g.len();
+                    grads.register::<B>(
+                        p_b.id,
+                        B::float_from_data(TensorData::new(g, [len]), &device),
+                    );
+                }
+            }
+            TreeSaved::Dev { f, x, tree } => {
+                // g = A^{-T} grad_x on the device. No host copy.
+                let g = tree_solve_transposed_dev(&pattern, &f, &into_cube::<B>(grad_out));
+                if let Some(p_a) = parent_a {
+                    let ga = tree_grad_a_dev(&tree, &g, &x);
+                    grads.register::<B>(p_a.id, from_cube::<B>(ga));
+                }
+                if let Some(p_b) = parent_b {
+                    grads.register::<B>(p_b.id, from_cube::<B>(g));
+                }
+            }
         }
     }
 }
@@ -292,12 +379,64 @@ where
 /// Solve `A x = b` for a tree matrix with a hand-written adjoint.
 ///
 /// `a_values` has length `2 * nnz` (layout in the module doc). `pattern` is
-/// structural metadata and does not take part in autograd.
+/// structural metadata and does not take part in autograd. `use_cuda` on a
+/// backend that is not CUDA falls back to the host path, with the one-shot
+/// WARN of `effective_use_cuda`.
 pub fn tree_lu_solve<I: Backend + 'static>(
     pattern: &Arc<CsrPattern>,
     a_values: Tensor<Autodiff<I>, 1>,
     b: Tensor<Autodiff<I>, 1>,
     use_cuda: bool,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    if effective_use_cuda::<I>(use_cuda) {
+        return tree_lu_solve_cuda::<I>(pattern, a_values, b);
+    }
+    let a_at = match a_values.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+    };
+    let b_at = match b.into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
+    };
+    let device = I::float_device(&a_at.primitive);
+
+    let a_host = primitive_to_vec::<I>(a_at.primitive.clone());
+    let b_host = primitive_to_vec::<I>(b_at.primitive.clone());
+    let factors = tree_lu_factor(pattern, &a_host);
+    let y = forward_sub_lower_recip(pattern, &factors.l_values, &b_host);
+    let x = back_sub_upper_transposed_recip(pattern, &factors.u_values, &y);
+    let n = x.len();
+    let out_prim = I::float_from_data(TensorData::new(x.clone(), [n]), &device);
+
+    let result = match TreeSolveOp
+        .prepare::<NoCheckpointing>([a_at.node.clone(), b_at.node.clone()])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => {
+            let state = TreeSolveState {
+                saved: TreeSaved::Host { factors: Arc::new(factors), x: Arc::new(x) },
+                pattern: pattern.clone(),
+            };
+            prep.finish(state, out_prim)
+        }
+        OpsKind::UnTracked(prep) => prep.finish(out_prim),
+    };
+    Tensor::from_primitive(TensorPrimitive::Float(result))
+}
+
+/// The device arm of [`tree_lu_solve`]: factor and solve on the GPU, with the
+/// hand-written adjoint. It builds the level structure on every call, so it
+/// serves the reference step and tests. The fused stage op caches its own.
+pub(crate) fn tree_lu_solve_cuda<I: Backend + 'static>(
+    pattern: &Arc<CsrPattern>,
+    a_values: Tensor<Autodiff<I>, 1>,
+    b: Tensor<Autodiff<I>, 1>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -311,15 +450,16 @@ where
         TensorPrimitive::Float(p) => p,
         TensorPrimitive::QFloat(_) => panic!("expected float tensor"),
     };
-    let device = I::float_device(&a_at.primitive);
-
-    let a_host = primitive_to_vec::<I>(a_at.primitive.clone());
-    let b_host = primitive_to_vec::<I>(b_at.primitive.clone());
-    let factors = dispatch_factor(pattern, &a_host, use_cuda);
-    let y = dispatch_l_solve(pattern, &factors.l_values, &b_host, use_cuda);
-    let x = dispatch_u_solve(pattern, &factors.u_values, &y, use_cuda);
-    let n = x.len();
-    let out_prim = I::float_from_data(TensorData::new(x.clone(), [n]), &device);
+    let a_cube = into_cube::<I>(a_at.primitive.clone());
+    let b_cube = into_cube::<I>(b_at.primitive.clone());
+    // Shape metadata only, no host read.
+    assert_eq!(a_cube.meta.shape()[0], 2 * pattern.nnz(), "a_values must have length 2 * nnz");
+    assert_eq!(b_cube.meta.shape()[0], pattern.n, "b must have length n");
+    let levels = tree_levels(pattern).expect("tree_lu_solve: pattern is not a tree");
+    let tree = Arc::new(TreeDev::upload(&levels, &a_cube));
+    let f = tree_factor_dev(&tree, &a_cube);
+    let x = tree_solve_dev(pattern, &f, &b_cube);
+    let out_prim = from_cube::<I>(x.clone());
 
     let result = match TreeSolveOp
         .prepare::<NoCheckpointing>([a_at.node.clone(), b_at.node.clone()])
@@ -328,10 +468,8 @@ where
     {
         OpsKind::Tracked(prep) => {
             let state = TreeSolveState {
-                factors: Arc::new(factors),
-                x: Arc::new(x),
+                saved: TreeSaved::Dev { f, x, tree },
                 pattern: pattern.clone(),
-                use_cuda,
             };
             prep.finish(state, out_prim)
         }

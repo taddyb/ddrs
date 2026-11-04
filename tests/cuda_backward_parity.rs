@@ -534,6 +534,7 @@ where
         slope_t,
         xst_t,
         false,
+        None, // skip_rows: count every row
         None, // gamma: no stage roughness in this fixture
     );
 
@@ -1192,8 +1193,10 @@ fn load_params_yaml(name: &str, params: &str) -> ddrs::data::error::Result<Confi
 
 #[test]
 fn enforce_positivity_can_never_reach_the_cuda_graph_path() {
-    // Case 1: ddr_match left at its default (true). The enforce_positivity
-    // validator rejects before cuda_graphs is even relevant.
+    // Case 1: ddr_match left at its default. Either validator may reject
+    // first, and which one depends on ddr_match (see
+    // .claude/PHYSICS-CORRECTIONS.md). Accept both messages, but the config
+    // must be rejected.
     let err = load_params_yaml(
         "ddrs_ep_graphs_default_ddr_match.yaml",
         "  enforce_positivity: true\n  use_cuda_graphs: true\n",
@@ -1202,8 +1205,9 @@ fn enforce_positivity_can_never_reach_the_cuda_graph_path() {
     let msg = format!("{err}");
     println!("case 1 rejection: {msg}");
     assert!(
-        msg.contains("enforce_positivity") && msg.contains("ddr_match"),
-        "expected the enforce_positivity/ddr_match conflict, got: {msg}"
+        (msg.contains("enforce_positivity") && msg.contains("ddr_match"))
+            || (msg.contains("use_cuda_graphs") && msg.contains("ddr_match")),
+        "expected an enforce_positivity or use_cuda_graphs conflict with ddr_match, got: {msg}"
     );
 
     // Case 2: ddr_match: false, which is the ONLY way enforce_positivity can

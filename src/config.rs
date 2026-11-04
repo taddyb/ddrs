@@ -2296,9 +2296,6 @@ fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
     if p.use_cuda_graphs {
         return Err(unsupported("`use_cuda_graphs: true`", "the captured graph has no stage solve"));
     }
-    if p.sparse_solver == SparseSolver::Cuda {
-        return Err(unsupported("`sparse_solver: cuda`", "the tree solve runs on the CPU path only"));
-    }
     if p.use_leakance {
         return Err(unsupported("`use_leakance: true`", "the leakance op has no stage path"));
     }
@@ -4734,9 +4731,11 @@ data_sources:
     }
 
     #[test]
-    fn stage_routing_rejects_cuda_solver() {
+    fn stage_routing_accepts_cuda_solver() {
         let p = format!("{SR_ON}  sparse_solver: cuda\n");
-        stage_rejection(stage_yaml("ddrs_sr_solver.yaml", "", &p, ""), &["stage_routing", "sparse_solver"]);
+        let cfg = Config::from_yaml_file(&stage_yaml("ddrs_sr_solver.yaml", "", &p, "")).expect("cuda solver loads");
+        assert_eq!(cfg.params.sparse_solver, SparseSolver::Cuda);
+        assert!(cfg.stage_routing_on());
     }
 
     #[test]

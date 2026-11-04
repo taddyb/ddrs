@@ -11,9 +11,11 @@
 //! See `docs/book/reference/burn-autograd.md` for the BURN-0.21 custom-backward
 //! recipe this module uses.
 
+pub mod cube_buf;
 pub mod cusparse;
 pub(crate) mod dispatch;
 pub mod tree_lu;
+pub mod tree_lu_cuda;
 
 use std::sync::Arc;
 
@@ -394,10 +396,12 @@ thread_local! {
 /// Number of host copies (`primitive_to_vec` calls) made on this thread so far.
 ///
 /// Test hook, not a stable API. A test reads it before and after a call and
-/// compares the two values. It counts only the copies in `primitive_to_vec`,
-/// the helper that the sparse solver and the timestep backward use to move a
-/// tensor to the host. It does not see other host reads, such as
-/// `Tensor::into_data` in a caller. The counter is per thread: the tests run
+/// compares the two values. It counts the copies in `primitive_to_vec`, the
+/// helper that the sparse solver and the timestep backward use to move a
+/// tensor to the host. It also counts the test hooks
+/// `cube_buf::cube_to_host` (through `primitive_to_vec`) and
+/// `cube_buf::cube_to_host_i32` (through `count_host_read`). It does not see
+/// other host reads, such as `Tensor::into_data` in a caller. The counter is per thread: the tests run
 /// in parallel threads, and burn's autodiff backward runs in the calling
 /// thread. The cost is one `Cell` increment per host copy. No result changes.
 #[doc(hidden)]
@@ -405,10 +409,16 @@ pub fn host_reads_on_this_thread_for_test() -> u64 {
     HOST_READS.with(|c| c.get())
 }
 
+/// Count one host copy on this thread. `primitive_to_vec` and the device
+/// buffer test hooks call it.
+pub(crate) fn count_host_read() {
+    HOST_READS.with(|c| c.set(c.get() + 1));
+}
+
 /// Wrap a raw `FloatTensorPrimitive` in a `Tensor` wrapper just long enough to
 /// call `.to_data()` synchronously, then yield a `Vec<f32>`.
 pub(crate) fn primitive_to_vec<B: Backend>(prim: B::FloatTensorPrimitive) -> Vec<f32> {
-    HOST_READS.with(|c| c.set(c.get() + 1));
+    count_host_read();
     let t: Tensor<B, 1> = Tensor::from_primitive(TensorPrimitive::Float(prim));
     t.to_data().to_vec::<f32>().expect("expected f32 tensor")
 }

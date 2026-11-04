@@ -310,7 +310,7 @@ when subdivision is enabled), plus one at dataset open.
 | `validate_reservoirs` | `use_reservoirs: true` without `data_sources.reservoirs` | `"use_reservoirs"` + `"data_sources.reservoirs"` |
 | | `use_reservoirs: true` + `use_leakance`, `use_cuda_graphs`, `ddr_match`, `subdivision.enabled` or `gridded_network` | `"use_reservoirs"` + the offending key. Runs before `validate_ddr_match`, so `use_cuda_graphs` reports the reservoir error first |
 | `validate_stage_routing` | `theta` outside `[0.5, 1]`, `theta_control` outside `(0, 1]`, `substeps: 0`, `tidal_filter: godin` with `enabled: false` | `"params.stage_routing"` + the key; godin: `tidal_filter` + `enabled` |
-| | enabled + `use_cuda_graphs`, `sparse_solver: cuda`, `use_leakance`, `ddr_match`, `subdivision.enabled`, `gridded_network`, `reservoir_release: learned`, `stage_roughness`, learned `gamma`, `reservoir_dam_row: additive`, `reservoir_flood_pool: true`, `reservoir_dam_floor: carry`, `experiment.state_cache`, or empty `reaches` | `"params.stage_routing"` + the offending key |
+| | enabled + `use_cuda_graphs`, `use_leakance`, `ddr_match`, `subdivision.enabled`, `gridded_network`, `reservoir_release: learned`, `stage_roughness`, learned `gamma`, `reservoir_dam_row: additive`, `reservoir_flood_pool: true`, `reservoir_dam_floor: carry`, `experiment.state_cache`, or empty `reaches` | `"params.stage_routing"` + the offending key |
 | | `prescribed_stage` without `boundary_comid`; `prescribed_stage` without `data_sources.stage_boundary` (and the converse); `geometry: table`/`mixed` without `data_sources.channel_geometry` (and the converse) | the source key |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
 | `validate_leakance_gate` | `leakance_gate` block without `use_leakance: true` | `"leakance_gate"` + `"use_leakance"` |
@@ -818,6 +818,18 @@ params:
   `anchor_elevation_m`. Table rows keep their own datum. A friction edge between
   rows in different datums makes a false drop in bed height. The Raystown config is
   safe only because the dam edge is one-way.
+
+### Stage block on CUDA (2026-11-02)
+
+`sparse_solver: cuda` is accepted with the stage block. On a `Cuda<f32, i32>` backend
+the stage op, its tree factors and its tree solves then run on the device, forward and
+backward (`src/routing/stage_cuda/`). `StageParams::use_cuda` follows
+`params.sparse_solver`; on any other backend the host path runs, with a one-shot
+warning. `use_cuda_graphs: true` is still rejected with the stage block: the captured
+graph has no stage solve. CUDA is faster than CPU for the stage op only above about
+10,000 reaches, and end to end it is far slower than CPU on the examples (trap T13
+has the numbers). Keep `--backend cpu` for Juniata and the Hudson. The test gates are
+in `testing.md` "Stage on CUDA".
 
 Unknown keys fail (`deny_unknown_fields`), so the removed `slope_eps` is an error.
 `Config::stage_routing_on()` is the gate. The paper studies and `probe_courant`
