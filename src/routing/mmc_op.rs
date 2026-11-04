@@ -1894,6 +1894,9 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     // `TimestepState::x_effective`). Always written.
     x_eff_out: &mut Option<I::FloatTensorPrimitive>,
     track_neg: bool,
+    // Rows the negative-discharge count leaves out (stage-routed rows); `None`
+    // counts every row. Length must be `n`.
+    skip_rows: Option<&[bool]>,
     // Per-reach stage-roughness exponent when it is a learned KAN output.
     // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`.
     gamma_in: Option<Tensor<I, 1>>,
@@ -2324,9 +2327,25 @@ where
     // `collect_zeta` / `enable_zeta_accumulation` pattern on MuskingumCunge.
     if track_neg {
         let x_host: Vec<f32> = primitive_to_vec::<I>(x_sol_prim.clone());
-        let n_neg = x_host.iter().filter(|&&v| v < 0.0).count() as u64;
+        let (n_neg, n_all) = match skip_rows {
+            Some(skip) => {
+                assert_eq!(
+                    skip.len(),
+                    x_host.len(),
+                    "negative-discharge skip mask has {} entries for {} reaches",
+                    skip.len(),
+                    x_host.len()
+                );
+                x_host
+                    .iter()
+                    .zip(skip)
+                    .filter(|(_, &s)| !s)
+                    .fold((0u64, 0u64), |(a, b), (&v, _)| (a + (v < 0.0) as u64, b + 1))
+            }
+            None => (x_host.iter().filter(|&&v| v < 0.0).count() as u64, x_host.len() as u64),
+        };
         NEG_SOLVES.fetch_add(n_neg, Ordering::Relaxed);
-        TOTAL_SOLVES.fetch_add(x_host.len() as u64, Ordering::Relaxed);
+        TOTAL_SOLVES.fetch_add(n_all, Ordering::Relaxed);
     }
 
     // S28: q_next = max(x_sol, discharge_lb)
@@ -2743,6 +2762,9 @@ pub fn timestep_forward<I: Backend + 'static>(
     slope_at: Tensor<Autodiff<I>, 1>,
     x_storage_at: Tensor<Autodiff<I>, 1>,
     track_neg: bool,
+    // Rows the negative-discharge count leaves out (stage-routed rows); `None`
+    // counts every row. Length must be `n`.
+    skip_rows: Option<&[bool]>,
     // Learned per-reach stage-roughness exponent. `Some` makes it the op's
     // SIXTH parent, so it receives a gradient and the KAN can train it.
     // `None` falls back to the global `params.stage_roughness.gamma`.
@@ -2758,6 +2780,7 @@ where
         q_t_at, q_prime_t_at,
         length_at, slope_at, x_storage_at,
         track_neg,
+        skip_rows,
         gamma_at,
         None,
         None,
@@ -2784,6 +2807,9 @@ pub(crate) fn timestep_forward_with_reservoirs<I: Backend + 'static>(
     slope_at: Tensor<Autodiff<I>, 1>,
     x_storage_at: Tensor<Autodiff<I>, 1>,
     track_neg: bool,
+    // Rows the negative-discharge count leaves out (stage-routed rows); `None`
+    // counts every row. Length must be `n`.
+    skip_rows: Option<&[bool]>,
     gamma_at: Option<Tensor<Autodiff<I>, 1>>,
     reservoir: Option<&ReservoirTensors<I>>,
     release: Option<ReleaseParent<I>>,
@@ -2884,6 +2910,7 @@ where
         &mut None,
         &mut x_eff_out,
         track_neg,
+        skip_rows,
         gamma_chain.clone(),
         reservoir,
     );
@@ -3139,6 +3166,7 @@ where
         false,
         None,
         None,
+        None,
         Some(release),
         None,
     )
@@ -3180,6 +3208,9 @@ pub fn timestep_forward_leakance<I: Backend + 'static>(
     impervious_mask: Option<Tensor<I, 1>>,
     zeta_out: Option<&mut Option<ZetaStepDiag<I>>>,
     track_neg: bool,
+    // Rows the negative-discharge count leaves out (stage-routed rows); `None`
+    // counts every row. Length must be `n`.
+    skip_rows: Option<&[bool]>,
     // Per-reach stage-roughness exponent when it is a learned KAN output.
     // `None` ⇒ the scalar `cfg.params.stage_roughness.gamma`, which is what
     // every pre-2026-09-17 leakance run used.
@@ -3260,6 +3291,7 @@ where
         &mut leak_out,
         &mut x_eff_out,
         track_neg,
+        skip_rows,
         gamma_p.clone().map(wrap),
         // Reservoir rows are rejected with leakance (`route_timestep`).
         None,
@@ -3464,6 +3496,7 @@ where
             n_at, q_spatial_at, p_spatial_at,
             q_t_at, q_prime_t_at, length_at, slope_at, x_storage_at,
             false,
+            None,
             // CUDA graphs and a learned gamma are mutually exclusive at config
             // load, so this fallback never needs one.
             None,
@@ -3748,7 +3781,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None, None,
+        &mut None, &mut None, false, None, None, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -3811,7 +3844,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None, None,
+        &mut None, &mut None, false, None, None, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

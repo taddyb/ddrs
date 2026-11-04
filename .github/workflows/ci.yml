@@ -116,7 +116,7 @@ jobs:
         run: df -h / | tail -1 && du -sh target 2>/dev/null || true
 
   # Release routing-acceptance gates: DDR sandbox parity (example exits 1
-  # unless ABSOLUTE MATCH) + Juniata end-to-end metric floors.
+  # unless ABSOLUTE MATCH) + Juniata end-to-end metric floors, plain and stage.
   acceptance:
     runs-on: ubuntu-24.04  # see the pin note on `test`
     timeout-minutes: 90
@@ -170,3 +170,10 @@ jobs:
       # runs them. Shares this job's release build; the test itself is ~10 s.
       - name: Gridded (DDM30) end-to-end acceptance
         run: cargo test --release --test gridded_acceptance -- --nocapture
+      # Stage routing: Juniata end-to-end floors (the stage block must take
+      # steps) and the fused-op parity against the autodiff reference. Same
+      # release build; the acceptance test runs about 36 s.
+      - name: Stage routing end-to-end acceptance
+        run: cargo test --release --test juniata_stage_acceptance -- --nocapture
+      - name: Stage op parity (release)
+        run: cargo test --release --test stage_op_parity

@@ -239,6 +239,19 @@ Three matched CONUS arms off the 500-update `nse-batch` baseline, all on 2,365 g
 - Routing adds the lag the gauges ask for (0 d below ~1,500 km², 1 d to 30,000, 2 d above) at ~70 % of
   gauges on all three arms; `experiments/stage_roughness/routing_lag.py`.
 
+## Stage routing on Juniata (2026-10-31)
+
+Stage routing (`params.stage_routing` config block, `src/routing/stage*`) solves for water depth instead of discharge. The
+Juniata bundle trains and tests with it (`examples/juniata/ddrs_stage.yaml`, `theta: 1.0`, `normal_depth` outlet,
+all 213 reaches, seed 42, CPU). Result: median NSE 0.7928 / KGE 0.8808 against the summed-Q' baseline 0.6947 /
+0.8192, and mass balance rel under 1e-8 (5.85e-9 with the fused op). The committed Muskingum-Cunge result is 0.7903 / 0.8810. Wall time is about
+36 s against about 21 s for Muskingum-Cunge (about 1.7x). It was 853 s before `StageBlock::step` switched to the fused
+op `StageTimestepOp` (src/routing/stage_op.rs). A rho 90 mini-batch is 2.05x Muskingum-Cunge (was 65x), 3.8x at
+`substeps: 4`. The tape holds 3 autodiff nodes per hour instead of 334 (1297 at `substeps: 4`).
+`StageBlock::set_reference_step(true)` restores the autodiff step for parity tests. There is **no DDR reference** for stage routing, so the
+check is the baseline and the analytic stage tests, not parity. One gauge, one seed: do not read the 0.0025 NSE
+difference as a gain. Gate: `tests/juniata_stage_acceptance.rs`.
+
 ## Structural constants (stable)
 
 CONUS 346,321 reaches / 338,814 edges · eval network 64,892 reaches for the
@@ -957,3 +970,24 @@ Harvest the trained field cheaply with bundle `landscape-pfixed-all-nfield`: the
 does not depend on the evaluation window, so it runs a one-year window with `newton_iters: 0`, `grid: 0`,
 `series: false`. **Its loss and NSE columns are one water year and must not be compared to the five-year
 censuses**; that mismatch is exactly what produced the withdrawn 0.700-against-0.720 figure.
+
+
+## Hudson tidal example (2026-11-01)
+
+`examples/hudson/` routes 756 MERIT reaches with a 41-reach stage block and a
+Battery water-level boundary, scored at Poughkeepsie against USGS 72137 (Godin
+filtered in training and eval). On the fallback uniform geometry, seed 42, the
+stage run reaches Poughkeepsie NSE 0.308 / KGE 0.625 against MC-only 0.145 /
+0.604 and the summed-Q' baseline 0.144 / 0.5605. Green Island and Croton do not
+change. Only the stage run gets the Godin filter. Control: MC with Godin
+applied at eval only gives Poughkeepsie 0.174 / 0.616 (Green Island
+0.793 / 0.886, Croton 0.819 / 0.849), so about 0.13 of the 0.16 NSE gain is
+the stage block and about 0.03 is the filter. Evidence limits: one seed (42),
+one tidal gauge, and 30 epochs with 4 gauges and `batch_size` 4 is 30 optimizer
+steps, so the head is not converged. The Battery boundary for Feb to May 2004
+is filled (tide plus an interpolated residual, no surge), and 217 hours of
+Nov 2003 are predictions plus an anchored residual. The 14.77 day amplitude ratio (model over observed) is 0.96 for stage
+and 0.54 for MC. Eval must run as one chunk: a 15-day chunk seam leaks into the
+71 h Godin filter (up to 125 m3/s daily at Poughkeepsie). The tide shape is
+unasserted until real bathymetry replaces the fallback. Test:
+`tests/hudson_acceptance.rs`, local only.

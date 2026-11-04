@@ -18,9 +18,32 @@ use crate::data::statistics::{fill_nans, AttrStats};
 use crate::data::store::{
     map_reservoir_rows, read_dam_features, read_fixed_release_table, AorcPrecipStore,
     AttributesStore, ConusAdjacencyStore, FixedTable, GageMetadata, GagesAdjacencyStore,
-    ObservationsStore, ReservoirRows, ReservoirTable, StateCache, StreamflowSource,
+    ChannelGeometryRows, ChannelGeometryStore, ObservationsStore, ReservoirRows, ReservoirTable,
+    StageBoundaryStore, StateCache,
+    StreamflowSource,
 };
 use crate::sparse::SparseAdjacency;
+
+/// Stage-block inputs of one batch. `None` on the batch unless
+/// `cfg.stage_routing_on()`. Later tasks add fields here only.
+#[derive(Debug, Clone, Default)]
+pub struct StageBatch {
+    /// Prescribed downstream stage, m, one value per q' row (`q_prime.shape()[0]`):
+    /// value `k` is the hour of q' row `k`, index 0 starts at 00:00 UTC on the
+    /// window's first day. `None` when the boundary is not prescribed.
+    pub boundary: Option<Vec<f32>>,
+    /// Table geometry rows in this batch's COMID order. `Some` exactly when
+    /// `params.stage_routing.geometry` is `table` or `mixed`.
+    pub geometry: Option<ChannelGeometryRows>,
+    /// Seed rows of the stage set in this batch's network, from
+    /// `StageReaches::Comids` (the COMID lookup `map_reservoir_rows` uses).
+    /// `None` for `reaches: all`; `Some(empty)` when no listed COMID is in the
+    /// batch (the block is then not armed for this batch).
+    pub seed_rows: Option<Vec<usize>>,
+    /// Row of `boundary_comid` in this batch's network. `None` when unset or
+    /// when the batch has no stage seeds.
+    pub boundary_row: Option<usize>,
+}
 
 /// One batch of inputs for the MC routing engine + MLP head.
 ///
@@ -92,6 +115,8 @@ pub struct RoutingBatch {
     /// `params.use_reservoirs` is true (possibly with no rows, when no table
     /// COMID is in this network); `None` leaves routing unchanged.
     pub reservoir_rows: Option<ReservoirRows>,
+    /// Stage-block inputs. `Some` exactly when `params.stage_routing` is on.
+    pub stage: Option<StageBatch>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +193,8 @@ pub struct RoutingTensors<B: Backend> {
     /// Carried from `RoutingBatch::reservoir_rows`; host-side indices, applied
     /// by `training::forward::apply_reservoir_rows` after `setup_inputs`.
     pub reservoir_rows: Option<ReservoirRows>,
+    /// Carried from `RoutingBatch::stage`.
+    pub stage: Option<StageBatch>,
 }
 
 impl RoutingBatch {
@@ -273,6 +300,7 @@ impl RoutingBatch {
             initial_state,
             impervious_mask,
             reservoir_rows: self.reservoir_rows,
+            stage: self.stage,
         }
     }
 }
@@ -377,6 +405,16 @@ pub struct MeritGagesDataset {
     /// phase resolves it (`resolve_learned_release`). Mapped onto each batch's
     /// COMID order by `map_reservoir_rows`.
     reservoirs: Option<ReservoirTable>,
+    /// `data_sources.stage_boundary`, read once at open when stage routing is
+    /// on and the path is set; `None` otherwise.
+    stage_boundary: Option<StageBoundaryStore>,
+    /// `data_sources.channel_geometry`, read once at open when stage routing is
+    /// on with `geometry: table | mixed`.
+    channel_geometry: Option<ChannelGeometryStore>,
+    /// `cfg.stage_routing_on()`, captured at open.
+    stage_on: bool,
+    /// `params.stage_routing`, captured at open when the block is on.
+    stage_cfg: Option<crate::config::StageRouting>,
 }
 
 /// Log the data version a store opened at, as a sibling of the
@@ -410,6 +448,112 @@ fn validate_disagg_vs_resolution(
                       store needs no daily→hourly head)"
                 .into(),
         });
+    }
+    Ok(())
+}
+
+/// `geometry: table` coverage, once at open. A batch's stage set is the
+/// downstream closure of the seeds inside that batch's network. That is a
+/// subset of (closure of the seeds on the full CONUS adjacency) intersected
+/// with (the union of the routed gauges' subgraphs), so a table that covers
+/// this set covers every batch. Errors name the missing COMIDs.
+fn check_table_covers_stage_set(
+    store: &ChannelGeometryStore,
+    reaches: &crate::config::StageReaches,
+    conus: &ConusAdjacencyStore,
+    gages_adj: &GagesAdjacencyStore,
+    gauges: &[Staid],
+) -> Result<()> {
+    let n = conus.n;
+    let mut routed = vec![false; n];
+    for s in gauges {
+        if let Some(g) = gages_adj.get(s) {
+            for &pos in g.indices_0.iter().chain(&g.indices_1) {
+                routed[pos as usize] = true;
+            }
+        }
+    }
+    let seeds: Vec<usize> = match reaches {
+        crate::config::StageReaches::All => (0..n).filter(|&i| routed[i]).collect(),
+        crate::config::StageReaches::Comids(ids) => {
+            let want: std::collections::HashSet<i64> = ids.iter().copied().collect();
+            (0..n).filter(|&i| routed[i] && want.contains(&conus.order[i].0)).collect()
+        }
+    };
+    let adj = SparseAdjacency {
+        n,
+        rows: conus.indices_0.clone(),
+        cols: conus.indices_1.clone(),
+        values: vec![1.0; conus.nnz],
+        length_m: conus.length_m.to_vec(),
+        slope: conus.slope.to_vec(),
+        parent_offset: None,
+    };
+    let (closure, _) = crate::routing::stage::downstream_closure(&adj, &seeds);
+    let in_stage: Vec<bool> = (0..n).map(|i| closure[i] && routed[i]).collect();
+    let mut missing = store.uncovered_stage_comids(&conus.order, &in_stage);
+    missing.sort();
+    missing.dedup();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let first: Vec<String> = missing.iter().take(5).map(|c| c.0.to_string()).collect();
+    Err(DataError::Malformed {
+        path: store.path.clone(),
+        message: format!(
+            "geometry: table needs a row for every stage reach; {} missing, first COMIDs: {}",
+            missing.len(),
+            first.join(", ")
+        ),
+    })
+}
+
+/// `downstream_boundary: prescribed_stage` fixes one outlet reach, so every
+/// batch network must contain `boundary_comid`. Checked once at open: the
+/// boundary must lie in the union of the gauge subgraphs (the eval network),
+/// and in a training dataset (`experiment.rho` set; the testing overlay sets
+/// it null) one batch must hold every gauge, so no training batch can omit it.
+fn check_stage_boundary_in_every_batch(
+    sr: &crate::config::StageRouting,
+    exp: &crate::config::Experiment,
+    conus: &ConusAdjacencyStore,
+    gages_adj: &GagesAdjacencyStore,
+    gauges: &[Staid],
+) -> Result<()> {
+    use crate::config::DownstreamBoundary;
+    let bad = |message: String| DataError::Malformed {
+        path: std::path::PathBuf::from("<config>"),
+        message,
+    };
+    if sr.downstream_boundary != DownstreamBoundary::PrescribedStage {
+        return Ok(());
+    }
+    let id = sr.boundary_comid.ok_or_else(|| {
+        bad("params.stage_routing: prescribed_stage needs boundary_comid".into())
+    })?;
+    let pos = conus.order.iter().position(|c| c.0 == id).ok_or_else(|| {
+        bad(format!("params.stage_routing.boundary_comid {id} is not in the adjacency"))
+    })?;
+    let in_union = gauges.iter().any(|s| {
+        gages_adj
+            .get(s)
+            .is_some_and(|g| g.indices_0.iter().chain(&g.indices_1).any(|&p| p as usize == pos))
+    });
+    if !in_union {
+        return Err(bad(format!(
+            "params.stage_routing.boundary_comid {id} is in none of the {} gauge subgraphs, \
+             so no batch network contains it",
+            gauges.len()
+        )));
+    }
+    if exp.rho.is_some() && exp.batch_size < gauges.len() {
+        return Err(bad(format!(
+            "params.stage_routing: prescribed_stage needs boundary_comid {id} in every batch network, \
+             so experiment.batch_size must be >= the number of gauges (one batch holds all of them); \
+             got batch_size {} for {} gauges",
+            exp.batch_size,
+            gauges.len()
+        )));
     }
     Ok(())
 }
@@ -602,6 +746,36 @@ impl MeritGagesDataset {
             None
         };
 
+        let stage_on = cfg.stage_routing_on();
+        let stage_boundary = match (&ds.stage_boundary, stage_on) {
+            (Some(path), true) => Some(StageBoundaryStore::open(path)?),
+            _ => None,
+        };
+
+        if let Some(sr) = cfg.params.stage_routing.as_ref().filter(|_| stage_on) {
+            check_stage_boundary_in_every_batch(sr, exp, &conus, &gages_adj, &gauges)?;
+        }
+
+        let channel_geometry = match &cfg.params.stage_routing {
+            Some(sr) if stage_on => {
+                use crate::config::StageGeometry;
+                let store = match (&ds.channel_geometry, sr.geometry) {
+                    (Some(path), StageGeometry::Table | StageGeometry::Mixed) => {
+                        Some(ChannelGeometryStore::open(path)?)
+                    }
+                    _ => None,
+                };
+                // `geometry: table`: every reach any batch can route as stage
+                // needs a row. Checked once here, not per batch, so a gap
+                // fails at open and not mid-training.
+                if let (Some(store), StageGeometry::Table) = (&store, sr.geometry) {
+                    check_table_covers_stage_set(store, &sr.reaches, &conus, &gages_adj, &gauges)?;
+                }
+                store
+            }
+            _ => None,
+        };
+
         let reservoirs = if cfg.params.use_reservoirs {
             let path = ds.reservoirs.as_ref().ok_or_else(|| DataError::Malformed {
                 path: std::path::PathBuf::from("<config>"),
@@ -781,6 +955,10 @@ impl MeritGagesDataset {
             state_cache,
             leakance_impervious_threshold,
             reservoirs,
+            stage_boundary,
+            channel_geometry,
+            stage_on,
+            stage_cfg: cfg.params.stage_routing.clone().filter(|_| stage_on),
         })
     }
 
@@ -1041,6 +1219,12 @@ impl MeritGagesDataset {
             .as_ref()
             .map(|table| map_reservoir_rows(table, &compressed.divide_comids));
 
+        let stage = self.stage_batch(
+            window.window_start,
+            q_prime.shape()[0],
+            &compressed.divide_comids,
+        )?;
+
         // ----- 8. Assemble -----
         Ok(RoutingBatch {
             adjacency,
@@ -1060,7 +1244,76 @@ impl MeritGagesDataset {
             initial_state,
             impervious_mask,
             reservoir_rows,
+            stage,
         })
+    }
+
+    /// Stage-block inputs for a window whose first q' row starts at
+    /// `window_start` 00:00 UTC and has `n_rows` q' rows. `None` unless stage
+    /// routing is on. Errors, naming the store path, when the record does not
+    /// cover the window or the slice length differs from `n_rows`.
+    fn stage_batch(
+        &self,
+        window_start: chrono::NaiveDate,
+        n_rows: usize,
+        comids: &[Comid],
+    ) -> Result<Option<StageBatch>> {
+        if !self.stage_on {
+            return Ok(None);
+        }
+        let geometry = match &self.channel_geometry {
+            Some(store) => {
+                Some(store.rows_for(comids))
+            }
+            None => None,
+        };
+        let boundary = match &self.stage_boundary {
+            Some(store) => {
+                let v = store.slice(window_start.and_hms_opt(0, 0, 0).unwrap(), n_rows)?;
+                if v.len() != n_rows {
+                    return Err(DataError::Malformed {
+                        path: store.path.clone(),
+                        message: format!(
+                            "stage boundary has {} values for {n_rows} q' rows",
+                            v.len()
+                        ),
+                    });
+                }
+                Some(v)
+            }
+            None => None,
+        };
+        // Stage seeds and the boundary reach in this batch's network. With no
+        // seed in the batch the block is not armed (`Some(empty)`), and the
+        // boundary reach is not checked.
+        let cfg = self.stage_cfg.as_ref().expect("stage_on implies stage_cfg");
+        let seed_rows = match &cfg.reaches {
+            crate::config::StageReaches::All => None,
+            crate::config::StageReaches::Comids(ids) => {
+                let want: std::collections::HashSet<i64> = ids.iter().copied().collect();
+                Some(
+                    comids
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| want.contains(&c.0))
+                        .map(|(i, _)| i)
+                        .collect::<Vec<usize>>(),
+                )
+            }
+        };
+        let has_set = seed_rows.as_ref().is_none_or(|s| !s.is_empty());
+        let boundary_row = match cfg.boundary_comid {
+            Some(id) if has_set => Some(comids.iter().position(|c| c.0 == id).ok_or_else(|| {
+                DataError::Malformed {
+                    path: std::path::PathBuf::from("<config>"),
+                    message: format!(
+                        "params.stage_routing.boundary_comid {id} is not in this batch's network"
+                    ),
+                }
+            })?),
+            _ => None,
+        };
+        Ok(Some(StageBatch { boundary, geometry, seed_rows, boundary_row }))
     }
 
     // -----------------------------------------------------------------------
@@ -1296,6 +1549,12 @@ impl MeritGagesDataset {
             None => None,
         };
 
+        let stage = self.stage_batch(
+            window.window_start,
+            q_prime.shape()[0],
+            &cache.divide_comids,
+        )?;
+
         Ok(RoutingBatch {
             adjacency: cache.adjacency.clone(),
             spatial_attributes_normalized: cache.spatial_attributes_normalized.clone(),
@@ -1320,6 +1579,7 @@ impl MeritGagesDataset {
             initial_state,
             impervious_mask: cache.impervious_mask.clone(),
             reservoir_rows: cache.reservoir_rows.clone(),
+            stage,
         })
     }
 
@@ -1456,6 +1716,38 @@ impl MeritGagesDataset {
             );
             rows
         });
+
+        // 8. Stage block: the stage set on the full static network, logged once
+        // per dataset (like the reservoir line above, to fd 2).
+        if let Some(sr) = self.stage_cfg.as_ref() {
+            let (k, added) = match &sr.reaches {
+                crate::config::StageReaches::All => (n, 0),
+                crate::config::StageReaches::Comids(ids) => {
+                    let want: std::collections::HashSet<i64> = ids.iter().copied().collect();
+                    let seeds: Vec<usize> = compressed
+                        .divide_comids
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| want.contains(&c.0))
+                        .map(|(i, _)| i)
+                        .collect();
+                    let (set, added) = crate::routing::stage::downstream_closure(&adjacency, &seeds);
+                    (set.iter().filter(|&&b| b).count(), added)
+                }
+            };
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "stage routing: {k} of {n} reaches in the stage block ({added} added by downstream closure)"
+            );
+            let _ = writeln!(
+                std::io::stderr(),
+                "stage routing: substeps: {}, theta: {}, theta_control: {}",
+                sr.substeps,
+                sr.theta,
+                sr.theta_control
+            );
+        }
 
         Ok(StaticNetworkCache {
             adjacency,

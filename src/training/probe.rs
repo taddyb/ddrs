@@ -229,6 +229,13 @@ pub fn probe_forward<I: Backend>(
         tensors.q_prime.dims()[0],
         None,
     );
+    crate::training::forward::apply_stage_block(
+        cfg,
+        &mut engine,
+        tensors.stage.as_ref(),
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+    );
     let runoff = engine.forward();
 
     (

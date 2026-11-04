@@ -187,6 +187,7 @@ fn run_forward(
         None,
         None,
         false,
+        None,
         gamma_t.clone(),
     );
 

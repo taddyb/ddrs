@@ -7,7 +7,7 @@ use burn::backend::Autodiff;
 use burn::tensor::{backend::Backend, IndexingUpdateOp, Int, Tensor, TensorData};
 
 use crate::config::Config;
-use crate::data::dataset::RoutingTensors;
+use crate::data::dataset::{RoutingTensors, StageBatch};
 use crate::data::store::ReservoirRows;
 use crate::routing::mmc::{DamRelease, FloodPool, MuskingumCunge, RoutingInputs, RuleCurve, SpatialParameters};
 use crate::routing::utils::denormalize;
@@ -425,6 +425,106 @@ fn arm_flood_pool<I: Backend>(
     engine.set_flood_pool(pool).expect("pooled rows are this window's armed dam rows");
 }
 
+/// Arm the implicit stage block on `engine` (`params.stage_routing`). A no-op
+/// unless `cfg.stage_routing_on()`. Call right after the reservoir rows at
+/// every forward. Panics with the engine's `Err` text on a misconfigured
+/// batch, the way [`apply_reservoir_rows`] does.
+///
+/// Builds the `StageParams` from `cfg`, takes the dams active on
+/// `window_start` (`ReservoirRows::active_on`) as `(row, T)`, and refuses
+/// a seasonal or rule-curve dam inside the stage set. A batch with no
+/// stage seed (`StageBatch::seed_rows == Some([])`) leaves the engine on MC.
+pub fn apply_stage_block<I: Backend>(
+    cfg: &Config,
+    engine: &mut MuskingumCunge<I>,
+    stage: Option<&StageBatch>,
+    reservoir_rows: Option<&ReservoirRows>,
+    window_start: chrono::NaiveDate,
+) {
+    if !cfg.stage_routing_on() {
+        return;
+    }
+    let sr = cfg.params.stage_routing.as_ref().expect("stage_routing_on implies the block");
+    let stage = stage.expect(
+        "params.stage_routing is on but the batch carries no stage inputs; \
+         build it with a MeritGagesDataset opened from the same config",
+    );
+    if stage.seed_rows.as_ref().is_some_and(|s| s.is_empty()) {
+        return;
+    }
+    let seeds = stage.seed_rows.as_deref();
+    let active = reservoir_rows.map(|r| r.active_on(window_start));
+    let mut dams: Vec<(usize, f32)> = Vec::new();
+    if let Some(rows) = active.as_ref() {
+        let set = engine.stage_set(seeds).expect("setup_inputs ran");
+        let inside = |row: usize| set.get(row).copied().unwrap_or(false);
+        if rows.seasonal.is_some() && rows.rows.iter().any(|&r| inside(r)) {
+            panic!(
+                "params.stage_routing: a seasonal dam release (`a`, `b` columns) has a dam inside \
+                 the stage set; the stage block routes only constant-T option C dams"
+            );
+        }
+        if rows.rule_curve.is_some() && rows.rows.iter().any(|&r| inside(r)) {
+            panic!(
+                "params.stage_routing: a rule-curve dam release has a dam inside the stage set; \
+                 the stage block routes only constant-T option C dams"
+            );
+        }
+        dams = rows.rows.iter().copied().zip(rows.t_days.iter().copied()).collect();
+    }
+    let params = crate::routing::stage::StageParams {
+        theta: sr.theta,
+        theta_control: sr.theta_control,
+        substeps: sr.substeps,
+        boundary: sr.downstream_boundary,
+        depth_lb: cfg.params.attribute_minimums.depth,
+        bottom_width_lb: cfg.params.attribute_minimums.bottom_width,
+        dt: crate::routing::mmc::DT_SECONDS,
+        g: 9.81,
+        // The validator rejects `sparse_solver: cuda` with the block, so this is false today.
+        use_cuda: cfg.params.sparse_solver == crate::config::SparseSolver::Cuda,
+    };
+    let inputs = crate::routing::stage::StageInputs {
+        seeds: stage.seed_rows.clone(),
+        anchor_m: sr.anchor_elevation_m,
+        boundary_series: stage.boundary.clone(),
+        boundary_row: stage.boundary_row,
+        geometry: stage
+            .geometry
+            .clone()
+            .map(|g| (g, sr.geometry == crate::config::StageGeometry::Table)),
+        dams,
+    };
+    engine.set_stage_block(params, inputs).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The stage block's state across the chunks of one eval: the engine is
+/// rebuilt per chunk, so the end-of-chunk `(h, Q)` and the volume account
+/// live here, like `DamClampSums`.
+#[derive(Debug, Default)]
+pub struct StageEvalState {
+    pub carry: Option<crate::routing::stage::StageCarry>,
+    pub mass: crate::routing::stage::StageMassBalance,
+}
+
+/// Start `engine`'s block from the previous chunk's end state, if any.
+fn carry_stage_state<I: Backend>(engine: &mut MuskingumCunge<I>, state: &StageEvalState) {
+    if let Some(c) = state.carry.as_ref() {
+        // A chunk with no stage seed has no block; nothing to restore.
+        if engine.stage_state().is_some() {
+            engine.set_stage_carry(c).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+}
+
+/// Read the chunk's end state and volume account back into `state`.
+fn record_stage_state<I: Backend>(engine: &MuskingumCunge<I>, state: &mut StageEvalState) {
+    if let Some(mb) = engine.stage_mass_balance() {
+        state.carry = engine.stage_carry();
+        state.mass.merge(&mb);
+    }
+}
+
 /// The device an engine was built on (its routing state lives there).
 fn engine_device<I: Backend>(engine: &MuskingumCunge<I>) -> I::Device {
     engine.discharge_state().expect("setup_inputs ran").device()
@@ -536,6 +636,13 @@ pub fn forward_with_frozen_params<I: Backend>(
         tensors.window.window_start,
         tensors.q_prime.dims()[0],
         None,
+    );
+    apply_stage_block(
+        cfg,
+        &mut engine,
+        tensors.stage.as_ref(),
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
     );
 
     // engine.forward() → (N, T_hours) on Autodiff<I>.
@@ -808,6 +915,13 @@ pub fn forward_with_release_dams_record<I: Backend>(
         release_head,
         dams,
     );
+    apply_stage_block(
+        cfg,
+        &mut engine,
+        tensors.stage.as_ref(),
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+    );
     // Enable negative-discharge tracking so the count appears in the training
     // log. When use_cuda_graphs is true, forward will print UNAVAILABLE instead.
     engine.enable_negative_discharge_tracking();
@@ -1002,6 +1116,7 @@ pub fn forward_eval<I: Backend>(
         overrides,
         param_overrides,
         None,
+        None,
     );
     scatter_add_by_group(
         runoff,
@@ -1035,6 +1150,7 @@ pub fn forward_eval_reaches<I: Backend>(
         zeta,
         overrides,
         param_overrides,
+        None,
         None,
     )
 }
@@ -1092,8 +1208,9 @@ pub fn forward_eval_reaches_with_dams<I: Backend>(
     carry_state: bool,
     zeta: Option<&mut ZetaSums<I>>,
     dams: &mut crate::training::release_eval::DamClampSums,
+    stage: Option<&mut StageEvalState>,
 ) -> Tensor<I, 2> {
-    forward_eval_core(cfg, tensors, head, device, carry_state, zeta, None, None, Some(dams))
+    forward_eval_core(cfg, tensors, head, device, carry_state, zeta, None, None, Some(dams), stage)
 }
 
 /// Shared body of `forward_eval` and `forward_eval_reaches`. Returns
@@ -1110,6 +1227,7 @@ fn forward_eval_core<I: Backend>(
     overrides: Option<&LeakanceOverride>,
     param_overrides: Option<&RoutingParamOverride>,
     dams: Option<&mut crate::training::release_eval::DamClampSums>,
+    stage: Option<&mut StageEvalState>,
 ) -> Tensor<I, 2> {
     let n_active = tensors.adjacency.n;
     // Parent → sub-reach gather, before the overrides below: `RoutingParamOverride`
@@ -1256,11 +1374,24 @@ fn forward_eval_core<I: Backend>(
     if let Some(sink) = dams.as_deref() {
         carry_dam_state(&mut engine, sink);
     }
+    apply_stage_block(
+        cfg,
+        &mut engine,
+        tensors.stage.as_ref(),
+        tensors.reservoir_rows.as_ref(),
+        tensors.window.window_start,
+    );
+    if let Some(state) = stage.as_deref() {
+        carry_stage_state(&mut engine, state);
+    }
     if zeta.is_some() {
         engine.enable_zeta_accumulation();
     }
     let runoff_ad = engine.forward();
     let runoff = runoff_ad.inner();
+    if let Some(state) = stage {
+        record_stage_state(&engine, state);
+    }
     if let Some(sink) = zeta {
         if let Some(sums) = engine.zeta_sums() {
             sink.merge(sums);
@@ -1473,6 +1604,7 @@ mod tests {
             initial_state: None,
             impervious_mask: None,
             reservoir_rows: None,
+            stage: None,
         }
     }
 

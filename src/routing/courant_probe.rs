@@ -169,6 +169,7 @@ where
             &mut leak_out,
             &mut x_eff_out,
             /* track_neg */ true,
+            /* skip_rows */ None,
             /* gamma_in */ None,
             /* reservoir */ None,
         );

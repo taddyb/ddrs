@@ -273,6 +273,7 @@ fn run_forward_loss(
         slope_t,
         xst_t,
         false,
+        None, // skip_rows
         None, // gamma: no stage roughness in this fixture
     );
 

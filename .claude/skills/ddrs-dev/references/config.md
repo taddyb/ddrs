@@ -36,7 +36,7 @@ to §`params:` if you are looking for `tau` (it is not a routing sub-step count)
 
 `kan_head:` accepts `mlp:` as a serde alias (backward compat with pre-KAN configs).
 
-## `data_sources:` — 10 path fields
+## `data_sources:` — 12 path fields
 
 `attributes` is a `Vec<PathBuf>` accepting a **single path or a list**
 (feature-concatenated on COMID, NaN-filled, `deserialize_one_or_many_paths`).
@@ -265,6 +265,7 @@ and bounds every topology from above.
 | `use_leakance` | false | |
 | `use_reservoirs` | false | Route the COMIDs in `data_sources.reservoirs` as linear reservoirs `S = T·Q` (option C). `false` is bit-identical to no reservoir code. Rejected with leakance, CUDA graphs, `ddr_match`, subdivision, `gridded_network`; see §Reservoirs |
 | `reservoir_release` | `fixed` | `fixed`: `T` (and optional seasonal `a`, `b`) from the table. `learned`: `(T0, a, b)` per dam from the `release_head:` block, trained jointly with the routing head. `learned` requires `use_reservoirs`, `kan_head`, `release_head`; see §Reservoirs |
+| `stage_routing` | absent | Implicit stage-based routing (tree solve). Absent or `enabled: false` is byte-identical. See §Stage routing |
 | `leakance_losing_only` | **true** | Clamps `head = max(0, depth − d_gw)`, so gaining reaches produce `zeta ≡ 0` |
 | `leakance_impervious_threshold` | 0.7 | Masks reaches whose `corridor_impervious` is **`>`** this value (not `≥`) |
 | `leakance_gate` | absent | Temperature-annealed 0/1 gate on the head's `leakance_factor` output; see §Leakance gate. Absent ⇒ byte-identical to the ungated readers. Requires `use_leakance: true` |
@@ -308,6 +309,9 @@ when subdivision is enabled), plus one at dataset open.
 | `validate_geodataset` | `geodataset:` contradicting the adjacency source (`ddm30` with `geospatial_fabric`, `merit` with `gridded_network`) | `"geodataset"` + the source key. Absent ⇒ inferred; explicit adjacency paths ⇒ any label allowed |
 | `validate_reservoirs` | `use_reservoirs: true` without `data_sources.reservoirs` | `"use_reservoirs"` + `"data_sources.reservoirs"` |
 | | `use_reservoirs: true` + `use_leakance`, `use_cuda_graphs`, `ddr_match`, `subdivision.enabled` or `gridded_network` | `"use_reservoirs"` + the offending key. Runs before `validate_ddr_match`, so `use_cuda_graphs` reports the reservoir error first |
+| `validate_stage_routing` | `theta` outside `[0.5, 1]`, `theta_control` outside `(0, 1]`, `substeps: 0`, `tidal_filter: godin` with `enabled: false` | `"params.stage_routing"` + the key; godin: `tidal_filter` + `enabled` |
+| | enabled + `use_cuda_graphs`, `sparse_solver: cuda`, `use_leakance`, `ddr_match`, `subdivision.enabled`, `gridded_network`, `reservoir_release: learned`, `stage_roughness`, learned `gamma`, `reservoir_dam_row: additive`, `reservoir_flood_pool: true`, `reservoir_dam_floor: carry`, `experiment.state_cache`, or empty `reaches` | `"params.stage_routing"` + the offending key |
+| | `prescribed_stage` without `boundary_comid`; `prescribed_stage` without `data_sources.stage_boundary` (and the converse); `geometry: table`/`mixed` without `data_sources.channel_geometry` (and the converse) | the source key |
 | `validate_leakance` | `use_leakance` + `use_cuda_graphs` | both key names |
 | `validate_leakance_gate` | `leakance_gate` block without `use_leakance: true` | `"leakance_gate"` + `"use_leakance"` |
 | | empty `leakance_gate.temperature` | `"temperature"` |
@@ -764,3 +768,57 @@ different model. The paper studies refuse `use_reservoirs` arms at load.
 **Untyped ranges.** `params.parameter_ranges` is a map; a misspelt `reservoir_T0` /
 `reservoir_a` / `reservoir_b` key is ignored and the default box is used (the pre-existing
 pattern for every range key). Check the spelling against this file.
+
+## Stage routing (`params.stage_routing`, added 2026-10-31)
+
+An implicit stage-based routing block, solved as a tree (`src/sparse/tree_lu.rs`).
+The load-time validator is `validate_stage_routing`; the routing block is
+`src/routing/stage.rs` and the default step is the fused op in
+`src/routing/stage_op.rs`. Absent block or `enabled: false` leaves every
+existing config unchanged (bitwise).
+
+```yaml
+params:
+  stage_routing:
+    enabled: true
+    theta: 1.0              # friction edges and normal-depth outlet, [0.5, 1]
+    theta_control: 0.5      # dam edges, (0, 1]
+    substeps: 1
+    reaches: all            # or a list of COMIDs
+    downstream_boundary: normal_depth   # or prescribed_stage (needs data_sources.stage_boundary and boundary_comid)
+    boundary_comid: null    # when set, the stage set's outlet must be this COMID
+    anchor_elevation_m: 0.0
+    geometry: head          # or table / mixed (need data_sources.channel_geometry)
+    tidal_filter: none      # none | godin (Godin filter on routed discharge at stage-row gauges, in training and eval)
+```
+
+### Rules and data files
+
+- **`prescribed_stage`** requires `boundary_comid`. At dataset open
+  (`src/data/dataset.rs::check_stage_boundary_in_every_batch`) the boundary reach
+  must lie in the union of the gauge subgraphs. In training, `experiment.batch_size`
+  must be at least the gauge count, so that no batch omits the boundary reach.
+- **`normal_depth`** also works on a forest (several stage outlets). Each outlet
+  uses its own normal depth. `prescribed_stage` needs exactly one outlet.
+- **`data_sources.stage_boundary`**: CSV with header `time,stage_m`. Times are
+  `%Y-%m-%dT%H:%M:%SZ`, hourly UTC, and the file must hold one value per q' row of
+  the window.
+- **`data_sources.channel_geometry`**: CSV with header `COMID,top_width_m,bed_z_m,n`
+  and an optional `pool_z_m` column. Lines starting with `#` are comments. Unknown
+  columns are ignored.
+- **Outlet anchor.** If the stage outlet has a table row, its `bed_z_m` replaces
+  `anchor_elevation_m`, and the run logs `stage routing: anchor_elevation_m ...
+  overridden by the table's outlet bed`. In a forest the first outlet that has a
+  table row is used.
+- **Dams inside the stage set.** Fixed-table dams (`reservoir_release: fixed`,
+  constant T) become control nodes. Seasonal or rule-curve dams inside the set are
+  refused. Arm the dams first and the stage block last: `set_reservoir_rows_as` and
+  `set_dam_release` refuse once the block is armed.
+- **Datum caveat with `geometry: mixed`.** Head beds integrate up from
+  `anchor_elevation_m`. Table rows keep their own datum. A friction edge between
+  rows in different datums makes a false drop in bed height. The Raystown config is
+  safe only because the dam edge is one-way.
+
+Unknown keys fail (`deny_unknown_fields`), so the removed `slope_eps` is an error.
+`Config::stage_routing_on()` is the gate. The paper studies and `probe_courant`
+refuse a stage-routing config; `sandbox::smoke` does too.

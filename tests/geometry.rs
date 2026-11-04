@@ -83,3 +83,78 @@ fn geometry_gradients_flow() {
     // Manning's: dv/dn < 0 (velocity decreases with n)
     assert!(gv < 0.0, "dv/dn should be negative, got {}", gv);
 }
+
+#[test]
+fn trapezoid_from_depth_matches_inversion_round_trip() {
+    use ddrs::geometry::trapezoid_from_depth;
+    let device = TestDevice::default();
+    for &qd in &[1.0_f32, 50.0, 800.0] {
+        let t = |v: f32| Tensor::<TestBackend, 1>::from_floats([v], &device);
+        let inv = compute_trapezoidal_geometry(t(0.035), t(21.0), t(0.5), t(qd), t(1e-3), 0.01, 0.01);
+        let g = trapezoid_from_depth(t(21.0), t(0.5), inv.depth.clone(), 0.01);
+        let pairs = [
+            (g.top_width, inv.top_width),
+            (g.area, inv.cross_sectional_area),
+            (g.hydraulic_radius, inv.hydraulic_radius),
+        ];
+        for (a, b) in pairs {
+            let (a, b) = (a.into_scalar(), b.into_scalar());
+            assert!(((a - b) / b).abs() < 1e-6, "Q={qd}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn trapezoid_from_depth_is_differentiable_in_depth() {
+    use ddrs::geometry::trapezoid_from_depth;
+    type AD = Autodiff<NdArray<f32>>;
+    type Dev = <AD as burn::tensor::backend::BackendTypes>::Device;
+    let device = Dev::default();
+    let t = |v: f32| Tensor::<AD, 1>::from_floats([v], &device);
+    let d = t(1.0).require_grad();
+    let g = trapezoid_from_depth(t(21.0), t(0.5), d.clone(), 0.01);
+    let tw = g.top_width.clone().into_scalar();
+    let grads = g.area.sum().backward();
+    let ad = d.grad(&grads).expect("depth grad").into_scalar();
+
+    let eps = 1e-3_f32;
+    let area_at = |x: f32| {
+        trapezoid_from_depth(t(21.0), t(0.5), t(x), 0.01).area.into_scalar()
+    };
+    let fd = (area_at(1.0 + eps) - area_at(1.0 - eps)) / (2.0 * eps);
+    assert!(((ad - fd) / fd).abs() < 1e-3, "autodiff {ad} vs central diff {fd}");
+    let closed = 1.125 * tw;
+    assert!(((ad - closed) / closed).abs() < 1e-3, "autodiff {ad} vs closed form {closed}");
+}
+
+/// f64 test-side copy of `src/geometry.rs::trapezoid_from_depth` (area, wetted perimeter).
+fn section_f64(p: f64, q: f64, d: f64, bw_lb: f64) -> (f64, f64) {
+    let qe = q + 1e-6;
+    let tw = p * d.powf(qe);
+    let ss = (tw * qe / (2.0 * d)).clamp(0.5, 50.0);
+    let bw = (tw - 2.0 * ss * d).max(bw_lb);
+    ((tw + bw) * d / 2.0, bw + 2.0 * d * (ss * ss + 1.0).sqrt())
+}
+
+#[test]
+fn trapezoid_depth_derivatives_match_finite_differences() {
+    use ddrs::geometry::{trapezoid_depth_derivatives, trapezoid_from_depth};
+    let device = TestDevice::default();
+    let bw_lb = 0.1f32;
+    for (p, q) in [(21.0f32, 0.5f32), (1000.0, 0.0), (5.0, 0.9)] {
+        for d in [0.02f32, 0.3, 1.0, 5.0] {
+            let pt: Tensor<TestBackend, 1> = Tensor::from_floats([p], &device);
+            let qt: Tensor<TestBackend, 1> = Tensor::from_floats([q], &device);
+            let dt: Tensor<TestBackend, 1> = Tensor::from_floats([d], &device);
+            let geom = trapezoid_from_depth(pt.clone(), qt.clone(), dt.clone(), bw_lb);
+            let (ad, pd) = trapezoid_depth_derivatives(qt, dt, &geom, bw_lb);
+            let (ad, pd) = (ad.into_scalar() as f64, pd.into_scalar() as f64);
+            let h = 1e-6 * d as f64;
+            let (ap, pp) = section_f64(p as f64, q as f64, d as f64 + h, bw_lb as f64);
+            let (am, pm) = section_f64(p as f64, q as f64, d as f64 - h, bw_lb as f64);
+            let (fa, fp) = ((ap - am) / (2.0 * h), (pp - pm) / (2.0 * h));
+            assert!(((ad - fa) / fa).abs() <= 1e-4, "p {p} q {q} d {d}: dA {ad} vs {fa}");
+            assert!(((pd - fp) / fp).abs() <= 1e-4, "p {p} q {q} d {d}: dP {pd} vs {fp}");
+        }
+    }
+}

@@ -67,6 +67,9 @@ ddrs.yaml
 # …but the Juniata sample's config is a committed example, not a personal
 # workspace config (its .ddrs/ workspace is still ignored by the rule above).
 !examples/juniata/ddrs.yaml
+!examples/hudson/ddrs.yaml
+# The full GAGES-II table is a local input for the Hudson extraction, never committed.
+examples/GAGES-II.csv
 # …same exception for the gridded Juniata example's committed config.
 !examples/juniata_gridded/ddrs.yaml
 

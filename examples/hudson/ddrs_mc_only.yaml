@@ -1,0 +1,102 @@
+# Hudson River MC-only control: the same data and settings as ddrs.yaml with no
+# stage block, no Battery boundary and no geometry table.
+#
+# Network: the MERIT reaches upstream of the New York Harbor outlet (COMID
+# 73005067), 756 reaches. A pseudo-gauge at the outlet (no observations) makes
+# every training batch the whole domain. Every reach runs MC. Targets: Poughkeepsie (01372058,
+# USGS tidally filtered discharge 72137), Green Island (01358000), Croton (01375000).
+#
+# Run FROM THE REPO ROOT. Give --workspace explicitly (the default would put
+# .ddrs/ beside this file):
+#
+#   ddrs --config examples/hudson/ddrs_mc_only.yaml --workspace /path/to/.ddrs plan
+#   ddrs --config examples/hudson/ddrs_mc_only.yaml --workspace /path/to/.ddrs run --workflow train-and-test --backend cpu
+
+mode: training
+workflow: train-and-test
+geodataset: merit
+device: 0
+seed: 42
+np_seed: 42
+
+data_sources:
+  attributes: examples/hudson/data/hudson_attributes.nc
+  conus_adjacency: examples/hudson/data/hudson_conus_adjacency.zarr
+  gages_adjacency: examples/hudson/data/hudson_gages_adjacency.zarr
+  # Daily Q' from 2001-05-01. The hourly Battery product has a 4-month outage
+  # from 2001-01-01 to 2001-04-30, so the stores start 2001-05-01.
+  streamflow: examples/hudson/data/hudson_qprime.ic
+  # USGS daily discharge; Poughkeepsie is the merged 72137 series.
+  observations: examples/hudson/data/hudson_obs.ic
+  gages: examples/hudson/data/hudson_gage.csv
+
+experiment:
+  # batch_size is the gauge count, so every mini-batch is the whole domain.
+  batch_size: 4
+  # Training window (water years 2003–2012).
+  start_time: 2002/10/01
+  end_time: 2012/09/30
+  epochs: 30
+  rho: 90
+  shuffle: true
+  warmup: 5
+  learning_rate:
+    1: 0.001
+    15: 0.0005
+  grad_clip_max_norm: 1.0
+
+kan_head:
+  hidden_size: 21
+  num_hidden_layers: 2
+  grid: 50
+  k: 2
+  input_var_names:
+    - SoilGrids1km_clay
+    - aridity
+    - meanelevation
+    - meanP
+    - NDVI
+    - meanslope
+    - log10_uparea
+    - SoilGrids1km_sand
+    - ETPOT_Hargr
+    - Porosity
+  learnable_parameters:
+    - n
+    - q_spatial
+    - p_spatial
+
+params:
+  parameter_ranges:
+    n: [0.015, 0.25]
+    q_spatial: [0.0, 1.0]
+    p_spatial: [1.0, 200.0]
+  attribute_minimums:
+    discharge: 1.0e-4
+    slope: 1.0e-3
+    velocity: 0.01
+    depth: 0.01
+    bottom_width: 0.01
+  defaults:
+    p_spatial: 21.0
+  log_space_parameters:
+    - p_spatial
+  # Hours the routed output is advanced before daily scoring (signed-at-zero
+  # convention; matches DDR's tau: 9).
+  tau: 9
+  # Corrected physics (trapezoid-exact celerity β, Cunge-matched X, own-reach
+  # gauge readout) is the default, the same physics as DDR's Juniata example
+  # since DDR PR #192.
+  # CPU-friendly: no CUDA requirement anywhere in the sample.
+  sparse_solver: cpu
+  use_cuda_graphs: false
+
+# Evaluation overlay (2012-10-01 to 2019-08-31, inside the 72137 record).
+# CAUTION: batch_size changes meaning: GAUGES in training, DAYS here.
+# 2600 days covers the whole test period (2,526 days) in ONE eval chunk. A 15-day
+# chunk seam leaks into the 71 h Godin filter at Poughkeepsie (see the README).
+testing:
+  start_time: 2012/10/01
+  end_time: 2019/08/31
+  batch_size: 2600
+  rho: null

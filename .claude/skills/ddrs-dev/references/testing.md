@@ -23,6 +23,12 @@ cargo test --test leakance_off_parity   # any routing change can disturb OFF-par
 cargo test --test zeta_accum
 cargo test --test leakance_reference_match  # the only DDR anchor leakance has
 cargo test --test reservoir_override    # the plain timestep op carries S19''/B19''
+# Stage routing (src/routing/stage*): the stage tests below
+cargo test --test stage_analytic --test stage_boundary_store --test stage_network \
+  --test stage_off_parity --test stage_option_c --test stage_step \
+  --test juniata_stage --test juniata_stage_diag --test juniata_bundle \
+  --test channel_geometry --test tree_lu --test tree_lu_gradcheck \
+  --test stage_op_parity --test stage_op_adjoint --test stage_op_tape
 ```
 
 Since 2026-09-02 the sandbox gate is machine-enforced twice over:
@@ -33,6 +39,19 @@ callers no longer need to read stdout. The example remains the diagnostic
 form (per-reach table, PNG, `DDRS_FORCE_GRAPHS` GPU path).
 
 ### Acceptance — end-to-end metric floors (Juniata)
+
+Stage routing has its own acceptance test, release-only (about 36 s on CPU):
+
+```bash
+cargo test --release --test juniata_stage_acceptance -- --nocapture
+```
+
+It trains the bundle with `examples/juniata/ddrs_stage.yaml` (stage block on,
+`theta: 1.0`, all 213 reaches). It asserts routed NSE >= 0.75 and KGE >= 0.84
+(seed-42 reference 0.7928 / 0.8808), NSE above the summed-Q' baseline, and the
+`stage routing:` and `stage mass balance: rel ... over N steps, gross ...` log lines
+(rel <= 1e-4, N > 0, gross > 0; a block that never ran prints `no steps` and fails).
+It reads `run.log`, so it needs `--nocapture`.
 
 ```bash
 cargo test --release --test juniata_acceptance -- --nocapture   # ~53 s after build (3 trainings)
@@ -67,6 +86,28 @@ The gridded (DDM30) twin on `examples/juniata_gridded/`: floors NSE ≥ 0.70 /
 KGE ≥ 0.69 (seed-42 reference 0.751 / 0.730; seeds {42, 7, 123} span
 0.744–0.758 / 0.728–0.732), baseline NSE ∈ [0.57, 0.62] (deterministic 0.594,
 matches DDR). The baseline band is the one that catches a wrong `Qr` axis order.
+
+### Acceptance: Hudson tidal example
+
+Local only (not in CI), release-only (about 150 s on CPU, about 2 GB):
+
+```bash
+cargo test --release --test hudson_acceptance -- --nocapture
+cargo test --release --test hudson_stage -- --nocapture
+```
+
+`hudson_acceptance` trains `examples/hudson/ddrs_mc_only.yaml` and `ddrs.yaml`
+(stage block, Godin filter at Poughkeepsie), computes per-gauge NSE/KGE from
+`eval/predictions.zarr` and joins them to the baseline by gauge id. It asserts
+`n_gauges_total` 4, `n_gauges_finite_nse` 3, a NaN harbor pseudo-gauge, stage
+Poughkeepsie NSE above the baseline and >= 0.26 / KGE >= 0.58 (measured 0.308 /
+0.625), Green Island within 0.02 of MC, the `run.log` stage lines, and a single
+eval chunk (`chunk 1/1:`). Eval runs as one 2600-day chunk
+(`testing.batch_size`). 15-day chunks leak into the Godin filter, and eval prints
+a warning when godin is on with more than one chunk. `hudson_stage` also asserts
+the Poughkeepsie M2 stage amplitude is above 0.2 m. `hudson_bundle` runs in CI.
+Run the release tests by hand before a merge that touches the stage or filter
+paths.
 
 ### Tier B — KAN head
 `src/nn/`, `Cargo.toml` rskan tag

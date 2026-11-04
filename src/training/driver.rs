@@ -198,6 +198,23 @@ fn run_micro_batch<I: Backend>(
     let obs_arr = batch.observations.clone(); // (rho_days, G)
     let t_days_full = obs_arr.nrows();
 
+    // Gauges on stage rows get the Godin filter before daily pooling. The rows
+    // are found here because `to_tensors` consumes the batch.
+    let godin_rows = if cfg.godin_filter_on() {
+        crate::training::tidal_filter::stage_gauge_rows(cfg, &batch, &batch.observations)
+    } else {
+        Vec::new()
+    };
+    if !godin_rows.is_empty() {
+        use std::io::Write;
+        let ids: Vec<Staid> = godin_rows.iter().map(|&r| batch.gauge_staids[r].clone()).collect();
+        let _ = writeln!(
+            std::io::stderr(),
+            "{}",
+            crate::training::tidal_filter::godin_log_line("train", &ids)
+        );
+    }
+
     // to_tensors::<Autodiff<I>> lifts plain ndarray buffers to the device.
     let tensors = batch.to_tensors::<Autodiff<I>>(device);
     let (median_n, n_at_floor) =
@@ -234,6 +251,11 @@ fn run_micro_batch<I: Backend>(
             rule_curve: rc_record,
         })
     });
+    let pred_hourly = if godin_rows.is_empty() {
+        pred_hourly
+    } else {
+        crate::training::tidal_filter::godin_filter(pred_hourly, &godin_rows)
+    };
     let daily = tau_trim_and_downsample(pred_hourly, cfg.params.tau);
     let dims = daily.dims();
     let (g, t_days) = (dims[0], dims[1]);
@@ -874,4 +896,87 @@ pub fn train<I: Backend>(
         state.epoch = epoch + 1;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::backend::NdArray;
+
+    type I = NdArray<f32>;
+
+    const STAGE_YAML: &str = "examples/juniata/ddrs_stage.yaml";
+    const GAUGE: &str = "01567000";
+
+    /// One `run_micro_batch` on the Juniata bundle with `tidal_filter` set to
+    /// `tidal` (`None` leaves the key out). Returns the loss and whether the
+    /// gradient of the head's output weight is finite with at least one
+    /// non-zero element.
+    fn one_batch(tidal: Option<&str>, tag: &str) -> (f32, bool) {
+        let mut yaml = std::fs::read_to_string(STAGE_YAML).unwrap();
+        if let Some(t) = tidal {
+            yaml = yaml.replace(
+                "    downstream_boundary: normal_depth\n",
+                &format!("    downstream_boundary: normal_depth\n    tidal_filter: {t}\n"),
+            );
+        }
+        let dir = std::env::temp_dir().join(format!("ddrs_drv_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cfg.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::from_yaml_file(&path).unwrap();
+        assert_eq!(cfg.godin_filter_on(), tidal == Some("godin"));
+        let device = Default::default();
+        let head_cfg = crate::config::kan_config(cfg.kan_head.as_ref().unwrap(), cfg.seed);
+        let head: KanHead<Autodiff<I>> = head_cfg.init::<Autodiff<I>>(&device);
+        let ds = MeritGagesDataset::open(&cfg).unwrap();
+        let start = chrono::NaiveDate::from_ymd_opt(1990, 1, 1).unwrap();
+        let window = RhoWindow {
+            start_day_idx: (start - ds.time_axis().start).num_days() as usize,
+            rho_days: 90,
+            window_start: start,
+        };
+        let out = run_micro_batch::<I>(
+            &cfg,
+            &ds,
+            &head,
+            None,
+            &device,
+            &[Staid::from(GAUGE)],
+            &window,
+            0,
+            None,
+        )
+        .unwrap()
+        .expect("the gauge has observations");
+        let grads = out.loss.backward();
+        let gw: Vec<f32> = head
+            .output
+            .weight
+            .val()
+            .grad(&grads)
+            .expect("the head output weight has a gradient")
+            .into_data()
+            .to_vec()
+            .unwrap();
+        let grad_ok = gw.iter().all(|v| v.is_finite()) && gw.iter().any(|v| *v != 0.0);
+        (out.loss_f32, grad_ok)
+    }
+
+    #[test]
+    fn tidal_filter_none_parses_as_absent_in_training() {
+        let (absent, grad_a) = one_batch(None, "absent");
+        let (none, grad_n) = one_batch(Some("none"), "none");
+        assert!(grad_a && grad_n, "control: the off path must give a real head gradient");
+        assert_eq!(absent.to_bits(), none.to_bits());
+    }
+
+    #[test]
+    fn training_loss_applies_the_filter() {
+        let (none, grad_none) = one_batch(Some("none"), "n2");
+        let (godin, grad_godin) = one_batch(Some("godin"), "g2");
+        assert!(grad_none, "control: off path head gradient");
+        assert!(grad_godin, "godin path: head gradient must be finite and non-zero (loss {godin})");
+        assert_ne!(none.to_bits(), godin.to_bits(), "godin must change the loss");
+    }
 }

@@ -144,6 +144,16 @@ pub struct DataSources {
     /// Required when `params.use_reservoirs: true`; ignored otherwise.
     #[serde(default)]
     pub reservoirs: Option<std::path::PathBuf>,
+    /// Prescribed downstream stage series for `params.stage_routing` with
+    /// `downstream_boundary: prescribed_stage`. Required then, rejected
+    /// otherwise (`validate_stage_routing`).
+    #[serde(default)]
+    pub stage_boundary: Option<std::path::PathBuf>,
+    /// Per-reach channel-geometry table for `params.stage_routing` with
+    /// `geometry: table` or `mixed`. Required then, rejected otherwise
+    /// (`validate_stage_routing`).
+    #[serde(default)]
+    pub channel_geometry: Option<std::path::PathBuf>,
     /// Optional per-source icechunk snapshot pins: source name → snapshot id
     /// (Crockford base32, as icechunk prints it). A pinned source is opened at
     /// `VersionInfo::SnapshotId` instead of the `main` branch tip, so a run is
@@ -778,6 +788,136 @@ impl Default for Subdivision {
     }
 }
 
+fn default_theta() -> f32 {
+    1.0
+}
+fn default_theta_control() -> f32 {
+    0.5
+}
+fn default_substeps() -> u32 {
+    1
+}
+
+/// Which reaches the stage solve covers.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum StageReaches {
+    /// Every reach of the network (YAML: the string `all`).
+    #[default]
+    All,
+    /// Only these COMIDs (YAML: a sequence of integers).
+    Comids(Vec<i64>),
+}
+
+impl<'de> Deserialize<'de> for StageReaches {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Word(String),
+            Ids(Vec<i64>),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Word(w) if w == "all" => Ok(StageReaches::All),
+            Raw::Word(w) => Err(D::Error::custom(format!(
+                "stage_routing.reaches: expected \"all\" or a list of COMIDs, got \"{w}\""
+            ))),
+            Raw::Ids(v) => Ok(StageReaches::Comids(v)),
+        }
+    }
+}
+
+/// Downstream boundary of the stage solve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstreamBoundary {
+    #[default]
+    NormalDepth,
+    /// Needs `data_sources.stage_boundary`.
+    PrescribedStage,
+}
+
+/// Where the stage solve gets channel geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageGeometry {
+    /// From the KAN head and attributes, as in the Muskingum-Cunge path.
+    #[default]
+    Head,
+    /// Every stage reach needs a row in `data_sources.channel_geometry`.
+    Table,
+    /// Table rows where present, head values elsewhere.
+    Mixed,
+}
+
+/// Tidal filter on the hourly routed discharge at gauges on stage rows. It runs
+/// in training and in eval, before the hourly-to-daily pooling. A daily mean of
+/// an hourly M2 tide aliases to 14.8 days, the period of the spring-neap cycle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TidalFilter {
+    #[default]
+    None,
+    /// 24, 24 and 25 h running means; needs `enabled: true`.
+    Godin,
+}
+
+/// YAML `params.stage_routing:` block: implicit stage-based routing solved as a
+/// tree. Absent or `enabled: false` leaves routing byte-identical.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StageRouting {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Implicitness of friction edges and the normal-depth outlet, in `[0.5, 1]`.
+    #[serde(default = "default_theta")]
+    pub theta: f32,
+    /// Implicitness of dam edges, in `(0, 1]`.
+    #[serde(default = "default_theta_control")]
+    pub theta_control: f32,
+    #[serde(default = "default_substeps")]
+    pub substeps: u32,
+    #[serde(default)]
+    pub reaches: StageReaches,
+    #[serde(default)]
+    pub downstream_boundary: DownstreamBoundary,
+    /// The stage set's outlet reach. Required with `prescribed_stage`
+    /// (`validate_stage_routing`); optional with `normal_depth`, where, when
+    /// set, it must be an outlet of the stage set. A COMID missing from a
+    /// batch network is a `DataError` at batch time; under `prescribed_stage`
+    /// `MeritGagesDataset::open` also checks that every batch holds it
+    /// (`experiment.batch_size` at least the gauge count).
+    #[serde(default)]
+    pub boundary_comid: Option<i64>,
+    /// Bed elevation `z_b` (m) at the downstream end of the stage set's outlet
+    /// reach; the datum of the `stage_boundary` series. Head beds integrate up
+    /// from it. When the outlet has a `channel_geometry` row, that row's
+    /// `bed_z_m` replaces it (the two must not disagree), and a differing
+    /// value is reported once on stderr.
+    #[serde(default)]
+    pub anchor_elevation_m: f32,
+    #[serde(default)]
+    pub geometry: StageGeometry,
+    #[serde(default)]
+    pub tidal_filter: TidalFilter,
+}
+
+impl Default for StageRouting {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            theta: default_theta(),
+            theta_control: default_theta_control(),
+            substeps: default_substeps(),
+            reaches: StageReaches::default(),
+            downstream_boundary: DownstreamBoundary::default(),
+            boundary_comid: None,
+            anchor_elevation_m: 0.0,
+            geometry: StageGeometry::default(),
+            tidal_filter: TidalFilter::default(),
+        }
+    }
+}
+
 /// Routing parameter configuration.
 #[derive(Debug, Clone)]
 pub struct Params {
@@ -943,6 +1083,10 @@ pub struct Params {
     /// `use_reservoirs`, is rejected at load, and so is `true` with
     /// `reservoir_dam_floor: carry`. [`Config::flood_pool_on`] reads it.
     pub reservoir_flood_pool: Option<bool>,
+    /// Implicit stage-based routing (tree solve). Absent ⇒ off, routing is
+    /// byte-identical. [`Config::stage_routing_on`] reads it;
+    /// `validate_stage_routing` guards it.
+    pub stage_routing: Option<StageRouting>,
 }
 
 /// `release_head.flood_pool`: which dams carry the per-dam flood pool (law FA
@@ -1225,6 +1369,19 @@ impl Config {
         }
     }
 
+    /// True when `params.stage_routing` is present and `enabled`.
+    pub fn stage_routing_on(&self) -> bool {
+        self.params.stage_routing.as_ref().is_some_and(|s| s.enabled)
+    }
+
+    /// True when the stage block is on and `tidal_filter: godin` is set.
+    pub fn godin_filter_on(&self) -> bool {
+        self.params
+            .stage_routing
+            .as_ref()
+            .is_some_and(|s| s.enabled && s.tidal_filter == TidalFilter::Godin)
+    }
+
     /// True when the routing head is frozen for release-only training
     /// (`release_head.freeze_routing` under `reservoir_release: learned`).
     pub fn routing_frozen(&self) -> bool {
@@ -1281,6 +1438,7 @@ impl Default for Params {
             reservoir_dam_floor: None,
             reservoir_dam_row_positivity: None,
             reservoir_flood_pool: None,
+            stage_routing: None,
         }
     }
 }
@@ -1319,6 +1477,7 @@ struct ParamsRaw {
     reservoir_dam_floor: Option<DamFloor>,
     reservoir_dam_row_positivity: Option<bool>,
     reservoir_flood_pool: Option<bool>,
+    stage_routing: Option<StageRouting>,
 }
 
 impl From<ParamsRaw> for Params {
@@ -1443,6 +1602,7 @@ impl From<ParamsRaw> for Params {
         p.reservoir_dam_floor = r.reservoir_dam_floor;
         p.reservoir_dam_row_positivity = r.reservoir_dam_row_positivity;
         p.reservoir_flood_pool = r.reservoir_flood_pool;
+        p.stage_routing = r.stage_routing;
         p
     }
 }
@@ -1596,6 +1756,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_reservoirs(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_stage_routing(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -2085,6 +2249,122 @@ fn validate_dam_row_positivity(
             "{key}: true is redundant with `params.enforce_positivity: true`, which already \
              caps X at 0.5·Cr·(1 − δ) on every row, dam rows included; set one of the two"
         ));
+    }
+    Ok(())
+}
+
+/// Guards for `params.stage_routing`. Value ranges and the `godin` rule apply
+/// whenever the block is present; every other rule applies only when it is
+/// `enabled`. Every message starts with `params.stage_routing:`.
+fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
+    let p = &cfg.params;
+    let Some(s) = p.stage_routing.as_ref() else {
+        return Ok(());
+    };
+    if !(s.theta.is_finite() && (0.5..=1.0).contains(&s.theta)) {
+        return Err(format!(
+            "params.stage_routing: `theta` must be in [0.5, 1], got {}",
+            s.theta
+        ));
+    }
+    if !(s.theta_control.is_finite() && s.theta_control > 0.0 && s.theta_control <= 1.0) {
+        return Err(format!(
+            "params.stage_routing: `theta_control` must be in (0, 1], got {}",
+            s.theta_control
+        ));
+    }
+    if s.substeps == 0 {
+        return Err("params.stage_routing: `substeps` must be >= 1".to_string());
+    }
+    if s.tidal_filter == TidalFilter::Godin && !s.enabled {
+        return Err("params.stage_routing: `tidal_filter: godin` needs `enabled: true`; the \
+                    filter acts on gauges on stage rows"
+            .to_string());
+    }
+    if !s.enabled {
+        return Ok(());
+    }
+    if matches!(&s.reaches, StageReaches::Comids(v) if v.is_empty()) {
+        return Err("params.stage_routing: `reaches` is an empty list; use \"all\" or list at \
+                    least one COMID"
+            .to_string());
+    }
+    let ds = cfg.data_sources.as_ref();
+    let unsupported = |key: &str, why: &str| -> String {
+        format!("params.stage_routing: not supported with {key}: {why}")
+    };
+    if p.use_cuda_graphs {
+        return Err(unsupported("`use_cuda_graphs: true`", "the captured graph has no stage solve"));
+    }
+    if p.sparse_solver == SparseSolver::Cuda {
+        return Err(unsupported("`sparse_solver: cuda`", "the tree solve runs on the CPU path only"));
+    }
+    if p.use_leakance {
+        return Err(unsupported("`use_leakance: true`", "the leakance op has no stage path"));
+    }
+    if p.ddr_match {
+        return Err(unsupported("`ddr_match: true`", "the legacy physics has no stage path"));
+    }
+    if p.subdivision.enabled {
+        return Err(unsupported("`params.subdivision.enabled: true`", "split reaches repeat a COMID"));
+    }
+    if ds.is_some_and(|d| d.gridded_network.is_some()) {
+        return Err(unsupported("`data_sources.gridded_network`", "the stage solve is built on MERIT reaches"));
+    }
+    if p.reservoir_release == ReservoirRelease::Learned {
+        return Err(unsupported("`reservoir_release: learned`", "only fixed dam tables are supported"));
+    }
+    if p.stage_roughness.is_some() {
+        return Err(unsupported("`params.stage_roughness`", "the stage solve has its own roughness"));
+    }
+    if learns_gamma(cfg) {
+        return Err(unsupported("`gamma` in kan_head.learnable_parameters", "no learned-gamma stage path"));
+    }
+    if p.reservoir_dam_row == Some(DamRow::Additive) {
+        return Err(unsupported("`reservoir_dam_row: additive`", "only the replace dam row is supported"));
+    }
+    if p.reservoir_flood_pool == Some(true) {
+        return Err(unsupported("`reservoir_flood_pool: true`", "no flood pool in the stage solve"));
+    }
+    if p.reservoir_dam_floor == Some(DamFloor::Carry) {
+        return Err(unsupported("`reservoir_dam_floor: carry`", "no owed-volume state in the stage solve"));
+    }
+    if cfg.experiment.as_ref().is_some_and(|e| e.state_cache.is_some()) {
+        return Err(unsupported("`experiment.state_cache`", "the stage solve has no cached initial state"));
+    }
+    let has_boundary = ds.is_some_and(|d| d.stage_boundary.is_some());
+    match (s.downstream_boundary, has_boundary) {
+        (DownstreamBoundary::PrescribedStage, _) if s.boundary_comid.is_none() => {
+            return Err("params.stage_routing: `downstream_boundary: prescribed_stage` requires \
+                        `boundary_comid` (the outlet reach the series is applied to)"
+                .to_string());
+        }
+        (DownstreamBoundary::PrescribedStage, false) => {
+            return Err("params.stage_routing: `downstream_boundary: prescribed_stage` requires \
+                        `data_sources.stage_boundary`"
+                .to_string());
+        }
+        (DownstreamBoundary::NormalDepth, true) => {
+            return Err("params.stage_routing: `data_sources.stage_boundary` is set but \
+                        `downstream_boundary` is normal_depth; set `prescribed_stage` or drop the path"
+                .to_string());
+        }
+        _ => {}
+    }
+    let has_geometry = ds.is_some_and(|d| d.channel_geometry.is_some());
+    match (s.geometry, has_geometry) {
+        (StageGeometry::Table | StageGeometry::Mixed, false) => {
+            return Err(format!(
+                "params.stage_routing: `geometry: {}` requires `data_sources.channel_geometry`",
+                if s.geometry == StageGeometry::Table { "table" } else { "mixed" }
+            ));
+        }
+        (StageGeometry::Head, true) => {
+            return Err("params.stage_routing: `data_sources.channel_geometry` is set but \
+                        `geometry` is head; set `table` or `mixed`, or drop the path"
+                .to_string());
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -4380,5 +4660,245 @@ data_sources:
             "  use_reservoirs: true\n",
         );
         reservoir_rejection(path, "gridded_network");
+    }
+
+    // ---- params.stage_routing ----
+
+    /// Builds a config with explicit adjacency, extra `data_sources` lines,
+    /// a `params:` body (each line indented by the caller), and a tail of
+    /// top-level blocks.
+    fn stage_yaml(name: &str, ds_extra: &str, params: &str, tail: &str) -> std::path::PathBuf {
+        write_yaml_with_data_sources(
+            name,
+            &format!(
+                "data_sources:\n  attributes: /dev/null/attrs.nc\n{EXPLICIT_ADJ}  \
+                 streamflow: /dev/null/sf.ic\n  observations: /dev/null/obs.ic\n  \
+                 gages: /dev/null/gages.csv\n{ds_extra}params:\n{params}{tail}"
+            ),
+        )
+    }
+
+    const SR_ON: &str = "  stage_routing:\n    enabled: true\n";
+
+    /// Loads `path`, asserts the load fails and every needle is in the message.
+    fn stage_rejection(path: std::path::PathBuf, needles: &[&str]) {
+        let msg = Config::from_yaml_file(&path)
+            .expect_err("config must be rejected at load")
+            .to_string();
+        for n in needles {
+            assert!(msg.contains(n), "error should contain `{n}`, got: {msg}");
+        }
+    }
+
+    #[test]
+    fn stage_routing_defaults_absent_and_off() {
+        assert!(Config::default().params.stage_routing.is_none());
+        assert!(!Config::default().stage_routing_on());
+        let cfg = Config::from_yaml_file("examples/juniata/ddrs.yaml").expect("juniata loads");
+        assert!(cfg.params.stage_routing.is_none());
+        assert!(!cfg.stage_routing_on());
+    }
+
+    #[test]
+    fn stage_routing_minimal_block_parses() {
+        let path = stage_yaml("ddrs_sr_min.yaml", "", SR_ON, "");
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let s = cfg.params.stage_routing.as_ref().expect("block");
+        assert!(s.enabled && cfg.stage_routing_on());
+        assert_eq!((s.theta, s.theta_control, s.substeps), (1.0, 0.5, 1));
+        assert_eq!(s.reaches, StageReaches::All);
+        assert_eq!(s.downstream_boundary, DownstreamBoundary::NormalDepth);
+        assert_eq!(s.boundary_comid, None);
+        assert_eq!(s.geometry, StageGeometry::Head);
+        assert_eq!(s.tidal_filter, TidalFilter::None);
+    }
+
+    #[test]
+    fn stage_routing_boundary_comid_and_reaches_parse() {
+        let path = stage_yaml(
+            "ddrs_sr_comid.yaml",
+            "",
+            "  stage_routing:\n    enabled: true\n    boundary_comid: 73005067\n    reaches: [1, 2]\n",
+            "",
+        );
+        let cfg = Config::from_yaml_file(&path).expect("load");
+        let s = cfg.params.stage_routing.unwrap();
+        assert_eq!(s.boundary_comid, Some(73005067));
+        assert_eq!(s.reaches, StageReaches::Comids(vec![1, 2]));
+    }
+
+    #[test]
+    fn stage_routing_rejects_cuda_graphs() {
+        let p = format!("{SR_ON}  use_cuda_graphs: true\n  ddr_match: true\n");
+        stage_rejection(stage_yaml("ddrs_sr_graphs.yaml", "", &p, ""), &["stage_routing", "use_cuda_graphs"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_cuda_solver() {
+        let p = format!("{SR_ON}  sparse_solver: cuda\n");
+        stage_rejection(stage_yaml("ddrs_sr_solver.yaml", "", &p, ""), &["stage_routing", "sparse_solver"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_leakance() {
+        let p = format!("{SR_ON}  use_leakance: true\n");
+        stage_rejection(stage_yaml("ddrs_sr_leak.yaml", "", &p, ""), &["stage_routing", "use_leakance"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_ddr_match() {
+        let p = format!("{SR_ON}  ddr_match: true\n");
+        stage_rejection(stage_yaml("ddrs_sr_ddr.yaml", "", &p, ""), &["stage_routing", "ddr_match"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_subdivision_and_gridded() {
+        let p = format!("{SR_ON}  subdivision:\n    enabled: true\n");
+        stage_rejection(stage_yaml("ddrs_sr_sub.yaml", "", &p, ""), &["stage_routing", "subdivision"]);
+        let path = write_yaml_with_data_sources(
+            "ddrs_sr_grid.yaml",
+            &format!(
+                "data_sources:\n  attributes: /dev/null/attrs.nc\n  gridded_network: /dev/null/g.zarr\n  \
+                 streamflow: /dev/null/sf.ic\n  observations: /dev/null/obs.ic\n  \
+                 gages: /dev/null/gages.csv\nparams:\n{SR_ON}"
+            ),
+        );
+        stage_rejection(path, &["stage_routing", "gridded_network"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_learned_release() {
+        let p = format!("{SR_ON}  use_reservoirs: true\n  reservoir_release: learned\n");
+        let path = stage_yaml(
+            "ddrs_sr_learned.yaml",
+            "  reservoirs: /dev/null/r.csv\n",
+            &p,
+            &format!("{KAN_HEAD_BLOCK}{RELEASE_HEAD_BLOCK}"),
+        );
+        stage_rejection(path, &["stage_routing", "reservoir_release: learned"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_bad_theta_and_substeps() {
+        let bad = |name: &str, body: &str, key: &str| {
+            let p = format!("  stage_routing:\n    enabled: true\n{body}");
+            stage_rejection(stage_yaml(name, "", &p, ""), &["stage_routing", key]);
+        };
+        bad("ddrs_sr_t04.yaml", "    theta: 0.4\n", "`theta`");
+        bad("ddrs_sr_t15.yaml", "    theta: 1.5\n", "`theta`");
+        bad("ddrs_sr_c0.yaml", "    theta_control: 0.0\n", "theta_control");
+        bad("ddrs_sr_c15.yaml", "    theta_control: 1.5\n", "theta_control");
+        bad("ddrs_sr_s0.yaml", "    substeps: 0\n", "substeps");
+    }
+
+    #[test]
+    fn stage_routing_prescribed_stage_needs_boundary_source() {
+        let p = "  stage_routing:\n    enabled: true\n    downstream_boundary: prescribed_stage\n    boundary_comid: 7\n";
+        stage_rejection(
+            stage_yaml("ddrs_sr_pres_no.yaml", "", p, ""),
+            &["prescribed_stage", "data_sources.stage_boundary"],
+        );
+        let ds = "  stage_boundary: /dev/null/stage.csv\n";
+        Config::from_yaml_file(stage_yaml("ddrs_sr_pres_ok.yaml", ds, p, "")).expect("both set loads");
+        stage_rejection(
+            stage_yaml("ddrs_sr_pres_conv.yaml", ds, SR_ON, ""),
+            &["data_sources.stage_boundary", "normal_depth"],
+        );
+    }
+
+    #[test]
+    fn stage_routing_prescribed_stage_needs_boundary_comid() {
+        let ds = "  stage_boundary: /dev/null/stage.csv\n";
+        let no = "  stage_routing:\n    enabled: true\n    downstream_boundary: prescribed_stage\n";
+        stage_rejection(
+            stage_yaml("ddrs_sr_pres_nocomid.yaml", ds, no, ""),
+            &["prescribed_stage", "boundary_comid"],
+        );
+        let yes = format!("{no}    boundary_comid: 7\n");
+        Config::from_yaml_file(stage_yaml("ddrs_sr_pres_comid.yaml", ds, &yes, "")).expect("comid set loads");
+    }
+
+    #[test]
+    fn stage_routing_table_geometry_needs_source() {
+        let ds = "  channel_geometry: /dev/null/geom.csv\n";
+        for g in ["table", "mixed"] {
+            let p = format!("  stage_routing:\n    enabled: true\n    geometry: {g}\n");
+            stage_rejection(
+                stage_yaml(&format!("ddrs_sr_geom_no_{g}.yaml"), "", &p, ""),
+                &[&format!("geometry: {g}"), "data_sources.channel_geometry"],
+            );
+            Config::from_yaml_file(stage_yaml(&format!("ddrs_sr_geom_ok_{g}.yaml"), ds, &p, ""))
+                .expect("both set loads");
+        }
+        stage_rejection(
+            stage_yaml("ddrs_sr_geom_conv.yaml", ds, SR_ON, ""),
+            &["data_sources.channel_geometry", "head"],
+        );
+    }
+
+    #[test]
+    fn stage_routing_godin_needs_the_block() {
+        let p = "  stage_routing:\n    enabled: false\n    tidal_filter: godin\n";
+        stage_rejection(
+            stage_yaml("ddrs_sr_godin_false.yaml", "", p, ""),
+            &["stage_routing", "tidal_filter", "enabled"],
+        );
+        let p = format!("{SR_ON}    tidal_filter: godin\n");
+        let cfg = Config::from_yaml_file(stage_yaml("ddrs_sr_godin_true.yaml", "", &p, ""))
+            .expect("godin with the block on loads");
+        assert_eq!(cfg.params.stage_routing.unwrap().tidal_filter, TidalFilter::Godin);
+    }
+
+    #[test]
+    fn stage_routing_rejects_empty_reaches() {
+        let p = "  stage_routing:\n    enabled: true\n    reaches: []\n";
+        stage_rejection(stage_yaml("ddrs_sr_empty.yaml", "", p, ""), &["stage_routing", "reaches"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_stage_roughness_and_learned_gamma() {
+        let p = format!("{SR_ON}  stage_roughness:\n    gamma: 0.1\n    d_ref: 1.0\n");
+        stage_rejection(stage_yaml("ddrs_sr_rough.yaml", "", &p, ""), &["stage_routing", "stage_roughness"]);
+        let kan = "kan_head:\n  hidden_size: 4\n  num_hidden_layers: 1\n  \
+                   input_var_names: [aridity]\n  learnable_parameters: [n, q_spatial, gamma]\n";
+        stage_rejection(stage_yaml("ddrs_sr_gamma.yaml", "", SR_ON, kan), &["stage_routing", "gamma"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_dam_row_variants() {
+        for (key, val) in [
+            ("reservoir_dam_row", "additive"),
+            ("reservoir_flood_pool", "true"),
+            ("reservoir_dam_floor", "carry"),
+        ] {
+            let p = format!("{SR_ON}  use_reservoirs: true\n  {key}: {val}\n");
+            let path = stage_yaml(
+                &format!("ddrs_sr_{key}.yaml"),
+                "  reservoirs: /dev/null/r.csv\n",
+                &p,
+                "",
+            );
+            stage_rejection(path, &["stage_routing", key]);
+        }
+    }
+
+    #[test]
+    fn stage_routing_rejects_state_cache() {
+        let exp = "experiment:\n  batch_size: 1\n  start_time: 1981/10/01\n  end_time: 1981/10/10\n  \
+                   epochs: 1\n  warmup: 1\n  state_cache: /dev/null/sc.nc\n";
+        stage_rejection(stage_yaml("ddrs_sr_cache.yaml", "", SR_ON, exp), &["stage_routing", "state_cache"]);
+    }
+
+    #[test]
+    fn stage_routing_rejects_slope_eps() {
+        let p = "  stage_routing:\n    enabled: true\n    slope_eps: 0.001\n";
+        stage_rejection(stage_yaml("ddrs_sr_eps.yaml", "", p, ""), &["slope_eps"]);
+    }
+
+    #[test]
+    fn stage_routing_allows_fixed_reservoir_table() {
+        let p = format!("{SR_ON}  use_reservoirs: true\n");
+        let path = stage_yaml("ddrs_sr_fixed_res.yaml", "  reservoirs: /dev/null/r.csv\n", &p, "");
+        Config::from_yaml_file(&path).expect("fixed table with stage routing loads");
     }
 }

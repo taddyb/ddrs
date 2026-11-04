@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod optimizer;
 pub mod probe;
 pub mod release_eval;
+pub mod tidal_filter;
 pub mod zarr_io;
 
 pub use bootstrap::bootstrap_head_and_state;

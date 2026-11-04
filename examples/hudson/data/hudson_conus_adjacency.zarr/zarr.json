@@ -1,0 +1,12 @@
+{
+  "attributes": {
+    "format": "COO",
+    "shape": [
+      756,
+      756
+    ],
+    "geodataset": "merit"
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}
