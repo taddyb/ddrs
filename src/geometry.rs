@@ -20,8 +20,14 @@ pub struct TrapezoidalGeometry<B: Backend> {
     pub velocity: Tensor<B, 1>,
 }
 
-/// Invert Manning's equation for a trapezoidal section, then derive the rest
-/// of the geometry from the Leopold & Maddock power law.
+/// Invert Manning's equation on the power-law section with `R = d`, then
+/// build a tangent trapezoid on that depth (sections 4.3 and 12.6 of
+/// `research/specs/2026-09-17-model-equations-reference.md`).
+/// The two sections differ, so `Q != vA` on the result. The trapezoid
+/// default keeps this; `params.geometry_form: power_law` uses one consistent
+/// section instead.
+///
+/// The rest of the geometry comes from the Leopold & Maddock power law.
 ///
 /// Matches the reference Python implementation including the `q + 1e-6` epsilon,
 /// the `(3 / (5 + 3q))` exponent on depth, and the `[0.5, 50]` side-slope clamp.
@@ -202,4 +208,171 @@ pub fn trapezoid_depth_derivatives<B: Backend>(
     let root = (ss.clone().powf_scalar(2.0) + 1.0).sqrt();
     let per_d = bw_d + root.clone() * 2.0 + depth * ss.clone() * ss_d * 2.0 / root;
     (area_d, per_d)
+}
+
+// ---------------------------------------------------------------------------
+// Power-law channel section
+// ---------------------------------------------------------------------------
+
+/// Power-law section at a known depth: `T = p d^q`, `A = T d/(q+1)`,
+/// `R = A/T = d/(q+1)`.
+///
+/// This is the reference for the stage block. Here `dA/dd = T` exactly, so the
+/// section, the discharge `Q = v A`, and the celerity `c = dQ/dA` agree.
+pub struct PowerLawSection<B: Backend> {
+    pub top_width: Tensor<B, 1>,
+    pub area: Tensor<B, 1>,
+    pub hydraulic_radius: Tensor<B, 1>,
+}
+
+/// Power-law geometry from discharge, returned by [`compute_power_law_geometry`]
+/// and [`compute_power_law_geometry_field`]. All fields are rank-1, one entry per reach.
+pub struct PowerLawGeometry<B: Backend> {
+    /// Natural log of the closed-form bracket, before the exponent is applied.
+    pub ln_ratio: Tensor<B, 1>,
+    /// `e = 3 / (5 + 3 q_eps + 3 gamma)`.
+    pub exponent: Tensor<B, 1>,
+    /// `clamp_min(exp(e * ln_ratio), depth_lb)`.
+    pub depth: Tensor<B, 1>,
+    pub top_width: Tensor<B, 1>,
+    pub area: Tensor<B, 1>,
+    pub hydraulic_radius: Tensor<B, 1>,
+    /// `Q / A`. No clamp, also at the depth floor.
+    pub velocity: Tensor<B, 1>,
+    /// `beta = (5 + 3 q + 3 gamma) / (3 (q + 1))`. Celerity is `velocity * beta`.
+    pub celerity_ratio: Tensor<B, 1>,
+}
+
+/// Build the power-law section for a known depth, with `q_eps = q + 1e-6`.
+///
+/// `top_width` uses the same op as the trapezoid, so `T` is bitwise equal on
+/// both forms. Fused forward code calls this function, so its op order is fixed.
+pub fn power_law_from_depth<B: Backend>(
+    p_spatial: Tensor<B, 1>,
+    q_spatial: Tensor<B, 1>,
+    depth: Tensor<B, 1>,
+) -> PowerLawSection<B> {
+    let q_eps = q_spatial + 1e-6;
+    let top_width = p_spatial * depth.clone().powf(q_eps.clone());
+    let qp1 = q_eps + 1.0;
+    let area = top_width.clone() * depth.clone() / qp1.clone();
+    let hydraulic_radius = depth / qp1;
+    PowerLawSection {
+        top_width,
+        area,
+        hydraulic_radius,
+    }
+}
+
+/// Closed-form `(dA/dd, dR/dd)` of the section from [`power_law_from_depth`].
+/// `dA/dd` is `section.top_width` itself. `dR/dd` is `1 / (q_eps + 1)`.
+/// The results stay on the tape.
+pub fn power_law_depth_derivatives<B: Backend>(
+    q_spatial: Tensor<B, 1>,
+    section: &PowerLawSection<B>,
+) -> (Tensor<B, 1>, Tensor<B, 1>) {
+    let q_eps = q_spatial + 1e-6;
+    (section.top_width.clone(), (q_eps + 1.0).recip())
+}
+
+/// Depth, section, velocity and celerity ratio of the power-law channel, for a
+/// scalar stage-roughness exponent `gamma` (`n(d) = n (d/d_ref)^-gamma`).
+///
+/// Depth solves Manning with `v = Q/A`:
+/// `d = [Q n (q+1)^(5/3) d_ref^gamma / (p sqrt(s))]^(3 / (5 + 3q + 3 gamma))`.
+/// It is computed in log space and floored at `depth_lb`. The `gamma ln(d_ref)`
+/// term enters only when `gamma != 0` and `d_ref != 1`.
+///
+/// Because `A = T d/(q+1)`, `dA/dd = T`, and the celerity is
+/// `c = v * celerity_ratio`, which equals `dQ/dA` exactly.
+///
+/// `clamp_min` is Burn's: at an exact tie with `depth_lb` the gradient passes.
+/// Below the floor the depth is constant, so no gradient reaches `n`, `p`, `q`,
+/// `Q` or `s` through it. The op order is a contract with the fused forward
+/// and its hand-written backward, so do not reorder or fuse these ops.
+///
+/// Autodiff gradients need `discharge > 0`: `ln_ratio` uses `discharge.log()`,
+/// and the gradient at `Q = 0` can be NaN (0/0) even though the forward value
+/// is fine, because the depth floors.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_power_law_geometry<B: Backend>(
+    n: Tensor<B, 1>,
+    p_spatial: Tensor<B, 1>,
+    q_spatial: Tensor<B, 1>,
+    discharge: Tensor<B, 1>,
+    slope: Tensor<B, 1>,
+    depth_lb: f32,
+    gamma: f32,
+    d_ref: f32,
+) -> PowerLawGeometry<B> {
+    let q_eps = q_spatial.clone() + 1e-6;
+    let qp1 = q_eps.clone() + 1.0;
+    let ln_ratio = discharge.clone().log() + n.log() + qp1.clone().log() * (5.0_f32 / 3.0_f32)
+        - p_spatial.clone().log()
+        - slope.log() * 0.5;
+    let ln_ratio = if gamma != 0.0 && d_ref != 1.0 {
+        ln_ratio + gamma * d_ref.ln()
+    } else {
+        ln_ratio
+    };
+    let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
+    let exponent = (q_eps * 3.0 + five_plus_three_gamma).recip() * 3.0;
+    let depth = (ln_ratio.clone() * exponent.clone())
+        .exp()
+        .clamp_min(depth_lb);
+    let s = power_law_from_depth(p_spatial, q_spatial, depth.clone());
+    let velocity = discharge / s.area.clone();
+    let celerity_ratio = (exponent.clone() * qp1).recip();
+    PowerLawGeometry {
+        ln_ratio,
+        exponent,
+        depth,
+        top_width: s.top_width,
+        area: s.area,
+        hydraulic_radius: s.hydraulic_radius,
+        velocity,
+        celerity_ratio,
+    }
+}
+
+/// Same as [`compute_power_law_geometry`], with `gamma` as a per-reach tensor.
+/// The same notes on the clamp tie rule, op order and `discharge > 0` apply.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_power_law_geometry_field<B: Backend>(
+    n: Tensor<B, 1>,
+    p_spatial: Tensor<B, 1>,
+    q_spatial: Tensor<B, 1>,
+    discharge: Tensor<B, 1>,
+    slope: Tensor<B, 1>,
+    depth_lb: f32,
+    gamma: Tensor<B, 1>,
+    d_ref: f32,
+) -> PowerLawGeometry<B> {
+    let q_eps = q_spatial.clone() + 1e-6;
+    let qp1 = q_eps.clone() + 1.0;
+    let ln_ratio = discharge.clone().log() + n.log() + qp1.clone().log() * (5.0_f32 / 3.0_f32)
+        - p_spatial.clone().log()
+        - slope.log() * 0.5;
+    let ln_ratio = if d_ref != 1.0 {
+        ln_ratio + gamma.clone() * d_ref.ln()
+    } else {
+        ln_ratio
+    };
+    let exponent = (q_eps * 3.0 + gamma * 3.0 + 5.0).recip() * 3.0;
+    let depth = (ln_ratio.clone() * exponent.clone())
+        .exp()
+        .clamp_min(depth_lb);
+    let s = power_law_from_depth(p_spatial, q_spatial, depth.clone());
+    let velocity = discharge / s.area.clone();
+    let celerity_ratio = (exponent.clone() * qp1).recip();
+    PowerLawGeometry {
+        ln_ratio,
+        exponent,
+        depth,
+        top_width: s.top_width,
+        area: s.area,
+        hydraulic_radius: s.hydraulic_radius,
+        velocity,
+        celerity_ratio,
+    }
 }

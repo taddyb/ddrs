@@ -604,6 +604,100 @@ fn step_gradcheck_t_prev_and_t_next_with_positivity() {
     assert!(failures.is_empty(), "gradcheck failed: {failures:?}");
 }
 
+/// One `ddr_match` step with the dam row's `x_storage` set to `x_dam`. Every
+/// parent is a leaf: `n`, `q_spatial`, `p_spatial`, `Q_t`, `q'_t`, `T_t`,
+/// `T_t+1`. Returns every reach's `Q_{t+1}` and the seven gradients of the
+/// weighted loss.
+fn one_step_ddr(x_dam: f32, positivity: bool) -> (Vec<f32>, Vec<Vec<f32>>) {
+    use ddrs::sparse::{AValuesAssembler, CsrPattern};
+    let device = Device::default();
+    let dam_len = 20_000.0;
+    let adj = sandbox(3, dam_len);
+    let pattern = Arc::new(CsrPattern::from_sparse(&adj));
+    let assembler = AValuesAssembler::<I>::new(&pattern, &device);
+    let leaf = |v: Vec<f32>| Tensor::<AB, 1>::from_floats(v.as_slice(), &device).require_grad();
+    let c = |v: Vec<f32>| Tensor::<AB, 1>::from_floats(v.as_slice(), &device);
+    let mut x = vec![0.3_f32; N_REACH];
+    x[3] = x_dam;
+    let setup = Setup { ddr_match: true, ..Setup::new(dam_len, positivity) };
+    let parents = [
+        leaf(vec![0.05; N_REACH]),
+        leaf(vec![0.5; N_REACH]),
+        leaf(vec![21.0; N_REACH]),
+        leaf(Q_T.to_vec()),
+        leaf(Q_LAT.to_vec()),
+        leaf(vec![7_200.0]),
+        leaf(vec![9_000.0]),
+    ];
+    let q = ddrs::routing::mmc_op::timestep_forward_release_as::<I>(
+        &setup.cfg(),
+        &pattern,
+        &assembler,
+        parents[0].clone(),
+        parents[1].clone(),
+        parents[2].clone(),
+        parents[3].clone(),
+        parents[4].clone(),
+        c(adj.length_m.clone()),
+        c(adj.slope.clone()),
+        c(x),
+        vec![3],
+        parents[6].clone(),
+        parents[5].clone(),
+        DamRow::Additive,
+    );
+    let out = host(q.clone());
+    let grads = (q * c(STEP_WEIGHTS.to_vec())).sum().backward();
+    let g = parents.iter().map(|t| t.grad(&grads).map(host).unwrap_or_default()).collect();
+    (out, g)
+}
+
+fn bits_equal(a: &[Vec<f32>], b: &[Vec<f32>]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| x.len() == y.len() && x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()))
+}
+
+#[test]
+fn a_tie_at_the_dam_cap_passes_the_channel_x_gradient() {
+    // The cap wins only when strictly smaller than X_r (B19p). So at X_r == cap
+    // the gradients equal the run where the cap is off (same x_storage). The
+    // cap depends on the step's K, which the test cannot read, so it finds the
+    // tie by bisecting the f32 bit pattern of the dam row's x_storage on the
+    // largest value whose positivity-on gradients are bitwise the positivity-off
+    // ones. Two checks tie that boundary to the cap itself: the forward there
+    // equals the forward of a clearly binding row (X_eff == cap in both), and
+    // one f32 step up the gradients change.
+    let same = |x: f32| bits_equal(&one_step_ddr(x, true).1, &one_step_ddr(x, false).1);
+    let (q_big, g_big) = one_step_ddr(0.3, true);
+    assert!(!same(0.3), "precondition: the cap binds at x_storage 0.3");
+    let (mut lo, mut hi) = (1e-3_f32.to_bits(), 0.3_f32.to_bits());
+    assert!(same(f32::from_bits(lo)), "precondition: no bind at 1e-3");
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if same(f32::from_bits(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let (x_tie, x_above) = (f32::from_bits(lo), f32::from_bits(hi));
+    println!("cap tie x_storage {x_tie:e}; one f32 step above {x_above:e}");
+    // At the tie the gradients are bitwise the no-cap run, every parent.
+    let (q_tie, g_tie) = one_step_ddr(x_tie, true);
+    let (q_tie_off, g_tie_off) = one_step_ddr(x_tie, false);
+    assert!(bits_equal(&g_tie, &g_tie_off), "tie: gradients differ from the no-cap run");
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&q_tie), bits(&q_tie_off), "tie: forward equals the no-cap forward");
+    // x_tie is the cap: the forward with X_r == x_tie equals the forward with a
+    // clearly binding row, where X_eff is the cap.
+    assert_eq!(bits(&q_tie), bits(&q_big), "the boundary is not the cap: forward differs from the binding forward");
+    // One f32 step above, the cap binds and the X path through K opens.
+    let (_, g_above) = one_step_ddr(x_above, true);
+    let (_, g_above_off) = one_step_ddr(x_above, false);
+    assert!(!bits_equal(&g_above, &g_above_off), "one step above the tie the cap must bind");
+    assert!(bits_equal(&g_above, &g_big), "above the tie the gradients are the binding ones");
+}
+
 // ---------------------------------------------------------------------------
 // 4. The debt pump (review v3 finding 3 / the v4 re-evaluations).
 // ---------------------------------------------------------------------------

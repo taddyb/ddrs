@@ -1010,6 +1010,14 @@ pub struct Params {
     /// legacy `5/3` celerity — see `validate_ddr_match`). Setting it emits a
     /// deprecation WARN. See `.claude/PHYSICS-CORRECTIONS.md`.
     pub ddr_match: bool,
+    /// Channel section for Muskingum-Cunge rows: `trapezoid` (default, an
+    /// absent key means this) or `power_law`. `power_law` needs
+    /// `ddr_match: false` and `use_cuda_graphs: false`, and positive
+    /// `attribute_minimums.slope`, `parameter_ranges.p_spatial` lower bound
+    /// and `defaults.p_spatial` (`validate_geometry_form`). Leakance and
+    /// reservoirs run on it. It does not change stage rows. Learned n and runs
+    /// are not comparable across forms.
+    pub geometry_form: GeometryForm,
     /// Enforce the Muskingum non-negativity window `2X <= Cr <= 2(1-X)`
     /// (`Cr = dt/K`) on every reach-timestep, so the S27 solve can never
     /// produce a negative discharge for S28's `clamp_min` to rewrite to
@@ -1116,6 +1124,28 @@ impl FloodPoolMode {
             Self::None => "none",
             Self::FloodControl => "flood_control",
             Self::All => "all",
+        }
+    }
+}
+
+/// Channel cross-section the Muskingum-Cunge rows use. See
+/// [`Params::geometry_form`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeometryForm {
+    /// The Leopold-Maddock trapezoid. The default.
+    #[default]
+    Trapezoid,
+    /// One power-law section: `T = p d^q`, `A = p d^(q+1)/(q+1)`, `R = d/(q+1)`.
+    PowerLaw,
+}
+
+impl GeometryForm {
+    /// The YAML spelling of this form.
+    pub fn name(self) -> &'static str {
+        match self {
+            GeometryForm::Trapezoid => "trapezoid",
+            GeometryForm::PowerLaw => "power_law",
         }
     }
 }
@@ -1428,6 +1458,7 @@ impl Default for Params {
             leakance_max_rhs_fraction: None,
             leakance_impervious_threshold: 0.7,
             ddr_match: default_ddr_match(),
+            geometry_form: GeometryForm::default(),
             enforce_positivity: false,
             subdivision: Subdivision::default(),
             stage_roughness: None,
@@ -1464,6 +1495,7 @@ struct ParamsRaw {
     leakance_max_rhs_fraction: Option<f32>,
     leakance_impervious_threshold: Option<f32>,
     ddr_match: Option<bool>,
+    geometry_form: Option<GeometryForm>,
     enforce_positivity: Option<bool>,
     #[serde(default)]
     subdivision: Subdivision,
@@ -1582,6 +1614,21 @@ impl From<ParamsRaw> for Params {
                 );
             }
             p.ddr_match = b;
+        }
+        if let Some(f) = r.geometry_form {
+            p.geometry_form = f;
+        }
+        if p.geometry_form == GeometryForm::PowerLaw {
+            eprintln!(
+                "INFO(config): params.geometry_form: power_law (one power-law section, \
+                 R = d/(q+1); see .claude/PHYSICS-CORRECTIONS.md)"
+            );
+            if r.stage_routing.as_ref().is_some_and(|s| s.enabled) {
+                eprintln!(
+                    "WARN(config): params.geometry_form: power_law applies to \
+                     Muskingum-Cunge rows only; stage rows keep their own section"
+                );
+            }
         }
         if let Some(b) = r.enforce_positivity {
             p.enforce_positivity = b;
@@ -1752,6 +1799,10 @@ impl Config {
             source: serde_yaml::Error::custom(msg),
         })?;
         validate_geodataset(&cfg).map_err(|msg| DataError::Yaml {
+            path: path.to_path_buf(),
+            source: serde_yaml::Error::custom(msg),
+        })?;
+        validate_geometry_form(&cfg).map_err(|msg| DataError::Yaml {
             path: path.to_path_buf(),
             source: serde_yaml::Error::custom(msg),
         })?;
@@ -2362,6 +2413,52 @@ fn validate_stage_routing(cfg: &Config) -> std::result::Result<(), String> {
                 .to_string());
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// `params.geometry_form: power_law` is a fused-op section. It has no legacy
+/// physics and no captured CUDA graph, so each of those is refused at load.
+/// Leakance and reservoirs run on it. Its log arguments (slope, p) must be
+/// positive.
+fn validate_geometry_form(cfg: &Config) -> std::result::Result<(), String> {
+    let p = &cfg.params;
+    if p.geometry_form != GeometryForm::PowerLaw {
+        return Ok(());
+    }
+    let refuse = |key: &str, why: &str| {
+        Err(format!(
+            "params.geometry_form: power_law requires `{key}: false`: {why}"
+        ))
+    };
+    if p.ddr_match {
+        return refuse("ddr_match", "the legacy physics only exists for the trapezoid.");
+    }
+    if p.use_cuda_graphs {
+        return refuse("use_cuda_graphs", "the captured kernel hardcodes the trapezoid.");
+    }
+    // The section takes `ln p` and `ln s` with no epsilon guard.
+    let positive = |key: &str, what: &str| {
+        Err(format!(
+            "params.geometry_form: power_law needs `{key}` > 0: {what}"
+        ))
+    };
+    if p.attribute_minimums.slope <= 0.0 {
+        return positive("attribute_minimums.slope", "the section takes ln of the slope.");
+    }
+    if p.parameter_ranges.p_spatial[0] <= 0.0 {
+        return positive(
+            "parameter_ranges.p_spatial",
+            "the lower bound must be positive; the section takes ln of p.",
+        );
+    }
+    if let Some(&v) = p.defaults.get("p_spatial") {
+        if v <= 0.0 {
+            return positive(
+                "defaults.p_spatial",
+                "the fixed p is used when p is not learned; the section takes ln of p.",
+            );
+        }
     }
     Ok(())
 }

@@ -7,7 +7,7 @@
 //!
 //! Parents in fixed order: [n, q_spatial, p_spatial, q_t, q_prime_t].
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use burn::backend::Autodiff;
@@ -17,7 +17,10 @@ use burn::backend::autodiff::grads::Gradients;
 use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
 use burn::tensor::{backend::Backend, Bool, IndexingUpdateOp, Int, Tensor, TensorPrimitive};
 
-use crate::config::Config;
+use crate::config::{Config, GeometryForm};
+use crate::geometry::{compute_power_law_geometry, compute_power_law_geometry_field};
+use crate::routing::clamp_ledger::{ClampLedger, ClampProbe, ClampSite, ProbeSite, SiteGrad, StepLedger, StepProbe};
+use crate::routing::clamp_rule::{ceiling_active, floor_active};
 use crate::sparse::{self, dispatch, primitive_to_vec, AValuesAssembler, CsrPattern};
 
 /// Count of solve outputs that came out NEGATIVE before the S28
@@ -82,6 +85,32 @@ pub const POSITIVITY_DELTA: f32 = 1e-2;
 fn dam_row_x_cap<I: Backend>(k_muskingum: Tensor<I, 1>, dt: f32) -> Tensor<I, 1> {
     let cr = k_muskingum.recip() * dt;
     cr * (0.5 * (1.0 - POSITIVITY_DELTA))
+}
+
+/// The depth exponent `3 / (5 + 3·q_eps + 3·gamma)` (S5). The forward and the
+/// backward's pre-clamp depth (B6) both call it, so the two get the same
+/// bits.
+///
+/// Substituting n = n_0·(d/d_ref)^(−gamma) into the Manning relation moves one
+/// power of depth from the left side to the right, so gamma simply shifts the
+/// denominator. `gamma == 0` restores `5 + 3·q_eps` exactly: the literal is
+/// written as a separate binding so the f32 rounding of the historical
+/// expression cannot change. When gamma is learned it is a per-reach tensor
+/// and the denominator is built elementwise; the scalar spelling is kept
+/// verbatim for the constant case so `gamma_t: None` reproduces it bit for
+/// bit.
+pub(crate) fn depth_exponent<I: Backend>(
+    q_eps: Tensor<I, 1>,
+    gamma: f32,
+    gamma_t: Option<&Tensor<I, 1>>,
+) -> Tensor<I, 1> {
+    match gamma_t {
+        Some(g) => (q_eps * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
+        None => {
+            let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
+            (q_eps * 3.0 + five_plus_three_gamma).recip() * 3.0
+        }
+    }
 }
 
 /// Inner-backend leakance inputs threaded into `forward_chain_inner`.
@@ -209,8 +238,10 @@ pub(crate) struct TimestepState<B: Backend> {
     pub x_storage: B::FloatTensorPrimitive,
     /// The Muskingum X the forward ACTUALLY used at S19. Equals `x_storage`
     /// when `ddr_match`; the Cunge-derived `clamp(0.5(1 − Q/(B·S·c·L)), 0, 0.5)`
-    /// otherwise. The backward reads it both to evaluate the c1..c4 chain and
-    /// to build the `[0, 0.5]` clamp mask (B19).
+    /// otherwise. The backward reads it to evaluate the c1..c4 chain. It does
+    /// NOT build the `[0, 0.5]` clamp mask (B19) from it: this value is
+    /// already clamped, so a tie rule applied to it would pass every
+    /// saturated entry. B19 reads the recomputed pre-clamp `x_raw`.
     ///
     /// Deliberately NOT part of the `forward_saved_idx` array: that array is
     /// index-locked to `cuda_graph::PersistentScratch`'s `state_*` fields, and
@@ -293,6 +324,13 @@ pub(crate) struct TimestepState<B: Backend> {
     /// (`∂cap/∂K = −cap/K`) instead of into the Cunge chain. Already the
     /// combined `additive && positivity && !enforce_pos`; `false` ⇒ no op.
     pub reservoir_positivity: bool,
+    /// Which channel section the forward used. The backward branches on it:
+    /// the trapezoid runs the B-labels in this file, and the power law runs
+    /// `power_law.rs::section_backward`.
+    pub geometry_form: GeometryForm,
+    /// Optional sink for the clamp probe. `None` ⇒ the backward records
+    /// nothing and makes no host copy.
+    pub probe: Option<Arc<Mutex<ClampProbe>>>,
 }
 
 #[derive(Debug)]
@@ -457,6 +495,8 @@ where
         };
 
         let gy = wrap(grad_out);
+        // Clamp probe: one `StepProbe` per backward call, pushed on return.
+        let mut sprobe: Option<StepProbe> = state.probe.as_ref().map(|_| StepProbe::default());
 
         let n_t = wrap(state.n.clone());
         // `state.q_spatial` is not read: every q path goes through the saved
@@ -468,7 +508,8 @@ where
         let slope = wrap(state.slope.clone());
         // The X the forward ACTUALLY used at S19 — equal to `state.x_storage`
         // under `ddr_match`, Cunge-derived otherwise. `state.x_storage` is
-        // deliberately never read here: it is not what c1..c4 were built from.
+        // read only at B19p, as the pre-cap X of a dam row under `ddr_match`:
+        // it is not what c1..c4 were built from.
         let x_eff = wrap(state.x_effective.clone());
         // Dam rows of the linear-reservoir override (S19''). `None` ⇒ B19''
         // below adds no op.
@@ -517,9 +558,11 @@ where
         // ===========================================================
         // B28. gx_sol = gy · mask(x_sol > discharge_lb)
         // ===========================================================
-        // clamp_min(x, lb): gradient passes through where x > lb, zero where x == lb (saturated).
-        let mask_x = x_sol.clone().greater_elem(discharge_lb);
-        let gx_sol = gy.mask_fill(mask_x.bool_not(), 0.0);
+        // clamp_min(x, lb): the gradient is cut where x < lb. A tie (x == lb)
+        // passes (`clamp_rule`).
+        let gy_in = probe_keep(&sprobe, &gy);
+        let gx_sol = gy.mask_fill(floor_active(x_sol.clone(), discharge_lb), 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::Discharge, gy_in, &gx_sol);
 
         // ===========================================================
         // B27. (gA_values, gb_rhs) = csr_solve_backward(...)
@@ -729,8 +772,10 @@ where
         //     mask_a     = !mask_cunge && (hi_a <= hi_b)
         //     mask_b     = !mask_cunge && !mask_a
         //
-        // Ties are a measure-zero subgradient choice; the ordering just has to
-        // be deterministic and total, which the `<=` cascade guarantees.
+        // Ties follow the tie rule (`src/routing/clamp_rule.rs`): the order
+        // must match `min_pair`, where the first operand wins a tie. The `<=`
+        // cascade above encodes that (Cunge first, then `hi_a`, then `hi_b`),
+        // so the fused gradient equals the autodiff reference at ties too.
         //
         // Consequences:
         //   * the existing `∂X/∂Q`, `∂X/∂B`, `∂X/∂c` terms are the Cunge
@@ -739,7 +784,7 @@ where
         //     that did not exist before the clamp. Its contribution is
         //     accumulated into `gk_from_x_cap` and folded into `gk_muskingum`
         //     BELOW (before the S18' floor mask and before B18 consumes it).
-        //   * the `[0, 0.5]` clamp mask belongs to `x_cunge`, NOT to `x_eff`:
+        //   * the `[0, 0.5]` clamp mask belongs to the pre-clamp Cunge X, NOT to `x_eff`:
         //     when `hi_a`/`hi_b` win, `x_eff` can sit anywhere in `[0, 0.5]`
         //     while `x_cunge` is saturated, and vice versa.
         // ===========================================================
@@ -751,9 +796,9 @@ where
         //   cap   = 0.5·(1−δ)·Δt/K       ∂cap/∂K = −0.5·(1−δ)·Δt/K² = −cap/K
         //
         // The same `min` rule as B19': ∂L/∂x_eff goes to exactly one branch.
-        // Where the cap bound (`x_eff == cap`, recomputed from the saved K by
-        // the forward's own ops, so the comparison reproduces its choice; a
-        // tie counts as the cap, a measure-zero subgradient choice) it goes
+        // Where the cap bound (`cap < X_r`, with the cap recomputed from the
+        // saved K by the forward's own ops, so the comparison reproduces its
+        // choice; a tie goes to X_r, the first operand of `min_pair`) it goes
         // into K, and the Cunge chain (`∂X_r/∂Q`, `∂X_r/∂B`, `∂X_r/∂c`) gets
         // nothing; elsewhere it goes on to X_r as before. With the cap bound,
         // `2K·x_eff = (1−δ)Δt` is constant and `2K(1 − x_eff) = 2K − (1−δ)Δt`,
@@ -767,12 +812,29 @@ where
         // under `enforce_pos`). The mask is applied AFTER the product, so a
         // zero-length reach (K = 0, cap = ∞) gets 0, not 0·∞.
         // ---------------------------------------------------------------
+        // Same expression as the forward's S19 (including the +1e-12). Hoisted
+        // above B19p because the dam-row cap compares against the channel X.
+        let bscl = top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
+        let w = q_t.clone() / bscl.clone();
+        // The Cunge X before its [0, 0.5] clamp. The band mask reads THIS, not
+        // the saved clamped X: a `>=` test on a clamped value would pass every
+        // saturated entry.
+        let x_raw = (-w.clone() + 1.0) * 0.5;
         let dam_cap = if state.reservoir_positivity {
             let m = reservoir_mask
                 .as_ref()
                 .expect("dam-row positivity needs the dam-row mask in the saved state");
             let cap = dam_row_x_cap(k_muskingum.clone(), dt);
-            let bound = m.clone().bool_and(x_eff.clone().equal(cap.clone()));
+            // The channel X the forward fed to `min_pair(X_r, cap)`: the
+            // constant `x_storage` under `ddr_match`, else the clamped Cunge X.
+            let x_r = if state.ddr_match {
+                wrap(state.x_storage.clone())
+            } else {
+                x_raw.clone().clamp(0.0, 0.5)
+            };
+            // `min_pair` keeps its first operand at a tie, so the cap wins
+            // only when strictly smaller than X_r.
+            let bound = m.clone().bool_and(cap.clone().lower(x_r));
             let gx = two_k.clone() * (g_2kx_total.clone() - g_2k1mx_total.clone());
             let gk = (gx * -(cap / k_muskingum.clone())).mask_fill(bound.clone().bool_not(), 0.0);
             Some((bound, gk))
@@ -801,19 +863,15 @@ where
                 Some((bound, _)) => gx.mask_fill(bound.clone(), 0.0),
                 None => gx,
             };
-            // Same expression as the forward's S19 (including the +1e-12).
-            let bscl =
-                top_width.clone() * slope.clone() * celerity.clone() * length.clone() + 1e-12;
-            let w = q_t.clone() / bscl.clone();
             let half_w = w.clone() * 0.5;
             // `gx` is ∂L/∂x_eff. Split it across the S19' min branches and pick
             // the tensor whose `[0, 0.5]` clamp mask applies to the Cunge term.
             // Without the clamp, x_eff IS x_cunge and both reduce to identity.
-            let (gx, x_for_clamp) = if enforce_pos {
+            let gx = if enforce_pos {
                 // Recomputed bit-identically to the forward (same ops, same
                 // saved operands), so the comparisons below reproduce the
                 // `min_pair` chain's choice exactly.
-                let x_cunge = ((-w + 1.0) * 0.5).clamp(0.0, 0.5);
+                let x_cunge = x_raw.clone().clamp(0.0, 0.5);
                 let cr = k_muskingum.clone().recip() * dt;
                 let hi_a = cr.clone() * (0.5 * (1.0 - POSITIVITY_DELTA));
                 let hi_b = (-cr * 0.5 + 1.0) * (1.0 - POSITIVITY_DELTA);
@@ -833,23 +891,26 @@ where
 
                 let g_hi_a = gx.clone().mask_fill(mask_a.bool_not(), 0.0);
                 let g_hi_b = gx.clone().mask_fill(mask_b.bool_not(), 0.0);
+                let gx_in = probe_keep(&sprobe, &gx);
                 let gx_cunge = gx.mask_fill(mask_cunge.bool_not(), 0.0);
+                probe_record::<I>(&mut sprobe, ProbeSite::XCap, gx_in, &gx_cunge);
 
                 // ∂hi_a/∂cr = +0.5(1−δ),  ∂hi_b/∂cr = −0.5(1−δ)
                 let half_1md = 0.5 * (1.0 - POSITIVITY_DELTA);
                 let gcr = (g_hi_a - g_hi_b) * half_1md;
                 // cr = Δt/k_musk  →  ∂cr/∂k_musk = −Δt/k_musk²
                 gk_from_x_cap = Some(-gcr * dt / (k_muskingum.clone() * k_muskingum.clone()));
-                (gx_cunge, x_cunge)
+                gx_cunge
             } else {
-                (gx, x_eff.clone())
+                gx
             };
-            // Zero where the [0, 0.5] clamp saturated (X is then constant).
-            let unsat = x_for_clamp
-                .clone()
-                .greater_elem(0.0)
-                .bool_and(x_for_clamp.lower_elem(0.5));
-            let gx = gx.mask_fill(unsat.bool_not(), 0.0);
+            // Zero where the [0, 0.5] clamp saturated (X is then constant). A
+            // tie at 0 or 0.5 passes. The mask reads the pre-clamp `x_raw`
+            // under both `enforce_pos` values.
+            let cut_x = floor_active(x_raw.clone(), 0.0).bool_or(ceiling_active(x_raw, 0.5));
+            let gx_in = probe_keep(&sprobe, &gx);
+            let gx = gx.mask_fill(cut_x, 0.0);
+            probe_record::<I>(&mut sprobe, ProbeSite::XBand, gx_in, &gx);
             Some(XGrads {
                 // ∂X/∂Q = −0.5·W/Q, but W = Q/(B·S·c·L) so Q cancels exactly.
                 // Written in the cancelled form on purpose: `q_t` is only
@@ -927,21 +988,9 @@ where
         };
 
         // ===========================================================
-        // Geometry recomputed from the saved primitives. Hoisted above B18
-        // because the `ddr_match: false` celerity (B17) needs A, T, P and
-        // sqrt(1+z²) too; B14/B13 below reuse the exact same tensors.
-        //   wp   = bw + 2·d·sqrt(1+ss²)   (S13)
-        //   area = R · wp                 (S14 inverted; area itself unsaved)
-        // ===========================================================
-        let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
-        let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
-        let wp = bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
-        let area = hyd_radius.clone() * wp.clone();
-
-        // ===========================================================
         // B18'. K floor (`enforce_positivity` only, S18'):
         //   k_musk = max(k_raw, k_floor)  →  ∂k_musk/∂k_raw = 1 where
-        //   k_raw > k_floor, else 0 (the reach is sub-grid and K is pinned to
+        //   k_raw >= k_floor (a tie passes), else 0 (the reach is sub-grid and K is pinned to
         //   the constant floor, so celerity gets NO gradient there).
         // `k_raw = length/celerity` is recomputed from the saved `length` and
         // `celerity` with the same op the forward used, so the mask reproduces
@@ -950,8 +999,10 @@ where
         let gk_raw = if enforce_pos {
             let k_raw = length.clone() / celerity.clone();
             let k_floor = dt * (1.0 + POSITIVITY_DELTA) / 2.0;
-            let unfloored = k_raw.greater_elem(k_floor);
-            gk_muskingum.mask_fill(unfloored.bool_not(), 0.0)
+            let gk_in = probe_keep(&sprobe, &gk_muskingum);
+            let gk_out = gk_muskingum.mask_fill(floor_active(k_raw, k_floor), 0.0);
+            probe_record::<I>(&mut sprobe, ProbeSite::KFloor, gk_in, &gk_out);
+            gk_out
         } else {
             gk_muskingum
         };
@@ -969,6 +1020,46 @@ where
             Some(xg) => gcelerity + xg.g_celerity.clone(),
             None => gcelerity,
         };
+
+        if state.geometry_form == GeometryForm::PowerLaw {
+            let s = crate::routing::power_law::section_backward(
+                state,
+                gcelerity,
+                x_grads.as_ref().map(|xg| xg.g_top_width.clone()),
+                zeta_geom.as_ref(),
+                &mut sprobe,
+            );
+            let gq_t = gq_t_from_s24.map(|from_s24| {
+                let g = gq_t_from_s25 + from_s24 + s.gq_t;
+                match x_grads.as_ref() {
+                    Some(xg) => g + xg.g_q_t.clone(),
+                    None => g,
+                }
+            });
+            push_step_probe(state, sprobe);
+            return ParentGrads {
+                n: mask.n.then_some(s.gn),
+                q_spatial: mask.q_spatial.then_some(s.gq_eps),
+                p_spatial: mask.p_spatial.then_some(s.gp),
+                q_t: gq_t,
+                q_prime_t: gq_prime_t,
+                gamma: if mask.gamma { s.ggamma } else { None },
+                t_release: g_t_release,
+                t_release_prev: g_t_release_prev,
+            };
+        }
+
+        // ===========================================================
+        // Geometry recomputed from the saved primitives. Placed below the
+        // power-law early return, since only the trapezoid path (B17 on) reads
+        // it. B14/B13 below reuse the exact same tensors.
+        //   wp   = bw + 2·d·sqrt(1+ss²)   (S13)
+        //   area = R · wp                 (S14 inverted; area itself unsaved)
+        // ===========================================================
+        let one_plus_ss_sq = side_slope.clone() * side_slope.clone() + 1.0;
+        let sqrt_1_plus_ss_sq = one_plus_ss_sq.clone().sqrt();
+        let wp = bottom_width.clone() + depth.clone() * sqrt_1_plus_ss_sq.clone() * 2.0;
+        let area = hyd_radius.clone() * wp.clone();
 
         // ===========================================================
         // B17. celerity = velocity_cl · beta
@@ -1043,12 +1134,13 @@ where
 
         // ===========================================================
         // B16. velocity_cl = clamp(velocity_un, velocity_lb, 15)
-        //   gradient passes where velocity_lb < velocity_un < 15
+        //   gradient passes where velocity_lb <= velocity_un <= 15 (ties pass)
         // ===========================================================
-        let mask_v_lo = velocity_un.clone().greater_elem(velocity_lb);
-        let mask_v_hi = velocity_un.clone().lower_elem(15.0);
-        let mask_v = mask_v_lo.bool_and(mask_v_hi);
-        let gvelocity_un = gvelocity_cl.mask_fill(mask_v.bool_not(), 0.0);
+        let cut_v = floor_active(velocity_un.clone(), velocity_lb)
+            .bool_or(ceiling_active(velocity_un.clone(), 15.0));
+        let gv_in = probe_keep(&sprobe, &gvelocity_cl);
+        let gvelocity_un = gvelocity_cl.mask_fill(cut_v, 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::Velocity, gv_in, &gvelocity_un);
 
         // ===========================================================
         // B15. velocity_un = (1/n) · R^(2/3) · √slope
@@ -1130,11 +1222,12 @@ where
 
         // ===========================================================
         // B11. bottom_width = max(bw_raw, bottom_width_lb)
-        //   gradient passes where bw_raw > lb.
+        //   gradient passes where bw_raw >= lb (a tie passes).
         // ===========================================================
-        let mask_bw = bw_raw.clone().greater_elem(bottom_width_lb);
         let gbw_total = gbw_from_s13 + gbw_from_s12;
-        let gbw_raw = gbw_total.mask_fill(mask_bw.bool_not(), 0.0);
+        let gbw_in = probe_keep(&sprobe, &gbw_total);
+        let gbw_raw = gbw_total.mask_fill(floor_active(bw_raw.clone(), bottom_width_lb), 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::BottomWidth, gbw_in, &gbw_raw);
 
         // ===========================================================
         // B10. bw_raw = tw - 2·ss·d
@@ -1148,17 +1241,18 @@ where
 
         // ===========================================================
         // B9. side_slope = clamp(side_slope_raw, 0.5, 50)
-        //   gradient passes where 0.5 < ss_raw < 50.
+        //   gradient passes where 0.5 <= ss_raw <= 50 (ties pass).
         // ===========================================================
         let gss_combined = match beta_grads.as_ref() {
             // ∂beta/∂z enters through u = √(1+z²) at S17.
             Some(bg) => gss_from_s13 + gss_from_s10 + bg.g_side_slope.clone(),
             None => gss_from_s13 + gss_from_s10,
         };
-        let mask_ss_lo = side_slope_raw.clone().greater_elem(0.5);
-        let mask_ss_hi = side_slope_raw.clone().lower_elem(50.0);
-        let mask_ss = mask_ss_lo.bool_and(mask_ss_hi);
-        let gss_from_clamp = gss_combined.mask_fill(mask_ss.bool_not(), 0.0);
+        let cut_ss = floor_active(side_slope_raw.clone(), 0.5)
+            .bool_or(ceiling_active(side_slope_raw.clone(), 50.0));
+        let gss_in = probe_keep(&sprobe, &gss_combined);
+        let gss_from_clamp = gss_combined.mask_fill(cut_ss, 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::SideSlope, gss_in, &gss_from_clamp);
 
         // ===========================================================
         // B8. side_slope_raw = tw · q_eps / (2·d)
@@ -1216,15 +1310,30 @@ where
         if let Some(zg) = zeta_geom.as_ref() {
             gd_total = gd_total + zg.g_depth.clone();
         }
-        // depth saturates when ratio^exp == depth_lb (clamped). Gradient passes through
-        // when depth > depth_lb. depth itself is the saved post-clamp value, so use
-        // depth > depth_lb as the mask (when the clamp is inactive, depth > depth_lb).
-        let mask_d = depth.clone().greater_elem(depth_lb);
-        let gd_pre_clamp = gd_total.mask_fill(mask_d.bool_not(), 0.0);
+        // The depth clamp cuts the gradient where ratio^exponent < depth_lb. A
+        // tie passes. The saved `depth` is post-clamp, so a `>=` test on it
+        // would pass every clamped entry. The mask reads the PRE-clamp depth,
+        // rebuilt with the forward's own ops (`depth_exponent`, the saved
+        // `ratio`). It is bit for bit the depth of the Burn-op forward. The
+        // CUDA graph kernel computes its raw depth as `exp(e * ln(ratio))`
+        // (`cuda_graph/geometry_kernel.rs::forward_k1_kernel`), so within a
+        // few ulp of `depth_lb` the graph path's floor decision can differ
+        // from this mask. This concerns the trapezoid graph path only: the
+        // power law with CUDA graphs is rejected at load.
+        let gamma_t_b6 = state
+            .gamma_t
+            .clone()
+            .map(|g| Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)));
+        let depth_pre_clamp = ratio
+            .clone()
+            .powf(depth_exponent(q_eps.clone(), state.gamma, gamma_t_b6.as_ref()));
+        let gd_in = probe_keep(&sprobe, &gd_total);
+        let gd_pre_clamp = gd_total.mask_fill(floor_active(depth_pre_clamp, depth_lb), 0.0);
+        probe_record::<I>(&mut sprobe, ProbeSite::Depth, gd_in, &gd_pre_clamp);
 
-        // d = ratio^exponent  (NOTE: depth saved is post-clamp; the un-clamped
-        // value at differentiation point equals depth when mask is true, so we can
-        // use depth in derivative expressions where mask is true.)
+        // d = ratio^exponent  (NOTE: depth saved is post-clamp; where the mask
+        // passes the gradient the clamp is inactive, so the saved depth equals
+        // the un-clamped value and the derivative expressions can use it.)
         let five_plus_three_gamma: Tensor<I, 1> = match state.gamma_t.clone() {
             Some(g) => {
                 Tensor::<I, 1>::from_primitive(TensorPrimitive::Float(g)) * 3.0 + 5.0
@@ -1334,6 +1443,7 @@ where
         };
         let ggamma = if mask.gamma { ggamma } else { None };
 
+        push_step_probe(state, sprobe);
         ParentGrads {
             n: gn,
             q_spatial: gq_spatial,
@@ -1866,6 +1976,87 @@ pub(crate) mod forward_saved_idx {
     pub const BW_RAW: usize = 22;
 }
 
+/// Record one ledger entry. `mask` runs only when a ledger is present, so the
+/// no-sink path builds no tensor and makes no host copy.
+fn ledger_record<I: Backend + 'static>(
+    step: &mut Option<StepLedger>,
+    site: ClampSite,
+    mask: impl FnOnce() -> Tensor<I, 1, Bool>,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if let Some(st) = step.as_mut() {
+        let prim = match mask().float().into_primitive() {
+            TensorPrimitive::Float(p) => p,
+            _ => unreachable!(),
+        };
+        let v: Vec<bool> = primitive_to_vec::<I>(prim).into_iter().map(|x| x != 0.0).collect();
+        st.active.insert(site, v);
+    }
+}
+
+/// Push one backward call's probe record onto the shared sink.
+pub(crate) fn push_step_probe<B: Backend>(state: &TimestepState<B>, sp: Option<StepProbe>) {
+    if let (Some(step), Some(sink)) = (sp, state.probe.as_ref()) {
+        sink.lock().expect("clamp probe lock").steps.push(step);
+    }
+}
+
+/// Copy a tensor to the host for the probe.
+fn probe_host<I: Backend + 'static>(t: &Tensor<I, 1>) -> Vec<f32>
+where
+    I::FloatTensorPrimitive: 'static,
+{
+    let prim = match t.clone().into_primitive() {
+        TensorPrimitive::Float(p) => p,
+        _ => unreachable!(),
+    };
+    primitive_to_vec::<I>(prim)
+}
+
+/// Keep a gradient for the probe: a cheap clone when probing, else `None`.
+pub(crate) fn probe_keep<I: Backend>(sp: &Option<StepProbe>, g: &Tensor<I, 1>) -> Option<Tensor<I, 1>> {
+    sp.as_ref().map(|_| g.clone())
+}
+
+/// Record the gradient before (`g_in`, from [`probe_keep`]) and after the
+/// mask (`g_out`) at one site. No-op when not probing.
+pub(crate) fn probe_record<I: Backend + 'static>(
+    sp: &mut Option<StepProbe>,
+    site: ProbeSite,
+    g_in: Option<Tensor<I, 1>>,
+    g_out: &Tensor<I, 1>,
+) where
+    I::FloatTensorPrimitive: 'static,
+{
+    if let (Some(step), Some(g_in)) = (sp.as_mut(), g_in) {
+        step.sites.insert(
+            site,
+            SiteGrad { g_in: probe_host::<I>(&g_in), g_out: probe_host::<I>(g_out) },
+        );
+    }
+}
+
+/// The channel section a form computes, in the order the saved state wants.
+/// Power law leaves the trapezoid-only fields at zero.
+struct SectionOut<I: Backend> {
+    depth: Tensor<I, 1>,
+    /// The depth before the floor `clamp_min`. Only the clamp ledger reads
+    /// it. The power law builds it only when a ledger is present.
+    depth_raw: Option<Tensor<I, 1>>,
+    top_width: Tensor<I, 1>,
+    side_slope: Tensor<I, 1>,
+    bottom_width: Tensor<I, 1>,
+    hyd_radius: Tensor<I, 1>,
+    velocity_un: Tensor<I, 1>,
+    velocity_cl: Tensor<I, 1>,
+    celerity: Tensor<I, 1>,
+    ratio: Tensor<I, 1>,
+    denominator: Tensor<I, 1>,
+    side_slope_raw: Tensor<I, 1>,
+    bw_raw: Tensor<I, 1>,
+}
+
 /// Inner-backend S1..S28 chain. Operates on `I::FloatTensorPrimitive`s — no
 /// autograd tape pushes. Returns `(q_next, [saved_state; NUM_SAVED_STATE])`.
 ///
@@ -1902,6 +2093,9 @@ pub(crate) fn forward_chain_inner<I: Backend + 'static>(
     gamma_in: Option<Tensor<I, 1>>,
     // Linear-reservoir override (S19''). `None` ⇒ no op, byte-identical.
     reservoir: Option<&ReservoirTensors<I>>,
+    // Clamp ledger sink. `Some` records one `StepLedger` for this call and
+    // reads masks to the host; `None` adds no kernel and no host copy.
+    mut ledger: Option<&mut ClampLedger>,
 ) -> (
     I::FloatTensorPrimitive,
     [I::FloatTensorPrimitive; NUM_SAVED_STATE],
@@ -1940,103 +2134,198 @@ where
 
     // S1
     let q_eps = qsp_in.clone() + 1e-6_f32;
-    // S2. With stage-dependent roughness the Manning inversion picks up a
-    // constant `d_ref^gamma` on the numerator; see S5 for where gamma really
-    // bites. At gamma == 0 (or d_ref == 1) the factor is exactly 1.0.
-    let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
-    let numerator = if gamma != 0.0 && d_ref != 1.0 {
-        numerator * d_ref.powf(gamma)
-    } else {
-        numerator
-    };
-    // S3
-    let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
-    // S4
-    let ratio = numerator.clone() / denominator.clone();
-    // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma).
-    //
-    // Substituting n = n_0·(d/d_ref)^(−gamma) into the Manning relation moves
-    // one power of depth from the left side to the right, so gamma simply
-    // shifts the denominator. `gamma == 0` restores `5 + 3·q_eps` exactly —
-    // the literal is written as a separate binding so the f32 rounding of the
-    // historical expression cannot change.
-    // When gamma is learned it is a per-reach tensor and the denominator has to
-    // be built elementwise; the scalar spelling is kept verbatim for the
-    // constant case so `gamma_t: None` reproduces it bit for bit.
-    let exponent = match &gamma_in {
-        Some(g) => (q_eps.clone() * 3.0 + g.clone() * 3.0 + 5.0).recip() * 3.0,
-        None => {
-            let five_plus_three_gamma = 5.0_f32 + 3.0_f32 * gamma;
-            (q_eps.clone() * 3.0 + five_plus_three_gamma).recip() * 3.0
-        }
-    };
-    // S6
-    let depth = ratio.clone().powf(exponent.clone()).clamp_min(depth_lb);
-    // S7
-    let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
-    // S8 (pre-clamp side slope)
-    let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
-    // S9
-    let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
-    // S10 (pre-clamp bw)
-    let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
-    // S11
-    let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
-    // S12
-    let _area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
-    // S13
-    let wp = bottom_width.clone()
-        + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
-    // S14
-    let hyd_radius = _area.clone() / wp.clone();
-    // S15. v = (1/n(d))·R^(2/3)·√slope. With stage-dependent roughness
-    // 1/n(d) = (1/n_0)·(d/d_ref)^gamma, so the factor rides on the velocity as
-    // well as on the depth inversion. Applying it to only one of the two leaves
-    // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
-    // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
-    // caught on the first run.
-    let n_recip = match &gamma_in {
-        Some(g) => n_in.clone().recip() * (depth.clone() / d_ref).powf(g.clone()),
-        None if gamma != 0.0 => {
-            n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
-        }
-        None => n_in.clone().recip(),
-    };
-    let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
-        * slope_in.clone().sqrt();
-    // S16
-    let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
-    // S17: celerity.
-    //   ddr_match=true  -> c = v·5/3, the wide-rectangular Kleitz-Seddon limit.
-    //                      Mirrors ddr/mmc.py:167. WRONG for the trapezoid built
-    //                      in S7-S13: kappa = b/y ~ 0.7-1.8 here, so the true
-    //                      ratio is ~1.30-1.36, not 1.667 (22-27% high).
-    //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
-    //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
-    //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
-    //   With stage-dependent roughness, Q = (d/d_ref)^gamma · Q_Manning(d), so
-    //   c = dQ/dA picks up one extra term. Using dA/dd = T (true for ANY cross
-    //   section, not just the power law):
-    //       c = v · [ beta_trapezoid + gamma · A/(T·d) ]
-    //   Sanity: for the pure power-law section A/(T·d) = 1/(q+1), recovering
-    //   beta = (5 + 3q + 3·gamma)/(3(q+1)), which is 5/3 at q = gamma = 0.
-    let celerity = if ddr_match {
-        velocity_cl.clone() * (5.0_f32 / 3.0_f32)
-    } else {
-        let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
-        let beta =
-            -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
-        let beta = match &gamma_in {
-            Some(g) => {
-                beta + _area.clone() * g.clone() / (top_width.clone() * depth.clone())
-            }
-            None if gamma != 0.0 => {
-                beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
-            }
-            None => beta,
+    // S2..S17: the channel section. The form picks the geometry. Everything
+    // after S17 reads the same named fields, whatever the form.
+    let SectionOut {
+        depth,
+        depth_raw,
+        top_width,
+        side_slope,
+        bottom_width,
+        hyd_radius,
+        velocity_un,
+        velocity_cl,
+        celerity,
+        ratio,
+        denominator,
+        side_slope_raw,
+        bw_raw,
+    } = match cfg.params.geometry_form {
+        GeometryForm::Trapezoid => {
+        // S2. With stage-dependent roughness the Manning inversion picks up a
+        // constant `d_ref^gamma` on the numerator; see S5 for where gamma really
+        // bites. At gamma == 0 (or d_ref == 1) the factor is exactly 1.0.
+        let numerator = qt_in.clone() * n_in.clone() * (q_eps.clone() + 1.0);
+        let numerator = if gamma != 0.0 && d_ref != 1.0 {
+            numerator * d_ref.powf(gamma)
+        } else {
+            numerator
         };
-        velocity_cl.clone() * beta
+        // S3
+        let denominator = psp_in.clone() * slope_in.clone().sqrt() + 1e-8_f32;
+        // S4
+        let ratio = numerator.clone() / denominator.clone();
+        // S5. exponent = 3 / (5 + 3·q_eps + 3·gamma); see `depth_exponent`.
+        let exponent = depth_exponent(q_eps.clone(), gamma, gamma_in.as_ref());
+        // S6
+        let depth_raw = ratio.clone().powf(exponent.clone());
+        let depth = depth_raw.clone().clamp_min(depth_lb);
+        // S7
+        let top_width = psp_in.clone() * depth.clone().powf(q_eps.clone());
+        // S8 (pre-clamp side slope)
+        let side_slope_raw = top_width.clone() * q_eps.clone() / (depth.clone() * 2.0);
+        // S9
+        let side_slope = side_slope_raw.clone().clamp(0.5, 50.0);
+        // S10 (pre-clamp bw)
+        let bw_raw = top_width.clone() - side_slope.clone() * depth.clone() * 2.0;
+        // S11
+        let bottom_width = bw_raw.clone().clamp_min(bottom_width_lb);
+        // S12
+        let _area = (top_width.clone() + bottom_width.clone()) * depth.clone() / 2.0;
+        // S13
+        let wp = bottom_width.clone()
+            + depth.clone() * (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt() * 2.0;
+        // S14
+        let hyd_radius = _area.clone() / wp.clone();
+        // S15. v = (1/n(d))·R^(2/3)·√slope. With stage-dependent roughness
+        // 1/n(d) = (1/n_0)·(d/d_ref)^gamma, so the factor rides on the velocity as
+        // well as on the depth inversion. Applying it to only one of the two leaves
+        // the velocity exponent pinned at Manning's 2f/3 while the depth exponent
+        // moves — silently wrong, and exactly what `tests/stage_roughness.rs`
+        // caught on the first run.
+        let n_recip = match &gamma_in {
+            Some(g) => n_in.clone().recip() * (depth.clone() / d_ref).powf(g.clone()),
+            None if gamma != 0.0 => {
+                n_in.clone().recip() * (depth.clone() / d_ref).powf_scalar(gamma)
+            }
+            None => n_in.clone().recip(),
+        };
+        let velocity_un = n_recip * hyd_radius.clone().powf_scalar(2.0 / 3.0)
+            * slope_in.clone().sqrt();
+        // S16
+        let velocity_cl = velocity_un.clone().clamp(velocity_lb, 15.0);
+        // S17: celerity.
+        //   ddr_match=true  -> c = v·5/3, the wide-rectangular Kleitz-Seddon limit.
+        //                      Mirrors ddr/mmc.py:167. WRONG for the trapezoid built
+        //                      in S7-S13: kappa = b/y ~ 0.7-1.8 here, so the true
+        //                      ratio is ~1.30-1.36, not 1.667 (22-27% high).
+        //   ddr_match=false -> exact trapezoidal c = dQ/dA = (dQ/dy)/T:
+        //                      beta = 5/3 - (4/3)·A·sqrt(1+z²)/(T·P)
+        //                      (-> 5/3 as b/y -> inf, -> 4/3 as b -> 0).
+        //   With stage-dependent roughness, Q = (d/d_ref)^gamma · Q_Manning(d), so
+        //   c = dQ/dA picks up one extra term. Using dA/dd = T (true for ANY cross
+        //   section, not just the power law):
+        //       c = v · [ beta_trapezoid + gamma · A/(T·d) ]
+        //   Sanity: for the pure power-law section A/(T·d) = 1/(q+1), recovering
+        //   beta = (5 + 3q + 3·gamma)/(3(q+1)), which is 5/3 at q = gamma = 0.
+        let celerity = if ddr_match {
+            velocity_cl.clone() * (5.0_f32 / 3.0_f32)
+        } else {
+            let root = (side_slope.clone().powf_scalar(2.0) + 1.0).sqrt();
+            let beta =
+                -(_area.clone() * root) / (top_width.clone() * wp.clone()) * (4.0 / 3.0) + (5.0 / 3.0);
+            let beta = match &gamma_in {
+                Some(g) => {
+                    beta + _area.clone() * g.clone() / (top_width.clone() * depth.clone())
+                }
+                None if gamma != 0.0 => {
+                    beta + _area.clone() * gamma / (top_width.clone() * depth.clone())
+                }
+                None => beta,
+            };
+            velocity_cl.clone() * beta
+        };
+
+            SectionOut {
+                depth,
+                depth_raw: ledger.is_some().then_some(depth_raw),
+                top_width,
+                side_slope,
+                bottom_width,
+                hyd_radius,
+                velocity_un,
+                velocity_cl,
+                celerity,
+                ratio,
+                denominator,
+                side_slope_raw,
+                bw_raw,
+            }
+        }
+        GeometryForm::PowerLaw => {
+            assert!(!ddr_match, "geometry_form: power_law requires ddr_match: false");
+            let g = match &gamma_in {
+                Some(gt) => compute_power_law_geometry_field::<I>(
+                    n_in.clone(),
+                    psp_in.clone(),
+                    qsp_in.clone(),
+                    qt_in.clone(),
+                    slope_in.clone(),
+                    depth_lb,
+                    gt.clone(),
+                    d_ref,
+                ),
+                None => compute_power_law_geometry::<I>(
+                    n_in.clone(),
+                    psp_in.clone(),
+                    qsp_in.clone(),
+                    qt_in.clone(),
+                    slope_in.clone(),
+                    depth_lb,
+                    gamma,
+                    d_ref,
+                ),
+            };
+            // S16: same band as the trapezoid. Here it acts as a celerity band.
+            let velocity_cl = g.velocity.clone().clamp(velocity_lb, 15.0);
+            // S17 (power law): c = v_clamped * celerity_ratio.
+            let celerity = velocity_cl.clone() * g.celerity_ratio.clone();
+            let zeros = g.depth.zeros_like();
+            // The reference function's own ops for the pre-clamp depth. Built
+            // only for the ledger, so the no-sink path runs no extra kernel.
+            let depth_raw = ledger
+                .is_some()
+                .then(|| (g.ln_ratio.clone() * g.exponent.clone()).exp());
+            SectionOut {
+                depth: g.depth,
+                depth_raw,
+                top_width: g.top_width,
+                side_slope: zeros.clone(),
+                bottom_width: zeros.clone(),
+                hyd_radius: g.hydraulic_radius,
+                velocity_un: g.velocity,
+                velocity_cl,
+                celerity,
+                ratio: g.ln_ratio,
+                denominator: zeros.clone(),
+                side_slope_raw: zeros.clone(),
+                bw_raw: zeros,
+            }
+        }
     };
+
+    // Clamp ledger: the section clamps, on the same pre-clamp tensors the
+    // backward masks (`clamp_rule`: a tie is inactive).
+    let mut step_led: Option<StepLedger> = ledger.as_ref().map(|_| StepLedger {
+        n: qt_in.dims()[0],
+        active: Default::default(),
+    });
+    if step_led.is_some() {
+        let dr = depth_raw.clone().expect("the ledger asked for the pre-clamp depth");
+        ledger_record::<I>(&mut step_led, ClampSite::DepthFloor, || floor_active(dr, depth_lb));
+        if cfg.params.geometry_form == GeometryForm::Trapezoid {
+            let ss = side_slope_raw.clone();
+            ledger_record::<I>(&mut step_led, ClampSite::SideSlopeLow, || floor_active(ss.clone(), 0.5));
+            ledger_record::<I>(&mut step_led, ClampSite::SideSlopeHigh, || ceiling_active(ss, 50.0));
+            let bw = bw_raw.clone();
+            ledger_record::<I>(&mut step_led, ClampSite::BottomWidthFloor, || {
+                floor_active(bw, bottom_width_lb)
+            });
+        }
+        let v = velocity_un.clone();
+        ledger_record::<I>(&mut step_led, ClampSite::VelocityLow, || floor_active(v.clone(), velocity_lb));
+        ledger_record::<I>(&mut step_led, ClampSite::VelocityHigh, || ceiling_active(v, 15.0));
+    }
 
     // S18..S23: Muskingum coefficients
     //
@@ -2049,7 +2338,9 @@ where
     // `hi_b > 0`, so no `clamp_min` is needed on the three-way min).
     let k_raw = length_in.clone() / celerity.clone();
     let k_muskingum = if enforce_pos {
-        k_raw.clamp_min(dt * (1.0 + POSITIVITY_DELTA) / 2.0)
+        let k_floor = dt * (1.0 + POSITIVITY_DELTA) / 2.0;
+        ledger_record::<I>(&mut step_led, ClampSite::KFloor, || floor_active(k_raw.clone(), k_floor));
+        k_raw.clamp_min(k_floor)
     } else {
         k_raw
     };
@@ -2076,7 +2367,10 @@ where
         let w = qt_in.clone()
             / (top_width.clone() * slope_in.clone() * celerity.clone() * length_in.clone()
                 + 1e-12);
-        let x_cunge = ((-w + 1.0) * 0.5).clamp(0.0, 0.5);
+        let x_raw = (-w + 1.0) * 0.5;
+        ledger_record::<I>(&mut step_led, ClampSite::XBandLow, || floor_active(x_raw.clone(), 0.0));
+        ledger_record::<I>(&mut step_led, ClampSite::XBandHigh, || ceiling_active(x_raw.clone(), 0.5));
+        let x_cunge = x_raw.clamp(0.0, 0.5);
         if enforce_pos {
             // S19': stability cap. Muskingum's non-negative-coefficient window
             // is 2X <= Cr <= 2(1-X); solving both sides for X gives
@@ -2095,6 +2389,15 @@ where
             let cr = k_muskingum.clone().recip() * dt;
             let hi_a = cr.clone() * (0.5 * (1.0 - POSITIVITY_DELTA));
             let hi_b = (-cr * 0.5 + 1.0) * (1.0 - POSITIVITY_DELTA);
+            // The Cunge branch wins when it is at most both caps (the `<=`
+            // cascade of B19'). The cap is active where it does not.
+            ledger_record::<I>(&mut step_led, ClampSite::XCap, || {
+                x_cunge
+                    .clone()
+                    .lower_equal(hi_a.clone())
+                    .bool_and(x_cunge.clone().lower_equal(hi_b.clone()))
+                    .bool_not()
+            });
             x_cunge.min_pair(hi_a).min_pair(hi_b)
         } else {
             x_cunge
@@ -2190,6 +2493,11 @@ where
         Some((res, t_prev)) => c3.mask_where(res.mask.clone(), (t_prev.clone() * 2.0 - dt) / denom.clone()),
         None => c3,
     };
+
+    // Coefficients outside the non-negative window (not a clamp).
+    ledger_record::<I>(&mut step_led, ClampSite::OutsideCrWindow, || {
+        c1.clone().lower_elem(0.0).bool_or(c3.clone().lower_elem(0.0))
+    });
 
     // S24: i_t = N · q_t (inner-backend SpMV)
     let i_t_prim = sparse::spmv_primitive::<I>(pattern, qt_prim_for_spmv.clone(), &device, use_cuda, None);
@@ -2349,8 +2657,14 @@ where
     }
 
     // S28: q_next = max(x_sol, discharge_lb)
+    ledger_record::<I>(&mut step_led, ClampSite::DischargeFloor, || {
+        floor_active(x_sol.clone(), discharge_lb)
+    });
     let q_next = x_sol.clone().clamp_min(discharge_lb);
     let q_next_prim = unwrap(q_next);
+    if let (Some(sink), Some(step)) = (ledger.as_mut(), step_led.take()) {
+        sink.steps.push(step);
+    }
 
     // Saved-state array — order MUST match `forward_saved_idx`.
     let saved: [I::FloatTensorPrimitive; NUM_SAVED_STATE] = [
@@ -2785,6 +3099,48 @@ where
         None,
         None,
         None,
+        None,
+        None,
+    )
+}
+
+/// [`timestep_forward`] with the clamp sinks, for tests and probes. With both
+/// sinks `None` it is `timestep_forward`. `gamma_at` is the learned per-reach
+/// stage-roughness exponent, as in `timestep_forward`.
+#[allow(clippy::too_many_arguments)]
+pub fn timestep_forward_diag<I: Backend + 'static>(
+    cfg: &Config,
+    pattern: &Arc<CsrPattern>,
+    assembler: &AValuesAssembler<I>,
+    n_at: Tensor<Autodiff<I>, 1>,
+    q_spatial_at: Tensor<Autodiff<I>, 1>,
+    p_spatial_at: Tensor<Autodiff<I>, 1>,
+    q_t_at: Tensor<Autodiff<I>, 1>,
+    q_prime_t_at: Tensor<Autodiff<I>, 1>,
+    length_at: Tensor<Autodiff<I>, 1>,
+    slope_at: Tensor<Autodiff<I>, 1>,
+    x_storage_at: Tensor<Autodiff<I>, 1>,
+    gamma_at: Option<Tensor<Autodiff<I>, 1>>,
+    ledger: Option<&mut ClampLedger>,
+    probe: Option<Arc<Mutex<ClampProbe>>>,
+) -> Tensor<Autodiff<I>, 1>
+where
+    I::FloatTensorPrimitive: 'static,
+    I::Device: 'static,
+{
+    timestep_forward_with_reservoirs::<I>(
+        cfg, pattern, assembler,
+        n_at, q_spatial_at, p_spatial_at,
+        q_t_at, q_prime_t_at,
+        length_at, slope_at, x_storage_at,
+        false,
+        None,
+        gamma_at,
+        None,
+        None,
+        None,
+        ledger,
+        probe,
     )
 }
 
@@ -2816,6 +3172,10 @@ pub(crate) fn timestep_forward_with_reservoirs<I: Backend + 'static>(
     // Receives this step's pre-clamp solve and routed inflow when `Some`
     // (the engine's dam-row clamp accounting). Reads only; no numerics change.
     dam_diag: Option<&mut Option<DamStepDiag<I>>>,
+    // Clamp ledger sink: one `StepLedger` per call when `Some`.
+    ledger: Option<&mut ClampLedger>,
+    // Clamp probe sink: one `StepProbe` per backward call when `Some`.
+    probe: Option<Arc<Mutex<ClampProbe>>>,
 ) -> Tensor<Autodiff<I>, 1>
 where
     I::FloatTensorPrimitive: 'static,
@@ -2913,6 +3273,7 @@ where
         skip_rows,
         gamma_chain.clone(),
         reservoir,
+        ledger,
     );
     let x_effective = x_eff_out.expect("forward_chain_inner always writes x_eff_out");
 
@@ -2994,6 +3355,8 @@ where
         reservoir_additive: reservoir.is_some_and(|r| r.additive),
         // Mirrors S19p's gate in `forward_chain_inner` exactly.
         reservoir_positivity: reservoir.is_some_and(|r| r.additive && r.positivity) && !enforce_pos,
+        geometry_form: cfg.params.geometry_form,
+        probe,
     };
     debug_assert!(
         !state.reservoir_additive || state.reservoir_t_prev.is_some(),
@@ -3169,6 +3532,8 @@ where
         None,
         Some(release),
         None,
+        None,
+        None,
     )
 }
 
@@ -3189,6 +3554,8 @@ where
 /// zeta, routed depth, and area_z (inner backend, no tape), recomputed from the
 /// SAME saved primitives the backward reads — so the reported value is exactly
 /// what was subtracted from `b_rhs`. `None` (the training path) adds zero kernels.
+///
+/// Leakance runs are eval diagnostics here and record no clamp ledger.
 #[allow(clippy::too_many_arguments)]
 pub fn timestep_forward_leakance<I: Backend + 'static>(
     cfg: &Config,
@@ -3221,7 +3588,6 @@ where
     I::Device: 'static,
 {
     use crate::config::SparseSolver;
-
     let dt = crate::routing::mmc::DT_SECONDS;
     let bottom_width_lb = cfg.params.attribute_minimums.bottom_width;
     let depth_lb = cfg.params.attribute_minimums.depth;
@@ -3294,6 +3660,7 @@ where
         skip_rows,
         gamma_p.clone().map(wrap),
         // Reservoir rows are rejected with leakance (`route_timestep`).
+        None,
         None,
     );
     let leak = leak_out.expect("forward_chain_inner must populate LeakanceSaved when leakance is Some");
@@ -3388,6 +3755,8 @@ where
         reservoir_t_prev: None,
         reservoir_additive: false,
         reservoir_positivity: false,
+        geometry_form: cfg.params.geometry_form,
+        probe: None,
     };
 
     let state = TimestepLeakanceState::<I> { base, leak };
@@ -3476,6 +3845,10 @@ where
     I::FloatTensorPrimitive: 'static,
     I::Device: 'static,
 {
+    assert!(
+        cfg.params.geometry_form == GeometryForm::Trapezoid,
+        "geometry_form: power_law does not support CUDA graphs"
+    );
     use crate::config::SparseSolver;
 
     // SAFETY: route_timestep is the training thread's entry; no other thread
@@ -3734,6 +4107,8 @@ where
         reservoir_t_prev: None,
         reservoir_additive: false,
         reservoir_positivity: false,
+        geometry_form: GeometryForm::Trapezoid,
+        probe: None,
     };
 
     let result_prim = match TimestepOp
@@ -3781,7 +4156,7 @@ where
 {
     let (_q_next, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None, None, None,
+        &mut None, &mut None, false, None, None, None, None,
     );
 
     // Indices K1 produces (skip 14..=17: A_VALUES, B_RHS, I_T, X_SOL).
@@ -3844,7 +4219,7 @@ where
 {
     let (q_next_prim, saved) = forward_chain_inner::<I>(
         cfg, pattern, n_in, qsp_in, psp_in, qt_in, qpt_in, length_in, slope_in, xst_in, None,
-        &mut None, &mut None, false, None, None, None,
+        &mut None, &mut None, false, None, None, None, None,
     );
 
     let to_vec = |prim: I::FloatTensorPrimitive| -> Vec<f32> {

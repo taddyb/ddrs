@@ -1,8 +1,10 @@
 //! Per-gauge loss landscape in channel-parameter (log-multiplier) space.
 //! Spec: research/specs/2026-09-07-adjoint-landscape-design.md
 
+pub mod fd_sweep;
 pub mod objective;
 pub mod output;
+pub mod zero_audit;
 
 use std::path::Path;
 use std::time::Instant;
@@ -157,6 +159,20 @@ pub struct LandscapeSpec {
     /// `LandscapeOptions::period`.
     #[serde(default = "d_period")]
     pub period: String,
+    /// Sweep the Hessian FD step and count clamp switches per step. Writes
+    /// `fd_sweep.csv` and `fd_sweep_eig.csv` per arm. Absent by default, and
+    /// then nothing changes. See `fd_sweep::FdSweepSpec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd_sweep: Option<fd_sweep::FdSweepSpec>,
+    /// Audit every per-reach gradient that is exactly 0 and give it a cause.
+    /// Needs `reach_grad: true`. Writes `zero_audit.csv` per arm. Off by
+    /// default, and then nothing changes. See `zero_audit`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub zero_audit: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 fn d_window_days() -> usize { 365 }
 fn d_water_year() -> i32 { 2000 }
@@ -354,6 +370,36 @@ impl LandscapeSpec {
         Ok(())
     }
 
+    /// Reject an `fd_sweep` block with bad steps. Absent is fine.
+    pub fn validate_fd_sweep(&self) -> Result<(), BoxError> {
+        match &self.fd_sweep {
+            Some(sw) => sw.validate(),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse `fd_sweep` for an arm with `params.use_leakance`. The sweep reads
+    /// the clamp ledger, and the leakance path records none. Checked at arm
+    /// setup, before any evaluation, so one bad arm cannot panic mid-run.
+    pub fn validate_fd_sweep_arm(&self, arm_name: &str, use_leakance: bool) -> Result<(), BoxError> {
+        if self.fd_sweep.is_some() && use_leakance {
+            return Err(format!(
+                "arm `{arm_name}`: landscape.fd_sweep is not supported when params.use_leakance is true \
+                 (the leakance path records no clamp ledger); remove landscape.fd_sweep or use a non-leakance arm"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// `zero_audit` reads the per-reach gradients, so it needs `reach_grad`.
+    pub fn validate_zero_audit(&self) -> Result<(), BoxError> {
+        if self.zero_audit && !self.reach_grad {
+            return Err("landscape.zero_audit needs landscape.reach_grad: true".into());
+        }
+        Ok(())
+    }
+
     /// Reject a `period` that isn't one of `VALID_PERIODS`.
     pub fn validate_period(&self) -> Result<(), BoxError> {
         if !VALID_PERIODS.contains(&self.period.as_str()) {
@@ -402,6 +448,8 @@ where
     spec.validate_objective()?;
     spec.validate_deriv_weight()?;
     spec.validate_period()?;
+    spec.validate_fd_sweep()?;
+    spec.validate_zero_audit()?;
     if arms.is_empty() {
         return Err("no arms selected".into());
     }
@@ -475,6 +523,7 @@ where
     let t_arm = Instant::now();
     println!("=== arm {} (run {}, checkpoint {}) start ===", arm.name, arm.run_id, arm.checkpoint_label);
     let ctx = InfluenceContext::<I>::open_allowing_leakance(arm, device, opts.force_cpu, &opts.period)?;
+    spec.validate_fd_sweep_arm(&arm.name, ctx.cfg.params.use_leakance)?;
     let arm_dir = out_dir.join(&arm.name);
     std::fs::create_dir_all(arm_dir.join("gauges"))?;
     let n_windows = spec.n_windows.clamp(1, 4);
@@ -579,6 +628,15 @@ where
     let e0 = obj.eval([0.0; 3], true);
     let grad0 = e0.grad.unwrap();
     let hess0 = obj.hessian([0.0; 3], h);
+    if let Some(sw) = &spec.fd_sweep {
+        let (rows, eigs) = fd_sweep::fd_step_sweep(&obj, [0.0; 3], &sw.steps);
+        output::append_fd_sweep(arm_dir, &arm.name, &g.staid, "trained", &rows, &eigs)?;
+        if sw.steps.contains(&h) {
+            let hs = fd_sweep::hessian_from_rows(&rows, h);
+            let d = (0..3).flat_map(|i| (0..3).map(move |j| (i, j))).map(|(i, j)| (hs[i][j] - hess0[i][j]).abs()).fold(0.0f32, f32::max);
+            println!("  [{}] {} fd_sweep check: max |H_sweep(fd_step) - hess0| = {:e}", arm.name, g.staid, d);
+        }
+    }
     println!("  [{}] {} trained point: L0 {:.5} NSE {:.3} grad {:?} clamped {:.3}", arm.name, g.staid, e0.loss, e0.nse_mean, grad0, e0.clamped_frac);
 
     // 2. damped Newton to the per-gauge optimum
@@ -643,6 +701,10 @@ where
         }
     }
     let alpha_star = alpha;
+    if let Some(sw) = spec.fd_sweep.as_ref().filter(|sw| sw.at_optimum) {
+        let (rows, eigs) = fd_sweep::fd_step_sweep(&obj, alpha_star, &sw.steps);
+        output::append_fd_sweep(arm_dir, &arm.name, &g.staid, "optimum", &rows, &eigs)?;
+    }
     let e_star = cur;
     let hess_star = hess;
     let (eigval_star, eigvec_star) = eig_active(hess_star, active);
@@ -788,6 +850,18 @@ where
             }
         }
         let dist = dist_to_gauge(&obj.windows[0].tensors.adjacency, obj.windows[0].gauge_row);
+        if spec.zero_audit {
+            if zero_audit::auditable(&obj) {
+                let mut bad = zero_audit::audit_gauge(&obj, &arm.name, &g.staid, arm_dir, "trained", [0.0; 3], &rg0, &dist)?;
+                if alpha_star != [0.0; 3] {
+                    bad += zero_audit::audit_gauge(&obj, &arm.name, &g.staid, arm_dir, "optimum", alpha_star, &rgs, &dist)?;
+                }
+                println!("  [{}] {} zero_audit gate: unexplained and not flat = {bad}{}", arm.name, g.staid, if bad == 0 { "" } else { "  GATE FAIL" });
+            } else {
+                output::append_zero_audit_skipped(arm_dir, &arm.name, &g.staid, "")?;
+                println!("  [{}] {} zero_audit: not_audited (leakance or reservoirs)", arm.name, g.staid);
+            }
+        }
         (Some(rg0.slots), Some(rgs.slots), dist)
     } else {
         (None, None, Vec::new())
@@ -1248,5 +1322,63 @@ mod tests {
         assert!(err.to_string().contains("bogus"));
         assert!(err.to_string().contains("testing"));
         assert!(err.to_string().contains("training"));
+    }
+
+    #[test]
+    fn absent_keys_are_not_serialized() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        let text = serde_json::to_string(&spec).unwrap();
+        assert!(!text.contains("fd_sweep") && !text.contains("zero_audit"), "{text}");
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nzero_audit: true\n").unwrap();
+        assert!(serde_json::to_string(&spec).unwrap().contains("zero_audit"));
+    }
+
+    #[test]
+    fn zero_audit_needs_reach_grad() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nzero_audit: true\n").unwrap();
+        assert!(spec.validate_zero_audit().unwrap_err().to_string().contains("reach_grad"));
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nzero_audit: true\nreach_grad: true\n").unwrap();
+        spec.validate_zero_audit().unwrap();
+    }
+
+    #[test]
+    fn fd_sweep_absent_by_default() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        assert!(spec.fd_sweep.is_none());
+    }
+
+    #[test]
+    fn fd_sweep_empty_block_takes_the_defaults() {
+        let spec: LandscapeSpec = serde_yaml::from_str("gauges: {}\nfd_sweep: {}\n").unwrap();
+        let sw = spec.fd_sweep.as_ref().unwrap();
+        assert_eq!(sw.steps, vec![0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625]);
+        assert!(!sw.at_optimum);
+        spec.validate_fd_sweep().unwrap();
+    }
+
+    #[test]
+    fn fd_sweep_is_refused_for_a_leakance_arm() {
+        let on: LandscapeSpec = serde_yaml::from_str("gauges: {}\nfd_sweep: {}\n").unwrap();
+        let err = on.validate_fd_sweep_arm("leaky", true).unwrap_err().to_string();
+        assert!(err.contains("params.use_leakance") && err.contains("landscape.fd_sweep"), "{err}");
+        assert!(err.contains("leaky"), "{err}");
+        on.validate_fd_sweep_arm("plain", false).unwrap();
+        let off: LandscapeSpec = serde_yaml::from_str("gauges: {}\n").unwrap();
+        off.validate_fd_sweep_arm("leaky", true).unwrap();
+    }
+
+    #[test]
+    fn fd_sweep_validation_rejects_bad_steps() {
+        let bad = |steps: &str, needle: &str| {
+            let spec: LandscapeSpec = serde_yaml::from_str(&format!("gauges: {{}}\nfd_sweep: {{ steps: {steps} }}\n")).unwrap();
+            let err = spec.validate_fd_sweep().unwrap_err().to_string();
+            assert!(err.contains(needle), "{err}");
+        };
+        bad("[]", "empty");
+        bad("[0.1, 0.0]", "positive");
+        bad("[0.1, -0.2]", "positive");
+        bad("[0.1, .nan]", "finite");
+        bad("[0.1, 0.2]", "decreasing");
+        bad("[0.1, 0.1]", "decreasing");
     }
 }

@@ -5,12 +5,15 @@
 //! from reach `i` to the gauge should equal the path sum `Σ_j K_j` over reaches
 //! `j` from `i` (inclusive) down to the gauge (inclusive), evaluated at the
 //! flow state of the window. `reach_k_hours` mirrors `forward_chain_inner`
-//! S1–S18 for `ddr_match: false` (exact trapezoidal celerity).
+//! S1–S18 for `ddr_match: false`. It follows `params.geometry_form`: the exact
+//! trapezoidal celerity, or the power-law section with `c = v * celerity_ratio`
+//! (`geometry::compute_power_law_geometry` and its `_field` variant).
 
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 
-use crate::config::Config;
+use crate::config::{Config, GeometryForm};
+use crate::geometry::{compute_power_law_geometry, compute_power_law_geometry_field};
 use crate::sparse::SparseAdjacency;
 
 /// Per-reach Muskingum `K` in hours at the given discharge (`q_t`, m³/s).
@@ -44,6 +47,38 @@ pub fn reach_k_hours<I: Backend>(
     };
 
     let q_t = q_t.clamp_min(discharge_lb);
+
+    // Power-law section: same calls and op order as the solver's power-law
+    // arm in `forward_chain_inner`, so K is bitwise equal to the solver's.
+    if cfg.params.geometry_form == GeometryForm::PowerLaw {
+        let g = match gamma_field {
+            Some(gt) => compute_power_law_geometry_field::<I>(
+                n.clone(),
+                p.clone(),
+                q.clone(),
+                q_t,
+                slope.clone(),
+                depth_lb,
+                gt.clone(),
+                1.0,
+            ),
+            None => compute_power_law_geometry::<I>(
+                n.clone(),
+                p.clone(),
+                q.clone(),
+                q_t,
+                slope.clone(),
+                depth_lb,
+                gamma,
+                d_ref,
+            ),
+        };
+        let celerity = g.velocity.clamp(velocity_lb, 15.0) * g.celerity_ratio;
+        let k_seconds = length.clone() / celerity;
+        let k: Vec<f32> = k_seconds.into_data().to_vec::<f32>().expect("f32");
+        return k.into_iter().map(|s| s / 3600.0).collect();
+    }
+
     let q_eps = q.clone() + 1e-6_f32;
     let numerator = q_t * n.clone() * (q_eps.clone() + 1.0);
     let numerator = if gamma != 0.0 && d_ref != 1.0 {

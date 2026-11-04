@@ -1,8 +1,14 @@
+pub mod clamp_rule;
+pub mod clamp_ledger;
+pub mod clamp_parity;
+pub mod clamp_reasons;
 pub mod courant_probe;
 pub mod leakance;
 pub mod mmc;
 pub mod utils;
 pub mod mmc_op;
+pub mod power_law;
+pub mod reference_step;
 pub mod release;
 pub mod stage;
 pub mod stage_cuda;

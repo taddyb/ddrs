@@ -296,9 +296,142 @@ pub fn write_landscape_netcdf(path: &Path, r: &LandscapeResult) -> Result<(), Bo
     Ok(())
 }
 
+/// Append the FD step sweep of one gauge to `fd_sweep.csv` and
+/// `fd_sweep_eig.csv` in `arm_dir`. `point` is `trained` or `optimum`.
+///
+/// `fd_sweep.csv` has one row per step and per ACTIVE axis; a frozen axis has
+/// no row. `h_aa` is the diagonal entry `h_col[axis]`. `switch_total` is the
+/// sum of the 11 `switch_<site>` columns. `switch_frac` is the share of
+/// (step, reach) entries where at least one of the 11 sites differs between
+/// the plus and minus runs. `switch_range` counts parameter-range clamp
+/// changes and is kept apart. `fd_sweep_eig.csv` has one row per step;
+/// `max_rel_change_vs_prev_h` is empty on the first step. A frozen axis has
+/// no eigenvalue: its `eig_k` is written as NaN.
+pub fn append_fd_sweep(
+    arm_dir: &Path,
+    arm: &str,
+    staid: &str,
+    point: &str,
+    rows: &[super::fd_sweep::FdSweepRow],
+    eigs: &[super::fd_sweep::FdSweepEig],
+) -> Result<(), BoxError> {
+    let sites: Vec<_> = super::fd_sweep::clamp_sites().collect();
+    let path = arm_dir.join("fd_sweep.csv");
+    let new = !path.exists();
+    let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new {
+        let names: Vec<String> = sites.iter().map(|s| format!("switch_{}", s.name())).collect();
+        writeln!(w, "arm,staid,point,h,axis,h_aa,h_col_0,h_col_1,h_col_2,reach_steps,switch_total,{},switch_range,switch_frac", names.join(","))?;
+    }
+    for r in rows {
+        let per: Vec<u64> = sites.iter().map(|s| r.switches.get(s).copied().unwrap_or(0)).collect();
+        let total: u64 = per.iter().sum();
+        let per_s: Vec<String> = per.iter().map(|v| v.to_string()).collect();
+        let frac = if r.reach_steps > 0 { r.switched_entries as f64 / r.reach_steps as f64 } else { f64::NAN };
+        writeln!(
+            w,
+            "{arm},{staid},{point},{},{},{},{},{},{},{},{total},{},{},{frac}",
+            r.h, r.axis, r.h_col[r.axis], r.h_col[0], r.h_col[1], r.h_col[2], r.reach_steps, per_s.join(","), r.range_switches
+        )?;
+    }
+    let path = arm_dir.join("fd_sweep_eig.csv");
+    let new = !path.exists();
+    let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new {
+        writeln!(w, "arm,staid,point,h,eig_0,eig_1,eig_2,max_rel_change_vs_prev_h")?;
+    }
+    for (i, e) in eigs.iter().enumerate() {
+        let rel = if i == 0 {
+            String::new()
+        } else {
+            let p = &eigs[i - 1].eig;
+            let m = (0..3)
+                .filter(|&j| e.eig[j].is_finite() && p[j].is_finite())
+                .map(|j| (e.eig[j] - p[j]).abs() / p[j].abs().max(1e-12))
+                .fold(0.0f32, f32::max);
+            m.to_string()
+        };
+        writeln!(w, "{arm},{staid},{point},{},{},{},{},{rel}", e.h, e.eig[0], e.eig[1], e.eig[2])?;
+    }
+    Ok(())
+}
+
+/// Header of `zero_audit.csv`.
+pub const ZERO_AUDIT_HEADER: &str =
+    "arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat";
+
+/// One row of `zero_audit.csv`: the zero counts of one axis at one point.
+pub struct ZeroAuditRow<'a> {
+    pub point: &'a str,
+    pub axis: &'a str,
+    pub counts: &'a super::zero_audit::AxisCounts,
+    /// Unexplained entries whose single-leaf perturbation leaves the loss flat.
+    pub unexplained_flat: usize,
+}
+
+/// Append the zero-gradient audit of one gauge to `zero_audit.csv` in
+/// `arm_dir`. Each row counts the entries of one axis whose `reach_grad` is
+/// exactly 0.0 by cause. The gate is `unexplained - unexplained_flat == 0`.
+/// Something not audited writes a row with `point` `not_audited` and no
+/// counts (`append_zero_audit_skipped`): a leakance or reservoir arm writes one
+/// row for the whole arm (empty `axis`), and an arm with a gamma axis still
+/// audits its n, p and q axes and writes one such row for the gamma axis.
+pub fn append_zero_audit(arm_dir: &Path, arm: &str, staid: &str, rows: &[ZeroAuditRow]) -> Result<(), BoxError> {
+    let path = arm_dir.join("zero_audit.csv");
+    let new = !path.exists();
+    let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new {
+        writeln!(w, "{ZERO_AUDIT_HEADER}")?;
+    }
+    for r in rows {
+        let c = r.counts;
+        writeln!(
+            w,
+            "{arm},{staid},{},{},{},{},{},{},{},{},{},{},{}",
+            r.point, r.axis, c.n_reach, c.n_zero, c.no_path, c.range_clamp, c.masked_row, c.gauge_floor, c.clamp_cut, c.unexplained, r.unexplained_flat
+        )?;
+    }
+    Ok(())
+}
+
+/// A `not_audited` row of `zero_audit.csv`. `axis` is empty for a whole arm.
+pub fn append_zero_audit_skipped(arm_dir: &Path, arm: &str, staid: &str, axis: &str) -> Result<(), BoxError> {
+    let path = arm_dir.join("zero_audit.csv");
+    let new = !path.exists();
+    let mut w = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    if new {
+        writeln!(w, "{ZERO_AUDIT_HEADER}")?;
+    }
+    writeln!(w, "{arm},{staid},not_audited,{axis},,,,,,,,,")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_zero_audit_writes_exact_header_and_rows() {
+        use crate::experiment::landscape::zero_audit::AxisCounts;
+        let dir = std::env::temp_dir().join(format!("zero_audit_out_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = AxisCounts { n_reach: 10, n_zero: 7, no_path: 1, range_clamp: 2, masked_row: 0, gauge_floor: 0, clamp_cut: 3, unexplained: 1, unexplained_reaches: vec![4] };
+        append_zero_audit(&dir, "a", "01", &[ZeroAuditRow { point: "trained", axis: "n", counts: &c, unexplained_flat: 1 }]).unwrap();
+        append_zero_audit_skipped(&dir, "b", "01", "").unwrap();
+        append_zero_audit_skipped(&dir, "b", "01", "gamma").unwrap();
+        let t = std::fs::read_to_string(dir.join("zero_audit.csv")).unwrap();
+        let mut it = t.lines();
+        assert_eq!(
+            it.next().unwrap(),
+            "arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat"
+        );
+        assert_eq!(it.next().unwrap(), "a,01,trained,n,10,7,1,2,0,0,3,1,1");
+        assert_eq!(it.next().unwrap(), "b,01,not_audited,,,,,,,,,,");
+        assert_eq!(it.next().unwrap(), "b,01,not_audited,gamma,,,,,,,,,");
+        assert!(it.next().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn minimal_result(slices: Vec<Slice>) -> LandscapeResult {
         LandscapeResult {
@@ -504,6 +637,36 @@ mod tests {
         assert!(f.variable("dist_to_gauge_m").is_some());
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn append_fd_sweep_writes_exact_headers_and_rows() {
+        use crate::experiment::landscape::fd_sweep::{FdSweepEig, FdSweepRow};
+        use crate::routing::clamp_ledger::ClampSite;
+        use std::collections::BTreeMap;
+        let dir = std::env::temp_dir().join(format!("fd_sweep_out_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut sw = BTreeMap::new();
+        sw.insert(ClampSite::DepthFloor, 3u64);
+        sw.insert(ClampSite::XCap, 1u64);
+        let rows = vec![FdSweepRow { h: 0.5, axis: 1, h_col: [1.0, 2.0, 3.0], reach_steps: 100, switches: sw, range_switches: 2, switched_entries: 4 }];
+        let eigs = vec![FdSweepEig { h: 0.5, eig: [1.0, 2.0, 3.0] }, FdSweepEig { h: 0.25, eig: [1.5, 2.0, 3.0] }];
+        append_fd_sweep(&dir, "a", "01", "trained", &rows, &eigs).unwrap();
+        let t = std::fs::read_to_string(dir.join("fd_sweep.csv")).unwrap();
+        let mut it = t.lines();
+        assert_eq!(
+            it.next().unwrap(),
+            "arm,staid,point,h,axis,h_aa,h_col_0,h_col_1,h_col_2,reach_steps,switch_total,switch_depth_floor,switch_side_slope_low,switch_side_slope_high,switch_bottom_width_floor,switch_velocity_low,switch_velocity_high,switch_k_floor,switch_x_band_low,switch_x_band_high,switch_x_cap,switch_discharge_floor,switch_range,switch_frac"
+        );
+        assert_eq!(it.next().unwrap(), "a,01,trained,0.5,1,2,1,2,3,100,4,3,0,0,0,0,0,0,0,0,1,0,2,0.04");
+        assert!(it.next().is_none());
+        let e = std::fs::read_to_string(dir.join("fd_sweep_eig.csv")).unwrap();
+        let mut it = e.lines();
+        assert_eq!(it.next().unwrap(), "arm,staid,point,h,eig_0,eig_1,eig_2,max_rel_change_vs_prev_h");
+        assert_eq!(it.next().unwrap(), "a,01,trained,0.5,1,2,3,");
+        assert_eq!(it.next().unwrap(), "a,01,trained,0.25,1.5,2,3,0.5");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -250,6 +250,245 @@ Courant violation worse, not better. **Tasks 4 and 5 must land together.**
 | `outflow_idx` | extraction only (not the solver) | none | no (sandbox untouched) | `gauge_mass_conservation` |
 | `enforce_positivity` | S18′ K floor, S19′ X cap | gk_musk mask + new cr→k path; XGrads masked by mask_cunge | no (default off; requires `ddr_match: false`) | `positivity_clamp` |
 | `params.subdivision` | build-time graph only (larger N, `q'/m`, KAN gather, hot-start divisor) | **none** — no gradient path | no (default off) | `subdivide`, `subdivision_integration`, `adjacency_parity` |
+| `geometry_form` | S2..S17 arm | early-return power-law tail | no, default trapezoid | `power_law_gradcheck`, `power_law_leakance_gradcheck`, `power_law_reservoir_gradcheck`, `geometry_form_golden` |
+
+## geometry_form: one consistent section (power_law)
+
+`params.geometry_form` picks the channel section for Muskingum-Cunge rows.
+`trapezoid` is the default and an absent key means it. Forward values and parent
+gradients of the default are bitwise unchanged, except at exact clamp ties (see
+the tie rule below).
+
+### The defect on the trapezoid
+
+The trapezoid path gets its depth from a power-law inversion with `R = d`. It then
+builds a tangent trapezoid on that depth. The two sections differ, so `Q != vA`.
+Over a grid on the `config/merit_training.yaml` parameter box the ratio `vA/Q`
+has median 0.768 and a 5 to 95 % range of 0.080 to 1.174. At p 21, q 0.65 it is
+0.84 to 0.86. The grid is `n` 0.015 to 0.25 (6 log steps), `p` 1 to 200 (7 log
+steps), `q` 0.05 to 0.95 (7 steps), `Q` 0.5 to 5000 m3/s (7 log steps) and slope
+1e-3 to 3e-2 (4 log steps), 8232 points. Source: the ignored test
+`tests/geometry_power_law.rs::trapezoid_va_over_q_spread`. An earlier draft of this
+text said median 0.83 and range 0.14 to 1.17 for an unrecorded grid; the 95 % end
+agrees, the other two differ with the grid.
+
+The side-slope clamp makes it worse at small q. At q about 0.084 the clamp binds
+above about 1.9 m depth. It flips the sign of `d ln c / dq`: +0.19 on the
+trapezoid, against -0.80 for a consistent section, at Q 100 m3/s. These two
+values are planner estimates. No test in the repo reproduces them.
+
+### The power-law section
+
+```
+T = p d^q          A = T d/(q+1)          R = d/(q+1)
+d = [ Q n (q+1)^(5/3) d_ref^g / (p sqrt(s)) ]^( 3/(5 + 3q + 3g) )
+v = Q / A          c = v (5 + 3q + 3g) / (3 (q+1))      (= dQ/dA exactly)
+```
+
+- The depth runs in log space. The depth floor `attribute_minimums.depth` stays.
+- `dA/dd = T` holds exactly, so the celerity `beta` has no approximation.
+- Cunge X uses `T`. The path has no side slope, no bottom width, and no clamps C4
+  and C5.
+- The velocity clamp stays as `clamp(Q/A, v_lb, 15)`. It acts as a celerity band.
+  `Q = vA` holds wherever the clamp is inactive. At the depth floor `v = Q/A` is
+  kept (continuity, not Manning).
+
+### Where it applies
+
+- Supported: `ddr_match: false` only. `use_cuda_graphs` is rejected at load
+  (`config.rs::validate_geometry_form`). Leakance and reservoirs run on it:
+  zeta reads the shared power-law depth, and its depth, `q_eps` and `p`
+  gradients join `power_law.rs::section_backward`. The section takes `ln p` and
+  `ln s`, so load also needs `attribute_minimums.slope`, the lower bound of
+  `parameter_ranges.p_spatial` and `defaults.p_spatial` above zero.
+  On both forms the leakance width is `(p d)^q_eps` (the DDR reference form,
+  `src/routing/leakance.rs::zeta_forward`), not the section's top width
+  `p d^q`. It reads the section's depth. Open: matching the width to `p d^q`
+  would break `leakance_reference_match`; this is the user's decision.
+- Stage routing is allowed. The load prints a WARN: stage rows keep their own
+  section, so `geometry_form` changes Muskingum-Cunge rows only.
+- The load prints an INFO line that points at this file.
+- The learned `n` shifts. At fixed trained parameters the median celerity rises 3.0 %
+  on Juniata and 3.6 % on Hudson (see Measured). Runs and values of `n` are not
+  comparable across forms.
+- Do not resume a checkpoint across forms, and do not evaluate one across forms.
+  A trapezoid checkpoint loads under `power_law` with no warning, and its weights
+  were trained against the other section.
+
+Code: forward in `src/routing/mmc_op.rs` (the `geometry_form` arm of the forward
+chain), backward in `src/routing/power_law.rs::section_backward`, reference
+functions in `src/geometry.rs`.
+
+### Tie rule on the MC path
+
+A clamp bound is inactive at an exact tie, so the gradient passes. For a min of
+two live operands the tie goes to the first operand (Burn `min_pair`). This
+matches Burn autodiff and DDR's `torch.clamp`. The helpers are in
+`src/routing/clamp_rule.rs`. Two sites read the saved clamped value before. A `>=`
+mask on a clamped value would pass every clamped entry, so they now read the
+pre-clamp value, rebuilt with the forward's own ops.
+
+| Site | Mask | Tensor read | Before | After |
+|---|---|---|---|---|
+| B28 solve output floor | `x_sol` vs discharge floor | `x_sol` | `x > lb` | `x >= lb` |
+| B18' K floor | `k_raw` vs K floor | `k_raw` | `k > floor` | `k >= floor` |
+| B16 velocity band | `v_un` in `[v_lb, 15]` | `v_un` | strict `<` and `>` | `<=` and `>=` |
+| B11 bottom-width floor | `bw_raw` vs floor | `bw_raw` | `bw > lb` | `bw >= lb` |
+| B9 side-slope band | `z_raw` in `[0.5, 50]` | `z_raw` | strict | closed |
+| B6 depth floor | `ratio^e` vs `depth_lb` | pre-clamp depth | saved post-clamp depth `> lb` | pre-clamp `>= lb` |
+| B19 Cunge X band | `x_raw` in `[0, 0.5]` | pre-clamp `x_raw` | saved clamped X, strict | pre-clamp, closed |
+| S19p dam-row X cap | cap vs channel X | recomputed cap and `X_r` | tie counted as the cap | cap wins only if `cap < X_r` |
+| Leakance losing-only gate | `depth` vs `d_gw` | `depth` | `depth > d_gw` | `depth >= d_gw` |
+| Leakance bed cap | `m_raw` vs cap | `m_raw` | `m_raw < cap` | `m_raw <= cap` |
+
+A natural X = 0.5 rounding tie on the default path now passes the gradient.
+Forward values stay bitwise. A training trajectory can move slightly from older
+runs. The pins are in `tests/clamp_tie_rule.rs`.
+
+#### Zero pattern on real operating points
+
+`probe_clamp_parity` routes a trained window and compares the fused gradient with
+Burn autodiff at every 20th hourly step. The loss is `sum(q_next * w)` with
+`w_i = 1 + (i % 7)`. Five parents are tracked: `n`, `q_spatial`, `p_spatial`,
+`q_t`, `q_prime_t`. The fused forward equals the trajectory forward bitwise at
+every sampled step (the probe asserts it). The reference forward matches the
+fused forward with `max_q_rel_diff` 0 in all four arms.
+
+The runs are local, under the geometry-form workspace. Checkpoint: the last one,
+`epoch_30_mb_0`. Window: 90 days from day 0, 100 sampled steps. Juniata uses
+`--gauges 1` (01567000, 213 reaches). Hudson MC-only uses `--gauges 4`
+(756 reaches).
+
+**Result: the zero sets do not match for the parameter parents. Every mismatch is
+f32 round-off at an entry whose true gradient is 0 or near 0.** `q_t` and
+`q_prime_t` match in all four arms (0 mismatches in 75600 or 21300 entries). `n`,
+`q_spatial` and `p_spatial` reach `q_next` only through K and X, so they share one
+mismatch count per arm. Muskingum has c1 + c2 + c3 = 1 and c3 + c4 = 1 for any K
+and X. So `q_next = c1*dI + c3*dQ + I_t + q'`, with `dI = I_next - I_t`,
+`I = N q` and `dQ = q_t - I_t - q'`. The local derivative with respect to K or X is
+`dc1*dI + dc3*dQ`. It is near 0 at a steady reach, and where the two terms cancel.
+There the fused sum and the autodiff sum round differently, so one side can be
+exactly 0 and the other a small number.
+
+Steadiness of the reach at the step (`s = max(|q_next - q_t|, |I_next - I_t|) /
+max(|q_t|, |I_t|, 1e-6)`, from the trajectory values). Mismatches at bitwise or
+`s <= 1e-6` steadiness, out of all mismatches: Juniata trapezoid 1479 of 1479,
+Juniata power_law 1518 of 1518, Hudson trapezoid 7200 of 7203, Hudson power_law
+7458 of 7458. The three others are one entry, Hudson trapezoid step 1240, reach 556
+(`s` = 2.4e-4, X clamped to 0 by `x_band_low`). There `dI - 2*dQ` is 5.8e-5 against
+`dI` = -3.9e-2, and the f32 round-off scale of the four-term sum is 2.8e-5. So its
+true gradient is also at round-off.
+
+225 mismatch entries sit on reaches with a clamp site active (3 Juniata power_law,
+156 Hudson trapezoid, 66 Hudson power_law). They are `x_band_low` or `depth_floor`
+at steady reaches. No mismatch comes from a clamp mask. The nonzero side of a
+mismatch is small but not always tiny: the largest is 6.6e-4 for `n` (Hudson
+trapezoid), 8.9e-5 for `q_spatial` and 2.6e-6 for `p_spatial` (Hudson power_law).
+
+The probe's strict gate (exit 1 on any zero-set mismatch) still exits 1 on all four
+runs. Whether to gate only entries whose true gradient is resolvable in f32 is an
+open decision.
+
+| Arm | Run id | Mismatches per parent (n, q_spatial, p_spatial) | Entries per parent | Value outliers (n, q_spatial, p_spatial) | `max_q_rel_diff` |
+|---|---|---|---|---|---|
+| Juniata trapezoid | `2026-11-03T04-29-42Z-train-and-test` | 493, 493, 493 | 21300 | 184, 31, 1 | 0e0 |
+| Juniata power_law | `2026-11-03T04-30-00Z-train-and-test` | 506, 506, 506 | 21300 | 192, 25, 0 | 0e0 |
+| Hudson MC trapezoid | `2026-11-03T04-24-45Z-train-and-test` | 2401, 2401, 2401 | 75600 | 2754, 325, 217 | 0e0 |
+| Hudson MC power_law | `2026-11-03T04-25-11Z-train-and-test` | 2486, 2486, 2486 | 75600 | 2948, 263, 28 | 0e0 |
+
+Mismatches for `q_t` and `q_prime_t`: 0 in every arm, with 0 value outliers.
+
+Value outliers are nonzero entries on both sides that differ by more than rel 1e-3
+and abs 1e-6. Reported, not gated. Most sit at steady reaches (`s <= 1e-4`: 161 of
+216, 156 of 217, 2777 of 3296 and 2915 of 3239 in table order). The largest
+|fused - ref| per arm (n, q_spatial, p_spatial): Juniata trapezoid 9.9e-4, 5.2e-5,
+1.1e-6; Juniata power_law 9.4e-4, 9.8e-6, 0; Hudson trapezoid 6.2e-3, 8.3e-4, 4.3e-5;
+Hudson power_law 3.1e-3, 5.6e-4, 2.9e-5.
+
+Active (step, reach) entries per clamp site, summed over the 100 sampled steps:
+
+| Site | Juniata trapezoid | Juniata power_law | Hudson MC trapezoid | Hudson MC power_law |
+|---|---|---|---|---|
+| depth_floor | 0 | 1 | 31 | 2 |
+| side_slope_low | 0 | 0 | 0 | 0 |
+| side_slope_high | 0 | 0 | 0 | 0 |
+| bottom_width_floor | 0 | 0 | 0 | 0 |
+| velocity_low | 0 | 1 | 2 | 1 |
+| velocity_high | 0 | 0 | 0 | 0 |
+| k_floor | 0 | 0 | 0 | 0 |
+| x_band_low | 533 | 457 | 3743 | 2915 |
+| x_band_high | 0 | 0 | 0 | 0 |
+| x_cap | 0 | 0 | 0 | 0 |
+| discharge_floor | 0 | 2 | 4 | 2 |
+| outside_cr_window | 20530 | 20597 | 69190 | 69765 |
+
+### Measured
+
+Seed 42, CPU, 30 epochs, committed bundles. This is a record, not a gate. One run per
+cell. No seed repeat was run, so these differences are not shown to exceed seed noise. The harness is
+`tests/geometry_form_measure.rs` (ignored, release, manual).
+
+Routed metrics (median over gauges on Juniata, per gauge on Hudson):
+
+| Bundle | Gauge | Trapezoid NSE / KGE | power_law NSE / KGE | Baseline NSE / KGE |
+|---|---|---|---|---|
+| Juniata | median (1 gauge) | 0.790 / 0.881 | 0.836 / 0.910 | 0.695 / 0.819 |
+| Hudson MC only | 01372058 Poughkeepsie | 0.145 / 0.604 | 0.208 / 0.621 | 0.144 / 0.561 |
+| Hudson MC only | 01358000 Green Island | 0.781 / 0.876 | 0.810 / 0.882 | 0.688 / 0.801 |
+| Hudson MC only | 01375000 Croton | 0.820 / 0.856 | 0.823 / 0.857 | 0.835 / 0.867 |
+| Hudson stage | 01372058 Poughkeepsie | 0.308 / 0.625 | 0.317 / 0.623 | 0.144 / 0.561 |
+| Hudson stage | 01358000 Green Island | 0.780 / 0.876 | 0.801 / 0.881 | 0.688 / 0.801 |
+| Hudson stage | 01375000 Croton | 0.819 / 0.856 | 0.821 / 0.856 | 0.835 / 0.867 |
+
+Celerity from `probe_courant` (`enforce_positivity: false` pass, rho 90, 2000 steps,
+every 10th step). The paired ratio is the power_law celerity over the trapezoid
+celerity, on the trapezoid run's trained checkpoint, joined on reach and step. This is
+the pure form effect at fixed trained parameters. The trained-vs-trained ratio
+compares the median celerity of each form's own trained run.
+
+| Bundle | Paired ratio median | Paired ratio 5 to 95 % | Trained-vs-trained ratio |
+|---|---|---|---|
+| Juniata (213 reaches) | 1.030 | 1.024 to 1.102 | 1.027 |
+| Hudson MC only (756 reaches) | 1.036 | 1.026 to 1.183 | 1.054 |
+
+Median learned parameters. Juniata (from the plot output): n 0.1258 trapezoid and
+0.1275 power_law, p 12.47 and 12.26, q 0.483 and 0.481. These are medians over the
+full network, read from the plot file. Hudson runs write no parameter file; the last training log line gives median n: MC only 0.1258 and 0.1262,
+stage 0.1268 and 0.1306. The Hudson value is the last training-batch median from
+`run.log`, so it is not the same statistic as the Juniata network median.
+
+Hudson stage run: the `stage routing: 41 of 756 reaches in the stage block` line
+confirms 41 stage rows. Under power_law the section changes the 715 Muskingum-Cunge
+rows only (756 minus 41). Stage rows keep the table section. Poughkeepsie sits on a
+stage row, so it changes only through its Muskingum-Cunge inflows.
+
+`probe_courant --celerity-csv <path>` writes `reach,step,celerity_m_s` for the
+`enforce_positivity: false` pass.
+
+### Landscape Hessian on the power law
+
+The `fd_sweep` tool (`landscape.fd_sweep`) repeats the landscape Hessian at
+FD steps `h` from 0.4 down to 0.00625. Seed 42, CPU, one gauge per bundle, one
+window of 365 days, `grid: 0`, `newton_iters: 0`. The trapezoid curvature
+settles as `h` shrinks on Juniata. The power-law curvature does not.
+
+- Juniata 01567000, power_law: `h_aa` does not settle below `h = 0.025`. The
+  p axis goes 0.0187 to 0.0038 and the q axis 0.0431 to 0.0307 over `h = 0.1`
+  to `0.00625`. The smallest eigenvalue changes sign.
+- Hudson 01372058, power_law: the n axis `h_aa` at the default `fd_step = 0.05`
+  is 0.4827. It is 0.139 at `h = 0.1` and 0.126 at `h = 0.025`. So `hess0`
+  sits on an outlier for this arm.
+- Clamp switching is under 5 % of reach-steps, mostly `x_band_low`. It does not
+  explain the drift. The cause is untested.
+- Run `fd_sweep` before you trust `hess0` on a power-law arm.
+
+The runs are local (gitignored workspace `output/geometry-form/.ddrs`):
+`fd-sweep-juniata/2026-11-03T10-41-17Z` and `fd-sweep-hudson/2026-11-03T10-42-38Z`.
+The arms are the trapezoid and power_law runs of 2026-11-03 (Juniata
+`04-29-42Z` and `04-30-00Z`, Hudson `04-24-45Z` and `04-25-11Z`).
+
+Zero audit (`zero_audit`, same four arms): `n_zero` is 0 on every axis and arm.
+The audit held without classifying anything.
 
 ## CUDA backend coverage
 

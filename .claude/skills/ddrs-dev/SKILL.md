@@ -209,6 +209,48 @@ variables named by label; `census.py` reads the labels. The adjoint study and th
 hydraulic-K check carry the learned gamma too, and both handle a fixed `q_spatial`
 (`params.defaults.q_spatial`, the n_0 + gamma head).
 
+**`landscape.fd_sweep` (FD step sweep).** Add `fd_sweep: {}` to the `landscape`
+block to repeat the Hessian central difference at several steps `h` and count
+how many MC clamp states switch between the plus and minus runs. Fields:
+`steps` (default `[0.4, 0.2, 0.1, 0.05, 0.025, 0.0125, 0.00625]`; non-empty,
+finite, positive, strictly decreasing) and `at_optimum` (default false; also
+sweep at the Newton optimum). Absent means off and nothing changes. The sweep
+reads the clamp ledger (`src/routing/clamp_ledger.rs`), so it covers the plain
+`route_timestep` path only; a CUDA-graph arm gives an empty ledger and the run
+stops with an error. A leakance arm (`params.use_leakance`) is refused at arm
+setup, before any evaluation, with an error that names `landscape.fd_sweep`. Each arm writes two CSVs:
+`fd_sweep.csv` (one row per point, `h` and active axis; a frozen axis has no
+row; columns `h_aa`, `h_col_*`, `reach_steps`, `switch_total`, one
+`switch_<site>` per clamp site, `switch_range`, `switch_frac`) and
+`fd_sweep_eig.csv` (eigenvalues per `h` and `max_rel_change_vs_prev_h`; a frozen
+axis's eigenvalue is written as NaN).
+`switch_frac` is the share of (step, reach) entries where any clamp site
+differs. `switch_range` counts parameter-range clamp changes and stays apart.
+When `fd_step` is one of the steps, the log prints
+`fd_sweep check: max |H_sweep(fd_step) - hess0| = 0` (same evaluations). Code:
+`src/experiment/landscape/fd_sweep.rs`.
+
+**`landscape.zero_audit` (zero-gradient audit).** Add `zero_audit: true` next to
+`reach_grad: true` to give every per-reach gradient that is exactly 0.0 one
+cause. Classes, in order: `no_path` (reach not upstream of the gauge),
+`range_clamp` (parameter outside its range in every window), `masked_row` (dam
+or stage row; 0 in the paper studies), `gauge_floor` (`DischargeFloor` active at
+the gauge row at every step), `clamp_cut` (a clamp set that cuts the path at
+every step, from the table in the module doc), else `unexplained`. Each
+`unexplained` entry is perturbed by +-0.05 on its own leaf; it counts as
+`unexplained_flat` when `|dL| < 1e-6 |L|`. Per arm it writes `zero_audit.csv`
+(`arm,staid,point,axis,n_reach,n_zero,no_path,range_clamp,masked_row,gauge_floor,clamp_cut,unexplained,unexplained_flat`).
+A non-finite perturbed loss is never flat. The gate is
+`unexplained - unexplained_flat == 0`; the log prints one `UNEXPLAINED` line for
+every unexplained entry (flat or not; the line says which) and `GATE FAIL` when
+any is not flat. Once per audited point it asserts that the per-reach loss with
+no perturbation equals `eval` bitwise. The `optimum` point is audited only
+when the Newton optimum differs from the trained point. A leakance, reservoir
+arm writes one `not_audited` row for the whole arm; a gamma axis gets a
+`not_audited` row of its own while n, p and q are still audited. It needs the clamp ledger, so
+it covers the plain `route_timestep` path only. Code:
+`src/experiment/landscape/zero_audit.rs`.
+
 ## Juniata single-catchment sample (`examples/juniata/`)
 
 The fastest full end-to-end exercise of the CLI, and the mirror of DDR's

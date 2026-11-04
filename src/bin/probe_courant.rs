@@ -130,6 +130,12 @@ struct Cli {
     /// `<--output>.trace.csv`, for measuring hot-start wash-out. 0 = off.
     #[arg(long, default_value_t = 0)]
     trace_steps: usize,
+
+    /// Write the physical celerity `cr_raw * length / dt` (m/s) of the
+    /// `enforce_positivity: false` pass to this CSV, as `reach,step,celerity_m_s`
+    /// for each sampled (reach, step). `step` is the 1-based routed timestep.
+    #[arg(long)]
+    celerity_csv: Option<PathBuf>,
 }
 
 type R<T> = Result<T, Box<dyn std::error::Error>>;
@@ -386,6 +392,7 @@ where
     };
 
     let mut summaries: Vec<Summary> = Vec::new();
+    let mut inp_length: Vec<f32> = Vec::new();
     for (label, enforce) in [("off", false), ("on", true)] {
         let mut cfg_v = cfg.clone();
         cfg_v.params.enforce_positivity = enforce;
@@ -412,6 +419,7 @@ where
             tensors.initial_state.clone(),
         );
         let inp = engine.probe_inputs();
+        inp_length = inp.length.clone().into_data().to_vec::<f32>().expect("f32");
         eprintln!("--- routing with enforce_positivity: {enforce} ---");
         let t0 = std::time::Instant::now();
         let rep = run_courant_probe::<I>(&cfg_v, &inp, cli.steps, cli.sample_every, cli.trace_steps);
@@ -426,6 +434,23 @@ where
             1000.0 * secs / rep.n_steps.max(1) as f64
         );
         summaries.push(Summary { label, rep });
+    }
+
+    // Celerity table of the `off` pass. Written before the report, which sorts
+    // `cr_raw` in place. `cr_raw` is row-major (sampled step, reach).
+    if let Some(p) = cli.celerity_csv.as_ref() {
+        let off = &summaries[0].rep;
+        let n = off.n_reaches;
+        let lengths = &inp_length;
+        let dt = ddrs::routing::mmc::DT_SECONDS;
+        let mut out = String::from("reach,step,celerity_m_s\n");
+        for (j, &cr_raw) in off.cr_raw.iter().enumerate() {
+            let (reach, sample) = (j % n, j / n);
+            let step = (sample + 1) * cli.sample_every;
+            out.push_str(&format!("{reach},{step},{}\n", cr_raw * lengths[reach] / dt));
+        }
+        std::fs::write(p, out).map_err(|e| format!("write {}: {e}", p.display()))?;
+        eprintln!("wrote {}", p.display());
     }
 
     // ---- Report -------------------------------------------------------------

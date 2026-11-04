@@ -262,6 +262,7 @@ and bounds every topology from above.
 | `sparse_solver` | `cpu` | On a non-CUDA backend, `cuda` **silently WARN-falls-back** to cpu. An unrecognized value **panics** |
 | `use_cuda_graphs` | false | Requires the DEPRECATED `ddr_match: true` (the captured kernel hardcodes the legacy 5/3 celerity); rejected alongside the corrected-physics default. `config/merit_training.yaml` set it true until 2026-08-19 |
 | `ddr_match` | **false** (since 2026-08-19) | DEPRECATED. `true` = legacy pre-#192 DDR physics (5/3 celerity, X ≡ 0.3, upstream-cols readout) — parses with a WARN, kept only for pre-#192 reproduction and CUDA graphs. DDR itself runs the corrected physics since DeepGroundwater/ddr#192. See `.claude/PHYSICS-CORRECTIONS.md` |
+| `geometry_form` | `trapezoid` (an absent key means this) | Channel section for Muskingum-Cunge rows. `power_law` uses one section, `T = p d^q`, `A = T d/(q+1)`, `R = d/(q+1)`, so `Q = vA` holds. It changes the learned `n`: the value is NOT comparable across forms. Do NOT resume a checkpoint, or evaluate one, across forms: nothing warns, and the weights were trained against the other section. Needs `ddr_match: false`, `use_cuda_graphs: false`, and positive `attribute_minimums.slope`, `parameter_ranges.p_spatial` lower bound and `defaults.p_spatial`. Leakance and reservoirs run on it. Stage rows keep their own section. See `.claude/PHYSICS-CORRECTIONS.md` |
 | `use_leakance` | false | |
 | `use_reservoirs` | false | Route the COMIDs in `data_sources.reservoirs` as linear reservoirs `S = T·Q` (option C). `false` is bit-identical to no reservoir code. Rejected with leakance, CUDA graphs, `ddr_match`, subdivision, `gridded_network`; see §Reservoirs |
 | `reservoir_release` | `fixed` | `fixed`: `T` (and optional seasonal `a`, `b`) from the table. `learned`: `(T0, a, b)` per dam from the `release_head:` block, trained jointly with the routing head. `learned` requires `use_reservoirs`, `kan_head`, `release_head`; see §Reservoirs |
@@ -318,6 +319,9 @@ when subdivision is enabled), plus one at dataset open.
 | | a temperature that is not positive and finite | `"epoch N"` + `"positive"` |
 | `validate_ddr_match` | `use_cuda_graphs: true` without the deprecated `ddr_match: true` | `"use_cuda_graphs: true` requires the DEPRECATED `ddr_match: true"` |
 | `validate_enforce_positivity` | `enforce_positivity: true` + `ddr_match: true` | `"requires \`ddr_match: false\`"` |
+| `validate_geometry_form` | `geometry_form: power_law` + `ddr_match: true` or `use_cuda_graphs: true` | `"params.geometry_form: power_law requires"` + the offending key |
+| | `geometry_form: power_law` + `attribute_minimums.slope <= 0`, a `parameter_ranges.p_spatial` lower bound `<= 0`, or `defaults.p_spatial <= 0` | `"params.geometry_form: power_law needs"` + the offending key |
+| | `geometry_form: power_law` (log lines at load, not errors) | INFO `"params.geometry_form: power_law"` always; WARN `"stage rows keep their own section"` when `stage_routing.enabled` |
 | `validate_disagg_pretrained` | `freeze: true` without `pretrained_checkpoint` | `"freeze: true requires pretrained_checkpoint"` |
 | `validate_grad_accum` | `grad_accum_steps: 0` | `"grad_accum_steps: 0"` |
 | | `use_grad_accum: true` with steps < 2 | `"requires grad_accum_steps: N with N >= 2"` |
