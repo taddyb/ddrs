@@ -75,7 +75,8 @@ pub(crate) fn open_session(path: &Path, snapshot: Option<&str>) -> Result<IcSess
             .await
             .map_err(|e| ic_err(path, e))?;
 
-        let repo = Repository::open(None, storage, std::collections::HashMap::new())
+        let repo = Repository::open(storage)
+            .execute()
             .await
             .map_err(|e| ic_err(path, e))?;
 
@@ -134,7 +135,8 @@ pub fn main_branch_snapshot(path: &Path) -> Result<String> {
             .await
             .map_err(|e| ic_err(path, e))?;
 
-        let repo = Repository::open(None, storage, std::collections::HashMap::new())
+        let repo = Repository::open(storage)
+            .execute()
             .await
             .map_err(|e| ic_err(path, e))?;
 

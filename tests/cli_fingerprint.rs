@@ -127,7 +127,8 @@ fn main_branch_tip(path: &std::path::Path) -> String {
         .unwrap();
     rt.block_on(async {
         let storage = icechunk::new_local_filesystem_storage(path).await.unwrap();
-        let repo = icechunk::Repository::open(None, storage, std::collections::HashMap::new())
+        let repo = icechunk::Repository::open(storage)
+            .execute()
             .await
             .unwrap();
         repo.lookup_branch("main").await.unwrap().to_string()
